@@ -1,0 +1,5 @@
+ruff==0.14.14
+pip==26.0
+check-manifest==0.51
+pre-commit==6.0.0
+pytest==9.0.2
