@@ -1,82 +1,74 @@
 """
-Test cases for NetBox Rack Design GraphQL API.
+GraphQL tests for NetBox Rack Design.
+
+The full GraphQL get/list/permission matrix is already inherited via
+``APIViewTestCases.APIViewTestCase`` in test_api.py (it mixes in
+``GraphQLTestCase``). These tests add a couple of focused, end-to-end checks
+against the plugin's actual snake_case query names through the unified
+``/graphql`` endpoint.
 """
-from ..models import Rackdesign
-from ..testing import PluginGraphQLTestCase
+
+import json
+
+from django.test import override_settings
+from django.urls import reverse
+from utilities.testing import APITestCase
+
+from ..choices import DesignPlacementKindChoices
+from ..models import Design, DesignGroup, DesignPlacement
+from .utils import create_dcim_environment
 
 
-class RackdesignGraphQLTestCase(PluginGraphQLTestCase):
-    """Test Rackdesign GraphQL queries."""
+class RackDesignGraphQLTestCase(APITestCase):
 
     @classmethod
     def setUpTestData(cls):
-        """Set up test data for all tests."""
-        Rackdesign.objects.create(name='GraphQL Test 1')
-        Rackdesign.objects.create(name='GraphQL Test 2')
-        Rackdesign.objects.create(name='GraphQL Test 3')
+        env = create_dcim_environment()
+        site = env["site"]
 
-    def test_query_rackdesign(self):
-        """Test GraphQL query for a single Rackdesign."""
-        self.add_permissions('netbox_rack_design.view_rackdesign')
-
-        instance = Rackdesign.objects.first()
-
-        query = (
-            "query { "
-            "rackdesign(id: " + str(instance.pk) + ") { "
-            "id name "
-            "} "
-            "}"
+        cls.group = DesignGroup.objects.create(name="Group 1")
+        cls.design = Design.objects.create(title="Design 1", site=site, group=cls.group)
+        cls.placement = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=env["device_type"],
+            target_rack=env["racks"][1],
+            target_position=1,
         )
 
-        response = self.execute_query(query)
-        self.assertIsNone(response.get('errors'))
-
-        data = response['data']['rackdesign']
-        self.assertEqual(data['id'], str(instance.pk))
-        self.assertEqual(data['name'], instance.name)
-
-    def test_query_rackdesign_list(self):
-        """Test GraphQL query for list of Rackdesigns."""
-        self.add_permissions('netbox_rack_design.view_rackdesign')
-
-        query = """
-        query {
-            rackdesign_list {
-                id
-                name
-            }
-        }
-        """
-
-        response = self.execute_query(query)
-        self.assertIsNone(response.get('errors'))
-
-        data = response['data']['rackdesign_list']
-        self.assertEqual(len(data), 3)
-        self.assertIn('id', data[0])
-        self.assertIn('name', data[0])
-
-    def test_query_rackdesign_with_all_fields(self):
-        """Test GraphQL query with all available fields."""
-        self.add_permissions('netbox_rack_design.view_rackdesign')
-
-        instance = Rackdesign.objects.first()
-
-        query = (
-            "query { "
-            "rackdesign(id: " + str(instance.pk) + ") { "
-            "id name created last_updated "
-            "} "
-            "}"
+    def _query(self, query):
+        url = reverse("graphql")
+        return self.client.post(
+            url, data={"query": query}, format="json", **self.header
         )
 
-        response = self.execute_query(query)
-        self.assertIsNone(response.get('errors'))
+    @override_settings(LOGIN_REQUIRED=True)
+    def test_query_design_list(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        query = "query { design_list { id title } }"
+        response = self._query(query)
+        self.assertHttpStatus(response, 200)
+        data = json.loads(response.content)
+        self.assertNotIn("errors", data)
+        self.assertEqual(len(data["data"]["design_list"]), 1)
+        self.assertEqual(data["data"]["design_list"][0]["title"], "Design 1")
 
-        data = response['data']['rackdesign']
-        self.assertEqual(data['id'], str(instance.pk))
-        self.assertEqual(data['name'], instance.name)
-        self.assertIsNotNone(data['created'])
-        self.assertIsNotNone(data['last_updated'])
+    @override_settings(LOGIN_REQUIRED=True)
+    def test_query_design_group_list(self):
+        self.add_permissions("netbox_rack_design.view_designgroup")
+        query = "query { design_group_list { id name } }"
+        response = self._query(query)
+        self.assertHttpStatus(response, 200)
+        data = json.loads(response.content)
+        self.assertNotIn("errors", data)
+        self.assertEqual(len(data["data"]["design_group_list"]), 1)
 
+    @override_settings(LOGIN_REQUIRED=True)
+    def test_query_design_placement_list(self):
+        self.add_permissions("netbox_rack_design.view_designplacement")
+        query = "query { design_placement_list { id kind } }"
+        response = self._query(query)
+        self.assertHttpStatus(response, 200)
+        data = json.loads(response.content)
+        self.assertNotIn("errors", data)
+        self.assertEqual(len(data["data"]["design_placement_list"]), 1)

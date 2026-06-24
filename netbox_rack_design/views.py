@@ -7,8 +7,11 @@ from . import filtersets, forms, models, tables
 
 __all__ = (
     "DesignGroupView", "DesignGroupListView", "DesignGroupEditView", "DesignGroupDeleteView",
+    "DesignGroupBulkImportView", "DesignGroupBulkEditView", "DesignGroupBulkDeleteView",
     "DesignView", "DesignListView", "DesignEditView", "DesignDeleteView",
+    "DesignBulkImportView", "DesignBulkEditView", "DesignBulkDeleteView",
     "DesignPlacementView", "DesignPlacementListView", "DesignPlacementEditView", "DesignPlacementDeleteView",
+    "DesignPlacementBulkImportView", "DesignPlacementBulkEditView", "DesignPlacementBulkDeleteView",
 )
 
 
@@ -42,6 +45,27 @@ class DesignGroupDeleteView(generic.ObjectDeleteView):
     queryset = models.DesignGroup.objects.all()
 
 
+@register_model_view(models.DesignGroup, "bulk_import", detail=False)
+class DesignGroupBulkImportView(generic.BulkImportView):
+    queryset = models.DesignGroup.objects.all()
+    model_form = forms.DesignGroupImportForm
+
+
+@register_model_view(models.DesignGroup, "bulk_edit", path="edit", detail=False)
+class DesignGroupBulkEditView(generic.BulkEditView):
+    queryset = models.DesignGroup.objects.all()
+    filterset = filtersets.DesignGroupFilterSet
+    table = tables.DesignGroupTable
+    form = forms.DesignGroupBulkEditForm
+
+
+@register_model_view(models.DesignGroup, "bulk_delete", path="delete", detail=False)
+class DesignGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.DesignGroup.objects.all()
+    filterset = filtersets.DesignGroupFilterSet
+    table = tables.DesignGroupTable
+
+
 # ---------------------------------------------------------------------------
 # Design
 # ---------------------------------------------------------------------------
@@ -50,12 +74,6 @@ class DesignGroupDeleteView(generic.ObjectDeleteView):
 @register_model_view(models.Design)
 class DesignView(generic.ObjectView):
     queryset = models.Design.objects.all()
-
-    def get_extra_context(self, request, instance):
-        placements = instance.placements.all()
-        table = tables.DesignPlacementTable(placements)
-        table.configure(request)
-        return {"placement_table": table}
 
 
 @register_model_view(models.Design, "list", path="", detail=False)
@@ -76,6 +94,27 @@ class DesignEditView(generic.ObjectEditView):
 @register_model_view(models.Design, "delete")
 class DesignDeleteView(generic.ObjectDeleteView):
     queryset = models.Design.objects.all()
+
+
+@register_model_view(models.Design, "bulk_import", detail=False)
+class DesignBulkImportView(generic.BulkImportView):
+    queryset = models.Design.objects.all()
+    model_form = forms.DesignImportForm
+
+
+@register_model_view(models.Design, "bulk_edit", path="edit", detail=False)
+class DesignBulkEditView(generic.BulkEditView):
+    queryset = models.Design.objects.all()
+    filterset = filtersets.DesignFilterSet
+    table = tables.DesignTable
+    form = forms.DesignBulkEditForm
+
+
+@register_model_view(models.Design, "bulk_delete", path="delete", detail=False)
+class DesignBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.Design.objects.all()
+    filterset = filtersets.DesignFilterSet
+    table = tables.DesignTable
 
 
 # ---------------------------------------------------------------------------
@@ -106,3 +145,24 @@ class DesignPlacementEditView(generic.ObjectEditView):
 @register_model_view(models.DesignPlacement, "delete")
 class DesignPlacementDeleteView(generic.ObjectDeleteView):
     queryset = models.DesignPlacement.objects.all()
+
+
+@register_model_view(models.DesignPlacement, "bulk_import", detail=False)
+class DesignPlacementBulkImportView(generic.BulkImportView):
+    queryset = models.DesignPlacement.objects.all()
+    model_form = forms.DesignPlacementImportForm
+
+
+@register_model_view(models.DesignPlacement, "bulk_edit", path="edit", detail=False)
+class DesignPlacementBulkEditView(generic.BulkEditView):
+    queryset = models.DesignPlacement.objects.all()
+    filterset = filtersets.DesignPlacementFilterSet
+    table = tables.DesignPlacementTable
+    form = forms.DesignPlacementBulkEditForm
+
+
+@register_model_view(models.DesignPlacement, "bulk_delete", path="delete", detail=False)
+class DesignPlacementBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.DesignPlacement.objects.all()
+    filterset = filtersets.DesignPlacementFilterSet
+    table = tables.DesignPlacementTable

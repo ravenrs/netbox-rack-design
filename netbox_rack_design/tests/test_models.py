@@ -1,133 +1,155 @@
 """
-Test cases for NetBox Rack Design models.
+Model-level tests for NetBox Rack Design.
+
+These cover behaviour that the generic suites do NOT exercise: the custom
+``clean()`` validation rules, sequence auto-assignment, and string/URL helpers.
+The CRUD/permissions/changelog matrix lives in test_api.py and test_views.py.
 """
 
 from django.core.exceptions import ValidationError
+from django.test import TestCase
 
-from ..models import Rackdesign
-from ..testing import PluginModelTestCase
-from ..testing.utils import create_tags, get_random_string
+from ..choices import DesignPlacementKindChoices, DesignStatusChoices
+from ..models import Design, DesignGroup, DesignPlacement
+from .utils import create_dcim_environment
 
 
-class RackdesignTestCase(PluginModelTestCase):
-    """Test Rackdesign model."""
-
+class DesignGroupTestCase(TestCase):
     @classmethod
     def setUpTestData(cls):
-        """Set up test data for all tests."""
-        # Create test instances
-        Rackdesign.objects.create(name='Test 1')
-        Rackdesign.objects.create(name='Test 2')
-        Rackdesign.objects.create(name='Test 3')
+        cls.parent = DesignGroup.objects.create(name="Parent")
+        cls.child = DesignGroup.objects.create(name="Child", parent=cls.parent)
 
-    def test_create_rackdesign(self):
-        """Test creating a Rackdesign instance."""
-        name = f'Test {get_random_string(10)}'
-        instance = Rackdesign.objects.create(name=name)
+    def test_str(self):
+        self.assertEqual(str(self.parent), "Parent")
 
-        self.assertEqual(instance.name, name)
-        self.assertIsNotNone(instance.pk)
-
-    def test_rackdesign_str(self):
-        """Test Rackdesign string representation."""
-        instance = Rackdesign.objects.first()
-        self.assertEqual(str(instance), instance.name)
-
-    def test_rackdesign_absolute_url(self):
-        """Test Rackdesign get_absolute_url method."""
-        instance = Rackdesign.objects.first()
-        url = instance.get_absolute_url()
-
-        self.assertIsNotNone(url)
-        self.assertIn(str(instance.pk), url)
-
-    def test_rackdesign_unique_name(self):
-        """Test that Rackdesign names must be unique."""
-        name = 'Duplicate Name'
-        Rackdesign.objects.create(name=name)
-
+    def test_unique_name(self):
         with self.assertRaises(ValidationError):
-            instance = Rackdesign(name=name)
-            instance.full_clean()
+            DesignGroup(name="Parent").full_clean()
 
-    def test_model_to_dict(self):
-        """Test model_to_dict helper method."""
-        instance = Rackdesign.objects.first()
-        data = self.model_to_dict(instance)
+    def test_cyclic_parent_rejected(self):
+        # A group cannot be its own ancestor.
+        self.parent.parent = self.child
+        with self.assertRaises(ValidationError):
+            self.parent.full_clean()
 
-        self.assertIn('name', data)
-        self.assertEqual(data['name'], instance.name)
-        self.assertIn('id', data)
 
-    def test_instance_equal(self):
-        """Test assertInstanceEqual helper method."""
-        instance = Rackdesign.objects.first()
+class DesignTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
 
-        # Should pass with matching data
-        self.assertInstanceEqual(
-            instance,
-            {'name': instance.name, 'id': instance.pk}
+    def test_str_includes_version(self):
+        design = Design.objects.create(title="Plan", site=self.site, version=2)
+        self.assertEqual(str(design), "Plan (v2)")
+
+    def test_sequence_auto_assigned(self):
+        d1 = Design.objects.create(title="A", site=self.site)
+        d2 = Design.objects.create(title="B", site=self.site)
+        self.assertEqual(d1.sequence, 10)
+        self.assertEqual(d2.sequence, 20)
+
+    def test_cannot_be_based_on_self(self):
+        design = Design.objects.create(title="A", site=self.site)
+        design.based_on = design
+        with self.assertRaises(ValidationError):
+            design.full_clean()
+
+    def test_single_approved_version_per_plan(self):
+        root = Design.objects.create(
+            title="Root", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-
-    def test_rackdesign_with_tags(self):
-        """Test Rackdesign with tags."""
-        tags = create_tags(['important', 'test'])
-        instance = Rackdesign.objects.first()
-
-        instance.tags.add(*tags)
-        instance.save()
-
-        self.assertEqual(instance.tags.count(), 2)
-        self.assertIn(tags[0], instance.tags.all())
-
-    def test_bulk_create(self):
-        """Test bulk creation of Rackdesign instances."""
-        initial_count = Rackdesign.objects.count()
-
-        instances = [
-            Rackdesign(name=f'Bulk {i}')
-            for i in range(5)
-        ]
-        Rackdesign.objects.bulk_create(instances)
-
-        self.assertEqual(
-            Rackdesign.objects.count(),
-            initial_count + 5
+        sibling = Design(
+            title="V2",
+            site=self.site,
+            version=2,
+            root=root,
+            status=DesignStatusChoices.STATUS_APPROVED,
         )
-
-    def test_query_filter(self):
-        """Test filtering Rackdesign instances."""
-        # Create a specific instance for filtering
-        test_name = f'FilterTest {get_random_string(10)}'
-        Rackdesign.objects.create(name=test_name)
-
-        # Test filter
-        results = Rackdesign.objects.filter(name=test_name)
-        self.assertEqual(results.count(), 1)
-        self.assertEqual(results.first().name, test_name)
-
-    def test_ordering(self):
-        """Test Rackdesign default ordering."""
-        instances = list(Rackdesign.objects.all())
-
-        # Check that instances are ordered by name
-        names = [instance.name for instance in instances]
-        self.assertEqual(names, sorted(names))
-
-
-class RackdesignValidationTestCase(PluginModelTestCase):
-    """Test Rackdesign validation."""
-
-    def test_empty_name(self):
-        """Test that empty name is not allowed."""
         with self.assertRaises(ValidationError):
-            instance = Rackdesign(name='')
-            instance.full_clean()
+            sibling.full_clean()
 
-    def test_name_max_length(self):
-        """Test name field max length."""
-        long_name = 'x' * 101  # Exceeds max_length of 100
 
+class DesignPlacementTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]
+        cls.design = Design.objects.create(title="Plan", site=cls.site)
+
+    def test_add_requires_device_type(self):
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            target_rack=self.racks[1],
+            target_position=10,
+        )
         with self.assertRaises(ValidationError):
-            instance = Rackdesign(name=long_name)
-            instance.full_clean()
+            placement.full_clean()
+
+    def test_add_rejects_existing_device(self):
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device=self.devices[0],
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+        )
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
+    def test_valid_add(self):
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+        )
+        placement.full_clean()  # should not raise
+
+    def test_move_requires_device(self):
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+        )
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
+    def test_valid_move(self):
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[1],
+            target_position=10,
+        )
+        placement.full_clean()  # should not raise
+
+    def test_remove_needs_no_target(self):
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=self.devices[0],
+        )
+        placement.full_clean()  # should not raise
+
+    def test_add_rejects_occupied_slot(self):
+        # U1 in Rack 1 is occupied by Device 1.
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[0],
+            target_position=1,
+        )
+        with self.assertRaises(ValidationError):
+            placement.full_clean()

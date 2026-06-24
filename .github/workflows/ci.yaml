@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff==0.11.12
+          pip install ruff==0.14.14
 
       - name: Run Ruff
         run: ruff check netbox_rack_design/
@@ -77,7 +77,7 @@ jobs:
 
       - name: Clone NetBox
         run: |
-          git clone --depth 1 --branch v4.5 https://github.com/netbox-community/netbox.git
+          git clone --depth 1 --branch v4.4.8 https://github.com/netbox-community/netbox.git
 
       - name: Install NetBox dependencies
         working-directory: netbox

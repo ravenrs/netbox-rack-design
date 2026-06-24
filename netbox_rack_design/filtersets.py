@@ -1,7 +1,7 @@
 """FilterSets for NetBox Rack Design."""
 
 import django_filters
-from dcim.models import DeviceType, Rack, Site
+from dcim.models import Device, DeviceType, Rack, Site
 from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
 
@@ -33,6 +33,17 @@ class DesignFilterSet(NetBoxModelFilterSet):
     group_id = django_filters.ModelMultipleChoiceFilter(
         queryset=DesignGroup.objects.all(), label="Group (ID)"
     )
+    based_on_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Design.objects.all(), label="Based on (ID)"
+    )
+    root_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Design.objects.all(), label="Root (ID)"
+    )
+    design_id = django_filters.ModelMultipleChoiceFilter(
+        field_name="depends_on",
+        queryset=Design.objects.all(),
+        label="Depends on (ID)",
+    )
     status = django_filters.MultipleChoiceFilter(choices=DesignStatusChoices)
 
     class Meta:
@@ -48,6 +59,9 @@ class DesignFilterSet(NetBoxModelFilterSet):
 class DesignPlacementFilterSet(NetBoxModelFilterSet):
     design_id = django_filters.ModelMultipleChoiceFilter(
         queryset=Design.objects.all(), label="Design (ID)"
+    )
+    device_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Device.objects.all(), label="Device (ID)"
     )
     target_rack_id = django_filters.ModelMultipleChoiceFilter(
         queryset=Rack.objects.all(), label="Target rack (ID)"

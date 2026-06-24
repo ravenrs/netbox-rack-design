@@ -52,11 +52,9 @@ this enforces) and **netbox-plugin-testing** (how to run the suite locally).
 Lint with the **same Ruff version CI uses** (`.github/workflows/ci.yaml` pins it):
 ```bash
 cd /Users/petr.voronov/Documents/Developing/netbox-rack-design
-pip install 'ruff==0.11.12' >/dev/null   # match ci.yaml, NOT pyproject's test extra
+pip install 'ruff==0.14.14' >/dev/null   # matches ci.yaml and pyproject [test]
 ruff check netbox_rack_design/
 ```
-> ⚠ Known drift to fix: `ci.yaml` pins `ruff==0.11.12` but `pyproject.toml`
-> `[test]` pins `ruff==0.14.14`. Align them, then use the agreed version here.
 
 Run the NetBox test suite the way CI does, against the dev NetBox checkout
 (`../netbox-contribute`). Per **netbox-plugin-testing**, from the netbox dir:
@@ -91,10 +89,10 @@ If `min_version`/`max_version` in `__init__.py` changed, update:
 - `netbox_rack_design/__init__.py` (`min_version` / `max_version`)
 - `COMPATIBILITY.md` — add a row for the new plugin version.
 
-> ⚠ Known drift to fix: `ci.yaml` clones NetBox `--branch v4.5`, but the plugin
-> declares `max_version = "4.4.99"` and pyproject classifies Django 5.1 (= NetBox
-> 4.4). Either bump the declared compat or point CI at the matching NetBox branch —
-> certification checks that declared compat matches what you actually test.
+> Keep CI honest: `ci.yaml` clones NetBox `--branch v4.4.8` to match the declared
+> `min_version`/`max_version` (4.4.x) and the Django 5.1 classifiers. If you change
+> the supported NetBox range, update the CI clone ref too — certification checks
+> that declared compat matches what you actually test.
 
 ### 5. Update CHANGELOG.md
 
