@@ -129,8 +129,10 @@ EMAIL_PORT = 25
 EMAIL_TIMEOUT = 10
 EMAIL_FROM_EMAIL = 'netbox@localhost'
 
-# Exempt all views from login requirement for testing
-EXEMPT_VIEW_PERMISSIONS = ['*']
+# NOTE: do NOT set EXEMPT_VIEW_PERMISSIONS = ['*'] here. NetBox's test suites
+# assert that users without permission receive 404, and a global exemption makes
+# those assertions get 200 instead (CI failure). The suites toggle EXEMPT
+# per-test via @override_settings where needed.
 
 # Banner (optional)
 BANNER_TOP = ''
