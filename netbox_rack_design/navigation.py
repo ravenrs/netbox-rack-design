@@ -1,24 +1,41 @@
-"""
-Navigation menu items for NetBox Rack Design.
+"""Navigation menu for NetBox Rack Design."""
 
-For more information on navigation menus, see:
-https://docs.netbox.dev/en/stable/plugins/development/navigation/
-"""
+from netbox.plugins import PluginMenu, PluginMenuButton, PluginMenuItem
 
-from netbox.plugins import PluginMenuButton, PluginMenuItem
-
-plugin_buttons = [
-    PluginMenuButton(
-        link="plugins:netbox_rack_design:rackdesign_add",
-        title="Add",
-        icon_class="mdi mdi-plus-thick",
-    )
-]
-
-menu_items = (
-    PluginMenuItem(
-        link="plugins:netbox_rack_design:rackdesign_list",
-        link_text="Rack Design",
-        buttons=plugin_buttons,
+menu = PluginMenu(
+    label="Rack Design",
+    icon_class="mdi mdi-floor-plan",
+    groups=(
+        (
+            "Designs",
+            (
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:design_list",
+                    link_text="Designs",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rack_design:design_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:designgroup_list",
+                    link_text="Design Groups",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rack_design:designgroup_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:designplacement_list",
+                    link_text="Placements",
+                ),
+            ),
+        ),
     ),
 )

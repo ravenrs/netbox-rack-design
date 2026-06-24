@@ -1,20 +1,27 @@
-"""
-API viewsets for NetBox Rack Design.
-
-For more information on NetBox REST API viewsets, see:
-https://docs.netbox.dev/en/stable/plugins/development/rest-api/#viewsets
-
-For Django REST Framework viewsets, see:
-https://www.django-rest-framework.org/api-guide/viewsets/
-"""
+"""REST API viewsets for NetBox Rack Design."""
 
 from netbox.api.viewsets import NetBoxModelViewSet
 
-from ..models import Rackdesign
-from .serializers import RackdesignSerializer
+from .. import filtersets
+from ..models import Design, DesignGroup, DesignPlacement
+from .serializers import DesignGroupSerializer, DesignPlacementSerializer, DesignSerializer
+
+__all__ = ("DesignGroupViewSet", "DesignViewSet", "DesignPlacementViewSet")
 
 
-class RackdesignViewSet(NetBoxModelViewSet):
-    queryset = Rackdesign.objects.all()
-    serializer_class = RackdesignSerializer
+class DesignGroupViewSet(NetBoxModelViewSet):
+    queryset = DesignGroup.objects.all()
+    serializer_class = DesignGroupSerializer
+    filterset_class = filtersets.DesignGroupFilterSet
 
+
+class DesignViewSet(NetBoxModelViewSet):
+    queryset = Design.objects.prefetch_related("placements", "depends_on", "tags")
+    serializer_class = DesignSerializer
+    filterset_class = filtersets.DesignFilterSet
+
+
+class DesignPlacementViewSet(NetBoxModelViewSet):
+    queryset = DesignPlacement.objects.all()
+    serializer_class = DesignPlacementSerializer
+    filterset_class = filtersets.DesignPlacementFilterSet

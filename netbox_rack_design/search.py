@@ -1,80 +1,30 @@
-"""
-Search indexes for NetBox Rack Design.
-
-This module defines search indexes to make plugin models searchable in NetBox's
-global search. See: https://docs.netbox.dev/en/stable/plugins/development/search/
-"""
+"""Global-search indexes for NetBox Rack Design."""
 
 from netbox.search import SearchIndex
 
-from .models import Rackdesign
+from .models import Design, DesignGroup
+
+__all__ = ("DesignIndex", "DesignGroupIndex", "indexes")
 
 
-class RackdesignIndex(SearchIndex):
-    """
-    Search index for Rackdesign model.
-
-    This enables Rackdesign objects to appear in NetBox's global
-    search results.
-    """
-
-    model = Rackdesign
-
-    # Fields to index for search with their weights
-    # Higher weight = higher priority in search results
-    #
-    # Weight Guidelines:
-    #   50   - Unique serialized attribute (e.g., asset_tag)
-    #   60   - Unique per related object (e.g., serial)
-    #   100  - Primary human identifier (e.g., name)
-    #   110  - Slug fields
-    #   200  - Secondary identifier
-    #   300  - Highly unique descriptive text
-    #   500  - Description field
-    #   1000 - Custom field default
-    #   2000 - Other discrete attributes
-    #   5000 - Comments field
+class DesignIndex(SearchIndex):
+    model = Design
     fields = (
-        ('name', 100),          # Primary identifier
-        # ('slug', 110),        # Uncomment if your model has a slug field
-        # ('description', 500), # Uncomment if your model has a description field
-        # ('comments', 5000),   # Uncomment if your model has a comments field
+        ("title", 100),
+        ("summary", 300),
+        ("description", 500),
+        ("comments", 5000),
     )
+    display_attrs = ("site", "status", "version", "summary")
 
-    # Optional: Fields to display in search results (not indexed, just shown)
-    # These help users identify the correct result
-    # Foreign key fields are automatically prefetched for efficiency
-    display_attrs = (
-        # 'status',      # Example: Display status
-        # 'tenant',      # Example: Display tenant relationship
-        # 'description', # Example: Display description
+
+class DesignGroupIndex(SearchIndex):
+    model = DesignGroup
+    fields = (
+        ("name", 100),
+        ("description", 500),
     )
-
-    # Optional: Custom category label for grouping in search UI
-    # If not specified, defaults to the app's verbose name
-    # category = 'NetBox Rack Design'
+    display_attrs = ("parent", "description")
 
 
-# Register all search indexes for this plugin
-# The PluginConfig will automatically load these indexes
-indexes = (
-    RackdesignIndex,
-)
-
-
-# Example: Multiple models with different search configurations
-#
-# class AnotherModelIndex(SearchIndex):
-#     """Search index for another model."""
-#     model = AnotherModel
-#     fields = (
-#         ('name', 100),
-#         ('identifier', 200),
-#         ('description', 500),
-#     )
-#     display_attrs = ('status', 'type')
-#
-# indexes = (
-#     RackdesignIndex,
-#     AnotherModelIndex,
-# )
+indexes = (DesignIndex, DesignGroupIndex)

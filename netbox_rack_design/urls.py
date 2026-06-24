@@ -1,28 +1,17 @@
-"""
-URL patterns for NetBox Rack Design.
+"""URL patterns for NetBox Rack Design."""
 
-For more information on URL routing, see:
-https://docs.netbox.dev/en/stable/plugins/development/views/#url-registration
+from django.urls import include, path
+from utilities.urls import get_model_urls
 
-For Django URL patterns, see:
-https://docs.djangoproject.com/en/stable/topics/http/urls/
-"""
+from . import views  # noqa: F401  (import registers @register_model_view views)
 
-from django.urls import path
-from netbox.views.generic import ObjectChangeLogView
-
-from . import models, views
+app_name = "netbox_rack_design"
 
 urlpatterns = (
-    path("rack-designs/", views.RackdesignListView.as_view(), name="rackdesign_list"),
-    path("rack-designs/add/", views.RackdesignEditView.as_view(), name="rackdesign_add"),
-    path("rack-designs/<int:pk>/", views.RackdesignView.as_view(), name="rackdesign"),
-    path("rack-designs/<int:pk>/edit/", views.RackdesignEditView.as_view(), name="rackdesign_edit"),
-    path("rack-designs/<int:pk>/delete/", views.RackdesignDeleteView.as_view(), name="rackdesign_delete"),
-    path(
-        "rack-designs/<int:pk>/changelog/",
-        ObjectChangeLogView.as_view(),
-        name="rackdesign_changelog",
-        kwargs={"model": models.Rackdesign},
-    ),
+    path("groups/", include(get_model_urls("netbox_rack_design", "designgroup", detail=False))),
+    path("groups/<int:pk>/", include(get_model_urls("netbox_rack_design", "designgroup"))),
+    path("designs/", include(get_model_urls("netbox_rack_design", "design", detail=False))),
+    path("designs/<int:pk>/", include(get_model_urls("netbox_rack_design", "design"))),
+    path("placements/", include(get_model_urls("netbox_rack_design", "designplacement", detail=False))),
+    path("placements/<int:pk>/", include(get_model_urls("netbox_rack_design", "designplacement"))),
 )

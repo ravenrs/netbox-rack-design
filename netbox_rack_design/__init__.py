@@ -22,10 +22,23 @@ class RackdesignConfig(PluginConfig):
     author= "Petr Voronov"
     author_email = "ravenrs@gmail.com"
     version = __version__
-    base_url = "netbox_rack_design"
-    min_version = "4.5.0"
-    max_version = "4.5.99"
+    base_url = "rack-design"
+    min_version = "4.4.0"
+    max_version = "4.4.99"
     graphql_schema = "graphql.schema"
+    default_settings = {
+        # Device statuses the plugin treats as "planned".
+        "planned_statuses": ["planned"],
+        # Device statuses that mark a planned removal. Default uses native
+        # 'decommissioning'. Environments where that status is destructive
+        # (auto-delete / inventory dismantle) should override with a custom
+        # status added via FIELD_CHOICES (e.g. 'to_decommission').
+        "removal_statuses": ["decommissioning"],
+        # Default lifecycle status for a new Design.
+        "default_status": "draft",
+        # Show the rack-page panel listing designs that touch a rack.
+        "enable_rack_panel": True,
+    }
 
 
 config = RackdesignConfig
