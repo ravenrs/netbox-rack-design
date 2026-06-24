@@ -5,20 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-06-23
+## [0.1.0] - 2026-06-24
 
 ### Release Summary
-Initial release of NetBox Rack Design. This is a **minor** release introducing basic functionality for managing Rack Design resources in NetBox.
+Initial release of NetBox Rack Design — a generic, public plugin that adds a
+versioned **design layer** for planning rack changes on top of real NetBox data.
+This first release delivers the data model and full management surface (Stage 1);
+the interactive visual editor and apply/conflict/power features follow in later stages.
 
 ### Added
-- Initial plugin structure with Rackdesign model
-- Basic CRUD operations through NetBox UI
-- Change logging and journaling support
-- Custom fields and tags support
-- REST API endpoints for programmatic access
-- GraphQL support for flexible queries
-- Comprehensive test suite
-- Documentation with MkDocs
+- **Models:** `Design` (versioned, sequenced, with dependencies and optional grouping),
+  `DesignGroup` (hierarchical container), and `DesignPlacement` (add / move / remove
+  actions, validated against `Rack.get_available_units()`).
+- Full CRUD UI for all three models, including detail pages with related-object panels.
+- REST API at `/api/plugins/rack-design/` (designs, design-groups, placements).
+- GraphQL types and filters on the unified `/graphql` endpoint.
+- Global search, navigation menu, change logging, journaling, custom fields, and tags.
+- Config-driven statuses (`planned_statuses` / `removal_statuses` / `default_status`)
+  via `PLUGINS_CONFIG` — nothing organization-specific is hardcoded.
+- Test suite built on NetBox's standard test cases, plus MkDocs documentation.
 
 ### Fixed
 - N/A (initial release)
