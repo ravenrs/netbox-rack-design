@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-25
+
+### Release Summary
+A minor, backward-compatible feature release. It adds a **read-only projected rack
+elevation**: for any design you can now view a rack as it *would* look once that
+design's placements (add / move / remove) are applied, computed entirely in memory
+without modifying real NetBox data. The projected elevation is rendered with a
+bundled GridStack-based layout and is reachable both from a design's own elevation
+tab and, optionally, from a panel injected onto the core `dcim.rack` detail page
+(gated by the `enable_rack_panel` config). This release also fixes a couple of bugs,
+declares the Apache-2.0 license in the package metadata, and ships the project icon.
+
+### Added
+- **Projected rack elevation (read-only):** `projection.project_rack()` computes the
+  front/rear/non-racked layout a design would produce for a given rack, and the new
+  `DesignElevationView` renders it at `/plugins/rack-design/designs/<pk>/racks/<rack_id>/`.
+- Bundled GridStack assets and plugin CSS/JS under `static/netbox_rack_design/`, plus
+  a `rack_design` template-tag library for the elevation template.
+- Optional **rack-page panel** (`PluginTemplateExtension` on `dcim.rack`) listing the
+  designs that touch a rack, gated by the `enable_rack_panel` config setting.
+
+### Fixed
+- `DesignPlacement.get_kind_color()` so placement kind badges render with the correct
+  color.
+- `Design.clean()` no longer raises when approving a brand-new, unsaved root design;
+  the "at most one approved version per plan" sibling check is now skipped until the
+  version root is persisted. Covered by a regression test.
+
+### Changed
+- Declared `license = "Apache-2.0"` in `pyproject.toml` and shipped the full
+  Apache-2.0 `LICENSE` text. Added the project icon (CC0) under `docs/assets/`, wired
+  it into the README and the MkDocs theme logo/favicon.
+
+### Deprecated
+- N/A
+
+### Removed
+- N/A
+
+### Security
+- N/A
+
+---
+
 ## [0.1.0] - 2026-06-24
 
 ### Release Summary
