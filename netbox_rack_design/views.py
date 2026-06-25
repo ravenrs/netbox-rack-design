@@ -1,15 +1,19 @@
 """Views for NetBox Rack Design."""
 
+from dcim.choices import DeviceFaceChoices
+from dcim.models import Rack
+from django.shortcuts import get_object_or_404, render
 from netbox.views import generic
 from utilities.views import register_model_view
 
-from . import filtersets, forms, models, tables
+from . import filtersets, forms, models, projection, tables
 
 __all__ = (
     "DesignGroupView", "DesignGroupListView", "DesignGroupEditView", "DesignGroupDeleteView",
     "DesignGroupBulkImportView", "DesignGroupBulkEditView", "DesignGroupBulkDeleteView",
     "DesignView", "DesignListView", "DesignEditView", "DesignDeleteView",
     "DesignBulkImportView", "DesignBulkEditView", "DesignBulkDeleteView",
+    "DesignElevationView",
     "DesignPlacementView", "DesignPlacementListView", "DesignPlacementEditView", "DesignPlacementDeleteView",
     "DesignPlacementBulkImportView", "DesignPlacementBulkEditView", "DesignPlacementBulkDeleteView",
 )
@@ -74,6 +78,42 @@ class DesignGroupBulkDeleteView(generic.BulkDeleteView):
 @register_model_view(models.Design)
 class DesignView(generic.ObjectView):
     queryset = models.Design.objects.all()
+
+
+@register_model_view(models.Design, "elevation", path="racks/<int:rack_id>")
+class DesignElevationView(generic.ObjectView):
+    """
+    Read-only projected elevation of ONE rack under a design.
+
+    URL: /plugins/rack-design/designs/<pk>/racks/<rack_id>/
+    Name: plugins:netbox_rack_design:design_elevation  (kwargs: pk, rack_id)
+
+    Loads the Design (pk) and the Rack (rack_id), computes the projected layout
+    with ``projection.project_rack`` and renders it. No writes are performed.
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_elevation.html"
+
+    def get(self, request, pk, rack_id):
+        design = get_object_or_404(self.queryset, pk=pk)
+        rack = get_object_or_404(Rack.objects.all(), pk=rack_id)
+        result = projection.project_rack(design, rack)
+
+        face = request.GET.get("face", DeviceFaceChoices.FACE_FRONT)
+        if face not in (DeviceFaceChoices.FACE_FRONT, DeviceFaceChoices.FACE_REAR):
+            face = DeviceFaceChoices.FACE_FRONT
+
+        return render(request, self.get_template_name(), {
+            "object": design,
+            "design": design,
+            "rack": rack,
+            "front": result.front,
+            "rear": result.rear,
+            "non_racked": result.non_racked,
+            "face": face,
+            "tab": self.tab,
+        })
 
 
 @register_model_view(models.Design, "list", path="", detail=False)

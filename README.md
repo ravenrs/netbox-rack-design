@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ravenrs/netbox-rack-design/main/docs/assets/icon-500.png" alt="NetBox Rack Design" width="120" height="120" />
+</p>
+
 # NetBox Rack Design
 
 **Plan rack changes as versioned designs — on top of your real NetBox data, without touching it until you're ready.**

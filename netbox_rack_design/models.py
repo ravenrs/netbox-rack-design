@@ -161,8 +161,11 @@ class Design(PrimaryModel):
         super().clean()
         if self.based_on_id and self.based_on_id == self.pk:
             raise ValidationError({"based_on": "A design cannot be based on itself."})
-        # At most one approved version per plan (root group).
-        if self.status == DesignStatusChoices.STATUS_APPROVED:
+        # At most one approved version per plan (root group). A brand-new, unsaved
+        # root (pk=None, root=None) has no persisted version group yet, so there is
+        # nothing it can conflict with -- and querying with an unsaved instance would
+        # raise ValueError. Only run the sibling check once the root is persisted.
+        if self.status == DesignStatusChoices.STATUS_APPROVED and self.version_root.pk is not None:
             root = self.version_root
             siblings = Design.objects.filter(
                 models.Q(root=root) | models.Q(pk=root.pk)
@@ -232,6 +235,9 @@ class DesignPlacement(NetBoxModel):
 
     def get_absolute_url(self):
         return reverse("plugins:netbox_rack_design:designplacement", args=[self.pk])
+
+    def get_kind_color(self):
+        return DesignPlacementKindChoices.colors.get(self.kind)
 
     def clean(self):
         super().clean()

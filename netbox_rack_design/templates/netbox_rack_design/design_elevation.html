@@ -1,0 +1,157 @@
+{% extends 'generic/object.html' %}
+{% load static %}
+{% load i18n %}
+{% load rack_design %}
+
+{# Read-only projected rack elevation, rendered with GridStack (staticGrid). #}
+{# Consumes the projection.project_rack contract: design, rack, front, rear,  #}
+{# non_racked, face. Front/Rear toggle is client-side; the tray below lists   #}
+{# position-less placements. State tints come from rack_design.css.           #}
+
+{% block head %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/gridstack.min.css' %}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}">
+{% endblock head %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">
+        {% blocktrans with rack=rack.name design=design.title %}Projected elevation: {{ rack }} ({{ design }}){% endblocktrans %}
+        <div class="card-actions">
+          <div class="btn-group btn-group-sm" role="group" aria-label="{% trans 'Face' %}">
+            <button type="button" class="btn btn-outline-primary{% if face != 'rear' %} active{% endif %}"
+                    id="nbx-rd-show-front">{% trans "Front" %}</button>
+            <button type="button" class="btn btn-outline-primary{% if face == 'rear' %} active{% endif %}"
+                    id="nbx-rd-show-rear">{% trans "Rear" %}</button>
+          </div>
+        </div>
+      </h2>
+
+      <div class="card-body">
+        {# Legend #}
+        <div class="nbx-rd-legend mb-3">
+          <span><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</span>
+          <span><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</span>
+          <span><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</span>
+          <span><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</span>
+          <span><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</span>
+        </div>
+
+        <div class="row">
+          {# ---- Front face ---- #}
+          <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-front"
+               {% if face == 'rear' %}style="display: none;"{% endif %}>
+            <h3 class="h5">{% trans "Front" %}</h3>
+            <div class="d-flex justify-content-center">
+              <ul class="nbx-rd-unit-numbers">
+                {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+              </ul>
+              <div class="grid-stack nbx-rd-rack"
+                   id="nbx-rd-grid-front"
+                   gs-column="1"
+                   gs-max-row="{{ rack.u_height|mul2 }}"
+                   gs-min-row="{{ rack.u_height|mul2 }}">
+                {% for slot in front %}
+                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                       gs-w="1"
+                       gs-h="{{ slot.u_height|mul2 }}"
+                       gs-x="0"
+                       gs-y="{{ slot|slot_gs_y:rack }}"
+                       gs-no-move="true"
+                       gs-no-resize="true"
+                       gs-locked="true">
+                    <div class="grid-stack-item-content"
+                         {% with bg=slot|slot_color %}{% if slot.state == 'existing' and bg %}style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endwith %}
+                         title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                      {{ slot.label }}
+                    </div>
+                  </div>
+                {% empty %}
+                {% endfor %}
+              </div>
+            </div>
+            {% if not front %}<p class="text-muted mt-2">{% trans "No projected slots on this face." %}</p>{% endif %}
+          </div>
+
+          {# ---- Rear face ---- #}
+          <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-rear"
+               {% if face != 'rear' %}style="display: none;"{% endif %}>
+            <h3 class="h5">{% trans "Rear" %}</h3>
+            <div class="d-flex justify-content-center">
+              <ul class="nbx-rd-unit-numbers">
+                {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+              </ul>
+              <div class="grid-stack nbx-rd-rack"
+                   id="nbx-rd-grid-rear"
+                   gs-column="1"
+                   gs-max-row="{{ rack.u_height|mul2 }}"
+                   gs-min-row="{{ rack.u_height|mul2 }}">
+                {% for slot in rear %}
+                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                       gs-w="1"
+                       gs-h="{{ slot.u_height|mul2 }}"
+                       gs-x="0"
+                       gs-y="{{ slot|slot_gs_y:rack }}"
+                       gs-no-move="true"
+                       gs-no-resize="true"
+                       gs-locked="true">
+                    <div class="grid-stack-item-content"
+                         {% with bg=slot|slot_color %}{% if slot.state == 'existing' and bg %}style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endwith %}
+                         title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                      {{ slot.label }}
+                    </div>
+                  </div>
+                {% empty %}
+                {% endfor %}
+              </div>
+            </div>
+            {% if not rear %}<p class="text-muted mt-2">{% trans "No projected slots on this face." %}</p>{% endif %}
+          </div>
+        </div>
+
+        {# ---- Non-racked tray ---- #}
+        <div class="mt-4">
+          <h3 class="h5">{% trans "Non-racked placements" %}</h3>
+          {% if non_racked %}
+            <div class="nbx-rd-nonracked">
+              {% for slot in non_racked %}
+                <div class="nbx-rd-chip nbx-rd-state-{{ slot.state }}"
+                     title="{{ slot.label }} ({{ slot.state }})">
+                  {{ slot.label }}
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="text-muted mb-0">{% trans "No non-racked placements." %}</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock content %}
+
+{% block javascript %}
+  {{ block.super }}
+  <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
+  <script src="{% static 'netbox_rack_design/js/rack_design.js' %}" defer></script>
+  <script type="text/javascript">
+    (function () {
+      var front = document.getElementById('nbx-rd-face-front');
+      var rear = document.getElementById('nbx-rd-face-rear');
+      var btnFront = document.getElementById('nbx-rd-show-front');
+      var btnRear = document.getElementById('nbx-rd-show-rear');
+      function show(faceFront) {
+        if (front) { front.style.display = faceFront ? '' : 'none'; }
+        if (rear) { rear.style.display = faceFront ? 'none' : ''; }
+        if (btnFront) { btnFront.classList.toggle('active', faceFront); }
+        if (btnRear) { btnRear.classList.toggle('active', !faceFront); }
+      }
+      if (btnFront) { btnFront.addEventListener('click', function () { show(true); }); }
+      if (btnRear) { btnRear.addEventListener('click', function () { show(false); }); }
+    })();
+  </script>
+{% endblock javascript %}

@@ -1,0 +1,29 @@
+{% load helpers %}
+{% load i18n %}
+<div class="card">
+  <h2 class="card-header">{% trans "Rack Designs" %}</h2>
+  <table class="table table-hover">
+    <thead>
+      <tr>
+        <th scope="col">{% trans "Design" %}</th>
+        <th scope="col">{% trans "Status" %}</th>
+        <th scope="col">{% trans "Placements" %}</th>
+        <th scope="col">{% trans "Elevation" %}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for design in designs %}
+        <tr>
+          <td>{{ design|linkify }}</td>
+          <td>{% badge design.get_status_display bg_color=design.get_status_color %}</td>
+          <td>{{ design.rack_placement_count }}</td>
+          <td>
+            <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=design.pk rack_id=rack.pk %}">
+              {% trans "View projected elevation" %}
+            </a>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

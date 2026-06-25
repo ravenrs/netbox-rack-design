@@ -1,6 +1,7 @@
 """UI view tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
-from utilities.testing import ViewTestCases, create_tags
+from django.urls import reverse
+from utilities.testing import TestCase, ViewTestCases, create_tags
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignGroup, DesignPlacement
@@ -152,3 +153,113 @@ class DesignPlacementTest(ViewTestCases.PrimaryObjectViewTestCase):
         cls.bulk_edit_data = {
             "proposed_name": "renamed-node",
         }
+
+
+class DesignElevationViewTest(TestCase):
+    """The read-only projected rack elevation view returns HTTP 200."""
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack1 = env["racks"][0]  # has Device 1 (U1) and Device 2 (U2)
+        cls.rack2 = env["racks"][1]  # empty
+        cls.device1 = env["devices"][0]
+        cls.device2 = env["devices"][1]
+
+        cls.design = Design.objects.create(title="Elevation Design", site=cls.site)
+
+        # add: a new device from the catalog into rack 1 at a free slot.
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack1,
+            target_position=10,
+            target_face="front",
+            proposed_name="planned-node-1",
+        )
+        # move: relocate Device 1 from rack 1 (U1) to rack 1 (U20).
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.device1,
+            target_rack=cls.rack1,
+            target_position=20,
+            target_face="front",
+        )
+        # remove: flag Device 2 (rack 1, U2) for removal.
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=cls.device2,
+        )
+
+    def _url(self, design, rack):
+        return reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": design.pk, "rack_id": rack.pk},
+        )
+
+    def test_elevation_view_returns_200(self):
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertHttpStatus(response, 200)
+
+    def test_elevation_view_rear_face_returns_200(self):
+        response = self.client.get(self._url(self.design, self.rack1) + "?face=rear")
+        self.assertHttpStatus(response, 200)
+
+    def test_elevation_projection_states(self):
+        from ..projection import ProjectedSlotState, project_rack
+
+        result = project_rack(self.design, self.rack1)
+        states = {slot["state"] for slot in result.front}
+        # add -> ADD, move -> MOVE_IN + MOVE_OUT_GHOST, remove -> REMOVE.
+        self.assertIn(ProjectedSlotState.ADD, states)
+        self.assertIn(ProjectedSlotState.MOVE_IN, states)
+        self.assertIn(ProjectedSlotState.MOVE_OUT_GHOST, states)
+        self.assertIn(ProjectedSlotState.REMOVE, states)
+
+
+class RackDesignsPanelTest(TestCase):
+    """The injected panel on the core dcim.rack page lists touching designs."""
+
+    user_permissions = (
+        "dcim.view_rack",
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.view_designplacement",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][1]  # empty rack with free U slots
+
+        cls.design = Design.objects.create(title="Panel Design", site=cls.site)
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=5,
+            target_face="front",
+        )
+
+    def _rack_url(self, rack):
+        return reverse("dcim:rack", kwargs={"pk": rack.pk})
+
+    def test_panel_lists_touching_design(self):
+        response = self.client.get(self._rack_url(self.rack))
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn("Rack Designs", content)
+        elevation_url = reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": self.design.pk, "rack_id": self.rack.pk},
+        )
+        self.assertIn(elevation_url, content)

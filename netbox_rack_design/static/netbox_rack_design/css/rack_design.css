@@ -1,0 +1,150 @@
+/*
+ * Read-only projected rack elevation styling for NetBox Rack Design.
+ *
+ * The rack chassis / unit-number rail are adapted from netbox-reorder-rack's
+ * rack.css. The `.state-*` classes encode the projection's slot states
+ * (existing / add / move_in / move_out_ghost / remove) using Tabler/Bootstrap
+ * theme variables so the tints track the active NetBox light/dark theme.
+ */
+
+:root {
+    --nbx-rack-slot-bg: #e9ecef;
+    --nbx-rack-slot-border: #adb5bd;
+    --nbx-rack-unit-color: #6c757d;
+}
+
+:root[data-bs-theme="dark"] {
+    --nbx-rack-slot-bg: #343a40;
+    --nbx-rack-slot-border: #495057;
+    --nbx-rack-unit-color: #adb5bd;
+}
+
+/* Unit-number rail down the left of each rack. */
+ul.nbx-rd-unit-numbers {
+    list-style-type: none;
+    font-size: 0.7em;
+    color: var(--nbx-rack-unit-color);
+    float: left;
+    margin: 0;
+    padding: 0;
+}
+
+ul.nbx-rd-unit-numbers li {
+    width: 22px;
+    margin-bottom: 2px;
+    line-height: 20px;
+    text-align: right;
+    padding-right: 4px;
+}
+
+/* The rack chassis: a repeating-stripe "empty U" background. */
+.nbx-rd-rack {
+    width: 220px;
+    background: var(--nbx-rack-slot-bg) repeating-linear-gradient(
+        to bottom,
+        var(--nbx-rack-slot-bg) 0px,
+        var(--nbx-rack-slot-bg) 20px,
+        var(--nbx-rack-slot-border) 20px,
+        var(--nbx-rack-slot-border) 22px
+    );
+    border: 2px solid var(--nbx-rack-unit-color);
+    float: left;
+}
+
+/* A single-column grid that fills the rack width. */
+.grid-stack.nbx-rd-rack > .grid-stack-item[gs-w="1"] {
+    width: 100%;
+}
+
+.nbx-rd-rack .grid-stack-item > .grid-stack-item-content {
+    border: 1px solid var(--nbx-rack-slot-border);
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 0.75rem;
+    line-height: 1.1;
+    overflow: hidden;
+    padding: 1px 3px;
+}
+
+/* Non-racked tray: simple wrapped chips, no grid geometry. */
+.nbx-rd-nonracked {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.nbx-rd-nonracked .nbx-rd-chip {
+    border: 1px solid var(--nbx-rack-slot-border);
+    border-radius: 3px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    min-width: 120px;
+    text-align: center;
+}
+
+/* Legend swatches. */
+.nbx-rd-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    font-size: 0.8rem;
+}
+
+.nbx-rd-legend .nbx-rd-swatch {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    border-radius: 3px;
+    border: 1px solid var(--nbx-rack-slot-border);
+    vertical-align: middle;
+    margin-right: 0.25rem;
+}
+
+/* ----------------------------------------------------------------------- */
+/* State tints (keyed on projection slot.state)                            */
+/* ----------------------------------------------------------------------- */
+
+/* existing: neutral, matches a normal NetBox device tile. The inline role
+   color from the template provides the fill; nothing extra needed here. */
+.nbx-rd-state-existing > .grid-stack-item-content {
+    border-color: var(--nbx-rack-slot-border);
+}
+
+/* add: green tint (planned new device). */
+.nbx-rd-state-add > .grid-stack-item-content,
+.nbx-rd-chip.nbx-rd-state-add {
+    background-color: rgba(var(--tblr-success-rgb), 0.22) !important;
+    border: 1px solid var(--tblr-success) !important;
+    color: var(--tblr-body-color) !important;
+}
+
+/* move_in: cyan tint (device arriving at its new spot). */
+.nbx-rd-state-move_in > .grid-stack-item-content,
+.nbx-rd-chip.nbx-rd-state-move_in {
+    background-color: rgba(var(--tblr-cyan-rgb), 0.22) !important;
+    border: 1px solid var(--tblr-cyan) !important;
+    color: var(--tblr-body-color) !important;
+}
+
+/* move_out_ghost: faded, dashed outline marking the vacated U. */
+.nbx-rd-state-move_out_ghost > .grid-stack-item-content,
+.nbx-rd-chip.nbx-rd-state-move_out_ghost {
+    background-color: transparent !important;
+    border: 1px dashed var(--nbx-rack-unit-color) !important;
+    color: var(--nbx-rack-unit-color) !important;
+    opacity: 0.6;
+    font-style: italic;
+}
+
+/* remove: red tint + struck-through label. */
+.nbx-rd-state-remove > .grid-stack-item-content,
+.nbx-rd-chip.nbx-rd-state-remove {
+    background-color: rgba(var(--tblr-danger-rgb), 0.22) !important;
+    border: 1px solid var(--tblr-danger) !important;
+    color: var(--tblr-body-color) !important;
+    text-decoration: line-through;
+}

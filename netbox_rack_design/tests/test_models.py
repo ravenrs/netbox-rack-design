@@ -70,6 +70,15 @@ class DesignTestCase(TestCase):
         with self.assertRaises(ValidationError):
             sibling.full_clean()
 
+    def test_first_approved_design_validates(self):
+        # A brand-new, unsaved standalone design created directly as Approved must
+        # validate cleanly -- it has no persisted version group to conflict with.
+        # Regression: clean() previously raised ValueError on the unsaved root.
+        design = Design(
+            title="First", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
+        )
+        design.full_clean()  # must not raise
+
 
 class DesignPlacementTestCase(TestCase):
     @classmethod

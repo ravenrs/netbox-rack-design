@@ -10,7 +10,8 @@ nav:
 theme:
   name: material
   language: en
-  #logo: assets/logo.png
+  logo: assets/icon.svg
+  favicon: assets/icon.svg
   palette:
     # Palette toggle for automatic mode
     - media: "(prefers-color-scheme)"
