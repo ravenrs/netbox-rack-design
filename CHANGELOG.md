@@ -8,44 +8,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-06-25
 
 ### Release Summary
-A minor, backward-compatible feature release. It adds a **read-only projected rack
-elevation**: for any design you can now view a rack as it *would* look once that
-design's placements (add / move / remove) are applied, computed entirely in memory
-without modifying real NetBox data. The projected elevation is rendered with a
-bundled GridStack-based layout and is reachable both from a design's own elevation
-tab and, optionally, from a panel injected onto the core `dcim.rack` detail page
-(gated by the `enable_rack_panel` config). This release also fixes a couple of bugs,
-declares the Apache-2.0 license in the package metadata, and ships the project icon.
+**Projected rack elevations** — the first *visual* surface of NetBox Rack Design.
+
+Until now a design was only a list of placement records; you couldn't actually *see*
+the rack it described. This minor, backward-compatible release renders any design as a
+full rack elevation showing how the rack **would** look once the design is applied:
+planned **adds**, **moves**, and **removals** overlaid on the rack's real devices —
+computed entirely in memory, with **zero changes to your live NetBox data** (nothing
+is materialized until an explicit Apply, which arrives in a later release).
+
+The elevation is drawn with a bundled GridStack layout (front/rear faces plus a
+non-racked tray) and uses clear visual encoding so the plan reads at a glance:
+
+- **green** — a device the design *adds*;
+- **cyan** — a device *moved in*, with a faded **ghost** left at the slot it vacates;
+- **red, struck-through** — a device marked for *removal*;
+- **neutral** (the device role color) — existing devices the design leaves untouched.
+
+Open it from a design at `/plugins/rack-design/designs/<id>/racks/<rack_id>/`, or
+straight from the core **Rack** detail page via an optional panel that lists every
+design touching that rack. This is the read-only foundation for the interactive
+drag-and-drop editor coming in a future release.
+
+This release also fixes two bugs, declares the project's Apache-2.0 license in the
+package metadata, and ships the project icon.
+
+**Upgrade:** `pip install -U netbox-rack-design` and restart NetBox. No database
+migrations and no configuration changes are required. The rack-page panel is enabled
+by default; set `enable_rack_panel = False` in `PLUGINS_CONFIG` to hide it.
 
 ### Added
-- **Projected rack elevation (read-only):** `projection.project_rack()` computes the
-  front/rear/non-racked layout a design would produce for a given rack, and the new
-  `DesignElevationView` renders it at `/plugins/rack-design/designs/<pk>/racks/<rack_id>/`.
-- Bundled GridStack assets and plugin CSS/JS under `static/netbox_rack_design/`, plus
-  a `rack_design` template-tag library for the elevation template.
-- Optional **rack-page panel** (`PluginTemplateExtension` on `dcim.rack`) listing the
-  designs that touch a rack, gated by the `enable_rack_panel` config setting.
+- **Projected rack elevation (read-only).** A new `DesignElevationView` renders, for a
+  given design and rack, the front/rear/non-racked layout the design would produce —
+  existing devices in place, plus the design's add/move/remove placements overlaid at
+  their target units with state-based colour coding and a legend. The projection is
+  computed by `projection.project_rack()` purely in memory; real devices are never
+  modified. Reachable at `/plugins/rack-design/designs/<pk>/racks/<rack_id>/`.
+- **Rack-page panel.** An optional `PluginTemplateExtension` on the core `dcim.rack`
+  detail page lists the designs whose placements touch that rack, each linking to its
+  projected elevation. Gated by the new `enable_rack_panel` config setting (default
+  `True`); renders nothing when no design touches the rack.
+- Bundled GridStack assets and plugin CSS/JS under `static/netbox_rack_design/` (no
+  external CDN), plus a `rack_design` template-tag library powering the elevation
+  template.
 
 ### Fixed
-- `DesignPlacement.get_kind_color()` so placement kind badges render with the correct
-  color.
-- `Design.clean()` no longer raises when approving a brand-new, unsaved root design;
-  the "at most one approved version per plan" sibling check is now skipped until the
-  version root is persisted. Covered by a regression test.
+- Placement **kind badges** (Add/Move/Remove) now render in their intended colours
+  instead of grey — `DesignPlacement` was missing the `get_kind_color()` accessor that
+  NetBox's choice-field column relies on.
+- **Approving a brand-new design no longer errors.** `Design.clean()` previously raised
+  an unhandled error (HTTP 500) when a first/standalone design was created directly with
+  status *Approved*, because the "at most one approved version per plan" check queried
+  against an unsaved version root. The check is now skipped until the root is persisted.
+  Covered by a regression test.
 
 ### Changed
-- Declared `license = "Apache-2.0"` in `pyproject.toml` and shipped the full
-  Apache-2.0 `LICENSE` text. Added the project icon (CC0) under `docs/assets/`, wired
-  it into the README and the MkDocs theme logo/favicon.
-
-### Deprecated
-- N/A
-
-### Removed
-- N/A
-
-### Security
-- N/A
+- The project's **Apache-2.0 license is now declared in the package metadata**
+  (`license = "Apache-2.0"` in `pyproject.toml`) and the full `LICENSE` text ships with
+  the distribution — previously the published package carried no license metadata.
+- Added the **project icon** (CC0) under `docs/assets/` and wired it into the README and
+  the MkDocs theme logo/favicon.
 
 ---
 
