@@ -224,6 +224,213 @@ class DesignElevationViewTest(TestCase):
         self.assertIn(ProjectedSlotState.REMOVE, states)
 
 
+class ElevationBrowserViewTest(TestCase):
+    """The standalone Elevations LIST page: a filterable table of (design, rack) rows."""
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack1 = env["racks"][0]  # has Device 1 (U1) and Device 2 (U2)
+        cls.rack2 = env["racks"][1]  # empty
+
+        # Design 1 touches rack1 (add placement) -> one row.
+        cls.design1 = Design.objects.create(title="Browser Design 1", site=cls.site)
+        DesignPlacement.objects.create(
+            design=cls.design1,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack1,
+            target_position=10,
+            target_face="front",
+            proposed_name="planned-node-1",
+        )
+
+        # Design 2 touches BOTH rack2 and rack1 (two add placements) -> two rows.
+        cls.design2 = Design.objects.create(title="Browser Design 2", site=cls.site)
+        DesignPlacement.objects.create(
+            design=cls.design2,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack2,
+            target_position=5,
+            target_face="front",
+            proposed_name="planned-node-2",
+        )
+        DesignPlacement.objects.create(
+            design=cls.design2,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack1,
+            target_position=15,
+            target_face="front",
+            proposed_name="planned-node-3",
+        )
+
+    @property
+    def _url(self):
+        return reverse("plugins:netbox_rack_design:elevation_browser")
+
+    def _elevation_url(self, design, rack):
+        return reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": design.pk, "rack_id": rack.pk},
+        )
+
+    def test_list_returns_200(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+
+    def test_list_shows_expected_rows_and_elevation_links(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        # The derived (design, rack) pairs each appear with their per-pair links.
+        self.assertIn(self.design1.title, content)
+        self.assertIn(self.rack1.name, content)
+        self.assertIn(self._elevation_url(self.design1, self.rack1), content)
+        self.assertIn(self._elevation_url(self.design2, self.rack2), content)
+        self.assertIn(self._elevation_url(self.design2, self.rack1), content)
+
+    def test_single_value_filter_narrows_rows(self):
+        # Filtering by design 1 keeps only its row, dropping design 2's rows.
+        response = self.client.get(f"{self._url}?design={self.design1.pk}")
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(self._elevation_url(self.design1, self.rack1), content)
+        self.assertNotIn(self._elevation_url(self.design2, self.rack2), content)
+        self.assertNotIn(self._elevation_url(self.design2, self.rack1), content)
+
+    def test_multi_value_design_filter_returns_both(self):
+        # ?design=A&design=B is OR within the field -> rows for both designs.
+        response = self.client.get(
+            f"{self._url}?design={self.design1.pk}&design={self.design2.pk}"
+        )
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(self._elevation_url(self.design1, self.rack1), content)
+        self.assertIn(self._elevation_url(self.design2, self.rack2), content)
+        self.assertIn(self._elevation_url(self.design2, self.rack1), content)
+
+    def test_design_selection_narrows_rack_options(self):
+        # Selecting design 1 (touches only rack1) limits the Rack field's offered
+        # options to rack1, excluding rack2 (which only design 2 touches).
+        response = self.client.get(f"{self._url}?design={self.design1.pk}")
+        self.assertHttpStatus(response, 200)
+        rack_field = response.context["form"].fields["rack"]
+        rack_pks = set(rack_field.queryset.values_list("pk", flat=True))
+        self.assertEqual(rack_pks, {self.rack1.pk})
+        self.assertNotIn(self.rack2.pk, rack_pks)
+
+    def test_unfiltered_rack_options_include_all_elevation_racks(self):
+        # With no Design/Site selected, Rack options = all racks present in rows.
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        rack_pks = set(response.context["form"].fields["rack"].queryset.values_list("pk", flat=True))
+        self.assertEqual(rack_pks, {self.rack1.pk, self.rack2.pk})
+
+
+class DesignEditorViewTest(TestCase):
+    """The interactive single-rack layout editor view (Stage 2, slice 2a)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.rack1 = env["racks"][0]  # has Device 1 (U1) and Device 2 (U2)
+        cls.device1 = env["devices"][0]
+        cls.device2 = env["devices"][1]
+
+        cls.design = Design.objects.create(title="Editor Design", site=cls.site)
+
+        # move: relocate Device 1 from rack 1 (U1) to rack 1 (U20).
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.device1,
+            target_rack=cls.rack1,
+            target_position=20,
+            target_face="front",
+        )
+        # remove: flag Device 2 (rack 1, U2) for removal.
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=cls.device2,
+        )
+
+    def _url(self, design, rack):
+        return reverse(
+            "plugins:netbox_rack_design:design_editor",
+            kwargs={"pk": design.pk, "rack_id": rack.pk},
+        )
+
+    def test_editor_view_without_permission_denied(self):
+        # No permissions granted -> the view's view_design check rejects (403/404).
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertIn(response.status_code, (403, 404))
+
+    def test_editor_view_with_change_permission_returns_200(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertHttpStatus(response, 200)
+
+
+class DesignAffectedRacksTest(TestCase):
+    """The Design detail page lists affected racks with per-rack view links."""
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "dcim.view_rack",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack1 = env["racks"][0]  # holds the real device referenced below
+        cls.rack2 = env["racks"][1]  # targeted by an add placement
+        cls.device1 = env["devices"][0]
+
+        cls.design = Design.objects.create(title="Affected Racks Design", site=cls.site)
+        # add into rack2 -> rack2 is affected via target_rack
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack2,
+            target_position=5,
+            target_face="front",
+        )
+        # remove device1 -> rack1 is affected via device.rack
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=cls.device1,
+        )
+
+    def test_detail_page_lists_affected_racks(self):
+        url = reverse("plugins:netbox_rack_design:design", kwargs={"pk": self.design.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+
+        for rack in (self.rack1, self.rack2):
+            self.assertIn(rack.name, content)
+            elevation_url = reverse(
+                "plugins:netbox_rack_design:design_elevation",
+                kwargs={"pk": self.design.pk, "rack_id": rack.pk},
+            )
+            self.assertIn(elevation_url, content)
+
+
 class RackDesignsPanelTest(TestCase):
     """The injected panel on the core dcim.rack page lists touching designs."""
 

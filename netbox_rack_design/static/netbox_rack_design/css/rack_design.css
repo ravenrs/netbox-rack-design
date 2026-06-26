@@ -104,6 +104,51 @@ ul.nbx-rd-unit-numbers li {
     margin-right: 0.25rem;
 }
 
+/* The legend doubles as a per-state filter: each entry is a checkbox label
+   whose swatch shows the state colour. Unchecking hides those slots. */
+.nbx-rd-legend .nbx-rd-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0;
+    font-weight: normal;
+    cursor: pointer;
+    user-select: none;
+}
+
+.nbx-rd-legend .nbx-rd-filter input {
+    cursor: pointer;
+    margin: 0;
+}
+
+/* Swatch fills mirror the state tints below (legend spans have no
+   .grid-stack-item-content child, so those rules don't reach them). */
+.nbx-rd-swatch.nbx-rd-state-existing {
+    background-color: var(--nbx-rack-slot-bg);
+    border-color: var(--nbx-rack-slot-border);
+}
+.nbx-rd-swatch.nbx-rd-state-add {
+    background-color: rgba(var(--tblr-success-rgb), 0.5);
+    border-color: var(--tblr-success);
+}
+.nbx-rd-swatch.nbx-rd-state-move_in {
+    background-color: rgba(var(--tblr-cyan-rgb), 0.5);
+    border-color: var(--tblr-cyan);
+}
+.nbx-rd-swatch.nbx-rd-state-move_out_ghost {
+    background-color: transparent;
+    border: 1px dashed var(--nbx-rack-unit-color);
+}
+.nbx-rd-swatch.nbx-rd-state-remove {
+    background-color: rgba(var(--tblr-danger-rgb), 0.5);
+    border-color: var(--tblr-danger);
+}
+
+/* A slot filtered out via the legend. */
+.nbx-rd-filtered-out {
+    display: none !important;
+}
+
 /* ----------------------------------------------------------------------- */
 /* State tints (keyed on projection slot.state)                            */
 /* ----------------------------------------------------------------------- */
@@ -130,14 +175,63 @@ ul.nbx-rd-unit-numbers li {
     color: var(--tblr-body-color) !important;
 }
 
-/* move_out_ghost: faded, dashed outline marking the vacated U. */
+/* move_out_ghost: the U a moved device is vacating. Rendered as a clearly
+   visible dashed tile (like a planned slot) overlaid with a dashed cross so it
+   reads as "this device is leaving here". */
 .nbx-rd-state-move_out_ghost > .grid-stack-item-content,
 .nbx-rd-chip.nbx-rd-state-move_out_ghost {
-    background-color: transparent !important;
+    position: relative;
+    background-color: rgba(108, 117, 125, 0.12) !important;
     border: 1px dashed var(--nbx-rack-unit-color) !important;
-    color: var(--nbx-rack-unit-color) !important;
-    opacity: 0.6;
+    color: var(--tblr-body-color) !important;
     font-style: italic;
+    font-weight: 500;
+}
+
+/* Dashed cross (X) overlaying the vacated tile. preserveAspectRatio=none
+   stretches the two diagonal dashed lines to fill any tile size. */
+.nbx-rd-state-move_out_ghost > .grid-stack-item-content::after,
+.nbx-rd-chip.nbx-rd-state-move_out_ghost::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='none' viewBox='0 0 100 100'%3E%3Cline x1='0' y1='0' x2='100' y2='100' stroke='%236c757d' stroke-width='2' stroke-dasharray='5,4'/%3E%3Cline x1='100' y1='0' x2='0' y2='100' stroke='%236c757d' stroke-width='2' stroke-dasharray='5,4'/%3E%3C/svg%3E");
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+}
+
+/* Keep the slot label legible above the ghost's dashed-cross overlay, and give
+   it a solid backing so the diagonal lines don't run through the text. */
+.nbx-rd-rack .grid-stack-item-content .nbx-rd-label,
+.nbx-rd-chip .nbx-rd-label {
+    position: relative;
+    z-index: 1;
+}
+
+.nbx-rd-state-move_out_ghost > .grid-stack-item-content .nbx-rd-label,
+.nbx-rd-state-remove > .grid-stack-item-content .nbx-rd-label {
+    font-weight: 600;
+}
+
+/* Solid backing so the dashed cross never runs through the ghost's label. */
+.nbx-rd-state-move_out_ghost > .grid-stack-item-content .nbx-rd-label {
+    background-color: var(--nbx-rack-slot-bg);
+    padding: 0 0.35rem;
+    border-radius: 3px;
+}
+
+/* Rack name + tenant caption beneath each elevation. */
+.nbx-rd-rack-caption {
+    margin-top: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.nbx-rd-rack-caption .nbx-rd-tenant {
+    font-weight: 400;
+    color: var(--nbx-rack-unit-color);
 }
 
 /* remove: red tint + struck-through label. */

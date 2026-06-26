@@ -1,0 +1,193 @@
+{% extends 'generic/object.html' %}
+{% load static %}
+{% load i18n %}
+{% load rack_design %}
+
+{# Interactive single-rack layout editor (Stage 2, slice 2a: MOVE + REMOVE).   #}
+{# Forks design_elevation.html but initialises GridStack WITHOUT staticGrid so  #}
+{# slots can be dragged vertically (and between faces / into the non-racked     #}
+{# tray). editor.js hydrates from #rd-editor-data, tracks each widget's original #}
+{# (u_position, face), and POSTs a diff to data-save-url. NO model changes.      #}
+{#                                                                               #}
+{# Widget indices: views.py builds `widgets` (and widgets_json) in the order    #}
+{# (*front, *rear, *non_racked). Each grid-stack-item below is stamped with the  #}
+{# matching GLOBAL index via `gs-id`/data-widget-index so editor.js can pair the #}
+{# JSON payload to its DOM tile: front uses forloop.counter0; rear adds the      #}
+{# front length; the tray adds front+rear lengths.                              #}
+
+{% block head %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/gridstack.min.css' %}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/editor.css' %}">
+{% endblock head %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">
+        {% blocktrans with rack=rack.name design=object.title %}Edit layout: {{ rack }} ({{ design }}){% endblocktrans %}
+        <div class="card-actions">
+          <div class="btn-group btn-group-sm me-2" role="group" aria-label="{% trans 'Face' %}">
+            <button type="button" class="btn btn-outline-primary active"
+                    id="nbx-rd-show-front">{% trans "Front" %}</button>
+            <button type="button" class="btn btn-outline-primary"
+                    id="nbx-rd-show-rear">{% trans "Rear" %}</button>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" id="rd-editor-save" disabled>
+            <i class="mdi mdi-content-save" aria-hidden="true"></i> {% trans "Save" %}
+          </button>
+        </div>
+      </h2>
+
+      {# The editor root: carries the save URL + rack meta the JS needs. #}
+      <div class="card-body"
+           id="rd-editor"
+           data-save-url="{{ save_url }}"
+           data-rack-id="{{ rack_meta.id }}"
+           data-u-height="{{ rack_meta.u_height }}"
+           data-desc-units="{{ rack_meta.desc_units|yesno:'true,false' }}"
+           data-csrf-token="{{ csrf_token }}">
+
+        {% with front_len=front|length rear_len=rear|length %}
+
+        {# Legend — also acts as a per-state filter (see legend_filter.js). #}
+        <div class="nbx-rd-legend mb-3" data-rd-legend>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+        </div>
+
+        <div class="row">
+          {# ---- Front face ---- #}
+          <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-front">
+            <h3 class="h5">{% trans "Front" %}</h3>
+            <div class="d-flex justify-content-center">
+              <ul class="nbx-rd-unit-numbers">
+                {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+              </ul>
+              <div class="grid-stack nbx-rd-rack nbx-rd-editable"
+                   id="nbx-rd-grid-front"
+                   data-face="front"
+                   gs-column="1"
+                   gs-max-row="{{ rack.u_height|mul2 }}"
+                   gs-min-row="{{ rack.u_height|mul2 }}">
+                {% for slot in front %}
+                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                       gs-w="1"
+                       gs-h="{{ slot.u_height|mul2 }}"
+                       gs-x="0"
+                       gs-y="{{ slot|slot_gs_y:rack }}"
+                       gs-id="w-{{ forloop.counter0 }}"
+                       data-widget-index="{{ forloop.counter0 }}">
+                    <div class="grid-stack-item-content"
+                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                         title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                      <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                              aria-label="{% trans 'Flag for removal' %}">&times;</button>
+                      <span class="nbx-rd-label">{{ slot.label }}</span>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+            <div class="nbx-rd-rack-caption">
+              <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
+              {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
+            </div>
+          </div>
+
+          {# ---- Rear face ---- #}
+          <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-rear" style="display: none;">
+            <h3 class="h5">{% trans "Rear" %}</h3>
+            <div class="d-flex justify-content-center">
+              <ul class="nbx-rd-unit-numbers">
+                {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+              </ul>
+              <div class="grid-stack nbx-rd-rack nbx-rd-editable"
+                   id="nbx-rd-grid-rear"
+                   data-face="rear"
+                   gs-column="1"
+                   gs-max-row="{{ rack.u_height|mul2 }}"
+                   gs-min-row="{{ rack.u_height|mul2 }}">
+                {% for slot in rear %}
+                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                       gs-w="1"
+                       gs-h="{{ slot.u_height|mul2 }}"
+                       gs-x="0"
+                       gs-y="{{ slot|slot_gs_y:rack }}"
+                       gs-id="w-{{ forloop.counter0|add:front_len }}"
+                       data-widget-index="{{ forloop.counter0|add:front_len }}">
+                    <div class="grid-stack-item-content"
+                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                         title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                      <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                              aria-label="{% trans 'Flag for removal' %}">&times;</button>
+                      <span class="nbx-rd-label">{{ slot.label }}</span>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+            <div class="nbx-rd-rack-caption">
+              <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
+              {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
+            </div>
+          </div>
+        </div>
+
+        {# ---- Non-racked tray (drop zone) ---- #}
+        <div class="mt-4">
+          <h3 class="h5">{% trans "Non-racked tray" %}</h3>
+          <p class="text-muted small mb-2">
+            {% trans "Drag a device here to move it off the rack, or use the × on a tile to flag it for removal." %}
+          </p>
+          <div class="grid-stack nbx-rd-tray"
+               id="nbx-rd-grid-tray"
+               data-face=""
+               gs-column="1"
+               gs-min-row="2">
+            {% for slot in non_racked %}
+              <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                   gs-w="1"
+                   gs-h="2"
+                   gs-x="0"
+                   gs-id="w-{{ forloop.counter0|add:front_len|add:rear_len }}"
+                   data-widget-index="{{ forloop.counter0|add:front_len|add:rear_len }}">
+                <div class="grid-stack-item-content"
+                     {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
+                     title="{{ slot.label }} ({{ slot.state }})">
+                  <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                          aria-label="{% trans 'Flag for removal' %}">&times;</button>
+                  <span class="nbx-rd-label">{{ slot.label }}</span>
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        {% endwith %}
+
+        {# Editor payload for the JS: one widget per projected slot (see views._slot_to_widget). #}
+        {# Use Django's json_script so the JSON is safely escaped for a <script> #}
+        {# element (e.g. < > & become \u-escapes) — a plain {{ ... }} would be #}
+        {# HTML-escaped (&quot;), which breaks JSON.parse(textContent) in editor.js. #}
+        {{ widgets|json_script:"rd-editor-data" }}
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Toast container (toasts are appended here by editor.js). #}
+<div class="toast-container position-fixed bottom-0 end-0 m-3" id="rd-editor-toasts"></div>
+{% endblock content %}
+
+{% block javascript %}
+  {{ block.super }}
+  <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
+  <script src="{% static 'netbox_rack_design/js/editor.js' %}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}" defer></script>
+{% endblock javascript %}

@@ -35,6 +35,11 @@ menu = PluginMenu(
                     link="plugins:netbox_rack_design:designplacement_list",
                     link_text="Placements",
                 ),
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:elevation_browser",
+                    link_text="Elevations",
+                    permissions=["netbox_rack_design.view_design"],
+                ),
             ),
         ),
     ),

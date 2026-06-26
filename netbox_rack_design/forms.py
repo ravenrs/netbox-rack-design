@@ -2,6 +2,7 @@
 
 from dcim.models import Device, DeviceType, Rack, Site
 from django import forms
+from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
     NetBoxModelBulkEditForm,
     NetBoxModelFilterSetForm,
@@ -14,6 +15,7 @@ from utilities.forms.fields import (
     DynamicModelChoiceField,
     DynamicModelMultipleChoiceField,
 )
+from utilities.forms.rendering import FieldSet
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
 from .models import Design, DesignGroup, DesignPlacement
@@ -31,6 +33,7 @@ __all__ = (
     "DesignGroupFilterForm",
     "DesignFilterForm",
     "DesignPlacementFilterForm",
+    "ElevationBrowserFilterForm",
 )
 
 
@@ -204,3 +207,68 @@ class DesignPlacementFilterForm(NetBoxModelFilterSetForm):
     design_id = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False, label="Design")
     target_rack_id = DynamicModelMultipleChoiceField(queryset=Rack.objects.all(), required=False, label="Target rack")
     kind = forms.MultipleChoiceField(choices=DesignPlacementKindChoices, required=False)
+
+
+# ---------------------------------------------------------------------------
+# Elevation browser (standalone, non-model-bound) filter form
+# ---------------------------------------------------------------------------
+
+
+class ElevationBrowserFilterForm(forms.Form):
+    """
+    GET-driven, multi-select filter for the standalone Elevations LIST page.
+
+    Not a NetBoxModelFilterSetForm (the rows are derived (design, rack) pairs, not
+    a single model's queryset) — a plain form whose four MULTI-select fields
+    populate the ``design``, ``rack``, ``site`` and ``status`` query-string params.
+    ElevationBrowserView applies them server-side to the derived rows; within a
+    field the values are OR'd, across fields AND'd, and an empty field is no
+    constraint.
+
+    The OFFERED options are narrowed SERVER-SIDE to the current selection: the view
+    passes the narrowed Design/Rack/Site querysets and Status choices (computed
+    from the actual elevation rows) into __init__ so the form never offers a value
+    that would yield zero rows. Plain Model/MultipleChoice fields are used (not the
+    API-backed Dynamic* fields) precisely so the limited querysets/choices — not
+    the full core catalog — drive the rendered <select> options. NetBox's frontend
+    still upgrades each plain <select multiple> to the native TomSelect multi-select.
+    """
+
+    design = forms.ModelMultipleChoiceField(
+        queryset=Design.objects.none(),
+        required=False,
+        label=_("Design"),
+        to_field_name="pk",
+    )
+    rack = forms.ModelMultipleChoiceField(
+        queryset=Rack.objects.none(),
+        required=False,
+        label=_("Rack"),
+        to_field_name="pk",
+    )
+    site = forms.ModelMultipleChoiceField(
+        queryset=Site.objects.none(),
+        required=False,
+        label=_("Site"),
+        to_field_name="pk",
+    )
+    status = forms.MultipleChoiceField(
+        choices=(),
+        required=False,
+        label=_("Status"),
+    )
+
+    fieldsets = (
+        FieldSet("design", "rack", "site", "status", name=_("Elevations")),
+    )
+
+    def __init__(self, *args, design_qs=None, rack_qs=None, site_qs=None, status_choices=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if design_qs is not None:
+            self.fields["design"].queryset = design_qs
+        if rack_qs is not None:
+            self.fields["rack"].queryset = rack_qs
+        if site_qs is not None:
+            self.fields["site"].queryset = site_qs
+        if status_choices is not None:
+            self.fields["status"].choices = status_choices

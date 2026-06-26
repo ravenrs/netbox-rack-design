@@ -12,6 +12,8 @@ urlpatterns = (
     path("groups/<int:pk>/", include(get_model_urls("netbox_rack_design", "designgroup"))),
     path("designs/", include(get_model_urls("netbox_rack_design", "design", detail=False))),
     path("designs/<int:pk>/", include(get_model_urls("netbox_rack_design", "design"))),
+    # Standalone, non-model-bound Elevations browser page.
+    path("elevations/", views.ElevationBrowserView.as_view(), name="elevation_browser"),
     path("placements/", include(get_model_urls("netbox_rack_design", "designplacement", detail=False))),
     path("placements/<int:pk>/", include(get_model_urls("netbox_rack_design", "designplacement"))),
 )

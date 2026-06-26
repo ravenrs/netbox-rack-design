@@ -1,9 +1,9 @@
 """
 PluginTemplateExtensions injecting NetBox Rack Design UI into core pages.
 
-Currently adds a full-width panel to the core dcim.rack detail page listing the
-Designs whose placements touch that rack, each linking into the read-only
-projected elevation for that design + rack.
+Currently adds a panel to the right column of the core dcim.rack detail page
+listing the Designs whose placements touch that rack, each linking into the
+read-only projected elevation for that design + rack.
 """
 
 from django.db.models import Count, Q
@@ -15,11 +15,11 @@ __all__ = ("RackDesignsPanel",)
 
 
 class RackDesignsPanel(PluginTemplateExtension):
-    """Full-width panel on a Rack page: the designs that touch this rack."""
+    """Right-column panel on a Rack page: the designs that touch this rack."""
 
     models = ["dcim.rack"]
 
-    def full_width_page(self):
+    def right_page(self):
         if not self.context["config"].get("enable_rack_panel"):
             return ""
 

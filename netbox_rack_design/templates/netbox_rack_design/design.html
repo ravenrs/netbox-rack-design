@@ -119,6 +119,47 @@
       </h2>
       {% htmx_table 'plugins:netbox_rack_design:designplacement_list' design_id=object.pk %}
     </div>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">{% trans "Racks" %}</h2>
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th>{% trans "Rack" %}</th>
+            <th>{% trans "Site" %}</th>
+            <th class="text-end">{% trans "Actions" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for rack in affected_racks %}
+            <tr>
+              <td>{{ rack|linkify }}</td>
+              <td>{{ rack.site|linkify|placeholder }}</td>
+              <td class="text-end">
+                <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=object.pk rack_id=rack.pk %}"
+                   class="btn btn-sm btn-outline-primary">
+                  <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "View elevation" %}
+                </a>
+                {% if perms.netbox_rack_design.change_design %}
+                  <a href="{% url 'plugins:netbox_rack_design:design_editor' pk=object.pk rack_id=rack.pk %}"
+                     class="btn btn-sm btn-outline-secondary">
+                    <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Edit layout" %}
+                  </a>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="3" class="text-muted">{% trans "No racks affected yet" %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {% plugin_full_width_page object %}
   </div>
 </div>

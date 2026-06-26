@@ -1,0 +1,124 @@
+{% load i18n %}
+{% load static %}
+{% load rack_design %}
+
+{# ------------------------------------------------------------------------- #}
+{# Shared read-only projected rack elevation grid.                            #}
+{#                                                                            #}
+{# Consumes the projection.project_rack contract via the context variables    #}
+{# ``rack``, ``front``, ``rear``, ``non_racked`` and ``face``. Included by     #}
+{# both design_elevation.html (the per-rack tab) and elevation_browser.html   #}
+{# (the standalone Elevations page) so the grid markup lives in one place.    #}
+{#                                                                            #}
+{# GridStack assets + rack_design.css/js and the Front/Rear toggle buttons    #}
+{# (#nbx-rd-show-front / #nbx-rd-show-rear) are provided by the including      #}
+{# template, not here.                                                        #}
+{# ------------------------------------------------------------------------- #}
+
+{# Legend — also acts as a per-state filter (see legend_filter.js). #}
+<div class="nbx-rd-legend mb-3" data-rd-legend>
+  <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
+  <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
+  <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
+  <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
+  <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+</div>
+
+<div class="row">
+  {# ---- Front face ---- #}
+  <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-front"
+       {% if face == 'rear' %}style="display: none;"{% endif %}>
+    <h3 class="h5">{% trans "Front" %}</h3>
+    <div class="d-flex justify-content-center">
+      <ul class="nbx-rd-unit-numbers">
+        {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+      </ul>
+      <div class="grid-stack nbx-rd-rack"
+           id="nbx-rd-grid-front"
+           gs-column="1"
+           gs-max-row="{{ rack.u_height|mul2 }}"
+           gs-min-row="{{ rack.u_height|mul2 }}">
+        {% for slot in front %}
+          <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+               gs-w="1"
+               gs-h="{{ slot.u_height|mul2 }}"
+               gs-x="0"
+               gs-y="{{ slot|slot_gs_y:rack }}"
+               gs-no-move="true"
+               gs-no-resize="true"
+               gs-locked="true">
+            <div class="grid-stack-item-content"
+                 {% with bg=slot|slot_color %}{% if slot.state == 'existing' and bg %}style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endwith %}
+                 title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+              <span class="nbx-rd-label">{{ slot.label }}</span>
+            </div>
+          </div>
+        {% empty %}
+        {% endfor %}
+      </div>
+    </div>
+    <div class="nbx-rd-rack-caption">
+      <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
+      {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
+    </div>
+    {% if not front %}<p class="text-muted mt-2">{% trans "No projected slots on this face." %}</p>{% endif %}
+  </div>
+
+  {# ---- Rear face ---- #}
+  <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-rear"
+       {% if face != 'rear' %}style="display: none;"{% endif %}>
+    <h3 class="h5">{% trans "Rear" %}</h3>
+    <div class="d-flex justify-content-center">
+      <ul class="nbx-rd-unit-numbers">
+        {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+      </ul>
+      <div class="grid-stack nbx-rd-rack"
+           id="nbx-rd-grid-rear"
+           gs-column="1"
+           gs-max-row="{{ rack.u_height|mul2 }}"
+           gs-min-row="{{ rack.u_height|mul2 }}">
+        {% for slot in rear %}
+          <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+               gs-w="1"
+               gs-h="{{ slot.u_height|mul2 }}"
+               gs-x="0"
+               gs-y="{{ slot|slot_gs_y:rack }}"
+               gs-no-move="true"
+               gs-no-resize="true"
+               gs-locked="true">
+            <div class="grid-stack-item-content"
+                 {% with bg=slot|slot_color %}{% if slot.state == 'existing' and bg %}style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endwith %}
+                 title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+              <span class="nbx-rd-label">{{ slot.label }}</span>
+            </div>
+          </div>
+        {% empty %}
+        {% endfor %}
+      </div>
+    </div>
+    <div class="nbx-rd-rack-caption">
+      <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
+      {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
+    </div>
+    {% if not rear %}<p class="text-muted mt-2">{% trans "No projected slots on this face." %}</p>{% endif %}
+  </div>
+</div>
+
+{# ---- Non-racked tray ---- #}
+<div class="mt-4">
+  <h3 class="h5">{% trans "Non-racked placements" %}</h3>
+  {% if non_racked %}
+    <div class="nbx-rd-nonracked">
+      {% for slot in non_racked %}
+        <div class="nbx-rd-chip nbx-rd-state-{{ slot.state }}"
+             title="{{ slot.label }} ({{ slot.state }})">
+          {{ slot.label }}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="text-muted mb-0">{% trans "No non-racked placements." %}</p>
+  {% endif %}
+</div>
+
+<script src="{% static 'netbox_rack_design/js/legend_filter.js' %}" defer></script>

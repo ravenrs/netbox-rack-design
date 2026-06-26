@@ -1,0 +1,84 @@
+/*
+ * Interactive layout-editor styling for NetBox Rack Design (Stage 2, slice 2a).
+ *
+ * Layers on top of rack_design.css: the elevation chassis, unit rail and the
+ * .nbx-rd-state-* tints are shared. This file only adds the editor affordances
+ * (grab cursor, the per-tile remove button, the non-racked drop tray, and the
+ * "pending change" highlight that flags a tile the user touched but has not yet
+ * saved). Colors use Tabler/Bootstrap theme vars so they track light/dark mode.
+ */
+
+/* Draggable tiles get a grab cursor; GridStack manages the actual dragging. */
+.grid-stack.nbx-rd-editable .grid-stack-item {
+    cursor: grab;
+}
+
+.grid-stack.nbx-rd-editable .grid-stack-item.ui-draggable-dragging {
+    cursor: grabbing;
+}
+
+/* Each tile holds a label and a small remove button in its top-right corner. */
+.nbx-rd-rack .grid-stack-item-content,
+.nbx-rd-tray .grid-stack-item-content {
+    position: relative;
+}
+
+.nbx-rd-remove-btn {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 16px;
+    height: 16px;
+    line-height: 14px;
+    padding: 0;
+    border: none;
+    border-radius: 0 2px 0 4px;
+    background-color: rgba(var(--tblr-danger-rgb), 0.85);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+    z-index: 2;
+}
+
+.grid-stack-item-content:hover > .nbx-rd-remove-btn {
+    opacity: 1;
+}
+
+.nbx-rd-label {
+    pointer-events: none;
+}
+
+/* A tile the user dragged/flagged but hasn't saved yet: dashed amber outline. */
+.grid-stack-item.nbx-rd-dirty > .grid-stack-item-content {
+    outline: 2px dashed var(--tblr-warning, #f59f00);
+    outline-offset: -2px;
+}
+
+/* A tile the server rejected on save (collision/validation): solid red ring. */
+.grid-stack-item.nbx-rd-error > .grid-stack-item-content {
+    outline: 2px solid var(--tblr-danger, #d63939);
+    outline-offset: -2px;
+}
+
+/* The non-racked tray: a wider, single-column drop target below the rack. */
+.grid-stack.nbx-rd-tray {
+    width: 100%;
+    min-height: 44px;
+    border: 2px dashed var(--nbx-rack-slot-border, #adb5bd);
+    border-radius: 4px;
+    background: var(--nbx-rack-slot-bg, #e9ecef);
+}
+
+.grid-stack.nbx-rd-tray > .grid-stack-item > .grid-stack-item-content {
+    border: 1px solid var(--nbx-rack-slot-border, #adb5bd);
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 0.75rem;
+    padding: 1px 3px;
+}

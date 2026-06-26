@@ -1,6 +1,8 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
-from utilities.testing import APIViewTestCases, create_tags
+from django.urls import reverse
+from rest_framework import status
+from utilities.testing import APITestCase, APIViewTestCases, create_tags
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignGroup, DesignPlacement
@@ -136,3 +138,141 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
                 "target_position": 12.0,
             },
         ]
+
+
+class SaveLayoutTest(APITestCase):
+    """Tests for the DesignViewSet save-layout action (Stage 2, increment 2a)."""
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]  # Device 1 @ Rack1/U1/front, Device 2 @ Rack1/U2/front
+        cls.design = Design.objects.create(title="Layout design", site=cls.site)
+
+    def _url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-save-layout",
+            kwargs={"pk": design.pk},
+        )
+
+    def _grant_all(self):
+        self.add_permissions(
+            "netbox_rack_design.change_design",
+            "netbox_rack_design.add_designplacement",
+            "netbox_rack_design.change_designplacement",
+            "netbox_rack_design.delete_designplacement",
+        )
+
+    def _payload(self, racks):
+        return {"design_id": self.design.pk, "racks": racks}
+
+    def test_move_persists_one_placement_and_leaves_device(self):
+        """Moving an existing device persists ONE move placement; real Device unchanged."""
+        self._grant_all()
+        device = self.devices[0]
+        rack = self.racks[0]
+        # Move Device 1 from U1 to U10 (free) on the front face.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(placement.device_id, device.pk)
+        self.assertEqual(float(placement.target_position), 10.0)
+        self.assertEqual(placement.target_rack_id, rack.pk)
+
+        # Real device is untouched.
+        device.refresh_from_db()
+        self.assertEqual(float(device.position), 1.0)
+        self.assertEqual(device.rack_id, rack.pk)
+
+    def test_collision_returns_400_and_persists_nothing(self):
+        """Moving a device onto an occupied unit → 400, no placements persisted."""
+        self._grant_all()
+        device = self.devices[0]  # at U1
+        rack = self.racks[0]
+        # U2 is occupied by Device 2 → collision.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 2, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_noop_payload_returns_304(self):
+        """Everything submitted as existing at real positions → 304, no changes."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "existing", "device_id": self.devices[0].pk, "u_position": 1, "face": "front"},
+                    {"kind": "existing", "device_id": self.devices[1].pk, "u_position": 2, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_304_NOT_MODIFIED)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_remove_persists_remove_placement(self):
+        """A remove item persists a remove placement."""
+        self._grant_all()
+        device = self.devices[0]
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "remove", "device_id": device.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_REMOVE)
+        self.assertEqual(placement.device_id, device.pk)
+        self.assertIsNone(placement.target_rack_id)
+        # Real device untouched.
+        device.refresh_from_db()
+        self.assertEqual(device.rack_id, rack.pk)
+
+    def test_missing_change_perm_returns_403(self):
+        """A user lacking change permission → 403."""
+        # No permissions granted at all.
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": self.devices[0].pk, "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
