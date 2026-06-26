@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-26
+
+### Release Summary
+**Pin the gear you reach for** — Rack Design gets per-user favorite device types.
+
+0.4.0 gave the single-rack editor a searchable device-type catalog to drag new gear from;
+0.5.0 makes that catalog *personal*. This minor, fully backward-compatible release lets each
+user **star a device type** to pin it to a dedicated **Quick access** column in the editor,
+so the handful of types you plan with most are always one click — and one drag — away,
+without scrolling or re-filtering the full catalog. Favorites are **per-user**: starring a
+type affects only your own Quick access column, never anyone else's, and they are persisted
+through a new user-scoped favorites REST API. The Quick access column is **independent of the
+catalog's search/manufacturer filter**, so narrowing the catalog never hides your pinned
+types — your favorites stay put while you search.
+
+As with every editor surface, this is purely a planning convenience: drag-to-plan from Quick
+access composes **design placements** exactly like the main catalog, and your live `Device`
+records are never touched.
+
+There are **no breaking changes**. This release adds a single database migration that only
+**adds one new table** (`FavoriteDeviceType`); it introduces no changes to existing models,
+placements, the public REST API, or GraphQL, and reverses cleanly.
+
+#### Per-user favorite device types
+Each row in the device-type catalog now carries a **star toggle**. Starring a type adds it to
+your **Quick access** column at the top of the palette; un-starring removes it. Favorites are
+scoped to the logged-in user via a `FavoriteDeviceType` model (a unique `(user, device_type)`
+pair), so two users planning the same rack see their own independent Quick access lists.
+
+#### Quick access column in the editor
+The Quick access column lists your starred device types as ready-to-drag tiles, **drag one
+straight onto a free rack unit** to plan an add — the same planning surface the main catalog
+uses. The column is rendered **independently of the catalog's type-ahead search and
+manufacturer filter**, so filtering the catalog to find something never empties or reorders
+your pinned favorites.
+
+#### User-scoped favorites API
+A new favorites endpoint backs the stars: a **GET** returns the current user's favorite device
+types, and a **POST** toggles a device type in or out of that set (`FavoriteToggleSerializer`,
+wired through `api/views.py` and the API router). All reads and writes are scoped to the
+requesting user, so one user can never see or modify another's favorites.
+
+### Added
+- **Per-user favorite device types.** A new `FavoriteDeviceType` model (per-user `(user,
+  device_type)` with a uniqueness constraint) lets each user pin the device types they plan
+  with most.
+- **"Quick access" favorites column** in the single-rack editor: starred device types render
+  as drag-to-plan tiles in a dedicated column that is **independent of the catalog's
+  search/manufacturer filter** (`design_editor.html`, `editor.js`, `editor.css`).
+- **Star toggles** on catalog rows to add/remove a device type from your favorites.
+- **User-scoped favorites REST API**: a GET list of the current user's favorites and a POST
+  toggle action, both scoped to the requesting user (`FavoriteToggleSerializer` in
+  `api/serializers.py`, the view in `api/views.py`, router entry in `api/urls.py`).
+- API and view tests covering the favorites endpoint (list + toggle, user scoping) and the
+  editor's Quick access wiring.
+
+### Changed
+- N/A — no changes to existing behavior, data model, or public API.
+
+### Fixed
+- N/A
+
+### Deprecated
+- N/A
+
+### Removed
+- N/A
+
+### Security
+- N/A
+
+### Upgrade
+`pip install -U netbox-rack-design` and restart NetBox.
+
+- **Run `python manage.py migrate`** — this release adds migration
+  `0003_favoritedevicetype`, which only **adds one new table** (`FavoriteDeviceType`). It is
+  additive (no changes to existing tables, no data rewrite, no backfill), safe against existing
+  designs, and reversible. There are **no breaking changes**.
+- **Run `python manage.py collectstatic`** — the editor's bundled JS/CSS were updated for the
+  Quick access favorites column and star toggles, so the new static assets must be collected
+  for the editor to render correctly.
+- **No configuration changes** are needed — existing `PLUGINS_CONFIG` settings continue to
+  work unchanged.
+
+---
+
 ## [0.4.0] - 2026-06-26
 
 ### Release Summary
