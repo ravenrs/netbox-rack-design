@@ -211,6 +211,23 @@ class DesignPlacement(NetBoxModel):
     )
     proposed_name = models.CharField(max_length=64, blank=True)
 
+    # Intended role/tenant for a planned new device (add). Only meaningful for
+    # kind=add; applied to the real device when the design is later executed.
+    device_role = models.ForeignKey(
+        to="dcim.DeviceRole",
+        on_delete=models.PROTECT,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+    tenant = models.ForeignKey(
+        to="tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+
     # Target placement (null for remove).
     target_rack = models.ForeignKey(
         to="dcim.Rack",
@@ -253,6 +270,10 @@ class DesignPlacement(NetBoxModel):
                 raise ValidationError({"device": f"A '{kind}' requires an existing device."})
             if self.device_type:
                 raise ValidationError({"device_type": f"A '{kind}' must not set a device type."})
+            if self.device_role:
+                raise ValidationError({"device_role": f"A '{kind}' must not set a device role."})
+            if self.tenant:
+                raise ValidationError({"tenant": f"A '{kind}' must not set a tenant."})
 
         if kind == DesignPlacementKindChoices.KIND_REMOVE:
             return  # No target for a removal.

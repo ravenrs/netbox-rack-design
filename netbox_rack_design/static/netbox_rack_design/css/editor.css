@@ -82,3 +82,117 @@
     font-size: 0.75rem;
     padding: 1px 3px;
 }
+
+/* ---- Editor layout: compact left rail + rack faces --------------------- */
+/* A flex row: a fixed-width left rail (palette + future role/tenant cards) sits
+   snug to the rack elevation on the right, instead of a wide Bootstrap column
+   that leaves a big empty gap. Wraps to a stack on narrow viewports. */
+.nbx-rd-editor-layout {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;   /* align the rail's top with the rack's top */
+    gap: 1.25rem;
+}
+
+.nbx-rd-leftrail {
+    flex: 0 0 280px;
+    max-width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;                 /* vertical stack: catalog + role + tenant */
+    /* The rail is rack-tall; the catalog card flexes to fill the space the two
+       small (auto-height) role/tenant cards leave. */
+    max-height: var(--nbx-rd-rack-height, 40rem);
+}
+
+/* Role + tenant cards keep their natural (small) height. */
+.nbx-rd-leftrail > #nbx-rd-role-card,
+.nbx-rd-leftrail > #nbx-rd-tenant-card {
+    flex: 0 0 auto;
+}
+
+.nbx-rd-editor-layout > .nbx-rd-face {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+@media (max-width: 575.98px) {
+    /* On phones the rail goes full width above the rack. */
+    .nbx-rd-leftrail { flex-basis: 100%; max-width: 100%; }
+}
+
+/* ---- Device-type catalog card ------------------------------------------- */
+/* Native Tabler card. The body (search + manufacturer filter) is pinned; only
+   the results list-group scrolls. The card's height tracks the rack elevation. */
+.nbx-rd-palette-card {
+    display: flex;
+    flex-direction: column;
+    /* Fill the rail's remaining height (after the role/tenant cards); the list
+       inside scrolls. min-height:0 lets the flex child actually shrink. */
+    flex: 1 1 auto;
+    min-height: 8rem;
+}
+
+.nbx-rd-palette-card > .card-header {
+    flex: 0 0 auto;
+}
+
+.nbx-rd-palette-controls {
+    flex: 0 0 auto;
+    padding: 0.5rem 0.75rem;
+}
+
+/* The scrolling region: a flush list-group that fills the remaining card height. */
+.nbx-rd-palette-list {
+    flex: 1 1 auto;
+    min-height: 6rem;
+    overflow-y: auto;
+    border-top: 1px solid var(--tblr-border-color, #dee2e6);
+}
+
+/* Each item is a neutral NetBox list-group row that is ALSO a GridStack drag
+   source (class grid-stack-item). It lives in a list-group div, not a .grid-stack,
+   so GridStack's absolute-positioning base CSS does not apply. */
+.nbx-rd-palette-item {
+    position: relative;
+    cursor: grab;
+    padding: 0;                /* the inner .grid-stack-item-content owns padding */
+}
+
+.nbx-rd-palette-item:active {
+    cursor: grabbing;
+}
+
+.nbx-rd-palette-item > .grid-stack-item-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.05rem;
+    padding: 0.4rem 0.75rem;
+    background: transparent;   /* neutral — the green add tint is only on rack tiles */
+}
+
+.nbx-rd-palette-item:hover > .grid-stack-item-content {
+    background-color: var(--tblr-bg-surface-secondary, rgba(0, 0, 0, 0.04));
+}
+
+.nbx-rd-palette-item .nbx-rd-palette-model {
+    font-weight: 600;
+    font-size: 0.8125rem;
+    line-height: 1.15;
+}
+
+.nbx-rd-palette-item .nbx-rd-palette-meta {
+    font-size: 0.72rem;
+    color: var(--tblr-secondary, #6c757d);
+}
+
+/* The clone GridStack drags while a palette item is in flight. */
+.nbx-rd-palette-drag-helper {
+    background-color: var(--tblr-bg-surface, #fff);
+    border: 1px dashed var(--tblr-green, #2fb344);
+    border-radius: 3px;
+    font-size: 0.72rem;
+    padding: 1px 3px;
+    opacity: 0.9;
+    list-style: none;
+}

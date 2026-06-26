@@ -159,18 +159,30 @@ ul.nbx-rd-unit-numbers li {
     border-color: var(--nbx-rack-slot-border);
 }
 
-/* add: green tint (planned new device). */
+/* add: green tint (planned new device). The tint is layered as a gradient over
+   a SOLID theme surface so the rack chassis unit-divider stripes never bleed
+   through the (otherwise translucent) tile — which read as a strikethrough on a
+   multi-U tile's centered name. */
 .nbx-rd-state-add > .grid-stack-item-content,
 .nbx-rd-chip.nbx-rd-state-add {
-    background-color: rgba(var(--tblr-success-rgb), 0.22) !important;
+    background-color: var(--tblr-bg-surface, #fff) !important;
+    background-image: linear-gradient(
+        rgba(var(--tblr-success-rgb), 0.22),
+        rgba(var(--tblr-success-rgb), 0.22)
+    ) !important;
     border: 1px solid var(--tblr-success) !important;
     color: var(--tblr-body-color) !important;
 }
 
-/* move_in: cyan tint (device arriving at its new spot). */
+/* move_in: cyan tint (device arriving at its new spot). Solid surface base under
+   the tint (see add note) so chassis unit-lines don't strike through the name. */
 .nbx-rd-state-move_in > .grid-stack-item-content,
 .nbx-rd-chip.nbx-rd-state-move_in {
-    background-color: rgba(var(--tblr-cyan-rgb), 0.22) !important;
+    background-color: var(--tblr-bg-surface, #fff) !important;
+    background-image: linear-gradient(
+        rgba(var(--tblr-cyan-rgb), 0.22),
+        rgba(var(--tblr-cyan-rgb), 0.22)
+    ) !important;
     border: 1px solid var(--tblr-cyan) !important;
     color: var(--tblr-body-color) !important;
 }
@@ -234,10 +246,16 @@ ul.nbx-rd-unit-numbers li {
     color: var(--nbx-rack-unit-color);
 }
 
-/* remove: red tint + struck-through label. */
+/* remove: red tint + struck-through label. Solid surface base under the tint
+   (see add note) so chassis unit-lines don't add a SECOND line across the name —
+   the intentional line-through on the label stays (it's a text-decoration). */
 .nbx-rd-state-remove > .grid-stack-item-content,
 .nbx-rd-chip.nbx-rd-state-remove {
-    background-color: rgba(var(--tblr-danger-rgb), 0.22) !important;
+    background-color: var(--tblr-bg-surface, #fff) !important;
+    background-image: linear-gradient(
+        rgba(var(--tblr-danger-rgb), 0.22),
+        rgba(var(--tblr-danger-rgb), 0.22)
+    ) !important;
     border: 1px solid var(--tblr-danger) !important;
     color: var(--tblr-body-color) !important;
     text-decoration: line-through;

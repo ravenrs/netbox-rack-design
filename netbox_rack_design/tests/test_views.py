@@ -381,6 +381,50 @@ class DesignEditorViewTest(TestCase):
         response = self.client.get(self._url(self.design, self.rack1))
         self.assertHttpStatus(response, 200)
 
+    def test_editor_view_renders_catalog_palette(self):
+        # The device-type catalog palette markup must be present so the editor JS
+        # can wire up search + drag-in of new adds.
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn("nbx-rd-palette", content)
+        self.assertIn("nbx-rd-palette-search", content)
+        self.assertIn("nbx-rd-palette-list", content)
+
+    def test_editor_view_renders_role_and_tenant_selectors(self):
+        # The left rail must include the Device-role and Tenant selector cards
+        # that drive role/tenant on new adds.
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        # The cards render NetBox API-backed DynamicModelChoiceFields (Django
+        # widget ids id_device_role / id_tenant / id_manufacturer).
+        self.assertIn("nbx-rd-role-card", content)
+        self.assertIn("nbx-rd-tenant-card", content)
+        self.assertIn('id="id_device_role"', content)
+        self.assertIn('id="id_tenant"', content)
+        self.assertIn('id="id_manufacturer"', content)
+        self.assertIn("palette_form", response.context)
+
+    def test_editor_view_context_builds_widgets(self):
+        # The view must hand a list of projected widgets to the template/JS.
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertHttpStatus(response, 200)
+        self.assertIn("widgets", response.context)
+        self.assertIsInstance(response.context["widgets"], list)
+
 
 class DesignAffectedRacksTest(TestCase):
     """The Design detail page lists affected racks with per-rack view links."""

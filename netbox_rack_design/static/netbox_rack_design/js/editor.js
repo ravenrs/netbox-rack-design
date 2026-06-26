@@ -545,6 +545,21 @@
         markDirty();
     }
 
+    // Cancel an UNSAVED add (a palette-dropped device type that was never saved,
+    // placement_id == null): there's no server placement to flag, so just delete
+    // the tile and orphan its state entry locally. We null the state slot rather
+    // than splice the array so every other tile's data-widget-index stays valid.
+    function removeUnsavedAdd(itemEl, idx, st) {
+        var grid = gridForItem(itemEl);
+        if (grid) {
+            grid.removeWidget(itemEl, true);
+        } else if (itemEl.parentNode) {
+            itemEl.parentNode.removeChild(itemEl);
+        }
+        state[idx] = null;
+        markDirty();
+    }
+
     // Context-sensitive × ("undo the planned change on this tile"):
     //   • a planned ADD                                → flag / un-flag cancel
     //   • a MOVE tile (pre-existing or this-session)  → cancel the move
@@ -555,7 +570,14 @@
         if (!st) { return; }
         if (st.widget.kind === "add") {
             // A planned add has no real device; × cancels the planned addition.
-            flagCancelAdd(itemEl, idx, st);
+            // An UNSAVED add (no placement_id, e.g. just dragged from the palette)
+            // has no server row → remove it locally. A pre-existing add (loaded
+            // from the design, has placement_id) is flagged cancel:true for save.
+            if (st.widget.placement_id == null) {
+                removeUnsavedAdd(itemEl, idx, st);
+            } else {
+                flagCancelAdd(itemEl, idx, st);
+            }
             return;
         }
         // Beyond adds, only real devices respond to ×.
@@ -626,6 +648,12 @@
                 u_position: null,
                 face: "",
             };
+            // Carry the intended role/tenant for a brand-new add (set at drop
+            // time). Only meaningful for adds; the server ignores them otherwise.
+            if (isAdd) {
+                if (w.device_role_id != null) { item.device_role_id = w.device_role_id; }
+                if (w.tenant_id != null) { item.tenant_id = w.tenant_id; }
+            }
 
             // A planned add the user flagged via × → cancel the addition. The
             // server deletes the add placement when cancel is true; no position is
@@ -794,6 +822,249 @@
         saveButton.addEventListener("click", doSave);
     }
 
+    // ---- Device-type catalog palette + drag-in -----------------------------
+    // A search box lists draggable device types fetched from NetBox's core API;
+    // dragging one onto the front/rear grid plans a brand-new KIND_ADD placement.
+    // No dcim.Device is ever created — only a synthetic `add` widget + state entry
+    // that buildRackPayload serializes as {kind:"add", device_type_id, placement_id:null}.
+    (function setupPalette() {
+        var paletteEl = document.getElementById("nbx-rd-palette");
+        var searchEl = document.getElementById("nbx-rd-palette-search");
+        // These three are NetBox API-backed searchable selects rendered from
+        // DesignEditorPaletteForm (DynamicModelChoiceField). NetBox's select-init
+        // enhances them into remote-loading TomSelects and writes the chosen value
+        // back to the underlying <select>, so reading .value by its Django id
+        // (id_<name>) gives the selected pk.
+        var manufEl = document.getElementById("id_manufacturer");
+        var roleEl = document.getElementById("id_device_role");
+        var tenantEl = document.getElementById("id_tenant");
+        var listEl = document.getElementById("nbx-rd-palette-list");
+        var statusEl = document.getElementById("nbx-rd-palette-status");
+        var layoutEl = document.querySelector(".nbx-rd-editor-layout");
+        if (!paletteEl || !listEl || !searchEl) { return; }
+        if (typeof GridStack === "undefined" || !GridStack.setupDragIn) { return; }
+
+        // Match the catalog card's max height to the (currently visible) rack
+        // elevation so the card is rack-tall and only the list scrolls. Recompute
+        // on resize / face toggle. Falls back to the CSS default when unmeasurable.
+        function syncRackHeight() {
+            if (!layoutEl) { return; }
+            var face = document.getElementById("nbx-rd-face-front");
+            if (!face || face.offsetParent === null) {
+                face = document.getElementById("nbx-rd-face-rear");
+            }
+            var grid = face && face.querySelector(".nbx-rd-rack");
+            var h = grid ? grid.offsetHeight : 0;
+            if (h > 80) {
+                layoutEl.style.setProperty("--nbx-rd-rack-height", h + "px");
+            }
+        }
+        syncRackHeight();
+        window.addEventListener("resize", syncRackHeight);
+        paletteEl.nbxSyncRackHeight = syncRackHeight;   // let the face toggle call it
+
+        function setStatus(msg) {
+            if (statusEl) { statusEl.textContent = msg || ""; }
+        }
+
+        function renderResults(results) {
+            listEl.innerHTML = "";
+            if (!results.length) {
+                setStatus("No device types found.");
+                return;
+            }
+            setStatus("");
+            results.forEach(function (dt) {
+                var uHeight = (dt.u_height != null) ? dt.u_height : 1;
+                var gsH = Math.max(1, Math.round(uHeight * 2));
+                // A palette item must be a real GridStack DRAG SOURCE so the
+                // bundled GridStack accepts the drop:
+                //   • class "grid-stack-item" — the receiving grid's acceptWidgets
+                //     check is `el.matches('.grid-stack-item')`;
+                //   • gs-w/gs-h — GridStack sizes the dropped node from these
+                //     (via _readAttr);
+                //   • an inner ".grid-stack-item-content" — the default drag
+                //     HANDLE (draggable.handle === '.grid-stack-item-content').
+                // Without these the real HTML5 drag-in never fires.
+                var li = document.createElement("div");
+                li.className = "list-group-item list-group-item-action grid-stack-item nbx-rd-palette-item";
+                li.setAttribute("gs-w", "1");
+                li.setAttribute("gs-h", String(gsH));
+                li.setAttribute("data-device-type-id", dt.id);
+                li.setAttribute("data-u-height", uHeight);
+                li.setAttribute("data-is-full-depth", dt.is_full_depth ? "true" : "false");
+                var manuf = (dt.manufacturer && (dt.manufacturer.name || dt.manufacturer.display)) || "";
+                var label = (manuf ? manuf + " " : "") + (dt.model || dt.display || ("type " + dt.id));
+                li.setAttribute("data-label", label);
+
+                var content = document.createElement("div");
+                content.className = "grid-stack-item-content";
+                var model = document.createElement("div");
+                model.className = "nbx-rd-palette-model";
+                model.textContent = dt.model || dt.display || ("Device type " + dt.id);
+                var meta = document.createElement("div");
+                meta.className = "nbx-rd-palette-meta";
+                meta.textContent = (manuf ? manuf + " · " : "") + uHeight + "U" + (dt.is_full_depth ? " · full-depth" : "");
+                content.appendChild(model);
+                content.appendChild(meta);
+                li.appendChild(content);
+                listEl.appendChild(li);
+            });
+
+            // (Re)register the freshly-rendered items as an external drag source.
+            // Re-applied every render because the nodes are replaced. appendTo:body
+            // + helper:clone so the dragged proxy floats above the layout and the
+            // palette list stays intact.
+            GridStack.setupDragIn(".nbx-rd-palette-item", { appendTo: "body", helper: "clone" });
+        }
+
+        var lastKey = null;
+        function fetchTypes() {
+            var q = searchEl.value.trim();
+            var manufId = manufEl ? manufEl.value : "";
+            var url = "/api/dcim/device-types/?brief=true&limit=50";
+            if (q) { url += "&q=" + encodeURIComponent(q); }
+            if (manufId) { url += "&manufacturer_id=" + encodeURIComponent(manufId); }
+            setStatus("Searching…");
+            fetch(url, {
+                credentials: "same-origin",
+                headers: { "Accept": "application/json" },
+            }).then(function (resp) {
+                if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+                return resp.json();
+            }).then(function (data) {
+                renderResults((data && data.results) || []);
+            }).catch(function (err) {
+                setStatus("Could not load device types (" + err.message + ").");
+            });
+        }
+
+        var debounceTimer = null;
+        function scheduleFetch() {
+            var key = searchEl.value.trim() + "|" + (manufEl ? manufEl.value : "");
+            if (key === lastKey) { return; }
+            lastKey = key;
+            if (debounceTimer) { window.clearTimeout(debounceTimer); }
+            debounceTimer = window.setTimeout(fetchTypes, 300);
+        }
+        searchEl.addEventListener("input", scheduleFetch);
+        if (manufEl) {
+            // The manufacturer filter changes results immediately (no debounce).
+            manufEl.addEventListener("change", function () {
+                lastKey = searchEl.value.trim() + "|" + manufEl.value;
+                fetchTypes();
+            });
+        }
+
+        // The manufacturer / role / tenant selects are populated + searched by
+        // NetBox's own API-backed select widget (DynamicModelChoiceField); no
+        // manual option-loading needed. We only read their current value.
+
+        // Initial device-type population.
+        fetchTypes();
+
+        // ---- Convert a dropped palette clone into a planned add tile --------
+        // The receiving (front/rear) grid fires `dropped` with the new node. We
+        // re-shape it to the device type's U-height, derive u_position + face, and
+        // register a synthetic `add` widget in state[] keyed by a fresh index.
+        function onPaletteDrop(face, grid, event, previousNode, newNode) {
+            // Only handle drops that ORIGINATED in the palette (carry our marker).
+            var el = newNode && newNode.el;
+            if (!el) { return; }
+            var dtId = el.getAttribute("data-device-type-id");
+            if (dtId == null) { return; }   // not a palette item (a normal tile move)
+
+            var uHeight = parseFloat(el.getAttribute("data-u-height")) || 1;
+            var label = el.getAttribute("data-label") || ("Device type " + dtId);
+            var gsH = Math.max(1, Math.round(uHeight * 2));
+
+            // Resize/normalise the dropped node to a single-column rack slot.
+            grid.update(el, { x: 0, w: 1, h: gsH });
+            var node = el.gridstackNode || newNode;
+            var gsY = (node && node.y != null) ? node.y : 0;
+            var uPosition = gsYToUPosition(gsY, gsH);
+
+            // Capture the CURRENT role/tenant selections — they apply to this new
+            // add only (future drops; not retroactive). Empty select => null.
+            var roleId = (roleEl && roleEl.value) ? parseInt(roleEl.value, 10) : null;
+            var tenantId = (tenantEl && tenantEl.value) ? parseInt(tenantEl.value, 10) : null;
+            var roleName = (roleEl && roleEl.value && roleEl.selectedOptions.length)
+                ? roleEl.selectedOptions[0].textContent : "";
+
+            // Register a synthetic add widget + state entry; stamp the tile index.
+            var newIdx = state.length;
+            var widget = {
+                kind: "add",
+                device_type_id: parseInt(dtId, 10),
+                device_id: null,
+                placement_id: null,
+                device_role_id: roleId,
+                tenant_id: tenantId,
+                u_height: uHeight,
+                u_position: uPosition,
+                label: label,
+                face: face,
+            };
+            state.push({ widget: widget, origUPosition: uPosition, origFace: face, removed: false });
+
+            // Re-shape the dropped element into a standard add tile: clear the
+            // palette markup/classes, add state class, inject label + × button.
+            el.setAttribute("data-widget-index", newIdx);
+            el.removeAttribute("data-device-type-id");
+            el.removeAttribute("data-u-height");
+            el.removeAttribute("data-is-full-depth");
+            el.removeAttribute("data-label");
+            el.classList.remove("nbx-rd-palette-item");
+            el.classList.add("nbx-rd-state-add");
+
+            var content = el.querySelector(".grid-stack-item-content");
+            if (!content) {
+                content = document.createElement("div");
+                content.className = "grid-stack-item-content";
+                el.appendChild(content);
+            }
+            content.innerHTML = "";
+            content.setAttribute(
+                "title",
+                label + " (U" + Math.round(uPosition) + ", add"
+                    + (roleName ? ", role: " + roleName : "") + ")"
+            );
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "nbx-rd-remove-btn";
+            btn.setAttribute("title", "Cancel this planned add");
+            btn.setAttribute("aria-label", "Cancel this planned add");
+            btn.innerHTML = "&times;";
+            var span = document.createElement("span");
+            span.className = "nbx-rd-label";
+            span.textContent = label;
+            content.appendChild(btn);
+            content.appendChild(span);
+
+            markDirty();
+        }
+
+        // Bind dropped on the racked grids only — a brand-new add must land on a
+        // real U. A palette drop onto the TRAY is rejected (the model requires
+        // target_position); we delete the stray clone so no position-less add forms.
+        [[frontGrid, "front"], [rearGrid, "rear"]].forEach(function (pair) {
+            var g = pair[0], face = pair[1];
+            if (!g) { return; }
+            g.on("dropped", function (event, previousNode, newNode) {
+                onPaletteDrop(face, g, event, previousNode, newNode);
+            });
+        });
+        if (trayGrid) {
+            trayGrid.on("dropped", function (event, previousNode, newNode) {
+                var el = newNode && newNode.el;
+                if (el && el.getAttribute("data-device-type-id") != null) {
+                    // Reject off-rack palette drops: remove the clone, keep state clean.
+                    trayGrid.removeWidget(el, true);
+                }
+            });
+        }
+    })();
+
     // ---- Face toggle (mirrors design_elevation.html) -----------------------
     var faceFront = document.getElementById("nbx-rd-face-front");
     var faceRear = document.getElementById("nbx-rd-face-rear");
@@ -804,6 +1075,10 @@
         if (faceRear) { faceRear.style.display = isFront ? "none" : ""; }
         if (btnFront) { btnFront.classList.toggle("active", isFront); }
         if (btnRear) { btnRear.classList.toggle("active", !isFront); }
+        // Re-measure the rack height for the catalog card (the newly-shown face's
+        // grid is what we size against).
+        var pal = document.getElementById("nbx-rd-palette");
+        if (pal && typeof pal.nbxSyncRackHeight === "function") { pal.nbxSyncRackHeight(); }
     }
     if (btnFront) { btnFront.addEventListener("click", function () { showFace(true); }); }
     if (btnRear) { btnRear.addEventListener("click", function () { showFace(false); }); }

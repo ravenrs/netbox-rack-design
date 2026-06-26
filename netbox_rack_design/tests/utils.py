@@ -1,6 +1,7 @@
 """Shared fixture factories for the NetBox Rack Design test suite."""
 
-from dcim.models import DeviceType, Manufacturer, Rack, Site
+from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
+from tenancy.models import Tenant
 from utilities.testing import create_test_device
 
 __all__ = ("create_dcim_environment",)
@@ -19,6 +20,10 @@ def create_dcim_environment():
         manufacturer=manufacturer, model="Device Type 1", slug="device-type-1", u_height=1
     )
 
+    # Optional role/tenant a planned 'add' placement may carry.
+    device_role = DeviceRole.objects.create(name="Role 1", slug="role-1")
+    tenant = Tenant.objects.create(name="Tenant 1", slug="tenant-1")
+
     racks = [
         Rack.objects.create(name="Rack 1", site=site),
         Rack.objects.create(name="Rack 2", site=site),
@@ -34,6 +39,8 @@ def create_dcim_environment():
         "site": site,
         "manufacturer": manufacturer,
         "device_type": device_type,
+        "device_role": device_role,
+        "tenant": tenant,
         "racks": racks,
         "devices": devices,
     }

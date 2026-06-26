@@ -18,8 +18,8 @@
 {% block head %}
   {{ block.super }}
   <link rel="stylesheet" href="{% static 'netbox_rack_design/css/gridstack.min.css' %}">
-  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}">
-  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/editor.css' %}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}?v={{ asset_version }}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/editor.css' %}?v={{ asset_version }}">
 {% endblock head %}
 
 {% block content %}
@@ -61,9 +61,60 @@
           <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
         </div>
 
-        <div class="row">
+        <div class="nbx-rd-editor-layout">
+          {# ---- Left rail: a vertical stack of compact NetBox cards. The catalog #}
+          {#      card sits here; below it a Device-role and a Tenant selector card #}
+          {#      supply the role/tenant applied to NEW adds at drop time. ---- #}
+          <div class="nbx-rd-leftrail" id="nbx-rd-leftrail">
+            {# ---- Catalog palette (drag a device type onto a face to plan an add) ---- #}
+            <div class="card nbx-rd-palette-card" id="nbx-rd-palette" data-rd-palette>
+              <div class="card-header">
+                <h3 class="card-title">{% trans "Device-type catalog" %}</h3>
+              </div>
+              <div class="card-body nbx-rd-palette-controls">
+                {# NetBox API-backed searchable select; the editor JS reads its #}
+                {# value (#id_manufacturer) to filter the device-type search. #}
+                <div class="mb-2">{{ palette_form.manufacturer }}</div>
+                <input type="search" class="form-control form-control-sm"
+                       id="nbx-rd-palette-search"
+                       placeholder="{% trans 'Search device types…' %}"
+                       autocomplete="off"
+                       aria-label="{% trans 'Search device types' %}">
+                <div class="nbx-rd-palette-status text-muted small mt-1" id="nbx-rd-palette-status"></div>
+              </div>
+              {# Only this list scrolls; the controls above stay pinned. #}
+              <div class="list-group list-group-flush nbx-rd-palette-list" id="nbx-rd-palette-list"></div>
+            </div>
+
+            {# ---- Device role applied to NEW adds (captured at drop time) ---- #}
+            <div class="card" id="nbx-rd-role-card">
+              <div class="card-header">
+                <h3 class="card-title">{% trans "Device role" %}</h3>
+              </div>
+              <div class="card-body">
+                {# API-backed searchable select; value (#id_device_role) is #}
+                {# applied to NEW adds at drop time. #}
+                {{ palette_form.device_role }}
+                <div class="text-muted small mt-1">{% trans "Applied to devices you drag in next." %}</div>
+              </div>
+            </div>
+
+            {# ---- Tenant applied to NEW adds (captured at drop time) ---- #}
+            <div class="card" id="nbx-rd-tenant-card">
+              <div class="card-header">
+                <h3 class="card-title">{% trans "Tenant" %}</h3>
+              </div>
+              <div class="card-body">
+                {# API-backed searchable select; value (#id_tenant) is applied #}
+                {# to NEW adds at drop time. #}
+                {{ palette_form.tenant }}
+                <div class="text-muted small mt-1">{% trans "Applied to devices you drag in next." %}</div>
+              </div>
+            </div>
+          </div>
+
           {# ---- Front face ---- #}
-          <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-front">
+          <div class="text-center nbx-rd-face" id="nbx-rd-face-front">
             <h3 class="h5">{% trans "Front" %}</h3>
             <div class="d-flex justify-content-center">
               <ul class="nbx-rd-unit-numbers">
@@ -101,7 +152,7 @@
           </div>
 
           {# ---- Rear face ---- #}
-          <div class="col col-12 col-md-6 text-center nbx-rd-face" id="nbx-rd-face-rear" style="display: none;">
+          <div class="text-center nbx-rd-face" id="nbx-rd-face-rear" style="display: none;">
             <h3 class="h5">{% trans "Rear" %}</h3>
             <div class="d-flex justify-content-center">
               <ul class="nbx-rd-unit-numbers">
@@ -188,6 +239,6 @@
 {% block javascript %}
   {{ block.super }}
   <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
-  <script src="{% static 'netbox_rack_design/js/editor.js' %}" defer></script>
-  <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/editor.js' %}?v={{ asset_version }}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}

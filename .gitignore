@@ -429,3 +429,6 @@ __marimo__/
 
 # JetBrains IDE
 .idea/
+
+# Local agent/dev helper scripts (not part of the package)
+/dev/

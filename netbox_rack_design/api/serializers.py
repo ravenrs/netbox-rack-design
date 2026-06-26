@@ -51,7 +51,8 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
         model = DesignPlacement
         fields = (
             "id", "url", "display", "design", "kind", "device", "device_type",
-            "proposed_name", "target_rack", "target_position", "target_face",
+            "proposed_name", "device_role", "tenant",
+            "target_rack", "target_position", "target_face",
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "kind")
@@ -73,6 +74,9 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     device_id = serializers.IntegerField(required=False, allow_null=True)
     device_type_id = serializers.IntegerField(required=False, allow_null=True)
     placement_id = serializers.IntegerField(required=False, allow_null=True)
+    # Intended role/tenant for a brand-new planned device (add); optional.
+    device_role_id = serializers.IntegerField(required=False, allow_null=True)
+    tenant_id = serializers.IntegerField(required=False, allow_null=True)
     u_position = serializers.DecimalField(
         max_digits=4, decimal_places=1, required=False, allow_null=True
     )
@@ -87,12 +91,13 @@ class SaveLayoutItemSerializer(serializers.Serializer):
 
     def validate(self, data):
         kind = data["kind"]
-        if kind == "add" and not data.get("placement_id"):
-            # Brand-new catalog adds are not yet supported; an 'add' item is only
-            # accepted when it faithfully re-asserts an EXISTING add placement
-            # (carrying its placement_id) so the editor round-trip preserves it.
+        if kind == "add" and not data.get("placement_id") and not data.get("device_type_id"):
+            # An 'add' item is valid when it either re-asserts an EXISTING add
+            # placement (carrying its placement_id, for reposition/cancel) OR
+            # creates a brand-new catalog add (carrying a device_type_id). An
+            # 'add' that has NEITHER is meaningless and is rejected.
             raise serializers.ValidationError(
-                {"kind": "Adding devices from the catalog is not yet supported."}
+                {"kind": "An 'add' item requires either a placement_id or a device_type_id."}
             )
         if kind in ("move", "remove") and not data.get("device_id"):
             raise serializers.ValidationError(

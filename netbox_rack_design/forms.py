@@ -1,6 +1,6 @@
 """Forms for NetBox Rack Design."""
 
-from dcim.models import Device, DeviceType, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 from django import forms
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
@@ -9,6 +9,7 @@ from netbox.forms import (
     NetBoxModelForm,
     NetBoxModelImportForm,
 )
+from tenancy.models import Tenant
 from utilities.forms.fields import (
     CSVChoiceField,
     CSVModelChoiceField,
@@ -34,7 +35,43 @@ __all__ = (
     "DesignFilterForm",
     "DesignPlacementFilterForm",
     "ElevationBrowserFilterForm",
+    "DesignEditorPaletteForm",
 )
+
+
+# ---------------------------------------------------------------------------
+# Interactive editor left-rail selectors
+# ---------------------------------------------------------------------------
+
+
+class DesignEditorPaletteForm(forms.Form):
+    """
+    Drives the editor's left-rail selectors as NetBox-native, API-backed
+    searchable selects (DynamicModelChoiceField → APISelect widget). NetBox's
+    bundled select-init enhances these into TomSelect-with-remote-load, so typing
+    queries the API live (unlike a plain <select> we populate after page load).
+
+    These are NOT bound to a model — they're transient UI controls:
+      • manufacturer filters the device-type catalog search (manufacturer_id);
+      • device_role / tenant are applied to NEW adds at drop time.
+    The editor JS reads each field's value by its Django widget id (id_<name>).
+    """
+
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label=_("Manufacturer"),
+    )
+    device_role = DynamicModelChoiceField(
+        queryset=DeviceRole.objects.all(),
+        required=False,
+        label=_("Device role"),
+    )
+    tenant = DynamicModelChoiceField(
+        queryset=Tenant.objects.all(),
+        required=False,
+        label=_("Tenant"),
+    )
 
 
 # ---------------------------------------------------------------------------

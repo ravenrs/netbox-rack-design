@@ -1,8 +1,10 @@
 """Views for NetBox Rack Design."""
 
+import os
 
 from dcim.choices import DeviceFaceChoices
 from dcim.models import Rack, Site
+from django.contrib.staticfiles import finders
 from django.db.models import Q
 from django.shortcuts import get_object_or_404, render
 from django.views.generic import View
@@ -141,6 +143,30 @@ class DesignElevationView(generic.ObjectView):
         })
 
 
+# Editor static assets we cache-bust: a ?v=<token> derived from their newest
+# mtime is appended in the template so a browser always fetches the current
+# build instead of a stale cached copy (no manual hard-refresh needed).
+_EDITOR_ASSETS = (
+    "netbox_rack_design/js/editor.js",
+    "netbox_rack_design/js/legend_filter.js",
+    "netbox_rack_design/css/editor.css",
+    "netbox_rack_design/css/rack_design.css",
+)
+
+
+def _asset_version():
+    """Cache-bust token = newest mtime across the editor's own static assets."""
+    newest = 0
+    for rel in _EDITOR_ASSETS:
+        path = finders.find(rel)
+        try:
+            if path:
+                newest = max(newest, int(os.path.getmtime(path)))
+        except OSError:
+            continue
+    return newest
+
+
 def _slot_to_widget(slot):
     """
     Flatten one projected-slot dict into a JSON-serializable widget dict for the
@@ -207,6 +233,10 @@ class DesignEditorView(generic.ObjectView):
                 "desc_units": rack.desc_units,
             },
             "save_url": f"/api/plugins/rack-design/designs/{instance.pk}/save-layout/",
+            "asset_version": _asset_version(),
+            # Drives the left-rail manufacturer/role/tenant selectors as NetBox
+            # API-backed searchable selects (see forms.DesignEditorPaletteForm).
+            "palette_form": forms.DesignEditorPaletteForm(),
         }
 
 

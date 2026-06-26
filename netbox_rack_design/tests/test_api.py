@@ -1,5 +1,6 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
+from dcim.models import Device
 from django.urls import reverse
 from rest_framework import status
 from utilities.testing import APITestCase, APIViewTestCases, create_tags
@@ -151,6 +152,9 @@ class SaveLayoutTest(APITestCase):
         cls.site = env["site"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]  # Device 1 @ Rack1/U1/front, Device 2 @ Rack1/U2/front
+        cls.device_type = env["device_type"]
+        cls.device_role = env["device_role"]
+        cls.tenant = env["tenant"]
         cls.design = Design.objects.create(title="Layout design", site=cls.site)
 
     def _url(self, design):
@@ -276,3 +280,303 @@ class SaveLayoutTest(APITestCase):
         response = self.client.post(self._url(self.design), payload, format="json", **self.header)
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    # --- increment 2b-1: brand-new catalog adds ----------------------------
+
+    def test_brand_new_add_creates_one_placement_no_device(self):
+        """A brand-new catalog add → 200, ONE KIND_ADD placement; no Device created."""
+        self._grant_all()
+        rack = self.racks[0]
+        device_count_before = Device.objects.count()
+        # U10 is free on the front face.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(placement.device_type_id, self.device_type.pk)
+        self.assertEqual(placement.target_rack_id, rack.pk)
+        self.assertEqual(float(placement.target_position), 10.0)
+        self.assertEqual(placement.target_face, "front")
+        self.assertIsNone(placement.device_id)
+
+        # No real dcim.Device was created.
+        self.assertEqual(Device.objects.count(), device_count_before)
+
+    def test_brand_new_add_on_occupied_unit_returns_400(self):
+        """A brand-new add onto an occupied U → 400 with an error; nothing persisted."""
+        self._grant_all()
+        rack = self.racks[0]
+        # U2 is occupied by Device 2 → collision.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 2, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_brand_new_add_coexists_with_reposition_and_move(self):
+        """A brand-new add, an existing-add reposition, and a move coexist (no cross-deletion)."""
+        self._grant_all()
+        rack = self.racks[0]
+        # An existing add placement to be repositioned (currently U5/front).
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    # brand-new add at U10
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                    # reposition the existing add from U5 -> U11
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 11, "face": "front"},
+                    # move a real device from U1 -> U12
+                    {"kind": "move", "device_id": self.devices[0].pk,
+                     "u_position": 12, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placements = DesignPlacement.objects.filter(design=self.design)
+        # The reposition reused existing_add (no extra row); a new add + a move.
+        self.assertEqual(placements.count(), 3)
+
+        # Existing add survived and was repositioned to U11.
+        existing_add.refresh_from_db()
+        self.assertEqual(float(existing_add.target_position), 11.0)
+
+        adds = placements.filter(kind=DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(adds.count(), 2)
+        new_add = adds.exclude(pk=existing_add.pk).first()
+        self.assertEqual(float(new_add.target_position), 10.0)
+
+        move = placements.filter(kind=DesignPlacementKindChoices.KIND_MOVE).first()
+        self.assertIsNotNone(move)
+        self.assertEqual(move.device_id, self.devices[0].pk)
+        self.assertEqual(float(move.target_position), 12.0)
+
+    # --- increment 2b-3b: add carries a device role + tenant ----------------
+
+    def test_brand_new_add_persists_role_and_tenant(self):
+        """A brand-new add with device_role_id + tenant_id persists them."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "device_role_id": self.device_role.pk,
+                     "tenant_id": self.tenant.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(placement.device_role_id, self.device_role.pk)
+        self.assertEqual(placement.tenant_id, self.tenant.pk)
+
+    def test_brand_new_add_without_role_or_tenant_persists_nulls(self):
+        """A brand-new add omitting role/tenant persists them as NULL."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.device_role_id)
+        self.assertIsNone(placement.tenant_id)
+
+    def test_brand_new_add_with_bad_role_returns_400(self):
+        """A brand-new add with a non-existent device_role_id → 400, nothing persisted."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "device_role_id": 999999,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_brand_new_add_with_bad_tenant_returns_400(self):
+        """A brand-new add with a non-existent tenant_id → 400, nothing persisted."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "tenant_id": 999999,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_reposition_existing_add_sets_role_and_tenant(self):
+        """Repositioning an add can also set role/tenant when sent."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "device_role_id": self.device_role.pk,
+                     "tenant_id": self.tenant.pk,
+                     "u_position": 9, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(float(existing_add.target_position), 9.0)
+        self.assertEqual(existing_add.device_role_id, self.device_role.pk)
+        self.assertEqual(existing_add.tenant_id, self.tenant.pk)
+
+    # --- regression: existing-add reposition / cancel (2a) ------------------
+
+    def test_reposition_existing_add_updates_in_place(self):
+        """An add item with placement_id repositions the existing add (no new row)."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
+        existing_add.refresh_from_db()
+        self.assertEqual(float(existing_add.target_position), 9.0)
+
+    def test_cancel_existing_add_deletes_it(self):
+        """An add item with cancel=true deletes the existing add placement."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 5, "face": "front", "cancel": True},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertFalse(
+            DesignPlacement.objects.filter(pk=existing_add.pk).exists()
+        )
+
+    def test_unmentioned_add_is_not_deleted(self):
+        """No-data-loss: an existing add not mentioned in the payload survives."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        # Submit only a move of a real device; the add is never mentioned.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": self.devices[0].pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        # The unmentioned add must NOT be deleted.
+        self.assertTrue(
+            DesignPlacement.objects.filter(pk=existing_add.pk).exists()
+        )

@@ -1,6 +1,6 @@
 """REST API viewsets for NetBox Rack Design."""
 
-from dcim.models import Device, Rack
+from dcim.models import Device, DeviceRole, DeviceType, Rack
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from netbox.api.authentication import TokenPermissions
@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
+from tenancy.models import Tenant
 
 from .. import filtersets
 from ..choices import DesignPlacementKindChoices
@@ -180,10 +181,14 @@ class DesignViewSet(NetBoxModelViewSet):
         if not made_changes:
             return Response(status=status.HTTP_304_NOT_MODIFIED)
 
-        # Serialize the design's resulting move/remove placements.
+        # Serialize the design's resulting add/move/remove placements. KIND_ADD is
+        # included here so a brand-new (or repositioned) catalog add is returned;
+        # it is deliberately NOT in the stale-deletion filter above (adds are only
+        # ever removed via explicit cancel, never by omission).
         placements = DesignPlacement.objects.filter(
             design=design,
             kind__in=(
+                DesignPlacementKindChoices.KIND_ADD,
                 DesignPlacementKindChoices.KIND_MOVE,
                 DesignPlacementKindChoices.KIND_REMOVE,
             ),
@@ -203,7 +208,37 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.target_rack_id,
             _norm_pos(placement.target_position),
             placement.target_face or "",
+            placement.device_role_id,
+            placement.tenant_id,
         )
+
+    @staticmethod
+    def _resolve_add_refs(item, rack, u_position, errors):
+        """
+        Validate the optional device_role_id / tenant_id on an 'add' item.
+
+        Returns (ok, device_role_id, tenant_id). On a non-null id that does not
+        resolve, append an error (mirroring device_type) and return ok=False.
+        """
+        device_role_id = item.get("device_role_id")
+        tenant_id = item.get("tenant_id")
+        if device_role_id is not None and not DeviceRole.objects.filter(pk=device_role_id).exists():
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": _norm_pos(u_position),
+                "device_id": None,
+                "detail": "Device role does not exist.",
+            })
+            return False, None, None
+        if tenant_id is not None and not Tenant.objects.filter(pk=tenant_id).exists():
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": _norm_pos(u_position),
+                "device_id": None,
+                "detail": "Tenant does not exist.",
+            })
+            return False, None, None
+        return True, device_role_id, tenant_id
 
     def _reconcile_item(self, design, rack, face_key, item, errors, desired_placement_ids):
         """
@@ -213,16 +248,63 @@ class DesignViewSet(NetBoxModelViewSet):
         """
         kind = item["kind"]
         device_id = item.get("device_id")
+        device_type_id = item.get("device_type_id")
         placement_id = item.get("placement_id")
         # 'other' bucket means off-rack: no target position.
         u_position = None if face_key == "other" else item.get("u_position")
         face = "" if face_key == "other" else item.get("face") or ""
 
-        # An 'add' tile is a catalog-add placement projected into this rack. It
-        # carries its placement_id (no device_id). We preserve it and let the user
-        # REPOSITION it within the rack (drag to a new U/face); brand-new catalog
-        # adds aren't created here. The device_type is left untouched.
+        # An 'add' tile is a catalog-add placement projected into this rack. When
+        # it carries a placement_id (no device_id) it re-asserts an EXISTING add:
+        # we preserve it and let the user REPOSITION it within the rack (drag to a
+        # new U/face) or cancel it. When it carries NO placement_id but a
+        # device_type_id, it is a BRAND-NEW catalog add and we CREATE the
+        # placement. Real Devices are never created/mutated either way.
         if kind == "add":
+            # Brand-new catalog add: no placement to reposition, build a fresh one.
+            if not placement_id and device_type_id:
+                dt = DeviceType.objects.filter(pk=device_type_id).first()
+                if dt is None:
+                    errors.append({
+                        "rack_id": rack.pk,
+                        "u_position": _norm_pos(u_position),
+                        "device_id": None,
+                        "detail": "Device type does not exist.",
+                    })
+                    return None
+                ok, device_role_id, tenant_id = self._resolve_add_refs(
+                    item, rack, u_position, errors
+                )
+                if not ok:
+                    return None
+                new_add = DesignPlacement(
+                    design=design,
+                    kind=DesignPlacementKindChoices.KIND_ADD,
+                    device_type=dt,
+                    device_role_id=device_role_id,
+                    tenant_id=tenant_id,
+                    target_rack=rack,
+                    target_position=u_position,
+                    target_face=face,
+                )
+                try:
+                    new_add.full_clean()
+                    new_add.save()
+                    self._made_db_change = True
+                except ValidationError as exc:
+                    detail = "; ".join(
+                        f"{k}: {' '.join(str(m) for m in v)}"
+                        for k, v in exc.message_dict.items()
+                    ) if hasattr(exc, "message_dict") else str(exc)
+                    errors.append({
+                        "rack_id": rack.pk,
+                        "u_position": _norm_pos(u_position),
+                        "device_id": None,
+                        "detail": detail,
+                    })
+                    return None
+                desired_placement_ids.add(new_add.pk)
+                return new_add
             if not placement_id:
                 return None
             add = DesignPlacement.objects.filter(
@@ -240,10 +322,22 @@ class DesignViewSet(NetBoxModelViewSet):
                 add.delete()
                 self._made_db_change = True
                 return None
+            ok, device_role_id, tenant_id = self._resolve_add_refs(
+                item, rack, u_position, errors
+            )
+            if not ok:
+                return None
             before = self._snapshot(add)
             add.target_rack = rack
             add.target_position = u_position
             add.target_face = face
+            # Only overwrite role/tenant when the editor actually sent them, so a
+            # plain reposition that omits the keys preserves the existing values
+            # (and stays idempotent).
+            if "device_role_id" in item:
+                add.device_role_id = device_role_id
+            if "tenant_id" in item:
+                add.tenant_id = tenant_id
             # Idempotent: an unmoved add round-trips without a write.
             if self._snapshot(add) == before:
                 desired_placement_ids.add(add.pk)

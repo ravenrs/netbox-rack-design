@@ -10,7 +10,8 @@ from ..models import Design, DesignGroup, DesignPlacement
 from .filters import DesignFilter, DesignGroupFilter, DesignPlacementFilter
 
 if TYPE_CHECKING:
-    from dcim.graphql.types import DeviceType, DeviceTypeType, RackType, SiteType
+    from dcim.graphql.types import DeviceRoleType, DeviceType, DeviceTypeType, RackType, SiteType
+    from tenancy.graphql.types import TenantType
 
 __all__ = ("DesignGroupType", "DesignType", "DesignPlacementType")
 
@@ -38,4 +39,6 @@ class DesignPlacementType(NetBoxObjectType):
     design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     device: Annotated["DeviceType", strawberry.lazy("dcim.graphql.types")] | None
     device_type: Annotated["DeviceTypeType", strawberry.lazy("dcim.graphql.types")] | None
+    device_role: Annotated["DeviceRoleType", strawberry.lazy("dcim.graphql.types")] | None
+    tenant: Annotated["TenantType", strawberry.lazy("tenancy.graphql.types")] | None
     target_rack: Annotated["RackType", strawberry.lazy("dcim.graphql.types")] | None
