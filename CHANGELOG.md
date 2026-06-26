@@ -5,6 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-26
+
+### Release Summary
+**Plan new gear, not just rearrange it** — Rack Design gets a device-type catalog.
+
+0.3.0 let you drag the rack's *existing* devices around; 0.4.0 lets you plan brand-new
+ones. This minor, fully backward-compatible release adds an interactive **device-type
+catalog palette** to the single-rack editor: search the catalog, narrow it by
+manufacturer, and **drag a device type straight onto a free rack unit** to plan a new
+add — no leaving the editor to pre-create anything. Each planned add can now also carry
+an intended **device role** and **tenant**, chosen through NetBox's own dynamic selects,
+so the plan records *what* you intend to rack and *whose* it is. As always the editor
+only composes **design placements**; your live `Device` records are never touched until
+a design is later executed.
+
+This release also fixes a visual glitch where multi-unit state tiles rendered
+semi-transparent (letting the grid bleed through), adds **cache-busting** to the bundled
+editor JS/CSS so browsers reliably pick up new assets after an upgrade, and ships a new
+committed **headless end-to-end regression suite** for the editor's client-side
+behaviour.
+
+There are **no breaking changes**. This release adds a database migration that only
+**adds two nullable fields** (`device_role`, `tenant`) to `DesignPlacement`, so it is
+safe to apply against existing data and reverses cleanly.
+
+#### Device-type catalog palette
+A new palette in the editor lists the device types you can plan. **Type-ahead search**
+filters by name and a **manufacturer filter** narrows the catalog to a single vendor.
+**Drag a device type onto an empty unit** and the editor plans an *add* placement at that
+position — the same planning surface that already handled moves and removals, now able to
+introduce devices that don't yet exist in the rack.
+
+#### Role and tenant on planned adds
+A planned add can now record an intended **device role** and **tenant**, selected via
+NetBox **dynamic (API-backed) selects** in the editor. The two new `DesignPlacement`
+fields are **add-only**: `clean()` rejects setting a role or tenant on a *move* or
+*remove* placement, keeping the data model honest. Both fields are optional and surface
+through the REST API and GraphQL.
+
+#### Editor polish & regression coverage
+- **Opaque multi-U tiles.** Tiles spanning more than one rack unit were rendering
+  semi-transparent, letting the grid lines show through and muddying the colour coding;
+  they are now fully opaque so add/move/remove states read clearly.
+- **Asset cache-busting.** The bundled editor `*.js`/`*.css` are now requested with a
+  version query string (`?v=`) derived from the asset set, so an upgraded plugin's new
+  editor assets are loaded instead of a stale cached copy.
+- **Headless e2e regression suite.** A new committed Playwright suite under `tests/e2e/`
+  exercises the editor's real client-side DOM/GridStack behaviour (catalog drag-in, the
+  context-sensitive `×`, the payload `buildRackPayload` would emit). It is strictly
+  **read-only** against the dev database and **skips cleanly** when Playwright/Chrome or a
+  dev server isn't present, so it stays out of the normal headless suite while remaining
+  runnable on demand.
+
+### Added
+- **Device-type catalog palette** in the single-rack editor: type-ahead search + a
+  manufacturer filter, and **drag-and-drop a device type onto a free unit** to plan a new
+  add (`editor.js`, `design_editor.html`, `editor.css`).
+- **`device_role` and `tenant` on planned adds.** Two new optional, nullable FK fields on
+  `DesignPlacement` (to `dcim.DeviceRole` / `tenancy.Tenant`), selected via NetBox dynamic
+  selects, add-only and validated as such in `clean()`, and exposed through the form, the
+  REST API serializer, and GraphQL.
+- **Committed headless e2e regression suite** (`tests/e2e/test_editor_e2e.py`) for the
+  editor's client-side behaviour — read-only and self-skipping when prerequisites are
+  absent.
+- Expanded API and view tests covering the new fields and the catalog/editor wiring.
+
+### Fixed
+- **Multi-unit state tiles** in the editor were semi-transparent and let the grid bleed
+  through; they now render fully opaque so the add/move/remove colour coding is legible.
+
+### Changed
+- Bundled editor JavaScript/CSS are now loaded with an `asset_version` cache-busting query
+  string so upgraded assets aren't served stale from the browser cache.
+
+### Deprecated
+- N/A
+
+### Removed
+- N/A
+
+### Security
+- N/A
+
+### Upgrade
+`pip install -U netbox-rack-design` and restart NetBox.
+
+- **Run `python manage.py migrate`** — this release adds migration
+  `0002_designplacement_device_role_designplacement_tenant`, which only **adds two
+  nullable fields** to `DesignPlacement`. It is additive (no data rewrite, no backfill),
+  safe against existing designs, and reversible. There are **no breaking changes**.
+- **Run `python manage.py collectstatic`** — the editor's bundled JS/CSS were updated for
+  the catalog palette and role/tenant selects (and now carry cache-busting), so the new
+  static assets must be collected for the editor to render correctly.
+- **No configuration changes** are needed — existing `PLUGINS_CONFIG` settings continue to
+  work unchanged.
+
+---
+
 ## [0.3.0] - 2026-06-26
 
 ### Release Summary
