@@ -3,10 +3,11 @@
 from dcim.models import Device
 from django.urls import reverse
 from rest_framework import status
+from users.models import Token, User
 from utilities.testing import APITestCase, APIViewTestCases, create_tags
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignGroup, DesignPlacement
+from ..models import Design, DesignGroup, DesignPlacement, FavoriteDeviceType
 from .utils import create_dcim_environment
 
 
@@ -579,4 +580,151 @@ class SaveLayoutTest(APITestCase):
         # The unmentioned add must NOT be deleted.
         self.assertTrue(
             DesignPlacement.objects.filter(pk=existing_add.pk).exists()
+        )
+
+
+class FavoriteDeviceTypeTest(APITestCase):
+    """
+    Tests for the user-scoped favorite-device-types endpoint (increment 2c-1).
+
+    The core property under test is per-user isolation: a user only ever sees
+    and mutates their own favorites; the client never passes a user.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.device_type = env["device_type"]
+        # A second device type so user B can star something distinct.
+        from dcim.models import DeviceType
+
+        cls.other_device_type = DeviceType.objects.create(
+            manufacturer=env["manufacturer"],
+            model="Device Type 2",
+            slug="device-type-2",
+            u_height=1,
+        )
+
+    def setUp(self):
+        super().setUp()  # builds self.user / self.token / self.header
+        # A second authenticated user (user B) with their own token/header.
+        self.user_b = User.objects.create_user(username="user_b")
+        self.token_b = Token.objects.create(user=self.user_b)
+        self.header_b = {"HTTP_AUTHORIZATION": f"Token {self.token_b.key}"}
+
+    def _list_url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:favoritedevicetype-list"
+        )
+
+    def _toggle_url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:favoritedevicetype-toggle"
+        )
+
+    def test_toggle_stars_then_unstars(self):
+        """First toggle stars (creates a row); second unstars (removes it)."""
+        body = {"device_type_id": self.device_type.pk}
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["device_type_id"], self.device_type.pk)
+        self.assertTrue(response.data["favorite"])
+        self.assertTrue(
+            FavoriteDeviceType.objects.filter(
+                user=self.user, device_type=self.device_type
+            ).exists()
+        )
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertFalse(response.data["favorite"])
+        self.assertFalse(
+            FavoriteDeviceType.objects.filter(
+                user=self.user, device_type=self.device_type
+            ).exists()
+        )
+
+    def test_list_returns_only_current_users_favorites(self):
+        """GET returns ONLY the requesting user's device-type ids."""
+        FavoriteDeviceType.objects.create(user=self.user, device_type=self.device_type)
+        FavoriteDeviceType.objects.create(
+            user=self.user_b, device_type=self.other_device_type
+        )
+
+        # User A sees only their own.
+        response = self.client.get(self._list_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["device_type_ids"], [self.device_type.pk])
+
+        # User B sees only their own.
+        response = self.client.get(self._list_url(), **self.header_b)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["device_type_ids"], [self.other_device_type.pk])
+
+    def test_toggle_as_user_a_never_affects_user_b(self):
+        """User B's favorites are untouched when user A toggles."""
+        b_fav = FavoriteDeviceType.objects.create(
+            user=self.user_b, device_type=self.device_type
+        )
+        # User A stars the same device type.
+        body = {"device_type_id": self.device_type.pk}
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["favorite"])
+
+        # A separate row was created for user A; user B's row survives.
+        self.assertTrue(FavoriteDeviceType.objects.filter(pk=b_fav.pk).exists())
+        self.assertEqual(
+            FavoriteDeviceType.objects.filter(device_type=self.device_type).count(), 2
+        )
+
+        # User A unstars; user B's row STILL survives.
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertFalse(response.data["favorite"])
+        self.assertTrue(FavoriteDeviceType.objects.filter(pk=b_fav.pk).exists())
+        self.assertFalse(
+            FavoriteDeviceType.objects.filter(
+                user=self.user, device_type=self.device_type
+            ).exists()
+        )
+
+    def test_unauthenticated_is_rejected(self):
+        """No token → 401/403 on both list and toggle."""
+        response = self.client.get(self._list_url())
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+        )
+        response = self.client.post(
+            self._toggle_url(),
+            {"device_type_id": self.device_type.pk},
+            format="json",
+        )
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+        )
+
+    def test_invalid_device_type_id_is_rejected(self):
+        """A device_type_id that doesn't resolve → 400, no row created."""
+        body = {"device_type_id": 9999999}
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(FavoriteDeviceType.objects.filter(user=self.user).count(), 0)
+
+    def test_double_star_does_not_duplicate_row(self):
+        """Pre-existing star + a star toggle reaching get_or_create stays unique."""
+        FavoriteDeviceType.objects.create(user=self.user, device_type=self.device_type)
+        # get_or_create must not raise the unique constraint nor add a 2nd row;
+        # because the row already exists, the toggle unstars it.
+        body = {"device_type_id": self.device_type.pk}
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertFalse(response.data["favorite"])
+        self.assertEqual(
+            FavoriteDeviceType.objects.filter(
+                user=self.user, device_type=self.device_type
+            ).count(),
+            0,
         )

@@ -5,23 +5,30 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
-from rest_framework import status
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
 from .. import filtersets
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignGroup, DesignPlacement
+from ..models import Design, DesignGroup, DesignPlacement, FavoriteDeviceType
 from .serializers import (
     DesignGroupSerializer,
     DesignPlacementSerializer,
     DesignSerializer,
+    FavoriteToggleSerializer,
     SaveLayoutSerializer,
 )
 
-__all__ = ("DesignGroupViewSet", "DesignViewSet", "DesignPlacementViewSet")
+__all__ = (
+    "DesignGroupViewSet",
+    "DesignViewSet",
+    "DesignPlacementViewSet",
+    "FavoriteDeviceTypeViewSet",
+)
 
 
 class DesignGroupViewSet(NetBoxModelViewSet):
@@ -459,3 +466,56 @@ class DesignPlacementViewSet(NetBoxModelViewSet):
     queryset = DesignPlacement.objects.all()
     serializer_class = DesignPlacementSerializer
     filterset_class = filtersets.DesignPlacementFilterSet
+
+
+class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
+    """
+    User-scoped "favorite device types" (the catalog palette's stars).
+
+    This is deliberately NOT a NetBoxModelViewSet: a generic model viewset would
+    expose every user's rows. Every query here is filtered by ``request.user``
+    and the client NEVER supplies a user — a user can only ever read or change
+    their own favorites.
+
+    Endpoints:
+      GET  /api/plugins/rack-design/favorite-device-types/        -> {"device_type_ids": [...]}
+      POST /api/plugins/rack-design/favorite-device-types/toggle/ -> star/unstar
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        """Return only the requesting user's favorite device-type ids."""
+        ids = list(
+            FavoriteDeviceType.objects.filter(user=request.user)
+            .values_list("device_type_id", flat=True)
+        )
+        return Response({"device_type_ids": ids})
+
+    @action(detail=False, methods=["post"], url_path="toggle")
+    def toggle(self, request):
+        """
+        Star or unstar a device type for the requesting user (idempotent).
+
+        Body: {"device_type_id": <id>}. Returns {"device_type_id": <id>,
+        "favorite": true|false} where ``favorite`` reflects the resulting state.
+        """
+        body = FavoriteToggleSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        device_type_id = body.validated_data["device_type_id"]
+
+        if not DeviceType.objects.filter(pk=device_type_id).exists():
+            return Response(
+                {"device_type_id": ["Device type does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        favorite, created = FavoriteDeviceType.objects.get_or_create(
+            user=request.user, device_type_id=device_type_id
+        )
+        if created:
+            return Response({"device_type_id": device_type_id, "favorite": True})
+
+        # Already starred → toggle off.
+        favorite.delete()
+        return Response({"device_type_id": device_type_id, "favorite": False})

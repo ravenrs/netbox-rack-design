@@ -10,6 +10,7 @@ __all__ = (
     "DesignSerializer",
     "DesignPlacementSerializer",
     "SaveLayoutSerializer",
+    "FavoriteToggleSerializer",
 )
 
 
@@ -120,3 +121,17 @@ class SaveLayoutSerializer(serializers.Serializer):
 
     design_id = serializers.IntegerField()
     racks = SaveLayoutRackSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# Favorite-device-type request serializer (increment 2c-1)
+#
+# Validates only the shape of the toggle body. The viewset enforces that the
+# referenced DeviceType exists and scopes every row to request.user.
+# ---------------------------------------------------------------------------
+
+
+class FavoriteToggleSerializer(serializers.Serializer):
+    """Body for POST .../favorite-device-types/toggle/."""
+
+    device_type_id = serializers.IntegerField()

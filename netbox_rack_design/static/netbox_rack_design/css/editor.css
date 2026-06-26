@@ -111,14 +111,61 @@
     flex: 0 0 auto;
 }
 
+/* ---- Quick access: its OWN rack-tall column (a sibling of the rail) ------ */
+.nbx-rd-quick-col {
+    flex: 0 0 240px;
+    max-width: 240px;
+    display: flex;
+    flex-direction: column;
+    /* Explicit height (not just max) so the column is rack-tall regardless of how
+       many favorites it holds; the card fills it and its list scrolls. */
+    height: var(--nbx-rd-rack-height, 40rem);
+}
+
+/* The card fills the column; only its favorites list scrolls. */
+.nbx-rd-quick-card {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.nbx-rd-quick-card > .card-header {
+    flex: 0 0 auto;
+}
+
+.nbx-rd-quick-list {
+    flex: 1 1 auto;
+    min-height: 4rem;
+    overflow-y: auto;
+    border-top: 1px solid var(--tblr-border-color, #dee2e6);
+}
+
+.nbx-rd-quick-empty {
+    background: transparent;
+}
+
 .nbx-rd-editor-layout > .nbx-rd-face {
     flex: 1 1 auto;
     min-width: 0;
 }
 
-@media (max-width: 575.98px) {
-    /* On phones the rail goes full width above the rack. */
-    .nbx-rd-leftrail { flex-basis: 100%; max-width: 100%; }
+@media (max-width: 767.98px) {
+    /* On narrow viewports the rail + quick-access columns go full width and
+       wrap above the rack. */
+    .nbx-rd-leftrail,
+    .nbx-rd-quick-col {
+        flex-basis: 100%;
+        max-width: 100%;
+        max-height: none;
+        height: auto;
+    }
+
+    /* When the quick-access column wraps full-width, cap its list so it doesn't
+       grow unbounded. */
+    .nbx-rd-quick-list {
+        max-height: 14rem;
+    }
 }
 
 /* ---- Device-type catalog card ------------------------------------------- */
@@ -168,6 +215,7 @@
     flex-direction: column;
     gap: 0.05rem;
     padding: 0.4rem 0.75rem;
+    padding-right: 2rem;       /* leave room for the favorite star on the right */
     background: transparent;   /* neutral — the green add tint is only on rack tiles */
 }
 
@@ -184,6 +232,43 @@
 .nbx-rd-palette-item .nbx-rd-palette-meta {
     font-size: 0.72rem;
     color: var(--tblr-secondary, #6c757d);
+}
+
+/* Favorite (star) button — top-right of each palette row, outside the drag
+   handle so it never starts a drag. Outline by default; gold when favorited. */
+.nbx-rd-fav-btn {
+    position: absolute;
+    top: 50%;
+    right: 0.5rem;
+    transform: translateY(-50%);
+    z-index: 2;
+    padding: 0;
+    width: 1.4rem;
+    height: 1.4rem;
+    line-height: 1;
+    border: none;
+    background: transparent;
+    color: var(--tblr-secondary, #6c757d);
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.nbx-rd-fav-btn:hover {
+    color: var(--tblr-warning, #f59f00);
+    background-color: var(--tblr-bg-surface-secondary, rgba(0, 0, 0, 0.06));
+}
+
+.nbx-rd-fav-btn.is-fav {
+    color: var(--tblr-warning, #f59f00);
+}
+
+.nbx-rd-fav-btn .mdi {
+    font-size: 1.05rem;
+}
+
+/* "Favorites only" toggle sits in the pinned palette controls. */
+.nbx-rd-palette-controls .form-switch {
+    font-size: 0.8125rem;
 }
 
 /* The clone GridStack drags while a palette item is in flight. */

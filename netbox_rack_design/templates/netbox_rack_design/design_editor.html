@@ -45,6 +45,7 @@
       <div class="card-body"
            id="rd-editor"
            data-save-url="{{ save_url }}"
+           data-favorites-url="{{ favorites_url }}"
            data-rack-id="{{ rack_meta.id }}"
            data-u-height="{{ rack_meta.u_height }}"
            data-desc-units="{{ rack_meta.desc_units|yesno:'true,false' }}"
@@ -73,7 +74,7 @@
               </div>
               <div class="card-body nbx-rd-palette-controls">
                 {# NetBox API-backed searchable select; the editor JS reads its #}
-                {# value (#id_manufacturer) to filter the device-type search. #}
+                {# value (#id_manufacturer) to filter the CATALOG search only. #}
                 <div class="mb-2">{{ palette_form.manufacturer }}</div>
                 <input type="search" class="form-control form-control-sm"
                        id="nbx-rd-palette-search"
@@ -110,6 +111,21 @@
                 {{ palette_form.tenant }}
                 <div class="text-muted small mt-1">{% trans "Applied to devices you drag in next." %}</div>
               </div>
+            </div>
+          </div>
+
+          {# ---- Quick access: its OWN full-height column (not in the left rail) ---- #}
+          {# Rack-tall card; favorites list scrolls internally. As a separate column #}
+          {# it never shrinks the catalog. Independent of the catalog search +       #}
+          {# manufacturer filter; drag a row onto a face to plan an add, click its    #}
+          {# filled star to unpin. ---- #}
+          <div class="nbx-rd-quick-col" id="nbx-rd-quick-col">
+            <div class="card nbx-rd-quick-card" id="nbx-rd-quick" data-rd-quick>
+              <div class="card-header">
+                <h3 class="card-title">{% trans "Quick access" %}</h3>
+              </div>
+              {# This list scrolls if many favorites; populated by editor.js. #}
+              <div class="list-group list-group-flush nbx-rd-quick-list" id="nbx-rd-quick-list"></div>
             </div>
           </div>
 

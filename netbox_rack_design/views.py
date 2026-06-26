@@ -233,6 +233,8 @@ class DesignEditorView(generic.ObjectView):
                 "desc_units": rack.desc_units,
             },
             "save_url": f"/api/plugins/rack-design/designs/{instance.pk}/save-layout/",
+            # User-scoped favorite device types (the catalog palette's stars).
+            "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
             "asset_version": _asset_version(),
             # Drives the left-rail manufacturer/role/tenant selectors as NetBox
             # API-backed searchable selects (see forms.DesignEditorPaletteForm).

@@ -10,6 +10,7 @@ grouped into a larger (hierarchical) effort via DesignGroup.
 All terminology is generic — no organization-specific concepts are hardcoded.
 """
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
@@ -17,7 +18,7 @@ from netbox.models import NetBoxModel, PrimaryModel
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
 
-__all__ = ("DesignGroup", "Design", "DesignPlacement")
+__all__ = ("DesignGroup", "Design", "DesignPlacement", "FavoriteDeviceType")
 
 
 class DesignGroup(NetBoxModel):
@@ -300,3 +301,41 @@ class DesignPlacement(NetBoxModel):
             raise ValidationError(
                 {"target_position": f"U{self.target_position} is not available in {self.target_rack}."}
             )
+
+
+class FavoriteDeviceType(models.Model):
+    """
+    A per-user UI preference: a device type the user has "starred" in the
+    catalog palette, surfaced for quick access.
+
+    Deliberately a plain ``django.db.models.Model`` (NOT a NetBoxModel): starring
+    is a transient personal preference, so it must NOT carry change logging,
+    search indexing, custom fields, or tags. Subclassing NetBoxModel would write
+    an ObjectChange row on every star toggle, which is unwanted noise.
+    """
+
+    user = models.ForeignKey(
+        to=settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="rack_design_favorite_device_types",
+    )
+    device_type = models.ForeignKey(
+        to="dcim.DeviceType",
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("user", "device_type")
+        verbose_name = "favorite device type"
+        verbose_name_plural = "favorite device types"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "device_type"),
+                name="%(app_label)s_%(class)s_unique_user_device_type",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user}: {self.device_type}"

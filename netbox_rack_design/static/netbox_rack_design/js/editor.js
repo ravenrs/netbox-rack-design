@@ -179,9 +179,9 @@
             acceptWidgets: true,   // allow drops between grids
             removable: false,
             // Don't start a drag when the pointer goes down on a tile's remove
-            // (×) button — otherwise GridStack captures the pointer and the
-            // click that toggles removal never fires.
-            draggable: { cancel: ".nbx-rd-remove-btn" },
+            // (×) button or a palette row's favorite (star) button — otherwise
+            // GridStack captures the pointer and the click never fires.
+            draggable: { cancel: ".nbx-rd-remove-btn, .nbx-rd-fav-btn" },
         };
         if (extra) {
             Object.keys(extra).forEach(function (k) { opts[k] = extra[k]; });
@@ -601,11 +601,11 @@
     });
 
     // Belt-and-suspenders alongside draggable.cancel: stop the pointer-down on
-    // the × button from reaching GridStack's drag machinery so the subsequent
-    // click reliably fires.
+    // the × button or a palette star from reaching GridStack's drag machinery so
+    // the subsequent click reliably fires (and no drag starts).
     ["pointerdown", "mousedown", "touchstart"].forEach(function (evtName) {
         root.addEventListener(evtName, function (event) {
-            if (event.target.closest(".nbx-rd-remove-btn")) {
+            if (event.target.closest(".nbx-rd-remove-btn, .nbx-rd-fav-btn")) {
                 event.stopPropagation();
             }
         }, true);
@@ -839,10 +839,19 @@
         var roleEl = document.getElementById("id_device_role");
         var tenantEl = document.getElementById("id_tenant");
         var listEl = document.getElementById("nbx-rd-palette-list");
+        var quickListEl = document.getElementById("nbx-rd-quick-list");
         var statusEl = document.getElementById("nbx-rd-palette-status");
         var layoutEl = document.querySelector(".nbx-rd-editor-layout");
         if (!paletteEl || !listEl || !searchEl) { return; }
         if (typeof GridStack === "undefined" || !GridStack.setupDragIn) { return; }
+
+        // Per-user favorite device-type ids (the catalog stars). Loaded once at
+        // init from the favorites endpoint; mutated as the user toggles stars. The
+        // dedicated "Quick access" panel renders these INDEPENDENTLY of the
+        // catalog's search + manufacturer filter.
+        var favoritesUrl = root.getAttribute("data-favorites-url")
+            || "/api/plugins/rack-design/favorite-device-types/";
+        var favoriteIds = {};   // id (number) -> true  (used as a Set)
 
         // Match the catalog card's max height to the (currently visible) rack
         // elevation so the card is rack-tall and only the list scrolls. Recompute
@@ -867,55 +876,113 @@
             if (statusEl) { statusEl.textContent = msg || ""; }
         }
 
+        // Build one palette/quick-access row as a real GridStack DRAG SOURCE so
+        // the bundled GridStack accepts the drop:
+        //   • class "grid-stack-item" — the receiving grid's acceptWidgets check
+        //     is `el.matches('.grid-stack-item')`;
+        //   • gs-w/gs-h — GridStack sizes the dropped node from these (_readAttr);
+        //   • an inner ".grid-stack-item-content" — the default drag HANDLE
+        //     (draggable.handle === '.grid-stack-item-content').
+        // Without these the real HTML5 drag-in never fires.
+        function buildPaletteRow(dt) {
+            var uHeight = (dt.u_height != null) ? dt.u_height : 1;
+            var gsH = Math.max(1, Math.round(uHeight * 2));
+            var li = document.createElement("div");
+            li.className = "list-group-item list-group-item-action grid-stack-item nbx-rd-palette-item";
+            li.setAttribute("gs-w", "1");
+            li.setAttribute("gs-h", String(gsH));
+            li.setAttribute("data-device-type-id", dt.id);
+            li.setAttribute("data-u-height", uHeight);
+            li.setAttribute("data-is-full-depth", dt.is_full_depth ? "true" : "false");
+            var manuf = (dt.manufacturer && (dt.manufacturer.name || dt.manufacturer.display)) || "";
+            var label = (manuf ? manuf + " " : "") + (dt.model || dt.display || ("type " + dt.id));
+            li.setAttribute("data-label", label);
+
+            var content = document.createElement("div");
+            content.className = "grid-stack-item-content";
+            var model = document.createElement("div");
+            model.className = "nbx-rd-palette-model";
+            model.textContent = dt.model || dt.display || ("Device type " + dt.id);
+            var meta = document.createElement("div");
+            meta.className = "nbx-rd-palette-meta";
+            meta.textContent = (manuf ? manuf + " · " : "") + uHeight + "U" + (dt.is_full_depth ? " · full-depth" : "");
+            content.appendChild(model);
+            content.appendChild(meta);
+            li.appendChild(content);
+
+            // Favorite (star) button — a sibling of the drag handle
+            // (.grid-stack-item-content), so it isn't part of the grab area and
+            // onPaletteDrop (which rebuilds the content) drops it cleanly.
+            var fav = !!favoriteIds[dt.id];
+            var star = document.createElement("button");
+            star.type = "button";
+            star.className = "nbx-rd-fav-btn" + (fav ? " is-fav" : "");
+            star.setAttribute("data-device-type-id", String(dt.id));
+            star.setAttribute("title", fav ? "Unstar (remove favorite)" : "Star (add favorite)");
+            star.setAttribute("aria-label", star.getAttribute("title"));
+            star.setAttribute("aria-pressed", fav ? "true" : "false");
+            var icon = document.createElement("i");
+            icon.className = "mdi " + (fav ? "mdi-star" : "mdi-star-outline");
+            star.appendChild(icon);
+            li.appendChild(star);
+            return li;
+        }
+
+        // (Re)register all current palette + quick-access rows as external drag
+        // sources. Re-applied after each render because the nodes are replaced.
+        function refreshDragIn() {
+            GridStack.setupDragIn(".nbx-rd-palette-item", { appendTo: "body", helper: "clone" });
+        }
+
+        // The MAIN catalog list — driven only by search + manufacturer filter.
         function renderResults(results) {
             listEl.innerHTML = "";
-            if (!results.length) {
+            var shown = results || [];
+            if (!shown.length) {
                 setStatus("No device types found.");
                 return;
             }
             setStatus("");
-            results.forEach(function (dt) {
-                var uHeight = (dt.u_height != null) ? dt.u_height : 1;
-                var gsH = Math.max(1, Math.round(uHeight * 2));
-                // A palette item must be a real GridStack DRAG SOURCE so the
-                // bundled GridStack accepts the drop:
-                //   • class "grid-stack-item" — the receiving grid's acceptWidgets
-                //     check is `el.matches('.grid-stack-item')`;
-                //   • gs-w/gs-h — GridStack sizes the dropped node from these
-                //     (via _readAttr);
-                //   • an inner ".grid-stack-item-content" — the default drag
-                //     HANDLE (draggable.handle === '.grid-stack-item-content').
-                // Without these the real HTML5 drag-in never fires.
-                var li = document.createElement("div");
-                li.className = "list-group-item list-group-item-action grid-stack-item nbx-rd-palette-item";
-                li.setAttribute("gs-w", "1");
-                li.setAttribute("gs-h", String(gsH));
-                li.setAttribute("data-device-type-id", dt.id);
-                li.setAttribute("data-u-height", uHeight);
-                li.setAttribute("data-is-full-depth", dt.is_full_depth ? "true" : "false");
-                var manuf = (dt.manufacturer && (dt.manufacturer.name || dt.manufacturer.display)) || "";
-                var label = (manuf ? manuf + " " : "") + (dt.model || dt.display || ("type " + dt.id));
-                li.setAttribute("data-label", label);
+            shown.forEach(function (dt) { listEl.appendChild(buildPaletteRow(dt)); });
+            refreshDragIn();
+        }
 
-                var content = document.createElement("div");
-                content.className = "grid-stack-item-content";
-                var model = document.createElement("div");
-                model.className = "nbx-rd-palette-model";
-                model.textContent = dt.model || dt.display || ("Device type " + dt.id);
-                var meta = document.createElement("div");
-                meta.className = "nbx-rd-palette-meta";
-                meta.textContent = (manuf ? manuf + " · " : "") + uHeight + "U" + (dt.is_full_depth ? " · full-depth" : "");
-                content.appendChild(model);
-                content.appendChild(meta);
-                li.appendChild(content);
-                listEl.appendChild(li);
+        // ---- Quick access: the user's favorites, fetched independently --------
+        // GET the favorite ids, then fetch those device types' details (one id= per
+        // favorite) and render. NEVER constrained by the catalog search/manufacturer.
+        function renderQuickAccess() {
+            if (!quickListEl) { return; }
+            var ids = Object.keys(favoriteIds);
+            if (!ids.length) {
+                quickListEl.innerHTML =
+                    '<div class="list-group-item text-muted small nbx-rd-quick-empty">'
+                    + "Star a device type to pin it here.</div>";
+                return;
+            }
+            var url = "/api/dcim/device-types/?brief=true&limit=200";
+            ids.forEach(function (id) { url += "&id=" + encodeURIComponent(id); });
+            fetch(url, {
+                credentials: "same-origin",
+                headers: { "Accept": "application/json" },
+            }).then(function (resp) {
+                if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+                return resp.json();
+            }).then(function (data) {
+                var results = (data && data.results) || [];
+                quickListEl.innerHTML = "";
+                if (!results.length) {
+                    quickListEl.innerHTML =
+                        '<div class="list-group-item text-muted small nbx-rd-quick-empty">'
+                        + "Star a device type to pin it here.</div>";
+                    return;
+                }
+                results.forEach(function (dt) { quickListEl.appendChild(buildPaletteRow(dt)); });
+                refreshDragIn();
+            }).catch(function () {
+                quickListEl.innerHTML =
+                    '<div class="list-group-item text-muted small nbx-rd-quick-empty">'
+                    + "Could not load favorites.</div>";
             });
-
-            // (Re)register the freshly-rendered items as an external drag source.
-            // Re-applied every render because the nodes are replaced. appendTo:body
-            // + helper:clone so the dragged proxy floats above the layout and the
-            // palette list stays intact.
-            GridStack.setupDragIn(".nbx-rd-palette-item", { appendTo: "body", helper: "clone" });
         }
 
         var lastKey = null;
@@ -939,9 +1006,13 @@
             });
         }
 
+        function currentKey() {
+            return searchEl.value.trim() + "|" + (manufEl ? manufEl.value : "");
+        }
+
         var debounceTimer = null;
         function scheduleFetch() {
-            var key = searchEl.value.trim() + "|" + (manufEl ? manufEl.value : "");
+            var key = currentKey();
             if (key === lastKey) { return; }
             lastKey = key;
             if (debounceTimer) { window.clearTimeout(debounceTimer); }
@@ -949,9 +1020,10 @@
         }
         searchEl.addEventListener("input", scheduleFetch);
         if (manufEl) {
-            // The manufacturer filter changes results immediately (no debounce).
+            // The manufacturer filter changes the CATALOG list only (never the
+            // quick-access panel), immediately (no debounce).
             manufEl.addEventListener("change", function () {
-                lastKey = searchEl.value.trim() + "|" + manufEl.value;
+                lastKey = currentKey();
                 fetchTypes();
             });
         }
@@ -960,8 +1032,88 @@
         // NetBox's own API-backed select widget (DynamicModelChoiceField); no
         // manual option-loading needed. We only read their current value.
 
-        // Initial device-type population.
-        fetchTypes();
+        // ---- Favorites (catalog stars) -------------------------------------
+        // Click a star → POST toggle, then update favoriteIds + the icon in place.
+        function applyFavState(starBtn, fav) {
+            starBtn.classList.toggle("is-fav", fav);
+            starBtn.setAttribute("aria-pressed", fav ? "true" : "false");
+            starBtn.setAttribute("title", fav ? "Unstar (remove favorite)" : "Star (add favorite)");
+            starBtn.setAttribute("aria-label", starBtn.getAttribute("title"));
+            var icon = starBtn.querySelector("i");
+            if (icon) { icon.className = "mdi " + (fav ? "mdi-star" : "mdi-star-outline"); }
+        }
+
+        // Reflect a device type's favorite state on EVERY star button for it
+        // (a type can appear in both the catalog list and the quick-access panel).
+        function syncStarsFor(id, fav) {
+            root.querySelectorAll(
+                '.nbx-rd-fav-btn[data-device-type-id="' + id + '"]'
+            ).forEach(function (btn) { applyFavState(btn, fav); });
+        }
+
+        function toggleFavorite(starBtn) {
+            var id = parseInt(starBtn.getAttribute("data-device-type-id"), 10);
+            if (isNaN(id)) { return; }
+            starBtn.disabled = true;
+            fetch(favoritesUrl + "toggle/", {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCsrfToken(),
+                },
+                body: JSON.stringify({ device_type_id: id }),
+            }).then(function (resp) {
+                if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+                return resp.json();
+            }).then(function (data) {
+                var fav = !!(data && data.favorite);
+                if (fav) { favoriteIds[id] = true; } else { delete favoriteIds[id]; }
+                // Update any catalog stars for this type, then re-render the
+                // quick-access panel (adds the type when starred, removes when not).
+                syncStarsFor(id, fav);
+                renderQuickAccess();
+            }).catch(function () {
+                /* leave the icon as-is on failure */
+            }).then(function () {
+                starBtn.disabled = false;
+            });
+        }
+
+        // Delegate star clicks across BOTH the catalog list and the quick-access
+        // panel (rows are re-created each render).
+        function onStarClick(event) {
+            var starBtn = event.target.closest(".nbx-rd-fav-btn");
+            if (!starBtn) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            toggleFavorite(starBtn);
+        }
+        listEl.addEventListener("click", onStarClick);
+        if (quickListEl) { quickListEl.addEventListener("click", onStarClick); }
+
+        // Load the user's favorites ONCE, then render the quick-access panel and
+        // the initial catalog list (so catalog stars reflect favorite state).
+        function loadFavoritesThenFetch() {
+            fetch(favoritesUrl, {
+                credentials: "same-origin",
+                headers: { "Accept": "application/json" },
+            }).then(function (resp) {
+                if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+                return resp.json();
+            }).then(function (data) {
+                favoriteIds = {};
+                ((data && data.device_type_ids) || []).forEach(function (id) {
+                    favoriteIds[id] = true;
+                });
+            }).catch(function () {
+                favoriteIds = {};
+            }).then(function () {
+                renderQuickAccess();
+                fetchTypes();
+            });
+        }
+        loadFavoritesThenFetch();
 
         // ---- Convert a dropped palette clone into a planned add tile --------
         // The receiving (front/rear) grid fires `dropped` with the new node. We
@@ -1016,6 +1168,9 @@
             el.removeAttribute("data-label");
             el.classList.remove("nbx-rd-palette-item");
             el.classList.add("nbx-rd-state-add");
+            // Drop any favorite (star) button the clone carried — the star belongs
+            // only on palette/quick-access rows, never on a placed rack tile.
+            el.querySelectorAll(".nbx-rd-fav-btn").forEach(function (s) { s.remove(); });
 
             var content = el.querySelector(".grid-stack-item-content");
             if (!content) {

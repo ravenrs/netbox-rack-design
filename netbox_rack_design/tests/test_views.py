@@ -394,6 +394,11 @@ class DesignEditorViewTest(TestCase):
         self.assertIn("nbx-rd-palette", content)
         self.assertIn("nbx-rd-palette-search", content)
         self.assertIn("nbx-rd-palette-list", content)
+        # The dedicated per-user "Quick access" favorites panel (independent of
+        # the catalog search/manufacturer filter).
+        self.assertIn("nbx-rd-quick", content)
+        self.assertIn("nbx-rd-quick-list", content)
+        self.assertIn("data-favorites-url", content)
 
     def test_editor_view_renders_role_and_tenant_selectors(self):
         # The left rail must include the Device-role and Tenant selector cards
