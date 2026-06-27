@@ -68,3 +68,36 @@ def slot_text_color(slot):
     if color:
         return foreground_color(color)
     return "000000"
+
+
+@register.filter()
+def slot_role_name(slot):
+    """
+    Device-role NAME for a slot's hover card.
+
+    Real devices (existing / move / remove) carry their own role; a planned
+    ``add`` carries the role chosen on its placement. Returns "" when neither
+    has a role so the template can omit the line entirely.
+    """
+    device = slot.get("device")
+    if device is not None and device.role:
+        return device.role.name
+    placement = slot.get("placement")
+    if placement is not None and placement.device_role:
+        return placement.device_role.name
+    return ""
+
+
+@register.filter()
+def slot_tenant_name(slot):
+    """
+    Tenant NAME for a slot's hover card (real device's tenant, or a planned
+    add's tenant). Returns "" when there is no tenant.
+    """
+    device = slot.get("device")
+    if device is not None and device.tenant:
+        return device.tenant.name
+    placement = slot.get("placement")
+    if placement is not None and placement.tenant:
+        return placement.tenant.name
+    return ""

@@ -16,8 +16,12 @@ def create_dcim_environment():
     site = Site.objects.create(name="Site 1", slug="site-1")
 
     manufacturer = Manufacturer.objects.create(name="Manufacturer 1", slug="manufacturer-1")
+    # Explicitly HALF-depth (dcim's DeviceType.is_full_depth defaults to True) so
+    # this shared fixture occupies a single face and target_face is meaningful.
+    # Full-depth (both-faces) behaviour is covered separately in test_fulldepth.py.
     device_type = DeviceType.objects.create(
-        manufacturer=manufacturer, model="Device Type 1", slug="device-type-1", u_height=1
+        manufacturer=manufacturer, model="Device Type 1", slug="device-type-1",
+        u_height=1, is_full_depth=False,
     )
 
     # Optional role/tenant a planned 'add' placement may carry.

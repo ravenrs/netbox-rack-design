@@ -29,10 +29,15 @@
       <h2 class="card-header">
         {% blocktrans with rack=rack.name design=object.title %}Edit layout: {{ rack }} ({{ design }}){% endblocktrans %}
         <div class="card-actions">
+          {# Independent on/off toggles: each shows/hides its OWN face, so BOTH #}
+          {# faces can be visible side by side. Both start active (visible);     #}
+          {# editor.js refuses to hide the last visible face.                    #}
           <div class="btn-group btn-group-sm me-2" role="group" aria-label="{% trans 'Face' %}">
             <button type="button" class="btn btn-outline-primary active"
+                    aria-pressed="true"
                     id="nbx-rd-show-front">{% trans "Front" %}</button>
-            <button type="button" class="btn btn-outline-primary"
+            <button type="button" class="btn btn-outline-primary active"
+                    aria-pressed="true"
                     id="nbx-rd-show-rear">{% trans "Rear" %}</button>
           </div>
           <button type="button" class="btn btn-primary btn-sm" id="rd-editor-save" disabled>
@@ -129,6 +134,11 @@
             </div>
           </div>
 
+          {# ---- Rack faces: Front + Rear side by side (independent toggles). #}
+          {#      Grouped in one flex wrapper so they always sit beside each      #}
+          {#      other and wrap together as a unit on narrow viewports, rather   #}
+          {#      than one face wrapping under the left-rail columns. ---- #}
+          <div class="nbx-rd-faces">
           {# ---- Front face ---- #}
           <div class="text-center nbx-rd-face" id="nbx-rd-face-front">
             <h3 class="h5">{% trans "Front" %}</h3>
@@ -143,7 +153,7 @@
                    gs-max-row="{{ rack.u_height|mul2 }}"
                    gs-min-row="{{ rack.u_height|mul2 }}">
                 {% for slot in front %}
-                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
                        gs-w="1"
                        gs-h="{{ slot.u_height|mul2 }}"
                        gs-x="0"
@@ -151,10 +161,13 @@
                        gs-id="w-{{ forloop.counter0 }}"
                        data-widget-index="{{ forloop.counter0 }}">
                     <div class="grid-stack-item-content"
-                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                         data-name="{{ slot.label }}"
+                         {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                         {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
                          title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
-                      <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
-                              aria-label="{% trans 'Flag for removal' %}">&times;</button>
+                      {% if not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                              aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
                       <span class="nbx-rd-label">{{ slot.label }}</span>
                     </div>
                   </div>
@@ -168,7 +181,7 @@
           </div>
 
           {# ---- Rear face ---- #}
-          <div class="text-center nbx-rd-face" id="nbx-rd-face-rear" style="display: none;">
+          <div class="text-center nbx-rd-face" id="nbx-rd-face-rear">
             <h3 class="h5">{% trans "Rear" %}</h3>
             <div class="d-flex justify-content-center">
               <ul class="nbx-rd-unit-numbers">
@@ -181,7 +194,7 @@
                    gs-max-row="{{ rack.u_height|mul2 }}"
                    gs-min-row="{{ rack.u_height|mul2 }}">
                 {% for slot in rear %}
-                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
                        gs-w="1"
                        gs-h="{{ slot.u_height|mul2 }}"
                        gs-x="0"
@@ -189,10 +202,13 @@
                        gs-id="w-{{ forloop.counter0|add:front_len }}"
                        data-widget-index="{{ forloop.counter0|add:front_len }}">
                     <div class="grid-stack-item-content"
-                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                         data-name="{{ slot.label }}"
+                         {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                         {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
                          title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
-                      <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
-                              aria-label="{% trans 'Flag for removal' %}">&times;</button>
+                      {% if not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                              aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
                       <span class="nbx-rd-label">{{ slot.label }}</span>
                     </div>
                   </div>
@@ -204,6 +220,7 @@
               {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
             </div>
           </div>
+          </div>{# /.nbx-rd-faces #}
         </div>
 
         {# ---- Non-racked tray (drop zone) ---- #}
@@ -226,6 +243,9 @@
                    data-widget-index="{{ forloop.counter0|add:front_len|add:rear_len }}">
                 <div class="grid-stack-item-content"
                      {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
+                     data-name="{{ slot.label }}"
+                     {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                     {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
                      title="{{ slot.label }} ({{ slot.state }})">
                   <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                           aria-label="{% trans 'Flag for removal' %}">&times;</button>

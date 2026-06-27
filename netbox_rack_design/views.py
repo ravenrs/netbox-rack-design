@@ -187,6 +187,10 @@ def _slot_to_widget(slot):
         "u_height": float(u_height) if u_height is not None else None,
         "face": slot.get("face"),
         "label": slot.get("label"),
+        # Passive full-depth "blocked" copy on the non-mounted face: the editor JS
+        # locks it and excludes it from the save payload (the interactive tile
+        # lives on the mounted face).
+        "opposite_face": slot.get("opposite_face", False),
     }
 
 

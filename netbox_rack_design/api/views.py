@@ -220,6 +220,37 @@ class DesignViewSet(NetBoxModelViewSet):
         )
 
     @staticmethod
+    def _item_is_full_depth(item):
+        """
+        True when the item's device/device_type spans the full rack depth.
+
+        Full-depth devices occupy BOTH faces, so the editor renders (and may POST)
+        one tile per face for the same device. Resolved from device_type_id (the
+        editor stamps it on every tile), else the device's type, else the
+        referenced placement's type. Callers normalise a full-depth item's face to
+        "" so the per-face copies reconcile to a single, idempotent placement.
+        """
+        dt_id = item.get("device_type_id")
+        if dt_id:
+            dt = DeviceType.objects.filter(pk=dt_id).only("is_full_depth").first()
+            return bool(dt and dt.is_full_depth)
+        dev_id = item.get("device_id")
+        if dev_id:
+            dev = Device.objects.filter(pk=dev_id).select_related("device_type").first()
+            return bool(dev and dev.device_type and dev.device_type.is_full_depth)
+        placement_id = item.get("placement_id")
+        if placement_id:
+            p = (
+                DesignPlacement.objects.filter(pk=placement_id)
+                .select_related("device_type", "device__device_type")
+                .first()
+            )
+            if p is not None:
+                dt = p.device_type or (p.device.device_type if p.device_id else None)
+                return bool(dt and dt.is_full_depth)
+        return False
+
+    @staticmethod
     def _resolve_add_refs(item, rack, u_position, errors):
         """
         Validate the optional device_role_id / tenant_id on an 'add' item.
@@ -260,6 +291,16 @@ class DesignViewSet(NetBoxModelViewSet):
         # 'other' bucket means off-rack: no target position.
         u_position = None if face_key == "other" else item.get("u_position")
         face = "" if face_key == "other" else item.get("face") or ""
+
+        # Full-depth devices occupy BOTH faces; the editor renders one tile per
+        # face for the same device. Their face is meaningless for placement (the
+        # model treats a full-depth target_face as None -- models.py:295), so we
+        # normalise it to "" here. This makes the two per-face copies the editor
+        # submits reconcile to an IDENTICAL placement: a single row, idempotent on
+        # a no-op (no front/rear flip-flop or spurious move), never a duplicate.
+        full_depth = self._item_is_full_depth(item)
+        if full_depth:
+            face = ""
 
         # An 'add' tile is a catalog-add placement projected into this rack. When
         # it carries a placement_id (no device_id) it re-asserts an EXISTING add:
@@ -402,12 +443,15 @@ class DesignViewSet(NetBoxModelViewSet):
 
         if kind == "existing":
             # Device sits at its real position/face → no placement needed; clean
-            # up any stale move/remove this design holds for it.
+            # up any stale move/remove this design holds for it. A full-depth
+            # device occupies both faces, so we ignore the face here — otherwise
+            # its rear (or front) per-face copy would look "moved" and spawn a
+            # spurious move placement on an untouched save.
             at_real = (
                 device is not None
                 and device.rack_id == rack.pk
                 and _norm_pos(device.position) == _norm_pos(u_position)
-                and (device.face or "") == face
+                and (full_depth or (device.face or "") == face)
             )
             if at_real:
                 if existing is not None:
