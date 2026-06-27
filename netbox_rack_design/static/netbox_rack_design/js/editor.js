@@ -217,8 +217,10 @@
     [[frontGrid, frontEl], [rearGrid, rearEl], [trayGrid, trayEl]].forEach(function (pair) {
         var g = pair[0], host = pair[1];
         if (!g || !host) { return; }
-        host.querySelectorAll(".nbx-rd-state-move_out_ghost, .nbx-rd-state-remove").forEach(function (el) {
-            g.update(el, { noMove: true, locked: true });
+        host.querySelectorAll(
+            ".nbx-rd-state-move_out_ghost, .nbx-rd-state-remove, .nbx-rd-opposite"
+        ).forEach(function (el) {
+            g.update(el, { noMove: true, noResize: true, locked: true });
         });
     });
 
@@ -332,6 +334,9 @@
                 var st = state[idx];
                 if (!st) { return; }
                 var w = st.widget;
+                // Passive full-depth "blocked" copies never move and never spawn
+                // a ghost — skip them entirely.
+                if (w.opposite_face) { return; }
                 // Only ORIGINALLY-existing real devices get a synthesised ghost.
                 // Pre-existing move_in tiles keep their static server ghost; adds
                 // and ghosts are excluded.
@@ -630,6 +635,13 @@
             // Skip ghost tiles entirely — they merely visualise the vacated U of
             // a move that the move_in tile already represents.
             if (w.kind === "move_out_ghost") {
+                return;
+            }
+
+            // Skip the passive full-depth "blocked" copy: it is only an occupancy
+            // indicator on the non-mounted face. The interactive tile on the
+            // mounted face carries this device/placement into the payload.
+            if (w.opposite_face) {
                 return;
             }
 
@@ -1141,7 +1153,9 @@
             var roleId = (roleEl && roleEl.value) ? parseInt(roleEl.value, 10) : null;
             var tenantId = (tenantEl && tenantEl.value) ? parseInt(tenantEl.value, 10) : null;
             var roleName = (roleEl && roleEl.value && roleEl.selectedOptions.length)
-                ? roleEl.selectedOptions[0].textContent : "";
+                ? roleEl.selectedOptions[0].textContent.trim() : "";
+            var tenantName = (tenantEl && tenantEl.value && tenantEl.selectedOptions.length)
+                ? tenantEl.selectedOptions[0].textContent.trim() : "";
 
             // Register a synthetic add widget + state entry; stamp the tile index.
             var newIdx = state.length;
@@ -1184,6 +1198,11 @@
                 label + " (U" + Math.round(uPosition) + ", add"
                     + (roleName ? ", role: " + roleName : "") + ")"
             );
+            // Hover-card data: planned adds show the same name/role/tenant card as
+            // existing tiles, sourced from the label + left-rail selections.
+            content.setAttribute("data-name", label);
+            if (roleName) { content.setAttribute("data-role-name", roleName); }
+            if (tenantName) { content.setAttribute("data-tenant-name", tenantName); }
             var btn = document.createElement("button");
             btn.type = "button";
             btn.className = "nbx-rd-remove-btn";
@@ -1220,23 +1239,133 @@
         }
     })();
 
-    // ---- Face toggle (mirrors design_elevation.html) -----------------------
+    // ---- Independent face toggles ------------------------------------------
+    // Front and Rear are independent on/off switches: BOTH faces can be visible
+    // at once (network gear front, servers rear). Each button toggles only its
+    // own face and reflects that face's state via .active. We never allow hiding
+    // the LAST visible face — turning it off is a no-op so at least one stays on.
     var faceFront = document.getElementById("nbx-rd-face-front");
     var faceRear = document.getElementById("nbx-rd-face-rear");
     var btnFront = document.getElementById("nbx-rd-show-front");
     var btnRear = document.getElementById("nbx-rd-show-rear");
-    function showFace(isFront) {
-        if (faceFront) { faceFront.style.display = isFront ? "" : "none"; }
-        if (faceRear) { faceRear.style.display = isFront ? "none" : ""; }
-        if (btnFront) { btnFront.classList.toggle("active", isFront); }
-        if (btnRear) { btnRear.classList.toggle("active", !isFront); }
-        // Re-measure the rack height for the catalog card (the newly-shown face's
-        // grid is what we size against).
+
+    function faceVisible(faceEl) {
+        return !!faceEl && faceEl.style.display !== "none";
+    }
+
+    function setFace(faceEl, btnEl, on) {
+        if (faceEl) { faceEl.style.display = on ? "" : "none"; }
+        if (btnEl) {
+            btnEl.classList.toggle("active", on);
+            btnEl.setAttribute("aria-pressed", on ? "true" : "false");
+        }
+    }
+
+    function toggleFace(faceEl, btnEl, otherFaceEl) {
+        if (!faceEl) { return; }
+        var on = faceVisible(faceEl);
+        // Refuse to hide the last visible face.
+        if (on && !faceVisible(otherFaceEl)) { return; }
+        setFace(faceEl, btnEl, !on);
+        // Re-measure the rack height for the catalog card against a visible grid.
         var pal = document.getElementById("nbx-rd-palette");
         if (pal && typeof pal.nbxSyncRackHeight === "function") { pal.nbxSyncRackHeight(); }
     }
-    if (btnFront) { btnFront.addEventListener("click", function () { showFace(true); }); }
-    if (btnRear) { btnRear.addEventListener("click", function () { showFace(false); }); }
+
+    if (btnFront) {
+        btnFront.addEventListener("click", function () {
+            toggleFace(faceFront, btnFront, faceRear);
+        });
+    }
+    if (btnRear) {
+        btnRear.addEventListener("click", function () {
+            toggleFace(faceRear, btnRear, faceFront);
+        });
+    }
+
+    // ---- Device hover card (name / role / tenant) --------------------------
+    // A single body-appended floating card, shown on hover over any device tile
+    // in either face (and the tray). It reads ONLY data-* attributes the
+    // template/JS stamped on each tile — no network calls. pointer-events:none
+    // and hide-on-pointerdown keep it clear of dragging and the remove/favorite
+    // buttons. Missing fields (e.g. no tenant) are simply omitted.
+    (function () {
+        var hcard = document.createElement("div");
+        hcard.className = "nbx-rd-hovercard";
+        hcard.setAttribute("role", "tooltip");
+        hcard.style.display = "none";
+        document.body.appendChild(hcard);
+        var currentContent = null;
+
+        function hideCard() {
+            hcard.style.display = "none";
+            currentContent = null;
+        }
+
+        function fillCard(content) {
+            var name = content.getAttribute("data-name");
+            var role = content.getAttribute("data-role-name");
+            var tenant = content.getAttribute("data-tenant-name");
+            if (!name && !role && !tenant) { return false; }
+            hcard.textContent = "";
+            if (name) {
+                var n = document.createElement("div");
+                n.className = "nbx-rd-hovercard-name";
+                n.textContent = name;
+                hcard.appendChild(n);
+            }
+            [["Role", role], ["Tenant", tenant]].forEach(function (pair) {
+                if (!pair[1]) { return; }
+                var row = document.createElement("div");
+                row.className = "nbx-rd-hovercard-row";
+                var key = document.createElement("span");
+                key.className = "nbx-rd-hovercard-key";
+                key.textContent = pair[0];
+                var val = document.createElement("span");
+                val.textContent = pair[1];
+                row.appendChild(key);
+                row.appendChild(val);
+                hcard.appendChild(row);
+            });
+            return true;
+        }
+
+        function positionCard(target) {
+            var r = target.getBoundingClientRect();
+            hcard.style.display = "block";
+            var cw = hcard.offsetWidth;
+            var ch = hcard.offsetHeight;
+            var left = r.right + 8;
+            if (left + cw > window.innerWidth - 8) {
+                left = r.left - cw - 8;   // flip to the tile's left edge
+            }
+            if (left < 8) { left = 8; }
+            var top = r.top;
+            if (top + ch > window.innerHeight - 8) {
+                top = window.innerHeight - ch - 8;
+            }
+            if (top < 8) { top = 8; }
+            hcard.style.left = left + "px";
+            hcard.style.top = top + "px";
+        }
+
+        root.addEventListener("pointerover", function (e) {
+            var content = e.target.closest && e.target.closest(".grid-stack-item-content");
+            if (!content || content === currentContent) { return; }
+            if (!fillCard(content)) { hideCard(); return; }
+            currentContent = content;
+            positionCard(content);
+        });
+        root.addEventListener("pointerout", function (e) {
+            var content = e.target.closest && e.target.closest(".grid-stack-item-content");
+            if (!content) { return; }
+            if (e.relatedTarget && content.contains(e.relatedTarget)) { return; }
+            hideCard();
+        });
+        // Get out of the way the instant a drag/click starts, or on scroll.
+        root.addEventListener("pointerdown", hideCard, true);
+        window.addEventListener("scroll", hideCard, true);
+    })();
 
     // ---- Unsaved-changes guard ---------------------------------------------
     window.addEventListener("beforeunload", function (event) {

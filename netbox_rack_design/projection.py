@@ -114,6 +114,7 @@ def _slot(
     device=None,
     device_type=None,
     placement=None,
+    opposite_face=False,
 ):
     """Build a single projected-slot dict following the documented contract."""
     return {
@@ -125,6 +126,11 @@ def _slot(
         "device": device,
         "device_type": device_type,
         "placement": placement,
+        # True only for the passive "blocked" copy of a full-depth device on the
+        # face it is NOT mounted on (mirrors core's draw_device_rear: the name is
+        # shown but the fill is the hatched "blocked" pattern, no state/role
+        # color). The PRIMARY (mounted-face) copy keeps opposite_face=False.
+        "opposite_face": opposite_face,
     }
 
 
@@ -151,6 +157,11 @@ def _normalize_face(value):
     return DeviceFaceChoices.FACE_FRONT
 
 
+def _is_full_depth(device_type):
+    """True when a device type spans the full rack depth (occupies both faces)."""
+    return bool(device_type is not None and device_type.is_full_depth)
+
+
 def _existing_slots(rack, face, excluded_device_ids):
     """
     Real installed devices on one face, as 'existing' slots.
@@ -168,6 +179,12 @@ def _existing_slots(rack, face, excluded_device_ids):
         if device.pk in excluded_device_ids:
             continue
         u_height = Decimal(unit.get("height") or device.device_type.u_height or 1)
+        # get_rack_units returns full-depth devices on BOTH faces. On the face the
+        # device is NOT mounted on, mark the slot as the passive "blocked" copy --
+        # exactly mirroring core draw_face(): `device.face == face` -> colored,
+        # else -> blocked hatch. (Non-full-depth devices only ever come back on
+        # their own face, so this is never True for them.)
+        opposite = _is_full_depth(device.device_type) and (device.face or "") != face
         slots.append(
             _slot(
                 u_position=Decimal(unit["id"]),
@@ -177,6 +194,7 @@ def _existing_slots(rack, face, excluded_device_ids):
                 state=ProjectedSlotState.EXISTING,
                 device=device,
                 device_type=device.device_type,
+                opposite_face=opposite,
             )
         )
     return slots
@@ -216,10 +234,33 @@ def project_rack(design, rack):
     rear = _existing_slots(rack, DeviceFaceChoices.FACE_REAR, design_device_ids)
     non_racked = []
 
-    def _append(slot):
+    def _append(slot, full_depth=False):
+        # A position-less slot (e.g. a target-less add/move) is never face-mirrored.
         if slot["u_position"] is None:
             non_racked.append(slot)
-        elif slot["face"] == DeviceFaceChoices.FACE_REAR:
+            return
+        # Full-depth devices physically occupy BOTH faces, so a design slot for
+        # one must render on each face (mirroring how core get_rack_units already
+        # returns existing full-depth devices on both faces). Emit one slot PER
+        # face -- identical state/label/device/device_type/placement/U, differing
+        # only in `face` -- so each face elevation colors/edits it the same and the
+        # save path (which dedupes by placement_id) still resolves to ONE
+        # placement.
+        if full_depth:
+            # The slot's own `face` is the device's real/target (mounted) face;
+            # that copy keeps its normal colored state. The OTHER face copy is the
+            # passive "blocked" indicator (opposite_face=True).
+            mounted = slot["face"]
+            front_slot = dict(slot)
+            front_slot["face"] = DeviceFaceChoices.FACE_FRONT
+            front_slot["opposite_face"] = mounted != DeviceFaceChoices.FACE_FRONT
+            rear_slot = dict(slot)
+            rear_slot["face"] = DeviceFaceChoices.FACE_REAR
+            rear_slot["opposite_face"] = mounted != DeviceFaceChoices.FACE_REAR
+            front.append(front_slot)
+            rear.append(rear_slot)
+            return
+        if slot["face"] == DeviceFaceChoices.FACE_REAR:
             rear.append(slot)
         else:
             front.append(slot)
@@ -238,7 +279,8 @@ def project_rack(design, rack):
                 state=ProjectedSlotState.ADD,
                 device_type=device_type,
                 placement=placement,
-            )
+            ),
+            full_depth=_is_full_depth(device_type),
         )
 
     # --- moves & removes --------------------------------------------------------
@@ -246,6 +288,7 @@ def project_rack(design, rack):
         device = placement.device
         device_type = _device_type_of(placement)
         u_height = _u_height(device_type)
+        full_depth = _is_full_depth(device_type)
 
         if placement.kind == DesignPlacementKindChoices.KIND_REMOVE:
             # Flag the device's current slot (only if it lives in this rack).
@@ -262,7 +305,8 @@ def project_rack(design, rack):
                     device=device,
                     device_type=device_type,
                     placement=placement,
-                )
+                ),
+                full_depth=full_depth,
             )
             continue
 
@@ -279,7 +323,8 @@ def project_rack(design, rack):
                     device=device,
                     device_type=device_type,
                     placement=placement,
-                )
+                ),
+                full_depth=full_depth,
             )
         if placement.target_rack_id == rack.pk:
             position = placement.target_position
@@ -293,7 +338,8 @@ def project_rack(design, rack):
                     device=device,
                     device_type=device_type,
                     placement=placement,
-                )
+                ),
+                full_depth=full_depth,
             )
 
     # Order each racked face top-of-rack first (descending U), matching

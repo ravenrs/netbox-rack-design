@@ -5,6 +5,94 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-27
+
+### Release Summary
+**See both faces at once** — Rack Design's elevation editor now renders front and rear side by side.
+
+0.5.0 made the device-type catalog personal; 0.6.0 makes the rack elevation read like the real
+thing. This minor, fully backward-compatible release replaces the single-face view with
+**independent Front and Rear toggles**: both faces render at the same time, so network gear on
+the front and servers on the rear are visible together. The toggles are independent on/off
+switches (you can show either or both) and the editor **never lets you hide both faces** at once.
+Hovering any tile now pops a **device hover card** showing the device's name, role, and tenant —
+gracefully omitting whichever fields are empty. Finally, **full-depth devices are now honored
+across both faces**, matching NetBox core's own rack-elevation rendering.
+
+There are **no breaking changes** and **no database migration** in this release — the changes are
+limited to the projection layer, the editor template/JS/CSS, the save-layout payload, and two new
+template filters.
+
+#### Independent Front/Rear face toggles
+The elevation editor now exposes Front and Rear as **independent on/off toggles** and renders both
+faces side by side, so you can plan the front and rear of a rack together instead of flipping
+between them. Either face can be hidden on its own, but the editor **always keeps at least one
+face visible** — it will not allow both to be turned off.
+
+#### Device hover card
+Hovering a placed tile now shows a **hover card** with the device's **name, role, and tenant**.
+When a field isn't set (no role, or no tenant), it is simply omitted from the card rather than
+shown blank. Two new template filters, `slot_role_name` and `slot_tenant_name`, resolve the
+display values.
+
+#### Full-depth devices across both faces
+**Full-depth devices are now correctly shown on both faces**, matching NetBox core's rack-elevation
+behaviour. A full-depth device renders its normal coloured state on the face it is mounted on,
+while the **opposite face** shows core's "blocked" diagonal hatch (the same `#f7f7f7`/`#ffc0c0`
+45° stripe pattern core uses) labelled with the device name. The opposite-face rendering is
+**passive**: it is not draggable, carries no `×`/star controls, and is **excluded from the save
+payload**, so it can never create a duplicate `DesignPlacement`. This applies to existing devices
+and across every design kind (add, move-in, move-out ghost, and remove), driven by a new
+`opposite_face` flag on the projection slot contract and the editor payload.
+
+### Added
+- **Independent Front/Rear face toggles** in the elevation editor: both faces render side by side
+  and each can be toggled on/off independently, with a guard that **never allows both faces to be
+  hidden** (`design_editor.html`, `editor.js`, `editor.css`).
+- **Device hover card** on placed tiles showing the device **name, role, and tenant**, omitting
+  empty fields, backed by two new template filters `slot_role_name` and `slot_tenant_name`
+  (`templatetags/rack_design.py`).
+- New `opposite_face` flag on the projection slot contract and the editor widget payload so
+  full-depth devices can be represented on the face they do not occupy.
+- Tests covering full-depth opposite-face projection and the new behaviour
+  (`tests/test_fulldepth.py`).
+
+### Fixed
+- **Full-depth devices now correctly occupy both faces**, matching NetBox core's rack-elevation
+  rendering. The mounted face shows the normal coloured state; the opposite face shows core's
+  "blocked" diagonal hatch (`#f7f7f7`/`#ffc0c0`, 45°) with the device name. The opposite-face
+  tile is passive — not draggable, no `×`/star controls — and is **excluded from the save
+  payload**, so it never creates a duplicate `DesignPlacement`. Applies to existing devices and
+  to all design kinds (add / move-in / move-out ghost / remove) (`projection.py`, `views.py`,
+  `editor.js`, `editor.css`).
+
+### Changed
+- The elevation editor now renders **both rack faces simultaneously** instead of a single face at
+  a time (see the independent toggles above).
+
+### Deprecated
+- N/A
+
+### Removed
+- N/A
+
+### Security
+- N/A
+
+### Upgrade
+`pip install -U netbox-rack-design` and restart NetBox.
+
+- **No database migration is required** this release — `python manage.py migrate` is a no-op for
+  this plugin (the changes are limited to the projection layer, editor template/JS/CSS, the
+  save-layout payload, and two template filters; no models changed).
+- **Run `python manage.py collectstatic`** — the editor's bundled JS/CSS were updated for the
+  independent face toggles, the device hover card, and the full-depth opposite-face rendering, so
+  the new static assets must be collected for the editor to render correctly.
+- **No configuration changes** are needed — existing `PLUGINS_CONFIG` settings continue to work
+  unchanged.
+
+---
+
 ## [0.5.0] - 2026-06-26
 
 ### Release Summary
