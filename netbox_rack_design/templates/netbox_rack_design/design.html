@@ -125,7 +125,70 @@
 <div class="row mb-3">
   <div class="col col-md-12">
     <div class="card">
-      <h2 class="card-header">{% trans "Racks" %}</h2>
+      <h2 class="card-header">
+        {% trans "Racks" %}
+        {% if scoped_racks or perms.netbox_rack_design.change_design %}
+          <div class="card-actions">
+            {% if scoped_racks %}
+            <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=object.pk %}"
+               class="btn btn-ghost-primary btn-sm">
+              <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "View elevation" %}
+            </a>
+            {% endif %}
+            {% if perms.netbox_rack_design.change_design %}
+            {# Targets the default (no-rack) editor route so it works even when #}
+            {# the design has no scoped racks yet (add the first rack inside).  #}
+            <a href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=object.pk %}"
+               class="btn btn-ghost-primary btn-sm">
+              <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Open editor" %}
+            </a>
+            {% endif %}
+          </div>
+        {% endif %}
+      </h2>
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th>{% trans "Rack" %}</th>
+            <th>{% trans "Site" %}</th>
+            <th>{% trans "Location" %}</th>
+            <th class="text-end">{% trans "Actions" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for rack in scoped_racks %}
+            <tr>
+              <td>{{ rack|linkify }}</td>
+              <td>{{ rack.site|linkify|placeholder }}</td>
+              <td>{{ rack.location|linkify|placeholder }}</td>
+              <td class="text-end">
+                <a href="{% url 'plugins:netbox_rack_design:design_elevation_rack' pk=object.pk rack_id=rack.pk %}"
+                   class="btn btn-sm btn-outline-primary">
+                  <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "View elevation" %}
+                </a>
+                {% if perms.netbox_rack_design.change_design %}
+                  <a href="{% url 'plugins:netbox_rack_design:design_editor' pk=object.pk rack_id=rack.pk %}"
+                     class="btn btn-sm btn-outline-secondary">
+                    <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Edit layout" %}
+                  </a>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="4" class="text-muted">{% trans "No racks in scope yet" %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">{% trans "Affected racks" %}</h2>
       <table class="table table-hover">
         <thead>
           <tr>
@@ -140,7 +203,7 @@
               <td>{{ rack|linkify }}</td>
               <td>{{ rack.site|linkify|placeholder }}</td>
               <td class="text-end">
-                <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=object.pk rack_id=rack.pk %}"
+                <a href="{% url 'plugins:netbox_rack_design:design_elevation_rack' pk=object.pk rack_id=rack.pk %}"
                    class="btn btn-sm btn-outline-primary">
                   <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "View elevation" %}
                 </a>

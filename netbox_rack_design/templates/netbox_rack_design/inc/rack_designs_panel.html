@@ -18,7 +18,7 @@
           <td>{% badge design.get_status_display bg_color=design.get_status_color %}</td>
           <td>{{ design.rack_placement_count }}</td>
           <td>
-            <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=design.pk rack_id=rack.pk %}">
+            <a href="{% url 'plugins:netbox_rack_design:design_elevation_rack' pk=design.pk rack_id=rack.pk %}">
               {% trans "View projected elevation" %}
             </a>
           </td>

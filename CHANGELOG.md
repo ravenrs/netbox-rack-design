@@ -5,6 +5,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-29
+
+### Release Summary
+**One design, every rack it touches** — Rack Design grows from a single-rack editor into a multi-rack workspace.
+
+0.6.0 made a single rack's elevation read like the real thing; 0.7.0 lets a **design span multiple racks**
+and reworks the editor around that. This minor, fully backward-compatible release adds an explicit
+**rack scope** to each design (a `racks` set, validated to the design's site), renders **all of a design's
+racks side by side** in one editor with a single design-level Save, and adds a **read-only elevation view**
+that shows the whole projected design — every rack, both faces — without an editing surface. It also ships
+a substantial editor-UX round: a redesigned, collapsible **tool drawer** with three independent
+Device / Favorites / Racks panels, a compact one-line **role + tenant** toolbar merged with the state legend,
+and an **empty-state** editor that walks you through adding your first rack. As always, the editor only
+composes **design placements**; your live `Device` and `Rack` records are never modified.
+
+This release adds three **additive, backward-compatible** migrations: `0004` adds the `Design.racks`
+relationship, `0005` seeds it from the racks each existing design already touches, and `0006` adds a
+per-user rack-visibility table. There are **no breaking changes** — existing designs, placements, the REST
+API, and GraphQL all continue to work, and the migrations reverse cleanly.
+
+#### Multi-rack designs
+A design now carries an explicit **rack scope** — a set of racks (`Design.racks`) the design plans against,
+validated to live in the design's own site. Migration `0005` backfills this from the distinct target racks
+of each design's existing placements, so every current design keeps exactly the racks it already touches.
+New REST endpoints manage the scope: `designs/<pk>/add-rack/` (enforces same-site) and
+`designs/<pk>/remove-rack/`. Removing a rack is **destructive and confirmed**: it returns `409` with the
+list of placements that would be affected unless called with `confirm: true`, at which point it deletes the
+placements targeting that rack and detaches it in a single transaction.
+
+#### Multi-rack editor workspace
+The editor is now a **design-level workspace** that renders every visible scoped rack **side by side**
+instead of one rack at a time, with a single Save that persists the whole design's layout at once. The old
+single-rack tab switcher is gone. Each rack renders through a shared `inc/rack_block.html` partial (the same
+markup the read-only view uses), and a per-user **`HiddenDesignRack`** store lets you hide racks you aren't
+working on without changing the design — with `hidden-design-racks/` list, `toggle/`, and `show-all/`
+endpoints backing it. Opening a design with no racks yet shows an **empty state** with an "Add your first
+rack" entry point instead of an error.
+
+#### Read-only elevation view
+A new **read-only elevation view** at `designs/<pk>/elevation/` renders the entire projected design — all
+scoped racks, both faces, with full-depth devices hatched on their opposite face and the device hover card —
+with no editing controls. It shares the exact projection the editor uses, so the two always agree. The old
+per-rack elevation URL now redirects to this view.
+
+#### Editor UX overhaul
+- **Tool drawer.** The editor's side tools are now a collapsible push-sidebar split into **three independent
+  toggles — Device, Favorites, and Racks** — that can be opened in any combination and stack side by side as
+  columns; the open/closed state of each is persisted in `localStorage`.
+- **Role + tenant toolbar.** The planned-add **device role** and **tenant** selectors now live in a compact,
+  always-visible one-line toolbar merged with the state legend, removing the previous duplicate hint.
+- **Layout polish.** Drawer columns flex-stretch to match the rendered rack heights, so the catalog scrolls
+  internally instead of overshooting, at both tall and short viewports.
+
+### Added
+- **Multi-rack designs.** A new `Design.racks` many-to-many rack scope (validated to the design's site),
+  with migration `0004` (schema) and `0005` (seed each design's scope from its placements' target racks). The
+  scope is editable through the design form (a site-filtered rack selector) and exposed on the REST API
+  serializer.
+- **Rack-scope REST actions:** `designs/<pk>/add-rack/` (same-site enforced) and `designs/<pk>/remove-rack/`
+  (destructive/confirmed — returns `409` + the affected placements unless `confirm: true`, then deletes the
+  rack's placements and detaches it in one transaction).
+- **Multi-rack editor workspace** rendering all visible scoped racks side by side via a shared
+  `inc/rack_block.html` partial, with one design-level Save (`design_editor.html`, `editor.js`,
+  `editor_panels.js`, `editor.css`).
+- **Read-only elevation view** at `designs/<pk>/elevation/` showing the whole projected design (all racks,
+  both faces, full-depth hatch, hover card) with no editing controls (`design_elevation.html`).
+- **Per-user rack visibility.** A `HiddenDesignRack` model (migration `0006`) lets each user hide scoped racks
+  from their own editor view, with `hidden-design-racks/` list, `toggle/`, and `show-all/` endpoints. Hiding a
+  rack is per-user and never alters the design.
+- **Editor tool drawer** with three independent Device / Favorites / Racks toggles (any combination, stacked
+  as columns), persisted in `localStorage`, and an **empty-state** with an "Add your first rack" entry point.
+
+### Changed
+- The editor now renders an entire design's racks **side by side in one workspace** with a single Save,
+  replacing the previous single-rack-at-a-time tab switcher.
+- The planned-add **device role** and **tenant** selectors moved into a compact always-visible one-line
+  toolbar merged with the state legend.
+- The per-rack elevation URL now **redirects** to the new design-level read-only elevation view.
+
+### Fixed
+- N/A
+
+### Deprecated
+- N/A
+
+### Removed
+- The single-rack elevation grid partial (`inc/elevation_grid.html`) and the editor's single-rack tab
+  switcher, superseded by the shared `inc/rack_block.html` and the multi-rack workspace.
+
+### Security
+- N/A
+
+### Upgrade
+`pip install -U netbox-rack-design` and restart NetBox.
+
+- **Run `python manage.py migrate`** — this release adds migrations `0004_design_racks` (the `Design.racks`
+  relationship), `0005_seed_design_racks` (seeds each existing design's rack scope from its placements'
+  target racks), and `0006_hiddendesignrack` (a per-user rack-visibility table). All three are **additive**
+  (no changes to existing columns, no destructive data rewrite), safe against existing designs, and reverse
+  cleanly. There are **no breaking changes**.
+- **Run `python manage.py collectstatic`** — the editor's bundled JS/CSS were reworked for the multi-rack
+  workspace, the tool drawer, and the new shared rack partial (new `editor_panels.js`), so the updated static
+  assets must be collected for the editor to render correctly.
+- **No configuration changes** are needed — existing `PLUGINS_CONFIG` settings continue to work unchanged.
+
+---
+
 ## [0.6.0] - 2026-06-27
 
 ### Release Summary

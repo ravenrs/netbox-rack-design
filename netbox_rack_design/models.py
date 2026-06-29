@@ -18,7 +18,13 @@ from netbox.models import NetBoxModel, PrimaryModel
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
 
-__all__ = ("DesignGroup", "Design", "DesignPlacement", "FavoriteDeviceType")
+__all__ = (
+    "DesignGroup",
+    "Design",
+    "DesignPlacement",
+    "FavoriteDeviceType",
+    "HiddenDesignRack",
+)
 
 
 class DesignGroup(NetBoxModel):
@@ -111,6 +117,19 @@ class Design(PrimaryModel):
         blank=True,
     )
 
+    # --- scoping --------------------------------------------------------------
+    # The explicit set of racks this design plans across. Historically the racks
+    # a design touched were only implicit (the distinct ``target_rack`` of its
+    # placements); this makes the planning scope first-class. Note: the related
+    # name is ``scoped_designs`` (not ``rack_designs``, which the ``site`` FK
+    # above already claims on dcim.Site).
+    racks = models.ManyToManyField(
+        to="dcim.Rack",
+        related_name="scoped_designs",
+        blank=True,
+        help_text="Racks this design plans across. Every rack must belong to the design's site.",
+    )
+
     # --- optional grouping ----------------------------------------------------
     group = models.ForeignKey(
         to="netbox_rack_design.DesignGroup",
@@ -177,6 +196,21 @@ class Design(PrimaryModel):
                 raise ValidationError(
                     "Another version of this plan is already approved. "
                     "Only one version may be approved at a time."
+                )
+
+        # Every scoped rack must belong to this design's site (consistent with the
+        # site-scoping of placements). M2M-timing caveat: a many-to-many relation
+        # cannot be read on an unsaved instance (pk=None) -- Django raises before
+        # the through-rows exist -- so this check only runs once the design is
+        # persisted (i.e. on edits). For a brand-new design the racks are attached
+        # only after the initial save, so the form/serializer layer (a later phase)
+        # must re-run full_clean() post-save to enforce this on create.
+        if self.pk and self.site_id:
+            offending = self.racks.exclude(site_id=self.site_id)
+            if offending.exists():
+                names = ", ".join(str(rack) for rack in offending)
+                raise ValidationError(
+                    {"racks": f"These racks are not in the design's site: {names}."}
                 )
 
 
@@ -339,3 +373,50 @@ class FavoriteDeviceType(models.Model):
 
     def __str__(self):
         return f"{self.user}: {self.device_type}"
+
+
+class HiddenDesignRack(models.Model):
+    """
+    A per-user editor view-state row recording that ``user`` has HIDDEN ``rack``
+    while working on ``design`` in the multi-rack workspace.
+
+    We store HIDDEN rows (not visible ones) so the natural default -- no rows --
+    means "all of the design's scoped racks are visible". Hiding/showing is a
+    purely personal, transient preference: it never affects another user, never
+    affects the design's data, and never changes the design.racks scope.
+
+    Deliberately a plain ``django.db.models.Model`` (NOT a NetBoxModel), for the
+    same reason as FavoriteDeviceType: toggling visibility must not write an
+    ObjectChange row, index for search, or carry custom fields/tags.
+    """
+
+    user = models.ForeignKey(
+        to=settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="rack_design_hidden_racks",
+    )
+    design = models.ForeignKey(
+        to="netbox_rack_design.Design",
+        on_delete=models.CASCADE,
+        related_name="hidden_rack_states",
+    )
+    rack = models.ForeignKey(
+        to="dcim.Rack",
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("user", "design", "rack")
+        verbose_name = "hidden design rack"
+        verbose_name_plural = "hidden design racks"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "design", "rack"),
+                name="%(app_label)s_%(class)s_unique_user_design_rack",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user}: {self.design} hides {self.rack}"

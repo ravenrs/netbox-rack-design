@@ -1,5 +1,8 @@
 """REST API serializers for NetBox Rack Design."""
 
+from dcim.api.serializers import RackSerializer
+from dcim.models import Rack
+from netbox.api.fields import SerializedPKRelatedField
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
@@ -11,6 +14,9 @@ __all__ = (
     "DesignPlacementSerializer",
     "SaveLayoutSerializer",
     "FavoriteToggleSerializer",
+    "DesignRackScopeSerializer",
+    "HiddenRackToggleSerializer",
+    "HiddenRackShowAllSerializer",
 )
 
 
@@ -32,12 +38,21 @@ class DesignSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rack_design-api:design-detail"
     )
+    # Brief Rack representations on read; accepts a list of rack PKs on write
+    # (SerializedPKRelatedField is the writable-M2M-nested pattern core uses).
+    racks = SerializedPKRelatedField(
+        queryset=Rack.objects.all(),
+        serializer=RackSerializer,
+        nested=True,
+        required=False,
+        many=True,
+    )
 
     class Meta:
         model = Design
         fields = (
             "id", "url", "display", "title", "site", "status", "summary", "link",
-            "version", "root", "based_on", "sequence", "depends_on", "group",
+            "version", "root", "based_on", "sequence", "depends_on", "racks", "group",
             "description", "comments", "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "title", "version", "status")
@@ -135,3 +150,33 @@ class FavoriteToggleSerializer(serializers.Serializer):
     """Body for POST .../favorite-device-types/toggle/."""
 
     device_type_id = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
+# Multi-rack workspace request serializers (Phase A)
+#
+# Validate only the shape of the request body. The viewset/action enforces the
+# same-site rule, object permissions, and user scoping.
+# ---------------------------------------------------------------------------
+
+
+class DesignRackScopeSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/add-rack/ and .../remove-rack/."""
+
+    rack_id = serializers.IntegerField()
+    # remove-rack only: must be true to confirm a destructive removal when the
+    # rack still has planned placements targeting it. Ignored by add-rack.
+    confirm = serializers.BooleanField(required=False, default=False)
+
+
+class HiddenRackToggleSerializer(serializers.Serializer):
+    """Body for POST .../hidden-design-racks/toggle/ (per-user view state)."""
+
+    design_id = serializers.IntegerField()
+    rack_id = serializers.IntegerField()
+
+
+class HiddenRackShowAllSerializer(serializers.Serializer):
+    """Body for POST .../hidden-design-racks/show-all/ (per-user view state)."""
+
+    design_id = serializers.IntegerField()

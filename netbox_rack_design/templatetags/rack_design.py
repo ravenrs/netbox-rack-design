@@ -2,8 +2,9 @@
 Template filters for the read-only projected rack elevation.
 
 These helpers translate a projected slot dict (see ``projection.py``) and the
-target rack into the GridStack half-U grid geometry used by
-``design_elevation.html``. The grid runs at half-U resolution: every rack unit
+target rack into the GridStack half-U grid geometry used by the shared per-rack
+block (``inc/rack_block.html``, rendered by both the read-only elevation and the
+editor). The grid runs at half-U resolution: every rack unit
 is two grid rows, so ``gs-h`` / ``gs-max-row`` are the U values doubled. Adapted
 from netbox-reorder-rack's ``templatetags/rack.py``.
 """

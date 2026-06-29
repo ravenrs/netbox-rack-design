@@ -1,16 +1,20 @@
 /*
- * Interactive single-rack layout editor for NetBox Rack Design (Stage 2, slice
- * 2a: MOVE + REMOVE on a single rack). Adapted from netbox-reorder-rack's
- * rack.js, but driven by the projection contract:
+ * Interactive MULTI-RACK layout editor for NetBox Rack Design (Stage 2, slice
+ * 2d Phase B). Renders EVERY currently-visible scoped rack of a design side by
+ * side and drives them from a SINGLE design-level Save. Adapted from the
+ * original single-rack editor; the per-rack behaviour is unchanged, it is just
+ * factored into an initRack(block) function that is called for every rack block.
  *
- *   - The page embeds a JSON payload in <script id="rd-editor-data"> — one
- *     widget per projected slot, in the order (*front, *rear, *non_racked).
- *     Each grid tile carries data-widget-index pointing back into that array.
- *   - We init three NON-static GridStacks (front, rear, non-racked tray) so a
- *     device can be dragged vertically, between faces, or off the rack.
- *   - On Save we walk the live DOM, derive each item's USER-intent kind
- *     (existing / move / remove), compute u_position via the inverse of the
- *     server-side slot_gs_y filter, and POST a diff to data-save-url.
+ *   - The page embeds one JSON payload per rack in <script id="rd-editor-data-
+ *     <rackId>"> — one widget per projected slot, in the order (*front, *rear,
+ *     *non_racked). Each grid tile carries data-widget-index pointing back into
+ *     that rack's array.
+ *   - Each rack block inits three NON-static GridStacks (front, rear, tray) so a
+ *     device can be dragged vertically, between that rack's faces, or off it.
+ *   - The catalog + quick-access columns are SHARED; dragging a device type into
+ *     a face plans a new add on whichever rack owns the drop-target grid.
+ *   - On Save we walk every rack block's live DOM, build a per-rack payload, and
+ *     POST a single dict keyed by rack_id to data-save-url.
  *
  * No real Devices are mutated server-side; the endpoint only writes
  * DesignPlacement rows.
@@ -27,11 +31,8 @@
         return;
     }
 
-    // ---- Context from the template -----------------------------------------
+    // ---- Shared context from the template ----------------------------------
     var saveUrl = root.getAttribute("data-save-url");
-    var rackId = parseInt(root.getAttribute("data-rack-id"), 10);
-    var rackUHeight = parseInt(root.getAttribute("data-u-height"), 10);
-    var descUnits = root.getAttribute("data-desc-units") === "true";
 
     // CSRF token. NetBox sets CSRF_COOKIE_HTTPONLY=True, so the cookie is NOT
     // readable from JS — we cannot rely on document.cookie. We resolve it from
@@ -48,31 +49,9 @@
         return input ? input.value : "";
     }
 
-    // ---- Hydrate the widget payload (index -> widget) ----------------------
-    var widgets = [];
-    var dataEl = document.getElementById("rd-editor-data");
-    try {
-        widgets = JSON.parse(dataEl.textContent || "[]");
-    } catch (e) {
-        widgets = [];
-    }
-
-    // Per-widget runtime state, keyed by global index. We snapshot the ORIGINAL
-    // (u_position, face) so at save time we can tell "moved" from "unchanged".
-    var state = widgets.map(function (w) {
-        return {
-            widget: w,
-            origUPosition: w.u_position,         // number | null
-            origFace: w.face || "",              // "front" | "rear" | ""
-            // A tile projected from a pre-existing REMOVE placement arrives
-            // already flagged for removal — seed `removed` from the projected
-            // state so an untouched round-trip re-asserts the remove (rather than
-            // mis-serializing it as a move). The × button toggles this for any
-            // tile; for a `remove` tile the user can un-remove by clicking ×.
-            removed: w.kind === "remove",
-        };
-    });
-
+    // ---- Shared dirty state + Save button + toasts -------------------------
+    // changesMade is design-level: ANY edit in ANY rack enables the single Save
+    // button and arms the beforeunload guard.
     var changesMade = false;
     var saveButton = document.getElementById("rd-editor-save");
     var toastContainer = document.getElementById("rd-editor-toasts");
@@ -131,42 +110,27 @@
         }
     }
 
-    // ---- gs-y -> u_position (inverse of templatetags/rack_design.slot_gs_y) -
-    // slot_gs_y forward (H = rack_u_height*2, h = item u_height*2, u = pos*2):
-    //   desc_units : gs_y = u - 2
-    //   h > 1      : gs_y = H - u - h + 2
-    //   else       : gs_y = H - u
-    // Working in U units: y = gs_y/2, uHeight = gs_h/2, rackH = rack u_height.
-    //   desc_units : pos = y + 1
-    //   uHeight>1  : pos = rackH - y - uHeight + 1
-    //   else       : pos = rackH - y
-    function gsYToUPosition(gsY, gsH) {
-        var y = gsY / 2;
-        var uHeight = gsH / 2;
-        if (descUnits) {
-            return y + 1;
+    // ---- Shared rack-height sync -------------------------------------------
+    // The fixed left rail (catalog) + quick-access columns track the height of a
+    // VISIBLE rack elevation so they read as rack-tall. With several racks we
+    // simply measure the first visible elevation found. Recomputed on resize and
+    // when a face is toggled.
+    var layoutEl = document.querySelector(".nbx-rd-editor-layout");
+    function syncRackHeight() {
+        if (!layoutEl) { return; }
+        var grids = root.querySelectorAll(".nbx-rd-rack");
+        var h = 0;
+        for (var i = 0; i < grids.length; i++) {
+            if (grids[i].offsetParent !== null && grids[i].offsetHeight > h) {
+                h = grids[i].offsetHeight;
+            }
         }
-        if (uHeight > 1) {
-            return rackUHeight - y - uHeight + 1;
+        if (h > 80) {
+            layoutEl.style.setProperty("--nbx-rd-rack-height", h + "px");
         }
-        return rackUHeight - y;
     }
 
-    // ---- u_position -> gs-y (forward; inverse of gsYToUPosition) -------------
-    // Mirrors templatetags/rack_design.slot_gs_y (working in GridStack rows,
-    // i.e. half-U units). gsH is the tile's gs-h (= u_height * 2). Used to place
-    // a dynamically-created move_out_ghost back at a device's ORIGINAL slot.
-    function uPositionToGsY(uPosition, gsH) {
-        if (descUnits) {
-            return uPosition * 2 - 2;
-        }
-        if (gsH > 2) {
-            return rackUHeight * 2 - uPosition * 2 - gsH + 2;
-        }
-        return rackUHeight * 2 - uPosition * 2;
-    }
-
-    // ---- Initialise the three grids ----------------------------------------
+    // ---- Shared GridStack options ------------------------------------------
     function commonOptions(extra) {
         var opts = {
             cellHeight: 11,
@@ -176,7 +140,7 @@
             float: true,
             animate: true,
             disableResize: true,   // slice 2a: move only, no resize
-            acceptWidgets: true,   // allow drops between grids
+            acceptWidgets: true,   // overridden per rack to scope cross-grid drops
             removable: false,
             // Don't start a drag when the pointer goes down on a tile's remove
             // (×) button or a palette row's favorite (star) button — otherwise
@@ -189,425 +153,646 @@
         return opts;
     }
 
-    var frontEl = document.getElementById("nbx-rd-grid-front");
-    var rearEl = document.getElementById("nbx-rd-grid-rear");
-    var trayEl = document.getElementById("nbx-rd-grid-tray");
+    // ========================================================================
+    // Per-rack controller. Initialises one rack block's three grids and wires
+    // every per-rack behaviour (move ghosts, context-sensitive ×, full-depth
+    // hatch, face toggles, palette drops). Returns a small controller the shared
+    // Save uses to build that rack's slice of the multi-rack payload.
+    // ========================================================================
+    function initRack(block) {
+        var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
+        var rackUHeight = parseInt(block.getAttribute("data-u-height"), 10);
+        var descUnits = block.getAttribute("data-desc-units") === "true";
 
-    var grids = [];
-    var frontGrid = frontEl ? GridStack.init(commonOptions(), frontEl) : null;
-    var rearGrid = rearEl ? GridStack.init(commonOptions(), rearEl) : null;
-    // The tray is unbounded vertically; let dropped items float to the top.
-    var trayGrid = trayEl ? GridStack.init(commonOptions({ float: false }), trayEl) : null;
-
-    [frontGrid, rearGrid, trayGrid].forEach(function (g) {
-        if (g) { grids.push(g); }
-    });
-
-    grids.forEach(function (grid) {
-        grid.on("change", markDirty);
-        grid.on("added", markDirty);
-        grid.on("removed", markDirty);
-        grid.on("dropped", markDirty);
-    });
-
-    // Lock move_out_ghost tiles: they only visualise the U a moved device is
-    // vacating, so they must not be draggable. Also lock tiles that arrive
-    // already flagged for removal (a projected `remove` placement) — they follow
-    // the same "removed ⇒ not draggable" rule the × toggle enforces.
-    [[frontGrid, frontEl], [rearGrid, rearEl], [trayGrid, trayEl]].forEach(function (pair) {
-        var g = pair[0], host = pair[1];
-        if (!g || !host) { return; }
-        host.querySelectorAll(
-            ".nbx-rd-state-move_out_ghost, .nbx-rd-state-remove, .nbx-rd-opposite"
-        ).forEach(function (el) {
-            g.update(el, { noMove: true, noResize: true, locked: true });
-        });
-    });
-
-    // Map a face ("front"/"rear") to its grid + host so we can drop a ghost back
-    // onto the device's original face.
-    var faceGrids = {
-        front: { grid: frontGrid, host: frontEl },
-        rear: { grid: rearGrid, host: rearEl },
-    };
-
-    // ---- Live move visualisation -------------------------------------------
-    // When the user drags a real (`existing`) device off its original slot we
-    // leave a locked grey "move_out_ghost" tile behind at that original slot and
-    // restyle the dragged tile as a cyan `move_in`. Dragging it back onto its
-    // original slot removes the ghost and restores the `existing` styling.
-    //
-    // Pre-existing `move_in` tiles already ship with a STATIC server-rendered
-    // ghost, so we never synthesise one for them (we'd duplicate it). Temp
-    // ghosts are keyed by global widget index so there is at most one per device.
-    var tempGhosts = {};      // widget-index -> ghost element
-    var refreshing = false;   // re-entrancy guard (our grid.update calls fire `change`)
-
-    function makeGhostElement(label) {
-        var item = document.createElement("div");
-        item.className = "grid-stack-item nbx-rd-state-move_out_ghost";
-        item.setAttribute("data-rd-temp-ghost", "1");
-        // No data-widget-index: buildRackPayload skips tiles without a state
-        // entry, and the explicit marker makes the intent obvious.
-        var content = document.createElement("div");
-        content.className = "grid-stack-item-content";
-        content.setAttribute("title", (label || "") + " (move out)");
-        var span = document.createElement("span");
-        span.className = "nbx-rd-label";
-        span.textContent = label || "";
-        content.appendChild(span);
-        item.appendChild(content);
-        return item;
-    }
-
-    function removeTempGhost(idx) {
-        var ghost = tempGhosts[idx];
-        if (!ghost) { return; }
-        var g = (ghost.gridstackNode && ghost.gridstackNode.grid) || null;
-        if (g) {
-            g.removeWidget(ghost, true);
-        } else if (ghost.parentNode) {
-            ghost.parentNode.removeChild(ghost);
-        }
-        delete tempGhosts[idx];
-    }
-
-    function ensureTempGhost(idx, st) {
-        if (tempGhosts[idx]) { return; }
-        var face = st.origFace;
-        var target = faceGrids[face];
-        if (!target || !target.grid) { return; }
-        var w = st.widget;
-        var gsH = Math.round((w.u_height || 1) * 2);
-        var gsY = uPositionToGsY(st.origUPosition, gsH);
-        var ghost = makeGhostElement(w.label);
-        // addWidget places + registers the node; then lock it so it can't drag.
-        var added = target.grid.addWidget(ghost, {
-            x: 0, y: gsY, w: 1, h: gsH, noMove: true, noResize: true, locked: true,
-        });
-        var el = added || ghost;
-        target.grid.update(el, { noMove: true, locked: true });
-        tempGhosts[idx] = el;
-    }
-
-    function faceOfItem(itemEl) {
-        var host = itemEl.closest(".grid-stack");
-        if (!host) { return ""; }
-        if (host === frontEl) { return "front"; }
-        if (host === rearEl) { return "rear"; }
-        return "";   // tray / off-rack
-    }
-
-    // Paint a tile to look like a normally-installed (existing) device, using the
-    // device's role color stamped on the content element by the template
-    // (data-role-bg / data-role-fg). Devices with no role color get no inline
-    // style — matching how a role-less existing device renders. Used by every
-    // restore-to-existing path so a cancelled move/remove shows the real color
-    // instead of the grey the move_in/ghost/remove CSS leaves behind once its
-    // class is dropped.
-    function applyExistingColor(itemEl) {
-        var content = itemEl.querySelector(".grid-stack-item-content");
-        if (!content) { return; }
-        var bg = content.getAttribute("data-role-bg");
-        var fg = content.getAttribute("data-role-fg");
-        if (bg) {
-            content.style.backgroundColor = "#" + bg;
-            content.style.color = fg ? "#" + fg : "";
-        } else {
-            // Role-less device: clear any leftover inline color so it falls back
-            // to the plain existing styling.
-            content.style.backgroundColor = "";
-            content.style.color = "";
-        }
-    }
-
-    // Re-evaluate every eligible real-device tile and converge the ghosts +
-    // move_in styling to match where each tile currently sits. Idempotent: safe
-    // to call after any drag, and never spawns a second ghost for a device.
-    function refreshGhosts() {
-        if (refreshing) { return; }
-        refreshing = true;
+        // ---- Hydrate this rack's widget payload (index -> widget) ----------
+        var widgets = [];
+        var dataEl = document.getElementById("rd-editor-data-" + rackId);
         try {
-            root.querySelectorAll(".grid-stack-item").forEach(function (itemEl) {
+            widgets = JSON.parse((dataEl && dataEl.textContent) || "[]");
+        } catch (e) {
+            widgets = [];
+        }
+
+        // Per-widget runtime state, keyed by this rack's local index. We snapshot
+        // the ORIGINAL (u_position, face) so at save time we can tell "moved"
+        // from "unchanged".
+        var state = widgets.map(function (w) {
+            return {
+                widget: w,
+                origUPosition: w.u_position,
+                origFace: w.face || "",
+                removed: w.kind === "remove",
+            };
+        });
+
+        // ---- gs-y <-> u_position (inverse of templatetags/rack_design.slot_gs_y)
+        function gsYToUPosition(gsY, gsH) {
+            var y = gsY / 2;
+            var uHeight = gsH / 2;
+            if (descUnits) {
+                return y + 1;
+            }
+            if (uHeight > 1) {
+                return rackUHeight - y - uHeight + 1;
+            }
+            return rackUHeight - y;
+        }
+        function uPositionToGsY(uPosition, gsH) {
+            if (descUnits) {
+                return uPosition * 2 - 2;
+            }
+            if (gsH > 2) {
+                return rackUHeight * 2 - uPosition * 2 - gsH + 2;
+            }
+            return rackUHeight * 2 - uPosition * 2;
+        }
+
+        // ---- Resolve this rack's three grid hosts --------------------------
+        var frontEl = document.getElementById("nbx-rd-grid-front-" + rackId);
+        var rearEl = document.getElementById("nbx-rd-grid-rear-" + rackId);
+        var trayEl = document.getElementById("nbx-rd-grid-tray-" + rackId);
+
+        // Only accept drops that belong to THIS rack: a palette/quick-access drag
+        // source (planning a new add), or a tile already inside this rack block
+        // (front <-> rear <-> tray). Tiles from OTHER racks are rejected so a
+        // real device can't be silently dragged across racks (the save endpoint
+        // reconciles each rack independently and has no cross-rack move concept).
+        function acceptForBlock(el) {
+            if (!el) { return false; }
+            if (el.getAttribute && el.getAttribute("data-device-type-id") != null) {
+                return true;
+            }
+            if (el.classList && el.classList.contains("nbx-rd-palette-item")) {
+                return true;
+            }
+            return el.closest && el.closest(".nbx-rd-rack-block") === block;
+        }
+
+        var grids = [];
+        var frontGrid = frontEl
+            ? GridStack.init(commonOptions({ acceptWidgets: acceptForBlock }), frontEl) : null;
+        var rearGrid = rearEl
+            ? GridStack.init(commonOptions({ acceptWidgets: acceptForBlock }), rearEl) : null;
+        // The tray is unbounded vertically; let dropped items float to the top.
+        var trayGrid = trayEl
+            ? GridStack.init(commonOptions({ float: false, acceptWidgets: acceptForBlock }), trayEl) : null;
+
+        [frontGrid, rearGrid, trayGrid].forEach(function (g) {
+            if (g) { grids.push(g); }
+        });
+
+        grids.forEach(function (grid) {
+            grid.on("change", markDirty);
+            grid.on("added", markDirty);
+            grid.on("removed", markDirty);
+            grid.on("dropped", markDirty);
+        });
+
+        // Lock move_out_ghost / pre-existing remove / full-depth opposite tiles:
+        // they are passive and must never be draggable.
+        [[frontGrid, frontEl], [rearGrid, rearEl], [trayGrid, trayEl]].forEach(function (pair) {
+            var g = pair[0], host = pair[1];
+            if (!g || !host) { return; }
+            host.querySelectorAll(
+                ".nbx-rd-state-move_out_ghost, .nbx-rd-state-remove, .nbx-rd-opposite"
+            ).forEach(function (el) {
+                g.update(el, { noMove: true, noResize: true, locked: true });
+            });
+        });
+
+        var faceGrids = {
+            front: { grid: frontGrid, host: frontEl },
+            rear: { grid: rearGrid, host: rearEl },
+        };
+
+        // ---- Live move visualisation ---------------------------------------
+        var tempGhosts = {};      // widget-index -> ghost element
+        var refreshing = false;   // re-entrancy guard
+
+        function makeGhostElement(label) {
+            var item = document.createElement("div");
+            item.className = "grid-stack-item nbx-rd-state-move_out_ghost";
+            item.setAttribute("data-rd-temp-ghost", "1");
+            var content = document.createElement("div");
+            content.className = "grid-stack-item-content";
+            content.setAttribute("title", (label || "") + " (move out)");
+            var span = document.createElement("span");
+            span.className = "nbx-rd-label";
+            span.textContent = label || "";
+            content.appendChild(span);
+            item.appendChild(content);
+            return item;
+        }
+
+        function removeTempGhost(idx) {
+            var ghost = tempGhosts[idx];
+            if (!ghost) { return; }
+            var g = (ghost.gridstackNode && ghost.gridstackNode.grid) || null;
+            if (g) {
+                g.removeWidget(ghost, true);
+            } else if (ghost.parentNode) {
+                ghost.parentNode.removeChild(ghost);
+            }
+            delete tempGhosts[idx];
+        }
+
+        function ensureTempGhost(idx, st) {
+            if (tempGhosts[idx]) { return; }
+            var face = st.origFace;
+            var target = faceGrids[face];
+            if (!target || !target.grid) { return; }
+            var w = st.widget;
+            var gsH = Math.round((w.u_height || 1) * 2);
+            var gsY = uPositionToGsY(st.origUPosition, gsH);
+            var ghost = makeGhostElement(w.label);
+            var added = target.grid.addWidget(ghost, {
+                x: 0, y: gsY, w: 1, h: gsH, noMove: true, noResize: true, locked: true,
+            });
+            var el = added || ghost;
+            target.grid.update(el, { noMove: true, locked: true });
+            tempGhosts[idx] = el;
+        }
+
+        function faceOfItem(itemEl) {
+            var host = itemEl.closest(".grid-stack");
+            if (!host) { return ""; }
+            if (host === frontEl) { return "front"; }
+            if (host === rearEl) { return "rear"; }
+            return "";   // tray / off-rack
+        }
+
+        function applyExistingColor(itemEl) {
+            var content = itemEl.querySelector(".grid-stack-item-content");
+            if (!content) { return; }
+            var bg = content.getAttribute("data-role-bg");
+            var fg = content.getAttribute("data-role-fg");
+            if (bg) {
+                content.style.backgroundColor = "#" + bg;
+                content.style.color = fg ? "#" + fg : "";
+            } else {
+                content.style.backgroundColor = "";
+                content.style.color = "";
+            }
+        }
+
+        // Converge ghosts + move_in styling to where each tile currently sits.
+        // Scoped to THIS rack block so racks never affect each other.
+        function refreshGhosts() {
+            if (refreshing) { return; }
+            refreshing = true;
+            try {
+                block.querySelectorAll(".grid-stack-item").forEach(function (itemEl) {
+                    if (itemEl.getAttribute("data-rd-temp-ghost")) { return; }
+                    var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
+                    var st = state[idx];
+                    if (!st) { return; }
+                    var w = st.widget;
+                    if (w.opposite_face) { return; }
+                    if (w.device_id == null) { return; }
+                    if (w.kind !== "existing") { return; }
+                    if (st.removed) { return; }
+
+                    var node = itemEl.gridstackNode;
+                    var curFace = faceOfItem(itemEl);
+                    var curGsY = node && node.y != null ? node.y : null;
+                    var gsH = Math.round((w.u_height || 1) * 2);
+                    var origGsY = uPositionToGsY(st.origUPosition, gsH);
+
+                    var atOrigin = (curFace === st.origFace) && (curGsY === origGsY);
+
+                    if (atOrigin) {
+                        removeTempGhost(idx);
+                        itemEl.classList.remove("nbx-rd-state-move_in");
+                        itemEl.classList.add("nbx-rd-state-existing");
+                        applyExistingColor(itemEl);
+                        itemEl.classList.remove("nbx-rd-dirty");
+                    } else {
+                        ensureTempGhost(idx, st);
+                        itemEl.classList.remove("nbx-rd-state-existing");
+                        itemEl.classList.add("nbx-rd-state-move_in");
+                        itemEl.classList.add("nbx-rd-dirty");
+                    }
+                });
+            } finally {
+                refreshing = false;
+            }
+        }
+
+        function scheduleRefresh() {
+            if (refreshing) { return; }
+            window.setTimeout(refreshGhosts, 0);
+        }
+        function onDragStart(event, el) {
+            if (!el) { return; }
+            var idx = parseInt(el.getAttribute("data-widget-index"), 10);
+            if (tempGhosts[idx]) {
+                removeTempGhost(idx);
+            }
+        }
+        grids.forEach(function (grid) {
+            grid.on("dragstart", onDragStart);
+            grid.on("dragstop", scheduleRefresh);
+            grid.on("dropped", scheduleRefresh);
+            grid.on("change", scheduleRefresh);
+        });
+
+        // ---- Remove affordance ---------------------------------------------
+        function gridForItem(itemEl) {
+            if (itemEl.gridstackNode && itemEl.gridstackNode.grid) {
+                return itemEl.gridstackNode.grid;
+            }
+            var host = itemEl.closest(".grid-stack");
+            var found = null;
+            grids.forEach(function (g) {
+                if (g.el === host) { found = g; }
+            });
+            return found;
+        }
+
+        function isMoveTile(itemEl, idx, st) {
+            if (st.removed) { return false; }
+            if (st.widget.kind === "move_in") { return true; }
+            if (tempGhosts[idx]) { return true; }
+            return itemEl.classList.contains("nbx-rd-state-move_in");
+        }
+
+        function staticGhostFor(placementId) {
+            if (placementId == null) { return null; }
+            var found = null;
+            block.querySelectorAll(".grid-stack-item.nbx-rd-state-move_out_ghost").forEach(function (el) {
+                if (found) { return; }
+                if (el.getAttribute("data-rd-temp-ghost")) { return; }
+                var gidx = parseInt(el.getAttribute("data-widget-index"), 10);
+                var gst = state[gidx];
+                if (gst && gst.widget.placement_id === placementId) { found = el; }
+            });
+            return found;
+        }
+
+        function cancelMove(itemEl, idx, st) {
+            var w = st.widget;
+            var gsH = Math.round((w.u_height || 1) * 2);
+
+            var origFace, origGsY;
+            if (w.kind === "move_in") {
+                var ghost = staticGhostFor(w.placement_id);
+                if (ghost) {
+                    var gidx = parseInt(ghost.getAttribute("data-widget-index"), 10);
+                    var gst = state[gidx];
+                    origFace = gst.widget.face || "";
+                    origGsY = uPositionToGsY(gst.widget.u_position, Math.round((gst.widget.u_height || 1) * 2));
+                    var gg = (ghost.gridstackNode && ghost.gridstackNode.grid) || null;
+                    if (gg) { gg.removeWidget(ghost, true); } else if (ghost.parentNode) { ghost.parentNode.removeChild(ghost); }
+                } else {
+                    origFace = w.face || "";
+                    origGsY = uPositionToGsY(w.u_position, gsH);
+                }
+            } else {
+                origFace = st.origFace;
+                origGsY = uPositionToGsY(st.origUPosition, gsH);
+                removeTempGhost(idx);
+            }
+
+            var target = faceGrids[origFace];
+            refreshing = true;
+            try {
+                if (target && target.grid) {
+                    var curGrid = gridForItem(itemEl);
+                    if (curGrid && curGrid !== target.grid) {
+                        curGrid.removeWidget(itemEl, false);
+                        target.grid.makeWidget(itemEl);
+                    }
+                    target.grid.update(itemEl, { x: 0, y: origGsY, w: 1, h: gsH, noMove: false, locked: false });
+                }
+            } finally {
+                refreshing = false;
+            }
+
+            itemEl.classList.remove("nbx-rd-state-move_in", "nbx-rd-state-move_out_ghost");
+            itemEl.classList.add("nbx-rd-state-existing");
+            applyExistingColor(itemEl);
+            itemEl.classList.remove("nbx-rd-dirty");
+            markDirty();
+        }
+
+        function flagRemove(itemEl, idx, st) {
+            st.removed = !st.removed;
+            itemEl.classList.toggle("nbx-rd-state-remove", st.removed);
+            itemEl.classList.toggle("nbx-rd-dirty", st.removed);
+            if (!st.removed) {
+                applyExistingColor(itemEl);
+            }
+            var grid = gridForItem(itemEl);
+            if (grid) {
+                grid.update(itemEl, { noMove: st.removed, locked: st.removed });
+            }
+            markDirty();
+        }
+
+        function flagCancelAdd(itemEl, idx, st) {
+            st.removed = !st.removed;
+            itemEl.classList.toggle("nbx-rd-state-remove", st.removed);
+            itemEl.classList.toggle("nbx-rd-state-add", !st.removed);
+            itemEl.classList.toggle("nbx-rd-dirty", st.removed);
+            var grid = gridForItem(itemEl);
+            if (grid) {
+                grid.update(itemEl, { noMove: st.removed, locked: st.removed });
+            }
+            markDirty();
+        }
+
+        function removeUnsavedAdd(itemEl, idx, st) {
+            var grid = gridForItem(itemEl);
+            if (grid) {
+                grid.removeWidget(itemEl, true);
+            } else if (itemEl.parentNode) {
+                itemEl.parentNode.removeChild(itemEl);
+            }
+            state[idx] = null;
+            markDirty();
+        }
+
+        function handleRemoveClick(itemEl) {
+            var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
+            var st = state[idx];
+            if (!st) { return; }
+            if (st.widget.kind === "add") {
+                if (st.widget.placement_id == null) {
+                    removeUnsavedAdd(itemEl, idx, st);
+                } else {
+                    flagCancelAdd(itemEl, idx, st);
+                }
+                return;
+            }
+            if (st.widget.device_id == null) { return; }
+            if (isMoveTile(itemEl, idx, st)) {
+                cancelMove(itemEl, idx, st);
+            } else {
+                flagRemove(itemEl, idx, st);
+            }
+        }
+
+        block.addEventListener("click", function (event) {
+            var btn = event.target.closest(".nbx-rd-remove-btn");
+            if (!btn) { return; }
+            if (!block.contains(btn)) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            var itemEl = btn.closest(".grid-stack-item");
+            if (itemEl) {
+                handleRemoveClick(itemEl);
+            }
+        });
+
+        // ---- Build this rack's save payload --------------------------------
+        function buildRackPayload() {
+            var buckets = { front: [], rear: [], other: [] };
+            var seenPlacement = {};
+
+            function pushItem(itemEl, faceKey) {
                 if (itemEl.getAttribute("data-rd-temp-ghost")) { return; }
                 var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
                 var st = state[idx];
                 if (!st) { return; }
                 var w = st.widget;
-                // Passive full-depth "blocked" copies never move and never spawn
-                // a ghost — skip them entirely.
+
+                if (w.kind === "move_out_ghost") { return; }
                 if (w.opposite_face) { return; }
-                // Only ORIGINALLY-existing real devices get a synthesised ghost.
-                // Pre-existing move_in tiles keep their static server ghost; adds
-                // and ghosts are excluded.
-                if (w.device_id == null) { return; }
-                if (w.kind !== "existing") { return; }
-                // A tile flagged for removal is locked and handled by toggleRemove.
-                if (st.removed) { return; }
+
+                var placementId = (w.placement_id !== undefined) ? w.placement_id : null;
+                if (placementId != null) {
+                    if (seenPlacement[placementId]) { return; }
+                    seenPlacement[placementId] = true;
+                }
+
+                var isAdd = w.kind === "add";
+                var item = {
+                    kind: null,
+                    device_id: (w.device_id != null) ? w.device_id : null,
+                    device_type_id: (w.device_type_id != null) ? w.device_type_id : null,
+                    placement_id: placementId,
+                    u_position: null,
+                    face: "",
+                };
+                if (isAdd) {
+                    if (w.device_role_id != null) { item.device_role_id = w.device_role_id; }
+                    if (w.tenant_id != null) { item.tenant_id = w.tenant_id; }
+                }
+
+                if (st.removed && isAdd) {
+                    item.kind = "add";
+                    item.cancel = true;
+                    buckets[faceKey].push(item);
+                    return;
+                }
+
+                if (st.removed && item.device_id != null) {
+                    item.kind = "remove";
+                    buckets[faceKey].push(item);
+                    return;
+                }
+
+                if (faceKey === "other") {
+                    item.kind = isAdd ? "add" : "move";
+                    buckets.other.push(item);
+                    return;
+                }
 
                 var node = itemEl.gridstackNode;
-                var curFace = faceOfItem(itemEl);
-                var curGsY = node && node.y != null ? node.y : null;
-                var gsH = Math.round((w.u_height || 1) * 2);
-                var origGsY = uPositionToGsY(st.origUPosition, gsH);
+                var gsY = (node && node.y != null) ? node.y : parseInt(itemEl.getAttribute("gs-y"), 10);
+                var gsH = (node && node.h != null) ? node.h : parseInt(itemEl.getAttribute("gs-h"), 10);
+                item.u_position = gsYToUPosition(gsY, gsH);
+                item.face = faceKey;
 
-                var atOrigin = (curFace === st.origFace) && (curGsY === origGsY);
+                item.kind = isAdd ? "add" : "existing";
+                buckets[faceKey].push(item);
+            }
 
-                if (atOrigin) {
-                    removeTempGhost(idx);
-                    itemEl.classList.remove("nbx-rd-state-move_in");
-                    itemEl.classList.add("nbx-rd-state-existing");
-                    // Restore the device's real role color (move_in CSS left the
-                    // tile cyan / colorless) and drop the per-tile "dirty" outline.
-                    applyExistingColor(itemEl);
-                    itemEl.classList.remove("nbx-rd-dirty");
-                } else {
-                    ensureTempGhost(idx, st);
-                    itemEl.classList.remove("nbx-rd-state-existing");
-                    itemEl.classList.add("nbx-rd-state-move_in");
-                    itemEl.classList.add("nbx-rd-dirty");
+            function walkGrid(grid, faceKey) {
+                if (!grid) { return; }
+                grid.getGridItems().forEach(function (itemEl) {
+                    pushItem(itemEl, faceKey);
+                });
+            }
+
+            walkGrid(frontGrid, "front");
+            walkGrid(rearGrid, "rear");
+            walkGrid(trayGrid, "other");
+
+            return {
+                rack_id: rackId,
+                front: buckets.front,
+                rear: buckets.rear,
+                other: buckets.other,
+            };
+        }
+
+        // Highlight a server-reported error tile within THIS rack (matched by
+        // device_id). Safe to call for every error from every controller.
+        function highlightError(err) {
+            block.querySelectorAll(".grid-stack-item").forEach(function (el) {
+                var idx = parseInt(el.getAttribute("data-widget-index"), 10);
+                var st = state[idx];
+                if (!st) { return; }
+                if (err.device_id != null && st.widget.device_id === err.device_id) {
+                    el.classList.add("nbx-rd-error");
                 }
             });
-        } finally {
-            refreshing = false;
         }
-    }
 
-    // Recompute ghosts whenever a drag settles. `dragstop` fires per grid after
-    // the user releases; `dropped` covers cross-grid moves. We defer to the next
-    // tick so GridStack has finalised each node's y/h first.
-    function scheduleRefresh() {
-        if (refreshing) { return; }
-        window.setTimeout(refreshGhosts, 0);
-    }
-    // When the user STARTS dragging a tile that already has a temp ghost, drop
-    // that ghost first so its original slot is free — otherwise the locked ghost
-    // would block the device from settling back onto its own origin (and a drop
-    // there would be pushed one slot away). refreshGhosts re-creates the ghost on
-    // drop only if the tile ended somewhere other than its origin.
-    function onDragStart(event, el) {
-        if (!el) { return; }
-        var idx = parseInt(el.getAttribute("data-widget-index"), 10);
-        if (tempGhosts[idx]) {
-            removeTempGhost(idx);
+        // ---- Per-rack independent face toggles -----------------------------
+        var faceFront = document.getElementById("nbx-rd-face-front-" + rackId);
+        var faceRear = document.getElementById("nbx-rd-face-rear-" + rackId);
+        var btnFront = block.querySelector("[data-rd-show-front]");
+        var btnRear = block.querySelector("[data-rd-show-rear]");
+
+        function faceVisible(faceEl) {
+            return !!faceEl && faceEl.style.display !== "none";
         }
-    }
-    grids.forEach(function (grid) {
-        grid.on("dragstart", onDragStart);
-        grid.on("dragstop", scheduleRefresh);
-        grid.on("dropped", scheduleRefresh);
-        // `change` is the catch-all: it fires for drags (after the node's y/h are
-        // finalised) and for cross-grid moves, so the ghosts converge even if a
-        // particular GridStack build doesn't surface `dragstop`. refreshGhosts is
-        // idempotent and guarded against the events its own add/remove emit.
-        grid.on("change", scheduleRefresh);
-    });
-
-    // ---- Remove affordance --------------------------------------------------
-    // Resolve the GridStack instance that owns a given tile so we can lock /
-    // unlock it. GridStack stamps the live grid onto each item's node; fall back
-    // to matching the tile's host .grid-stack element against our grids.
-    function gridForItem(itemEl) {
-        if (itemEl.gridstackNode && itemEl.gridstackNode.grid) {
-            return itemEl.gridstackNode.grid;
-        }
-        var host = itemEl.closest(".grid-stack");
-        var found = null;
-        grids.forEach(function (g) {
-            if (g.el === host) { found = g; }
-        });
-        return found;
-    }
-
-    // Is this tile currently representing a MOVE (as opposed to an untouched
-    // existing device)? Two cases: (a) a pre-existing move loaded from the design
-    // (widget.kind === "move_in"), or (b) an existing device the user dragged off
-    // its origin this session (we tagged it nbx-rd-state-move_in + a temp ghost).
-    function isMoveTile(itemEl, idx, st) {
-        if (st.removed) { return false; }
-        if (st.widget.kind === "move_in") { return true; }
-        if (tempGhosts[idx]) { return true; }
-        return itemEl.classList.contains("nbx-rd-state-move_in");
-    }
-
-    // The STATIC server-rendered move_out_ghost tile for a pre-existing move,
-    // matched by shared placement_id. It carries the device's REAL position.
-    function staticGhostFor(placementId) {
-        if (placementId == null) { return null; }
-        var found = null;
-        root.querySelectorAll(".grid-stack-item.nbx-rd-state-move_out_ghost").forEach(function (el) {
-            if (found) { return; }
-            if (el.getAttribute("data-rd-temp-ghost")) { return; }
-            var gidx = parseInt(el.getAttribute("data-widget-index"), 10);
-            var gst = state[gidx];
-            if (gst && gst.widget.placement_id === placementId) { found = el; }
-        });
-        return found;
-    }
-
-    // Cancel a planned move: return the device to its REAL original slot, restyle
-    // it as a normal existing device, and drop the ghost that marked the vacated
-    // slot. For a pre-existing move this makes buildRackPayload emit the device as
-    // `existing` at its real position, so the server's at_real branch deletes the
-    // move placement; for a session move it simply restores the pre-drag state.
-    function cancelMove(itemEl, idx, st) {
-        var w = st.widget;
-        var gsH = Math.round((w.u_height || 1) * 2);
-
-        // Resolve the device's REAL original slot (face + gs-y).
-        var origFace, origGsY;
-        if (w.kind === "move_in") {
-            // Real position lives on the companion static ghost (same placement).
-            var ghost = staticGhostFor(w.placement_id);
-            if (ghost) {
-                var gidx = parseInt(ghost.getAttribute("data-widget-index"), 10);
-                var gst = state[gidx];
-                origFace = gst.widget.face || "";
-                origGsY = uPositionToGsY(gst.widget.u_position, Math.round((gst.widget.u_height || 1) * 2));
-                // The ghost slot becomes the live existing tile — remove the ghost.
-                var gg = (ghost.gridstackNode && ghost.gridstackNode.grid) || null;
-                if (gg) { gg.removeWidget(ghost, true); } else if (ghost.parentNode) { ghost.parentNode.removeChild(ghost); }
-            } else {
-                // No ghost (shouldn't happen): fall back to the tile's own face.
-                origFace = w.face || "";
-                origGsY = uPositionToGsY(w.u_position, gsH);
+        function setFace(faceEl, btnEl, on) {
+            if (faceEl) { faceEl.style.display = on ? "" : "none"; }
+            if (btnEl) {
+                btnEl.classList.toggle("active", on);
+                btnEl.setAttribute("aria-pressed", on ? "true" : "false");
             }
-        } else {
-            // Session move of an originally-existing device.
-            origFace = st.origFace;
-            origGsY = uPositionToGsY(st.origUPosition, gsH);
-            removeTempGhost(idx);
+        }
+        function toggleFace(faceEl, btnEl, otherFaceEl) {
+            if (!faceEl) { return; }
+            var on = faceVisible(faceEl);
+            if (on && !faceVisible(otherFaceEl)) { return; }   // keep one face on
+            setFace(faceEl, btnEl, !on);
+            syncRackHeight();
+        }
+        if (btnFront) {
+            btnFront.addEventListener("click", function () {
+                toggleFace(faceFront, btnFront, faceRear);
+            });
+        }
+        if (btnRear) {
+            btnRear.addEventListener("click", function () {
+                toggleFace(faceRear, btnRear, faceFront);
+            });
         }
 
-        // Move the tile onto its original slot, in its original face's grid.
-        var target = faceGrids[origFace];
-        refreshing = true;   // suppress our own change-driven ghost recompute
-        try {
-            if (target && target.grid) {
-                var curGrid = gridForItem(itemEl);
-                if (curGrid && curGrid !== target.grid) {
-                    // Cross-face: move the DOM node into the destination grid.
-                    curGrid.removeWidget(itemEl, false);
-                    target.grid.makeWidget(itemEl);
+        // ---- Palette drops onto THIS rack's faces --------------------------
+        // The receiving (front/rear) grid fires `dropped` with the new node. We
+        // re-shape it to the device type's U-height, derive u_position + face,
+        // and register a synthetic `add` widget in this rack's state[].
+        function onPaletteDrop(face, grid, event, previousNode, newNode) {
+            var el = newNode && newNode.el;
+            if (!el) { return; }
+            var dtId = el.getAttribute("data-device-type-id");
+            if (dtId == null) { return; }   // a normal tile move, not a palette drop
+
+            var uHeight = parseFloat(el.getAttribute("data-u-height")) || 1;
+            var label = el.getAttribute("data-label") || ("Device type " + dtId);
+            var gsH = Math.max(1, Math.round(uHeight * 2));
+
+            grid.update(el, { x: 0, w: 1, h: gsH });
+            var node = el.gridstackNode || newNode;
+            var gsY = (node && node.y != null) ? node.y : 0;
+            var uPosition = gsYToUPosition(gsY, gsH);
+
+            // Read the CURRENT shared role/tenant selections (left rail).
+            var roleEl = document.getElementById("id_device_role");
+            var tenantEl = document.getElementById("id_tenant");
+            var roleId = (roleEl && roleEl.value) ? parseInt(roleEl.value, 10) : null;
+            var tenantId = (tenantEl && tenantEl.value) ? parseInt(tenantEl.value, 10) : null;
+            var roleName = (roleEl && roleEl.value && roleEl.selectedOptions.length)
+                ? roleEl.selectedOptions[0].textContent.trim() : "";
+            var tenantName = (tenantEl && tenantEl.value && tenantEl.selectedOptions.length)
+                ? tenantEl.selectedOptions[0].textContent.trim() : "";
+
+            var newIdx = state.length;
+            var widget = {
+                kind: "add",
+                device_type_id: parseInt(dtId, 10),
+                device_id: null,
+                placement_id: null,
+                device_role_id: roleId,
+                tenant_id: tenantId,
+                u_height: uHeight,
+                u_position: uPosition,
+                label: label,
+                face: face,
+            };
+            state.push({ widget: widget, origUPosition: uPosition, origFace: face, removed: false });
+
+            el.setAttribute("data-widget-index", newIdx);
+            el.removeAttribute("data-device-type-id");
+            el.removeAttribute("data-u-height");
+            el.removeAttribute("data-is-full-depth");
+            el.removeAttribute("data-label");
+            el.classList.remove("nbx-rd-palette-item");
+            el.classList.add("nbx-rd-state-add");
+            el.querySelectorAll(".nbx-rd-fav-btn").forEach(function (s) { s.remove(); });
+
+            var content = el.querySelector(".grid-stack-item-content");
+            if (!content) {
+                content = document.createElement("div");
+                content.className = "grid-stack-item-content";
+                el.appendChild(content);
+            }
+            content.innerHTML = "";
+            content.setAttribute(
+                "title",
+                label + " (U" + Math.round(uPosition) + ", add"
+                    + (roleName ? ", role: " + roleName : "") + ")"
+            );
+            content.setAttribute("data-name", label);
+            if (roleName) { content.setAttribute("data-role-name", roleName); }
+            if (tenantName) { content.setAttribute("data-tenant-name", tenantName); }
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "nbx-rd-remove-btn";
+            btn.setAttribute("title", "Cancel this planned add");
+            btn.setAttribute("aria-label", "Cancel this planned add");
+            btn.innerHTML = "&times;";
+            var span = document.createElement("span");
+            span.className = "nbx-rd-label";
+            span.textContent = label;
+            content.appendChild(btn);
+            content.appendChild(span);
+
+            markDirty();
+        }
+
+        [[frontGrid, "front"], [rearGrid, "rear"]].forEach(function (pair) {
+            var g = pair[0], face = pair[1];
+            if (!g) { return; }
+            g.on("dropped", function (event, previousNode, newNode) {
+                onPaletteDrop(face, g, event, previousNode, newNode);
+            });
+        });
+        if (trayGrid) {
+            trayGrid.on("dropped", function (event, previousNode, newNode) {
+                var el = newNode && newNode.el;
+                if (el && el.getAttribute("data-device-type-id") != null) {
+                    // Reject off-rack palette drops: a brand-new add needs a U.
+                    trayGrid.removeWidget(el, true);
                 }
-                target.grid.update(itemEl, { x: 0, y: origGsY, w: 1, h: gsH, noMove: false, locked: false });
-            }
-        } finally {
-            refreshing = false;
+            });
         }
 
-        // Restyle as a plain existing device. We DON'T mutate w.kind for a session
-        // move (it's already "existing"); for a pre-existing move_in we leave
-        // w.kind as-is but the tile now sits at the real slot, so buildRackPayload
-        // (which sends move_in/existing tiles as `existing` at their live spot)
-        // emits the real position → server clears the move.
-        itemEl.classList.remove("nbx-rd-state-move_in", "nbx-rd-state-move_out_ghost");
-        itemEl.classList.add("nbx-rd-state-existing");
-        // Paint the device's real role color (a pre-existing move_in tile never
-        // carried an inline color, so without this it would render grey/blank).
-        applyExistingColor(itemEl);
-        // The tile now reads as a plain existing device — clear the per-tile
-        // "dirty" outline. The change itself is still unsaved, so markDirty()
-        // below keeps Save enabled (global dirty state is independent).
-        itemEl.classList.remove("nbx-rd-dirty");
-        markDirty();
+        return {
+            rackId: rackId,
+            buildRackPayload: buildRackPayload,
+            highlightError: highlightError,
+        };
     }
 
-    // Toggle removal flag on an existing device. A flagged tile is LOCKED from
-    // dragging (a device being removed shouldn't also be moved); click × again to
-    // un-flag and unlock it.
-    function flagRemove(itemEl, idx, st) {
-        st.removed = !st.removed;
-        itemEl.classList.toggle("nbx-rd-state-remove", st.removed);
-        itemEl.classList.toggle("nbx-rd-dirty", st.removed);
-        // On un-flag the tile is a plain existing device again — restore its role
-        // color. (While flagged the remove CSS overrides any inline color via
-        // !important, so we can leave the inline style untouched when flagging.)
-        if (!st.removed) {
-            applyExistingColor(itemEl);
-        }
-        var grid = gridForItem(itemEl);
-        if (grid) {
-            grid.update(itemEl, { noMove: st.removed, locked: st.removed });
-        }
-        markDirty();
-    }
+    // ---- Initialise every visible rack block -------------------------------
+    var rackControllers = Array.prototype.map.call(
+        root.querySelectorAll(".nbx-rd-rack-block"),
+        initRack
+    );
 
-    // Toggle the cancel flag on a planned ADD tile. Flagged → same struck/red look
-    // as a removal (+ dirty) and LOCKED from dragging; un-flagged → restore the
-    // normal green `add` styling and unlock. We reuse st.removed as the flag; the
-    // tile's widget.kind stays "add", so buildRackPayload emits kind:"add" with
-    // cancel:true while flagged.
-    function flagCancelAdd(itemEl, idx, st) {
-        st.removed = !st.removed;
-        itemEl.classList.toggle("nbx-rd-state-remove", st.removed);
-        itemEl.classList.toggle("nbx-rd-state-add", !st.removed);
-        itemEl.classList.toggle("nbx-rd-dirty", st.removed);
-        var grid = gridForItem(itemEl);
-        if (grid) {
-            grid.update(itemEl, { noMove: st.removed, locked: st.removed });
-        }
-        markDirty();
-    }
+    syncRackHeight();
+    window.addEventListener("resize", syncRackHeight);
 
-    // Cancel an UNSAVED add (a palette-dropped device type that was never saved,
-    // placement_id == null): there's no server placement to flag, so just delete
-    // the tile and orphan its state entry locally. We null the state slot rather
-    // than splice the array so every other tile's data-widget-index stays valid.
-    function removeUnsavedAdd(itemEl, idx, st) {
-        var grid = gridForItem(itemEl);
-        if (grid) {
-            grid.removeWidget(itemEl, true);
-        } else if (itemEl.parentNode) {
-            itemEl.parentNode.removeChild(itemEl);
-        }
-        state[idx] = null;
-        markDirty();
-    }
-
-    // Context-sensitive × ("undo the planned change on this tile"):
-    //   • a planned ADD                                → flag / un-flag cancel
-    //   • a MOVE tile (pre-existing or this-session)  → cancel the move
-    //   • an existing device                          → flag / un-flag removal
-    function handleRemoveClick(itemEl) {
-        var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
-        var st = state[idx];
-        if (!st) { return; }
-        if (st.widget.kind === "add") {
-            // A planned add has no real device; × cancels the planned addition.
-            // An UNSAVED add (no placement_id, e.g. just dragged from the palette)
-            // has no server row → remove it locally. A pre-existing add (loaded
-            // from the design, has placement_id) is flagged cancel:true for save.
-            if (st.widget.placement_id == null) {
-                removeUnsavedAdd(itemEl, idx, st);
-            } else {
-                flagCancelAdd(itemEl, idx, st);
-            }
-            return;
-        }
-        // Beyond adds, only real devices respond to ×.
-        if (st.widget.device_id == null) { return; }
-        if (isMoveTile(itemEl, idx, st)) {
-            cancelMove(itemEl, idx, st);
-        } else {
-            flagRemove(itemEl, idx, st);
-        }
-    }
-
-    root.addEventListener("click", function (event) {
-        var btn = event.target.closest(".nbx-rd-remove-btn");
-        if (!btn) { return; }
-        event.preventDefault();
-        event.stopPropagation();
-        var itemEl = btn.closest(".grid-stack-item");
-        if (itemEl) {
-            handleRemoveClick(itemEl);
-        }
-    });
-
-    // Belt-and-suspenders alongside draggable.cancel: stop the pointer-down on
-    // the × button or a palette star from reaching GridStack's drag machinery so
-    // the subsequent click reliably fires (and no drag starts).
+    // Belt-and-suspenders alongside draggable.cancel: stop pointer-down on a ×
+    // button or a palette star from reaching GridStack so the click fires. One
+    // shared listener covers every rack block AND the palette / quick-access.
     ["pointerdown", "mousedown", "touchstart"].forEach(function (evtName) {
         root.addEventListener(evtName, function (event) {
             if (event.target.closest(".nbx-rd-remove-btn, .nbx-rd-fav-btn")) {
@@ -616,155 +801,21 @@
         }, true);
     });
 
-    // ---- Build the save request from the live DOM --------------------------
-    function buildRackPayload() {
-        var buckets = { front: [], rear: [], other: [] };
-        // Dedup by placement_id: an already-saved move can appear as both a
-        // move_in tile and a move_out_ghost tile; keep one (prefer non-ghost).
-        var seenPlacement = {};
-
-        function pushItem(itemEl, faceKey) {
-            // Dynamically-created move-out ghosts are purely visual: they carry a
-            // marker and no widget index, so they have no state entry to send.
-            if (itemEl.getAttribute("data-rd-temp-ghost")) { return; }
-            var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
-            var st = state[idx];
-            if (!st) { return; }
-            var w = st.widget;
-
-            // Skip ghost tiles entirely — they merely visualise the vacated U of
-            // a move that the move_in tile already represents.
-            if (w.kind === "move_out_ghost") {
-                return;
-            }
-
-            // Skip the passive full-depth "blocked" copy: it is only an occupancy
-            // indicator on the non-mounted face. The interactive tile on the
-            // mounted face carries this device/placement into the payload.
-            if (w.opposite_face) {
-                return;
-            }
-
-            var placementId = (w.placement_id !== undefined) ? w.placement_id : null;
-            if (placementId != null) {
-                if (seenPlacement[placementId]) { return; }
-                seenPlacement[placementId] = true;
-            }
-
-            var isAdd = w.kind === "add";
-            var item = {
-                kind: null,
-                device_id: (w.device_id != null) ? w.device_id : null,
-                device_type_id: (w.device_type_id != null) ? w.device_type_id : null,
-                placement_id: placementId,
-                u_position: null,
-                face: "",
-            };
-            // Carry the intended role/tenant for a brand-new add (set at drop
-            // time). Only meaningful for adds; the server ignores them otherwise.
-            if (isAdd) {
-                if (w.device_role_id != null) { item.device_role_id = w.device_role_id; }
-                if (w.tenant_id != null) { item.tenant_id = w.tenant_id; }
-            }
-
-            // A planned add the user flagged via × → cancel the addition. The
-            // server deletes the add placement when cancel is true; no position is
-            // needed. Bucket placement is irrelevant for a delete, so use faceKey.
-            if (st.removed && isAdd) {
-                item.kind = "add";
-                item.cancel = true;
-                buckets[faceKey].push(item);
-                return;
-            }
-
-            // A real device the user flagged via × → removal.
-            if (st.removed && item.device_id != null) {
-                item.kind = "remove";
-                buckets[faceKey].push(item);
-                return;
-            }
-
-            if (faceKey === "other") {
-                // Off-rack bucket: positionless. Adds stay adds.
-                item.kind = isAdd ? "add" : "move";
-                buckets.other.push(item);
-                return;
-            }
-
-            // Racked: read the LIVE position from GridStack's node. The gs-y /
-            // gs-h DOM attributes are NOT updated after a drag, so reading them
-            // would always yield the ORIGINAL position — that is the "no changes
-            // detected" bug, and the reason moved/removed tiles were being
-            // mis-serialized (and then deleted) on save.
-            var node = itemEl.gridstackNode;
-            var gsY = (node && node.y != null) ? node.y : parseInt(itemEl.getAttribute("gs-y"), 10);
-            var gsH = (node && node.h != null) ? node.h : parseInt(itemEl.getAttribute("gs-h"), 10);
-            item.u_position = gsYToUPosition(gsY, gsH);
-            item.face = faceKey;
-
-            // Adds stay adds (their position may have changed). Real devices are
-            // submitted as 'existing' carrying their CURRENT position; the server
-            // promotes them to a move when they no longer sit at their real spot,
-            // and clears a stale move when dragged back — so the editor doesn't
-            // have to track "moved vs not" itself.
-            item.kind = isAdd ? "add" : "existing";
-            buckets[faceKey].push(item);
-        }
-
-        function walkGrid(grid, faceKey) {
-            if (!grid) { return; }
-            grid.getGridItems().forEach(function (itemEl) {
-                pushItem(itemEl, faceKey);
-            });
-        }
-
-        walkGrid(frontGrid, "front");
-        walkGrid(rearGrid, "rear");
-        walkGrid(trayGrid, "other");
-
-        return {
-            rack_id: rackId,
-            front: buckets.front,
-            rear: buckets.rear,
-            other: buckets.other,
-        };
-    }
-
-    function numEq(a, b) {
-        if (a == null && b == null) { return true; }
-        if (a == null || b == null) { return false; }
-        return Math.abs(Number(a) - Number(b)) < 1e-6;
-    }
-
-    // ---- Highlight / clear server-reported errors --------------------------
-    function clearErrors() {
+    // ---- Save (single design-level POST across all racks) ------------------
+    function clearAllErrors() {
         root.querySelectorAll(".grid-stack-item.nbx-rd-error").forEach(function (el) {
             el.classList.remove("nbx-rd-error");
         });
     }
 
-    function highlightError(err) {
-        // Match the offending widget by device_id + u_position when possible.
-        var tiles = root.querySelectorAll(".grid-stack-item");
-        tiles.forEach(function (el) {
-            var idx = parseInt(el.getAttribute("data-widget-index"), 10);
-            var st = state[idx];
-            if (!st) { return; }
-            if (err.device_id != null && st.widget.device_id === err.device_id) {
-                el.classList.add("nbx-rd-error");
-            }
-        });
-    }
-
-    // ---- Save ---------------------------------------------------------------
     function doSave() {
-        clearErrors();
-        // design_id is the Design pk; the save URL already encodes it, but the
-        // SaveLayoutSerializer also accepts it in the body. Derive it from the URL.
+        clearAllErrors();
+        // The save URL encodes the Design pk; SaveLayoutSerializer also accepts
+        // it in the body. Build a payload keyed by rack — one slice per rack.
         var m = saveUrl.match(/designs\/(\d+)\//);
         var payload = {
             design_id: m ? parseInt(m[1], 10) : null,
-            racks: [buildRackPayload()],
+            racks: rackControllers.map(function (c) { return c.buildRackPayload(); }),
         };
 
         if (saveButton) { saveButton.setAttribute("disabled", "disabled"); }
@@ -782,7 +833,6 @@
                 response.json().then(function () {
                     changesMade = false;
                     createToast("success", "Saved", "Layout saved.");
-                    // Refresh to re-project the design with the persisted state.
                     window.location.reload();
                 });
             } else if (response.status === 304) {
@@ -790,8 +840,6 @@
                 createToast("info", "No changes", "No changes were detected.");
             } else if (response.status === 403) {
                 if (saveButton) { saveButton.removeAttribute("disabled"); }
-                // Surface the server's actual reason rather than assuming a perms
-                // problem — a 403 here can also be a CSRF failure.
                 response.text().then(function (text) {
                     var detail = "";
                     try {
@@ -813,7 +861,7 @@
                         return;
                     }
                     errs.forEach(function (err) {
-                        highlightError(err);
+                        rackControllers.forEach(function (c) { c.highlightError(err); });
                         var where = (err.u_position != null) ? (" (U" + err.u_position + ")") : "";
                         createToast("danger", "Conflict", (err.detail || "Validation error") + where);
                     });
@@ -834,68 +882,29 @@
         saveButton.addEventListener("click", doSave);
     }
 
-    // ---- Device-type catalog palette + drag-in -----------------------------
+    // ---- Shared device-type catalog palette + drag-in ----------------------
     // A search box lists draggable device types fetched from NetBox's core API;
-    // dragging one onto the front/rear grid plans a brand-new KIND_ADD placement.
-    // No dcim.Device is ever created — only a synthetic `add` widget + state entry
-    // that buildRackPayload serializes as {kind:"add", device_type_id, placement_id:null}.
+    // dragging one onto ANY rack's front/rear grid plans a brand-new KIND_ADD
+    // placement on that rack (the drop handler is wired per-rack in initRack).
+    // No dcim.Device is ever created.
     (function setupPalette() {
         var paletteEl = document.getElementById("nbx-rd-palette");
         var searchEl = document.getElementById("nbx-rd-palette-search");
-        // These three are NetBox API-backed searchable selects rendered from
-        // DesignEditorPaletteForm (DynamicModelChoiceField). NetBox's select-init
-        // enhances them into remote-loading TomSelects and writes the chosen value
-        // back to the underlying <select>, so reading .value by its Django id
-        // (id_<name>) gives the selected pk.
         var manufEl = document.getElementById("id_manufacturer");
-        var roleEl = document.getElementById("id_device_role");
-        var tenantEl = document.getElementById("id_tenant");
         var listEl = document.getElementById("nbx-rd-palette-list");
         var quickListEl = document.getElementById("nbx-rd-quick-list");
         var statusEl = document.getElementById("nbx-rd-palette-status");
-        var layoutEl = document.querySelector(".nbx-rd-editor-layout");
         if (!paletteEl || !listEl || !searchEl) { return; }
         if (typeof GridStack === "undefined" || !GridStack.setupDragIn) { return; }
 
-        // Per-user favorite device-type ids (the catalog stars). Loaded once at
-        // init from the favorites endpoint; mutated as the user toggles stars. The
-        // dedicated "Quick access" panel renders these INDEPENDENTLY of the
-        // catalog's search + manufacturer filter.
         var favoritesUrl = root.getAttribute("data-favorites-url")
             || "/api/plugins/rack-design/favorite-device-types/";
         var favoriteIds = {};   // id (number) -> true  (used as a Set)
-
-        // Match the catalog card's max height to the (currently visible) rack
-        // elevation so the card is rack-tall and only the list scrolls. Recompute
-        // on resize / face toggle. Falls back to the CSS default when unmeasurable.
-        function syncRackHeight() {
-            if (!layoutEl) { return; }
-            var face = document.getElementById("nbx-rd-face-front");
-            if (!face || face.offsetParent === null) {
-                face = document.getElementById("nbx-rd-face-rear");
-            }
-            var grid = face && face.querySelector(".nbx-rd-rack");
-            var h = grid ? grid.offsetHeight : 0;
-            if (h > 80) {
-                layoutEl.style.setProperty("--nbx-rd-rack-height", h + "px");
-            }
-        }
-        syncRackHeight();
-        window.addEventListener("resize", syncRackHeight);
-        paletteEl.nbxSyncRackHeight = syncRackHeight;   // let the face toggle call it
 
         function setStatus(msg) {
             if (statusEl) { statusEl.textContent = msg || ""; }
         }
 
-        // Build one palette/quick-access row as a real GridStack DRAG SOURCE so
-        // the bundled GridStack accepts the drop:
-        //   • class "grid-stack-item" — the receiving grid's acceptWidgets check
-        //     is `el.matches('.grid-stack-item')`;
-        //   • gs-w/gs-h — GridStack sizes the dropped node from these (_readAttr);
-        //   • an inner ".grid-stack-item-content" — the default drag HANDLE
-        //     (draggable.handle === '.grid-stack-item-content').
-        // Without these the real HTML5 drag-in never fires.
         function buildPaletteRow(dt) {
             var uHeight = (dt.u_height != null) ? dt.u_height : 1;
             var gsH = Math.max(1, Math.round(uHeight * 2));
@@ -922,9 +931,6 @@
             content.appendChild(meta);
             li.appendChild(content);
 
-            // Favorite (star) button — a sibling of the drag handle
-            // (.grid-stack-item-content), so it isn't part of the grab area and
-            // onPaletteDrop (which rebuilds the content) drops it cleanly.
             var fav = !!favoriteIds[dt.id];
             var star = document.createElement("button");
             star.type = "button";
@@ -940,13 +946,10 @@
             return li;
         }
 
-        // (Re)register all current palette + quick-access rows as external drag
-        // sources. Re-applied after each render because the nodes are replaced.
         function refreshDragIn() {
             GridStack.setupDragIn(".nbx-rd-palette-item", { appendTo: "body", helper: "clone" });
         }
 
-        // The MAIN catalog list — driven only by search + manufacturer filter.
         function renderResults(results) {
             listEl.innerHTML = "";
             var shown = results || [];
@@ -959,9 +962,6 @@
             refreshDragIn();
         }
 
-        // ---- Quick access: the user's favorites, fetched independently --------
-        // GET the favorite ids, then fetch those device types' details (one id= per
-        // favorite) and render. NEVER constrained by the catalog search/manufacturer.
         function renderQuickAccess() {
             if (!quickListEl) { return; }
             var ids = Object.keys(favoriteIds);
@@ -1032,20 +1032,13 @@
         }
         searchEl.addEventListener("input", scheduleFetch);
         if (manufEl) {
-            // The manufacturer filter changes the CATALOG list only (never the
-            // quick-access panel), immediately (no debounce).
             manufEl.addEventListener("change", function () {
                 lastKey = currentKey();
                 fetchTypes();
             });
         }
 
-        // The manufacturer / role / tenant selects are populated + searched by
-        // NetBox's own API-backed select widget (DynamicModelChoiceField); no
-        // manual option-loading needed. We only read their current value.
-
         // ---- Favorites (catalog stars) -------------------------------------
-        // Click a star → POST toggle, then update favoriteIds + the icon in place.
         function applyFavState(starBtn, fav) {
             starBtn.classList.toggle("is-fav", fav);
             starBtn.setAttribute("aria-pressed", fav ? "true" : "false");
@@ -1055,8 +1048,6 @@
             if (icon) { icon.className = "mdi " + (fav ? "mdi-star" : "mdi-star-outline"); }
         }
 
-        // Reflect a device type's favorite state on EVERY star button for it
-        // (a type can appear in both the catalog list and the quick-access panel).
         function syncStarsFor(id, fav) {
             root.querySelectorAll(
                 '.nbx-rd-fav-btn[data-device-type-id="' + id + '"]'
@@ -1081,8 +1072,6 @@
             }).then(function (data) {
                 var fav = !!(data && data.favorite);
                 if (fav) { favoriteIds[id] = true; } else { delete favoriteIds[id]; }
-                // Update any catalog stars for this type, then re-render the
-                // quick-access panel (adds the type when starred, removes when not).
                 syncStarsFor(id, fav);
                 renderQuickAccess();
             }).catch(function () {
@@ -1092,8 +1081,6 @@
             });
         }
 
-        // Delegate star clicks across BOTH the catalog list and the quick-access
-        // panel (rows are re-created each render).
         function onStarClick(event) {
             var starBtn = event.target.closest(".nbx-rd-fav-btn");
             if (!starBtn) { return; }
@@ -1104,8 +1091,6 @@
         listEl.addEventListener("click", onStarClick);
         if (quickListEl) { quickListEl.addEventListener("click", onStarClick); }
 
-        // Load the user's favorites ONCE, then render the quick-access panel and
-        // the initial catalog list (so catalog stars reflect favorite state).
         function loadFavoritesThenFetch() {
             fetch(favoritesUrl, {
                 credentials: "same-origin",
@@ -1126,169 +1111,12 @@
             });
         }
         loadFavoritesThenFetch();
-
-        // ---- Convert a dropped palette clone into a planned add tile --------
-        // The receiving (front/rear) grid fires `dropped` with the new node. We
-        // re-shape it to the device type's U-height, derive u_position + face, and
-        // register a synthetic `add` widget in state[] keyed by a fresh index.
-        function onPaletteDrop(face, grid, event, previousNode, newNode) {
-            // Only handle drops that ORIGINATED in the palette (carry our marker).
-            var el = newNode && newNode.el;
-            if (!el) { return; }
-            var dtId = el.getAttribute("data-device-type-id");
-            if (dtId == null) { return; }   // not a palette item (a normal tile move)
-
-            var uHeight = parseFloat(el.getAttribute("data-u-height")) || 1;
-            var label = el.getAttribute("data-label") || ("Device type " + dtId);
-            var gsH = Math.max(1, Math.round(uHeight * 2));
-
-            // Resize/normalise the dropped node to a single-column rack slot.
-            grid.update(el, { x: 0, w: 1, h: gsH });
-            var node = el.gridstackNode || newNode;
-            var gsY = (node && node.y != null) ? node.y : 0;
-            var uPosition = gsYToUPosition(gsY, gsH);
-
-            // Capture the CURRENT role/tenant selections — they apply to this new
-            // add only (future drops; not retroactive). Empty select => null.
-            var roleId = (roleEl && roleEl.value) ? parseInt(roleEl.value, 10) : null;
-            var tenantId = (tenantEl && tenantEl.value) ? parseInt(tenantEl.value, 10) : null;
-            var roleName = (roleEl && roleEl.value && roleEl.selectedOptions.length)
-                ? roleEl.selectedOptions[0].textContent.trim() : "";
-            var tenantName = (tenantEl && tenantEl.value && tenantEl.selectedOptions.length)
-                ? tenantEl.selectedOptions[0].textContent.trim() : "";
-
-            // Register a synthetic add widget + state entry; stamp the tile index.
-            var newIdx = state.length;
-            var widget = {
-                kind: "add",
-                device_type_id: parseInt(dtId, 10),
-                device_id: null,
-                placement_id: null,
-                device_role_id: roleId,
-                tenant_id: tenantId,
-                u_height: uHeight,
-                u_position: uPosition,
-                label: label,
-                face: face,
-            };
-            state.push({ widget: widget, origUPosition: uPosition, origFace: face, removed: false });
-
-            // Re-shape the dropped element into a standard add tile: clear the
-            // palette markup/classes, add state class, inject label + × button.
-            el.setAttribute("data-widget-index", newIdx);
-            el.removeAttribute("data-device-type-id");
-            el.removeAttribute("data-u-height");
-            el.removeAttribute("data-is-full-depth");
-            el.removeAttribute("data-label");
-            el.classList.remove("nbx-rd-palette-item");
-            el.classList.add("nbx-rd-state-add");
-            // Drop any favorite (star) button the clone carried — the star belongs
-            // only on palette/quick-access rows, never on a placed rack tile.
-            el.querySelectorAll(".nbx-rd-fav-btn").forEach(function (s) { s.remove(); });
-
-            var content = el.querySelector(".grid-stack-item-content");
-            if (!content) {
-                content = document.createElement("div");
-                content.className = "grid-stack-item-content";
-                el.appendChild(content);
-            }
-            content.innerHTML = "";
-            content.setAttribute(
-                "title",
-                label + " (U" + Math.round(uPosition) + ", add"
-                    + (roleName ? ", role: " + roleName : "") + ")"
-            );
-            // Hover-card data: planned adds show the same name/role/tenant card as
-            // existing tiles, sourced from the label + left-rail selections.
-            content.setAttribute("data-name", label);
-            if (roleName) { content.setAttribute("data-role-name", roleName); }
-            if (tenantName) { content.setAttribute("data-tenant-name", tenantName); }
-            var btn = document.createElement("button");
-            btn.type = "button";
-            btn.className = "nbx-rd-remove-btn";
-            btn.setAttribute("title", "Cancel this planned add");
-            btn.setAttribute("aria-label", "Cancel this planned add");
-            btn.innerHTML = "&times;";
-            var span = document.createElement("span");
-            span.className = "nbx-rd-label";
-            span.textContent = label;
-            content.appendChild(btn);
-            content.appendChild(span);
-
-            markDirty();
-        }
-
-        // Bind dropped on the racked grids only — a brand-new add must land on a
-        // real U. A palette drop onto the TRAY is rejected (the model requires
-        // target_position); we delete the stray clone so no position-less add forms.
-        [[frontGrid, "front"], [rearGrid, "rear"]].forEach(function (pair) {
-            var g = pair[0], face = pair[1];
-            if (!g) { return; }
-            g.on("dropped", function (event, previousNode, newNode) {
-                onPaletteDrop(face, g, event, previousNode, newNode);
-            });
-        });
-        if (trayGrid) {
-            trayGrid.on("dropped", function (event, previousNode, newNode) {
-                var el = newNode && newNode.el;
-                if (el && el.getAttribute("data-device-type-id") != null) {
-                    // Reject off-rack palette drops: remove the clone, keep state clean.
-                    trayGrid.removeWidget(el, true);
-                }
-            });
-        }
     })();
 
-    // ---- Independent face toggles ------------------------------------------
-    // Front and Rear are independent on/off switches: BOTH faces can be visible
-    // at once (network gear front, servers rear). Each button toggles only its
-    // own face and reflects that face's state via .active. We never allow hiding
-    // the LAST visible face — turning it off is a no-op so at least one stays on.
-    var faceFront = document.getElementById("nbx-rd-face-front");
-    var faceRear = document.getElementById("nbx-rd-face-rear");
-    var btnFront = document.getElementById("nbx-rd-show-front");
-    var btnRear = document.getElementById("nbx-rd-show-rear");
-
-    function faceVisible(faceEl) {
-        return !!faceEl && faceEl.style.display !== "none";
-    }
-
-    function setFace(faceEl, btnEl, on) {
-        if (faceEl) { faceEl.style.display = on ? "" : "none"; }
-        if (btnEl) {
-            btnEl.classList.toggle("active", on);
-            btnEl.setAttribute("aria-pressed", on ? "true" : "false");
-        }
-    }
-
-    function toggleFace(faceEl, btnEl, otherFaceEl) {
-        if (!faceEl) { return; }
-        var on = faceVisible(faceEl);
-        // Refuse to hide the last visible face.
-        if (on && !faceVisible(otherFaceEl)) { return; }
-        setFace(faceEl, btnEl, !on);
-        // Re-measure the rack height for the catalog card against a visible grid.
-        var pal = document.getElementById("nbx-rd-palette");
-        if (pal && typeof pal.nbxSyncRackHeight === "function") { pal.nbxSyncRackHeight(); }
-    }
-
-    if (btnFront) {
-        btnFront.addEventListener("click", function () {
-            toggleFace(faceFront, btnFront, faceRear);
-        });
-    }
-    if (btnRear) {
-        btnRear.addEventListener("click", function () {
-            toggleFace(faceRear, btnRear, faceFront);
-        });
-    }
-
-    // ---- Device hover card (name / role / tenant) --------------------------
-    // A single body-appended floating card, shown on hover over any device tile
-    // in either face (and the tray). It reads ONLY data-* attributes the
-    // template/JS stamped on each tile — no network calls. pointer-events:none
-    // and hide-on-pointerdown keep it clear of dragging and the remove/favorite
-    // buttons. Missing fields (e.g. no tenant) are simply omitted.
+    // ---- Shared device hover card (name / role / tenant) -------------------
+    // One body-appended floating card, shown on hover over any device tile in
+    // any rack block (and the trays). It reads ONLY data-* attributes stamped on
+    // each tile — no network calls.
     (function () {
         var hcard = document.createElement("div");
         hcard.className = "nbx-rd-hovercard";
@@ -1362,12 +1190,19 @@
             if (e.relatedTarget && content.contains(e.relatedTarget)) { return; }
             hideCard();
         });
-        // Get out of the way the instant a drag/click starts, or on scroll.
         root.addEventListener("pointerdown", hideCard, true);
         window.addEventListener("scroll", hideCard, true);
     })();
 
-    // ---- Unsaved-changes guard ---------------------------------------------
+    // ---- Shared helpers for sibling modules (editor_panels.js) -------------
+    // Expose the proven CSRF + toast helpers so the left-rail panels module can
+    // reuse them instead of duplicating the resolution logic.
+    window.NbxRdEditor = {
+        getCsrfToken: getCsrfToken,
+        createToast: createToast,
+    };
+
+    // ---- Unsaved-changes guard (design-level) ------------------------------
     window.addEventListener("beforeunload", function (event) {
         if (changesMade) {
             event.preventDefault();

@@ -27,51 +27,116 @@
   <div class="col col-md-12">
     <div class="card">
       <h2 class="card-header">
-        {% blocktrans with rack=rack.name design=object.title %}Edit layout: {{ rack }} ({{ design }}){% endblocktrans %}
+        {% blocktrans with design=object.title %}Edit layout: {{ design }}{% endblocktrans %}
         <div class="card-actions">
-          {# Independent on/off toggles: each shows/hides its OWN face, so BOTH #}
-          {# faces can be visible side by side. Both start active (visible);     #}
-          {# editor.js refuses to hide the last visible face.                    #}
-          <div class="btn-group btn-group-sm me-2" role="group" aria-label="{% trans 'Face' %}">
-            <button type="button" class="btn btn-outline-primary active"
-                    aria-pressed="true"
-                    id="nbx-rd-show-front">{% trans "Front" %}</button>
-            <button type="button" class="btn btn-outline-primary active"
-                    aria-pressed="true"
-                    id="nbx-rd-show-rear">{% trans "Rear" %}</button>
+          {# Three INDEPENDENT section toggles for the ONE push/collapse tool      #}
+          {# drawer. Each button shows or hides ONLY its own section; any          #}
+          {# combination can be open at once (open sections sit side by side as    #}
+          {# columns in the drawer). The                                           #}
+          {# drawer is open whenever ANY section is active. editor_panels.js marks  #}
+          {# each active button and persists the SET of open sections per browser. #}
+          <div class="btn-group btn-group-sm me-2" role="group"
+               aria-label="{% trans 'Editor tool sections' %}">
+            <button type="button" class="btn btn-outline-secondary"
+                    data-rd-section-toggle="device"
+                    aria-controls="nbx-rd-drawer"
+                    aria-expanded="false"
+                    title="{% trans 'Device-type catalog' %}">
+              <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "Device" %}
+            </button>
+            <button type="button" class="btn btn-outline-secondary"
+                    data-rd-section-toggle="favorites"
+                    aria-controls="nbx-rd-drawer"
+                    aria-expanded="false"
+                    title="{% trans 'Quick access favorites' %}">
+              <i class="mdi mdi-star" aria-hidden="true"></i> {% trans "Favorites" %}
+            </button>
+            <button type="button" class="btn btn-outline-secondary"
+                    data-rd-section-toggle="racks"
+                    aria-controls="nbx-rd-drawer"
+                    aria-expanded="false"
+                    title="{% trans 'Add and manage design racks' %}">
+              <i class="mdi mdi-rack" aria-hidden="true"></i> {% trans "Racks" %}
+            </button>
           </div>
+          {# ONE design-level Save: editor.js collects edits from EVERY rendered #}
+          {# rack block and POSTs a single multi-rack payload.                   #}
           <button type="button" class="btn btn-primary btn-sm" id="rd-editor-save" disabled>
             <i class="mdi mdi-content-save" aria-hidden="true"></i> {% trans "Save" %}
           </button>
         </div>
       </h2>
 
-      {# The editor root: carries the save URL + rack meta the JS needs. #}
+      {# The editor root: carries the design-level save URL + shared context the #}
+      {# JS needs. Per-rack meta lives on each .nbx-rd-rack-block below.          #}
       <div class="card-body"
            id="rd-editor"
+           data-design-id="{{ object.pk }}"
            data-save-url="{{ save_url }}"
            data-favorites-url="{{ favorites_url }}"
-           data-rack-id="{{ rack_meta.id }}"
-           data-u-height="{{ rack_meta.u_height }}"
-           data-desc-units="{{ rack_meta.desc_units|yesno:'true,false' }}"
            data-csrf-token="{{ csrf_token }}">
 
-        {% with front_len=front|length rear_len=rear|length %}
-
-        {# Legend — also acts as a per-state filter (see legend_filter.js). #}
-        <div class="nbx-rd-legend mb-3" data-rd-legend>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+        {# ---- ONE always-visible toolbar line: the state-LEGEND filter and the #}
+        {# Role/Tenant selects share a single horizontal row above the drawer +  #}
+        {# racks shell, visible regardless of which drawer sections are open.     #}
+        {#                                                                        #}
+        {# Left group — the legend, which also acts as a per-state filter         #}
+        {# (legend_filter.js binds [data-rd-legend] and the data-rd-state         #}
+        {# checkboxes; unchecking hides that state's slots). Shared across every  #}
+        {# rack block in this card-body.                                          #}
+        {# Right group — Role + Tenant, the SAME API-backed                       #}
+        {# DynamicModelChoiceFields with the SAME widget ids (#id_device_role /   #}
+        {# #id_tenant): NetBox's select-init enhances them into TomSelect and     #}
+        {# editor.js onPaletteDrop reads them by id to stamp the next drag-in.    #}
+        {# A `vr` divider separates the two groups; the line wraps only when the  #}
+        {# viewport is too narrow. #}
+        <div class="nbx-rd-toolbar mb-3 d-flex flex-wrap align-items-center gap-3" data-rd-toolbar>
+          <div class="nbx-rd-legend" data-rd-legend>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+          </div>
+          <div class="vr nbx-rd-toolbar-sep d-none d-md-block" aria-hidden="true"></div>
+          <div class="nbx-rd-toolbar-field d-flex align-items-center gap-2">
+            <label class="form-label small mb-0 text-nowrap" for="id_device_role">{% trans "Role" %}</label>
+            {{ palette_form.device_role }}
+          </div>
+          <div class="nbx-rd-toolbar-field d-flex align-items-center gap-2">
+            <label class="form-label small mb-0 text-nowrap" for="id_tenant">{% trans "Tenant" %}</label>
+            {{ palette_form.tenant }}
+          </div>
+          {# Single minimal affordance: the duplicated inline hint text is gone; #}
+          {# only this ⓘ remains, explained via its tooltip. #}
+          <span class="nbx-rd-toolbar-hint text-muted" title="{% trans 'Applied to devices you drag in next' %}">
+            <i class="mdi mdi-information-outline" aria-hidden="true"></i>
+          </span>
         </div>
 
-        <div class="nbx-rd-editor-layout">
-          {# ---- Left rail: a vertical stack of compact NetBox cards. The catalog #}
-          {#      card sits here; below it a Device-role and a Tenant selector card #}
-          {#      supply the role/tenant applied to NEW adds at drop time. ---- #}
-          <div class="nbx-rd-leftrail" id="nbx-rd-leftrail">
+        {# ---- Editor shell: a PUSH/COLLAPSE sidebar layout. The tool drawer is a #}
+        {#      left flex column; the rack workspace is the remaining width. When  #}
+        {#      the drawer is OPEN both are visible side by side (so a device-type #}
+        {#      can still be dragged from the catalog onto a rack face); when      #}
+        {#      CLOSED (the default) the drawer is removed and the racks take the  #}
+        {#      full width and sit at the top, immediately visible. editor_panels  #}
+        {#      .js toggles .drawer-open here from the set of active sections. ---- #}
+        {# data-drawer-section-initial signals the section(s) editor_panels.js      #}
+        {# opens when the user has NO stored preference: "" (closed) normally, but  #}
+        {# "racks" for a design with NO racks yet so the Add-rack panel is          #}
+        {# immediately reachable for the first rack. #}
+        <div class="nbx-rd-editor-shell nbx-rd-editor-layout" id="nbx-rd-editor-shell"
+             data-drawer-section-initial="{% if all_rack_blocks %}{% else %}racks{% endif %}">
+
+          {# ---- Collapsible tool drawer: ONE area, three INDEPENDENT ---- #}
+          {# sections (Device / Favorites / Racks). Each card-header toggle shows  #}
+          {# or hides its own section; any combination can be open and the active  #}
+          {# sections lay out side by side as columns (the drawer widens right).   #}
+          <div class="nbx-rd-drawer" id="nbx-rd-drawer">
+
+          {# ===== Section: Device (device-type catalog only) ===== #}
+          {# Role + Tenant moved OUT to the always-visible toolbar above. #}
+          <div class="nbx-rd-drawer-section" data-rd-section="device">
             {# ---- Catalog palette (drag a device type onto a face to plan an add) ---- #}
             <div class="card nbx-rd-palette-card" id="nbx-rd-palette" data-rd-palette>
               <div class="card-header">
@@ -91,40 +156,89 @@
               {# Only this list scrolls; the controls above stay pinned. #}
               <div class="list-group list-group-flush nbx-rd-palette-list" id="nbx-rd-palette-list"></div>
             </div>
+          </div>{# /section: device #}
 
-            {# ---- Device role applied to NEW adds (captured at drop time) ---- #}
-            <div class="card" id="nbx-rd-role-card">
+          {# ===== Section: Racks (add-rack + design-racks) ===== #}
+          <div class="nbx-rd-drawer-section" data-rd-section="racks">
+            {# ---- Add a rack to this design's scope (filtered by location) ---- #}
+            {# Location + rack are API-backed DynamicModelChoiceFields scoped to    #}
+            {# the design's site; the rack chooser chains on the chosen location.   #}
+            {# editor_panels.js reads #id_add_rack and POSTs it to add-rack, then   #}
+            {# reloads so the server re-renders the new rack block.                 #}
+            <div class="card" id="nbx-rd-add-rack-card" data-rd-add-rack>
               <div class="card-header">
-                <h3 class="card-title">{% trans "Device role" %}</h3>
+                <h3 class="card-title">{% trans "Add rack" %}</h3>
               </div>
               <div class="card-body">
-                {# API-backed searchable select; value (#id_device_role) is #}
-                {# applied to NEW adds at drop time. #}
-                {{ palette_form.device_role }}
-                <div class="text-muted small mt-1">{% trans "Applied to devices you drag in next." %}</div>
+                <div class="mb-2">
+                  <label class="form-label small mb-1" for="id_add_location">{% trans "Location" %}</label>
+                  {{ add_rack_form.add_location }}
+                </div>
+                <div class="mb-2">
+                  <label class="form-label small mb-1" for="id_add_rack">{% trans "Rack" %}</label>
+                  {{ add_rack_form.add_rack }}
+                </div>
+                <button type="button" class="btn btn-primary btn-sm w-100" id="nbx-rd-add-rack-btn">
+                  <i class="mdi mdi-plus-thick" aria-hidden="true"></i> {% trans "Add" %}
+                </button>
               </div>
             </div>
 
-            {# ---- Tenant applied to NEW adds (captured at drop time) ---- #}
-            <div class="card" id="nbx-rd-tenant-card">
+            {# ---- Design racks: per-rack show/hide + remove-from-design ---- #}
+            {# Visibility toggles are personal view-state (they POST to            #}
+            {# hidden-design-racks and toggle the .hidden class on the matching     #}
+            {# rack block — no reload, never marks the layout dirty). "All" reveals  #}
+            {# every block. The trash control removes the rack from design.racks    #}
+            {# (destructive; confirms via the remove-rack 409 flow).               #}
+            <div class="card" id="nbx-rd-design-racks-card" data-rd-design-racks>
               <div class="card-header">
-                <h3 class="card-title">{% trans "Tenant" %}</h3>
+                <h3 class="card-title">{% trans "Design racks" %}</h3>
+                <div class="card-actions">
+                  <button type="button" class="btn btn-ghost-secondary btn-sm"
+                          id="nbx-rd-show-all-racks" title="{% trans 'Show all racks' %}">
+                    {% trans "All" %}
+                  </button>
+                </div>
               </div>
-              <div class="card-body">
-                {# API-backed searchable select; value (#id_tenant) is applied #}
-                {# to NEW adds at drop time. #}
-                {{ palette_form.tenant }}
-                <div class="text-muted small mt-1">{% trans "Applied to devices you drag in next." %}</div>
+              <div class="list-group list-group-flush nbx-rd-design-racks-list" id="nbx-rd-design-racks-list">
+                {% for row in scoped_rack_rows %}
+                <div class="list-group-item nbx-rd-design-rack-row{% if row.hidden %} is-hidden{% endif %}"
+                     data-rd-rack-row="{{ row.rack.pk }}">
+                  <button type="button"
+                          class="nbx-rd-visi-toggle"
+                          data-rd-visi-toggle="{{ row.rack.pk }}"
+                          aria-pressed="{{ row.hidden|yesno:'false,true' }}"
+                          title="{% trans 'Toggle visibility' %}"
+                          aria-label="{% trans 'Toggle visibility' %}">
+                    <i class="mdi {% if row.hidden %}mdi-eye-off-outline{% else %}mdi-eye-outline{% endif %}" aria-hidden="true"></i>
+                  </button>
+                  <span class="nbx-rd-design-rack-name">
+                    {{ row.rack.name }}
+                    {% if row.rack.location %}<span class="text-muted small">· {{ row.rack.location }}</span>{% endif %}
+                  </span>
+                  <button type="button"
+                          class="nbx-rd-design-rack-remove"
+                          data-rd-remove-rack="{{ row.rack.pk }}"
+                          data-rack-name="{{ row.rack.name }}"
+                          title="{% trans 'Remove from design' %}"
+                          aria-label="{% trans 'Remove from design' %}">
+                    <i class="mdi mdi-trash-can-outline" aria-hidden="true"></i>
+                  </button>
+                </div>
+                {% empty %}
+                <div class="list-group-item text-muted small">{% trans "No racks in this design yet." %}</div>
+                {% endfor %}
               </div>
             </div>
-          </div>
+          </div>{# /section: racks #}
 
-          {# ---- Quick access: its OWN full-height column (not in the left rail) ---- #}
-          {# Rack-tall card; favorites list scrolls internally. As a separate column #}
-          {# it never shrinks the catalog. Independent of the catalog search +       #}
-          {# manufacturer filter; drag a row onto a face to plan an add, click its    #}
-          {# filled star to unpin. ---- #}
-          <div class="nbx-rd-quick-col" id="nbx-rd-quick-col">
+          {# ===== Section: Favorites (quick access) ===== #}
+          <div class="nbx-rd-drawer-section" data-rd-section="favorites">
+            {# ---- Quick access: per-user favorites, drag a row onto a face. ---- #}
+            {# Lives in the drawer alongside the catalog; favorites list scrolls   #}
+            {# internally. Independent of the catalog search + manufacturer filter; #}
+            {# drag a row onto a face to plan an add, click its filled star to     #}
+            {# unpin. ---- #}
             <div class="card nbx-rd-quick-card" id="nbx-rd-quick" data-rd-quick>
               <div class="card-header">
                 <h3 class="card-title">{% trans "Quick access" %}</h3>
@@ -132,137 +246,34 @@
               {# This list scrolls if many favorites; populated by editor.js. #}
               <div class="list-group list-group-flush nbx-rd-quick-list" id="nbx-rd-quick-list"></div>
             </div>
-          </div>
+          </div>{# /section: favorites #}
 
-          {# ---- Rack faces: Front + Rear side by side (independent toggles). #}
-          {#      Grouped in one flex wrapper so they always sit beside each      #}
-          {#      other and wrap together as a unit on narrow viewports, rather   #}
-          {#      than one face wrapping under the left-rail columns. ---- #}
-          <div class="nbx-rd-faces">
-          {# ---- Front face ---- #}
-          <div class="text-center nbx-rd-face" id="nbx-rd-face-front">
-            <h3 class="h5">{% trans "Front" %}</h3>
-            <div class="d-flex justify-content-center">
-              <ul class="nbx-rd-unit-numbers">
-                {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
-              </ul>
-              <div class="grid-stack nbx-rd-rack nbx-rd-editable"
-                   id="nbx-rd-grid-front"
-                   data-face="front"
-                   gs-column="1"
-                   gs-max-row="{{ rack.u_height|mul2 }}"
-                   gs-min-row="{{ rack.u_height|mul2 }}">
-                {% for slot in front %}
-                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
-                       gs-w="1"
-                       gs-h="{{ slot.u_height|mul2 }}"
-                       gs-x="0"
-                       gs-y="{{ slot|slot_gs_y:rack }}"
-                       gs-id="w-{{ forloop.counter0 }}"
-                       data-widget-index="{{ forloop.counter0 }}">
-                    <div class="grid-stack-item-content"
-                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
-                         data-name="{{ slot.label }}"
-                         {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
-                         {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
-                         title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
-                      {% if not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
-                              aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
-                      <span class="nbx-rd-label">{{ slot.label }}</span>
-                    </div>
-                  </div>
-                {% endfor %}
-              </div>
+          </div>{# /.nbx-rd-drawer #}
+
+          {# ---- Multi-rack workspace: one block per VISIBLE scoped rack, laid #}
+          {#      out horizontally in a bounded, scrollable container. It is the  #}
+          {#      PRIMARY region: when the drawer is closed it takes the full      #}
+          {#      width and sits at the top; the racks scroll sideways (more       #}
+          {#      racks) and vertically (full 42U) WITHIN this container so the    #}
+          {#      page itself never grows tall. editor.js inits each block         #}
+          {#      independently from its own rd-editor-data-<pk> payload. ---- #}
+          <div class="nbx-rd-racks-scroll" id="nbx-rd-racks-scroll">
+          {% for b in all_rack_blocks %}
+            {% include 'netbox_rack_design/inc/rack_block.html' with b=b editable=True %}
+          {% empty %}
+            {# Empty state: a design with ZERO scoped racks still opens the editor #}
+            {# (no bounce to detail). The button opens the Racks section so the    #}
+            {# Add-rack panel is shown and the first rack can be added here.        #}
+            <div class="nbx-rd-empty-state text-center text-muted p-5" id="nbx-rd-empty-state">
+              <i class="mdi mdi-server-off mdi-48px d-block mb-2" aria-hidden="true"></i>
+              <p class="mb-3">{% trans "No racks in this design yet — open Racks → Add rack to start." %}</p>
+              <button type="button" class="btn btn-primary" id="nbx-rd-add-first-rack">
+                <i class="mdi mdi-plus-thick" aria-hidden="true"></i> {% trans "Add your first rack" %}
+              </button>
             </div>
-            <div class="nbx-rd-rack-caption">
-              <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
-              {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
-            </div>
-          </div>
-
-          {# ---- Rear face ---- #}
-          <div class="text-center nbx-rd-face" id="nbx-rd-face-rear">
-            <h3 class="h5">{% trans "Rear" %}</h3>
-            <div class="d-flex justify-content-center">
-              <ul class="nbx-rd-unit-numbers">
-                {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
-              </ul>
-              <div class="grid-stack nbx-rd-rack nbx-rd-editable"
-                   id="nbx-rd-grid-rear"
-                   data-face="rear"
-                   gs-column="1"
-                   gs-max-row="{{ rack.u_height|mul2 }}"
-                   gs-min-row="{{ rack.u_height|mul2 }}">
-                {% for slot in rear %}
-                  <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
-                       gs-w="1"
-                       gs-h="{{ slot.u_height|mul2 }}"
-                       gs-x="0"
-                       gs-y="{{ slot|slot_gs_y:rack }}"
-                       gs-id="w-{{ forloop.counter0|add:front_len }}"
-                       data-widget-index="{{ forloop.counter0|add:front_len }}">
-                    <div class="grid-stack-item-content"
-                         {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
-                         data-name="{{ slot.label }}"
-                         {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
-                         {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
-                         title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
-                      {% if not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
-                              aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
-                      <span class="nbx-rd-label">{{ slot.label }}</span>
-                    </div>
-                  </div>
-                {% endfor %}
-              </div>
-            </div>
-            <div class="nbx-rd-rack-caption">
-              <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
-              {% if rack.tenant %}<span class="nbx-rd-tenant">· {{ rack.tenant }}</span>{% endif %}
-            </div>
-          </div>
-          </div>{# /.nbx-rd-faces #}
-        </div>
-
-        {# ---- Non-racked tray (drop zone) ---- #}
-        <div class="mt-4">
-          <h3 class="h5">{% trans "Non-racked tray" %}</h3>
-          <p class="text-muted small mb-2">
-            {% trans "Drag a device here to move it off the rack, or use the × on a tile to flag it for removal." %}
-          </p>
-          <div class="grid-stack nbx-rd-tray"
-               id="nbx-rd-grid-tray"
-               data-face=""
-               gs-column="1"
-               gs-min-row="2">
-            {% for slot in non_racked %}
-              <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
-                   gs-w="1"
-                   gs-h="2"
-                   gs-x="0"
-                   gs-id="w-{{ forloop.counter0|add:front_len|add:rear_len }}"
-                   data-widget-index="{{ forloop.counter0|add:front_len|add:rear_len }}">
-                <div class="grid-stack-item-content"
-                     {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
-                     data-name="{{ slot.label }}"
-                     {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
-                     {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
-                     title="{{ slot.label }} ({{ slot.state }})">
-                  <button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
-                          aria-label="{% trans 'Flag for removal' %}">&times;</button>
-                  <span class="nbx-rd-label">{{ slot.label }}</span>
-                </div>
-              </div>
-            {% endfor %}
-          </div>
-        </div>
-
-        {% endwith %}
-
-        {# Editor payload for the JS: one widget per projected slot (see views._slot_to_widget). #}
-        {# Use Django's json_script so the JSON is safely escaped for a <script> #}
-        {# element (e.g. < > & become \u-escapes) — a plain {{ ... }} would be #}
-        {# HTML-escaped (&quot;), which breaks JSON.parse(textContent) in editor.js. #}
-        {{ widgets|json_script:"rd-editor-data" }}
+          {% endfor %}
+          </div>{# /.nbx-rd-racks-scroll #}
+        </div>{# /.nbx-rd-editor-shell #}
       </div>
     </div>
   </div>
@@ -276,5 +287,6 @@
   {{ block.super }}
   <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
   <script src="{% static 'netbox_rack_design/js/editor.js' %}?v={{ asset_version }}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/editor_panels.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}

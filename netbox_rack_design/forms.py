@@ -1,6 +1,6 @@
 """Forms for NetBox Rack Design."""
 
-from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
+from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
 from django import forms
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
@@ -36,6 +36,7 @@ __all__ = (
     "DesignPlacementFilterForm",
     "ElevationBrowserFilterForm",
     "DesignEditorPaletteForm",
+    "DesignEditorAddRackForm",
 )
 
 
@@ -74,6 +75,43 @@ class DesignEditorPaletteForm(forms.Form):
     )
 
 
+class DesignEditorAddRackForm(forms.Form):
+    """
+    Drives the editor's "Add rack" panel: a Location chooser and a Rack chooser,
+    both NetBox-native, API-backed searchable selects (DynamicModelChoiceField →
+    APISelect → TomSelect with remote load). Like DesignEditorPaletteForm these
+    are transient UI controls (NOT bound to a model); the panel JS reads the
+    rack field's value and POSTs it to the design's add-rack endpoint.
+
+    Scoping (set per-design in __init__):
+      • both fields are limited to the design's site (site_id query param);
+      • the rack chooser is additionally chained to the chosen location
+        (location_id=$add_location) so picking a location narrows the racks.
+    Field names are prefixed ``add_`` so their rendered ids never collide with the
+    palette form's selects on the same page.
+    """
+
+    add_location = DynamicModelChoiceField(
+        queryset=Location.objects.all(),
+        required=False,
+        label=_("Location"),
+    )
+    add_rack = DynamicModelChoiceField(
+        queryset=Rack.objects.all(),
+        required=False,
+        label=_("Rack"),
+        query_params={"location_id": "$add_location"},
+    )
+
+    def __init__(self, *args, site_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Scope both choosers to the design's site (computed per-design in the
+        # view), keeping the static location_id chaining declared above.
+        if site_id is not None:
+            self.fields["add_location"].widget.add_query_param("site_id", site_id)
+            self.fields["add_rack"].widget.add_query_param("site_id", site_id)
+
+
 # ---------------------------------------------------------------------------
 # Model forms
 # ---------------------------------------------------------------------------
@@ -92,14 +130,53 @@ class DesignForm(NetBoxModelForm):
     group = DynamicModelChoiceField(queryset=DesignGroup.objects.all(), required=False)
     based_on = DynamicModelChoiceField(queryset=Design.objects.all(), required=False)
     depends_on = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False)
+    # Racks this design plans across. Options are filtered live to the chosen
+    # site via query_params (chained on the `site` field's value).
+    racks = DynamicModelMultipleChoiceField(
+        queryset=Rack.objects.all(),
+        required=False,
+        label=_("Racks"),
+        query_params={"site_id": "$site"},
+    )
+
+    fieldsets = (
+        FieldSet(
+            "title", "site", "status", "summary", "link", "racks",
+            name=_("Design"),
+        ),
+        FieldSet(
+            "group", "based_on", "depends_on", "sequence",
+            name=_("Lineage & scheduling"),
+        ),
+        FieldSet("description", "tags", name=_("Tags")),
+    )
 
     class Meta:
         model = Design
         fields = (
-            "title", "site", "status", "summary", "link",
+            "title", "site", "status", "summary", "link", "racks",
             "group", "based_on", "depends_on", "sequence",
             "description", "comments", "tags",
         )
+
+    def clean(self):
+        super().clean()
+        # Enforce the same-site rule at the FORM layer so it also holds on
+        # CREATE. The model's clean() can't see the M2M before the instance is
+        # saved (no pk → no through-rows), so a brand-new design would otherwise
+        # skip this check. Keep the message consistent with Design.clean().
+        site = self.cleaned_data.get("site")
+        racks = self.cleaned_data.get("racks")
+        if site and racks:
+            offending = [rack for rack in racks if rack.site_id != site.pk]
+            if offending:
+                names = ", ".join(str(rack) for rack in offending)
+                self.add_error(
+                    "racks",
+                    _("These racks are not in the design's site: %(names)s.")
+                    % {"names": names},
+                )
+        return self.cleaned_data
 
 
 class DesignPlacementForm(NetBoxModelForm):

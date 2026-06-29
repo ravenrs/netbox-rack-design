@@ -2,11 +2,11 @@
 
 import os
 
-from dcim.choices import DeviceFaceChoices
 from dcim.models import Rack, Site
 from django.contrib.staticfiles import finders
 from django.db.models import Q
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.views.generic import View
 from django_tables2 import RequestConfig
 from netbox.views import generic
@@ -21,7 +21,8 @@ __all__ = (
     "DesignGroupBulkImportView", "DesignGroupBulkEditView", "DesignGroupBulkDeleteView",
     "DesignView", "DesignListView", "DesignEditView", "DesignDeleteView",
     "DesignBulkImportView", "DesignBulkEditView", "DesignBulkDeleteView",
-    "DesignElevationView", "DesignEditorView", "ElevationBrowserView",
+    "DesignElevationView", "DesignElevationRackRedirectView",
+    "DesignEditorView", "DesignEditorDefaultView", "ElevationBrowserView",
     "DesignPlacementView", "DesignPlacementListView", "DesignPlacementEditView", "DesignPlacementDeleteView",
     "DesignPlacementBulkImportView", "DesignPlacementBulkEditView", "DesignPlacementBulkDeleteView",
 )
@@ -101,46 +102,80 @@ class DesignView(generic.ObjectView):
             .filter(pk__in=filter(None, rack_ids))
             .select_related("site")
         )
+        # The explicit planning scope (the design.racks M2M), ordered by name.
+        scoped_racks = (
+            instance.racks.restrict(request.user, "view")
+            .select_related("site", "location")
+            .order_by("name", "pk")
+        )
         return {
             "affected_racks": affected_racks,
             "affected_rack_count": len(affected_racks),
+            "scoped_racks": scoped_racks,
         }
 
 
-@register_model_view(models.Design, "elevation", path="racks/<int:rack_id>")
+@register_model_view(models.Design, "elevation", path="elevation")
 class DesignElevationView(generic.ObjectView):
     """
-    Read-only projected elevation of ONE rack under a design.
+    Read-only projected elevation of ALL the design's scoped racks.
 
-    URL: /plugins/rack-design/designs/<pk>/racks/<rack_id>/
-    Name: plugins:netbox_rack_design:design_elevation  (kwargs: pk, rack_id)
+    URL: /plugins/rack-design/designs/<pk>/elevation/
+    Name: plugins:netbox_rack_design:design_elevation  (kwargs: pk)
 
-    Loads the Design (pk) and the Rack (rack_id), computes the projected layout
-    with ``projection.project_rack`` and renders it. No writes are performed.
+    Renders the SAME multi-rack workspace as the editor — every rack in
+    ``design.racks`` (ordered by name) side by side, BOTH Front and Rear faces,
+    the full-depth opposite-face hatch and a hover card — but with NO edit
+    affordances (no catalog/quick-access, no add-rack/design-racks panels, no
+    drag, no remove, no favorites, no Save). It reuses the SAME
+    ``_project_rack_bundle`` helper the editor uses, so the projection is
+    identical. No writes are performed.
     """
 
     queryset = models.Design.objects.all()
     template_name = "netbox_rack_design/design_elevation.html"
 
+    def get_extra_context(self, request, instance):
+        # The design's planning scope (design.racks), ordered by name — the same
+        # ordering the editor's multi-rack workspace uses. Not restricted by
+        # dcim.view_rack so the read-only view always shows the full scope, like
+        # the editor does.
+        scoped_racks = list(
+            instance.racks.select_related("site", "location").order_by("name", "pk")
+        )
+        # One per-rack projected bundle per scoped rack, shaped identically to the
+        # editor's blocks (same projection.project_rack contract).
+        rack_blocks = [_project_rack_bundle(instance, rack) for rack in scoped_racks]
+        return {
+            "design": instance,
+            "scoped_racks": scoped_racks,
+            "rack_blocks": rack_blocks,
+            "asset_version": _asset_version(),
+        }
+
+
+@register_model_view(models.Design, "elevation_rack", path="racks/<int:rack_id>")
+class DesignElevationRackRedirectView(generic.ObjectView):
+    """
+    Back-compat redirect for the old per-rack elevation URL.
+
+    URL: /plugins/rack-design/designs/<pk>/racks/<rack_id>/
+    Name: plugins:netbox_rack_design:design_elevation_rack  (kwargs: pk, rack_id)
+
+    The read-only elevation is now a single all-racks view; this preserves every
+    existing per-(design, rack) link by redirecting to that view anchored on the
+    requested rack's block (``#rd-rack-<rack_id>``).
+    """
+
+    queryset = models.Design.objects.all()
+
     def get(self, request, pk, rack_id):
         design = get_object_or_404(self.queryset, pk=pk)
-        rack = get_object_or_404(Rack.objects.all(), pk=rack_id)
-        result = projection.project_rack(design, rack)
-
-        face = request.GET.get("face", DeviceFaceChoices.FACE_FRONT)
-        if face not in (DeviceFaceChoices.FACE_FRONT, DeviceFaceChoices.FACE_REAR):
-            face = DeviceFaceChoices.FACE_FRONT
-
-        return render(request, self.get_template_name(), {
-            "object": design,
-            "design": design,
-            "rack": rack,
-            "front": result.front,
-            "rear": result.rear,
-            "non_racked": result.non_racked,
-            "face": face,
-            "tab": self.tab,
-        })
+        url = reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": design.pk},
+        )
+        return redirect(f"{url}#rd-rack-{rack_id}")
 
 
 # Editor static assets we cache-bust: a ?v=<token> derived from their newest
@@ -148,7 +183,9 @@ class DesignElevationView(generic.ObjectView):
 # build instead of a stale cached copy (no manual hard-refresh needed).
 _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor.js",
+    "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
+    "netbox_rack_design/js/rack_design.js",
     "netbox_rack_design/css/editor.css",
     "netbox_rack_design/css/rack_design.css",
 )
@@ -194,6 +231,92 @@ def _slot_to_widget(slot):
     }
 
 
+def _project_rack_bundle(design, rack):
+    """
+    Project ONE rack under a design into a per-rack widget bundle for the editor.
+
+    Reuses ``projection.project_rack`` (the projection contract is unchanged) and
+    the existing ``_slot_to_widget`` builder, so every visible rack in the
+    multi-rack workspace is shaped identically to the single-rack context.
+    """
+    result = projection.project_rack(design, rack)
+    widgets = [
+        _slot_to_widget(slot)
+        for slot in (*result.front, *result.rear, *result.non_racked)
+    ]
+    return {
+        "rack": rack,
+        "front": result.front,
+        "rear": result.rear,
+        "non_racked": result.non_racked,
+        "widgets": widgets,
+        "rack_meta": {
+            "id": rack.pk,
+            "u_height": rack.u_height,
+            "desc_units": rack.desc_units,
+        },
+    }
+
+
+def _design_editor_context(request, design):
+    """
+    Shared multi-rack editor context: EVERY scoped rack of the design rendered
+    side by side, plus the tool-drawer panels' data.
+
+    Used by both the per-rack editor route (``design_editor``) and the default,
+    no-rack route (``design_editor_default``). The default route is the primary
+    entry point and is reachable even for a brand-new design with ZERO scoped
+    racks — in that case ``all_rack_blocks`` is empty and the template shows a
+    friendly empty state instead of bouncing to the detail page.
+    """
+    scoped_racks = list(
+        design.racks.select_related("site", "location").order_by("name", "pk")
+    )
+    # VISIBLE racks = scope minus the current user's hidden rows for this design.
+    # We store HIDDEN rows, so "no rows" => everything is visible.
+    if request.user.is_authenticated:
+        hidden_rack_ids = list(
+            models.HiddenDesignRack.objects.filter(
+                user=request.user, design=design
+            ).values_list("rack_id", flat=True)
+        )
+    else:
+        hidden_rack_ids = []
+    # Render EVERY scoped rack block and flag the hidden ones so the "Design
+    # racks" panel can show/hide them via a CSS class with no page reload.
+    all_rack_blocks = [
+        {
+            **_project_rack_bundle(design, scoped_rack),
+            "hidden": scoped_rack.pk in hidden_rack_ids,
+        }
+        for scoped_rack in scoped_racks
+    ]
+    # Rows for the "Design racks" panel: one per scoped rack with its current
+    # shown/hidden state for this user.
+    scoped_rack_rows = [
+        {"rack": scoped_rack, "hidden": scoped_rack.pk in hidden_rack_ids}
+        for scoped_rack in scoped_racks
+    ]
+    return {
+        "scoped_racks": scoped_racks,
+        "hidden_rack_ids": hidden_rack_ids,
+        "all_rack_blocks": all_rack_blocks,
+        "scoped_rack_rows": scoped_rack_rows,
+        # Drives the empty-state markup + the drawer's default-open override.
+        "has_racks": bool(all_rack_blocks),
+        "save_url": f"/api/plugins/rack-design/designs/{design.pk}/save-layout/",
+        # User-scoped favorite device types (the catalog palette's stars).
+        "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
+        "asset_version": _asset_version(),
+        # Drives the left-rail manufacturer/role/tenant selectors as NetBox
+        # API-backed searchable selects (see forms.DesignEditorPaletteForm).
+        "palette_form": forms.DesignEditorPaletteForm(),
+        # Drives the "Add rack" panel's Location + Rack choosers, scoped to this
+        # design's site (see forms.DesignEditorAddRackForm).
+        "add_rack_form": forms.DesignEditorAddRackForm(site_id=design.site_id),
+    }
+
+
 @register_model_view(models.Design, "editor", path="editor/<int:rack_id>")
 class DesignEditorView(generic.ObjectView):
     """
@@ -217,6 +340,9 @@ class DesignEditorView(generic.ObjectView):
         return super().get_object(**kwargs)
 
     def get_extra_context(self, request, instance):
+        # The URL targets a specific rack; load it (unrestricted, like the editor
+        # itself) but do NOT 404 if it is out of scope — the editor still renders
+        # the design's whole scope and just flags this rack as out-of-scope.
         rack = get_object_or_404(Rack.objects.all(), pk=self.kwargs["rack_id"])
         result = projection.project_rack(instance, rack)
 
@@ -225,8 +351,23 @@ class DesignEditorView(generic.ObjectView):
             for slot in (*result.front, *result.rear, *result.non_racked)
         ]
 
-        return {
+        context = _design_editor_context(request, instance)
+        scoped_racks = context["scoped_racks"]
+        hidden_rack_ids = context["hidden_rack_ids"]
+        # VISIBLE racks: the scope minus this user's hidden rows. Kept for the
+        # rack-specific route's context contract (the template renders the full
+        # all_rack_blocks set; this is exposed for callers/tests).
+        visible_racks = [
+            _project_rack_bundle(instance, scoped_rack)
+            for scoped_rack in scoped_racks
+            if scoped_rack.pk not in hidden_rack_ids
+        ]
+        # The currently-open rack is marked active in the template. If the URL
+        # rack is NOT in scope we still render it (don't 404) and flag it.
+        context.update({
             "rack": rack,
+            "current_in_scope": any(r.pk == rack.pk for r in scoped_racks),
+            "visible_racks": visible_racks,
             "front": result.front,
             "rear": result.rear,
             "non_racked": result.non_racked,
@@ -236,14 +377,31 @@ class DesignEditorView(generic.ObjectView):
                 "u_height": rack.u_height,
                 "desc_units": rack.desc_units,
             },
-            "save_url": f"/api/plugins/rack-design/designs/{instance.pk}/save-layout/",
-            # User-scoped favorite device types (the catalog palette's stars).
-            "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
-            "asset_version": _asset_version(),
-            # Drives the left-rail manufacturer/role/tenant selectors as NetBox
-            # API-backed searchable selects (see forms.DesignEditorPaletteForm).
-            "palette_form": forms.DesignEditorPaletteForm(),
-        }
+        })
+        return context
+
+
+@register_model_view(models.Design, "editor_default", path="editor")
+class DesignEditorDefaultView(generic.ObjectView):
+    """
+    Primary editor entry point: open the multi-rack editor by design alone.
+
+    URL: /plugins/rack-design/designs/<pk>/editor/
+    Name: plugins:netbox_rack_design:design_editor_default  (kwargs: pk)
+
+    Renders the SAME multi-rack workspace as ``design_editor`` (every scoped rack
+    side by side, the tool drawer, the Add-rack / Design-racks panels) but needs
+    NO rack_id, so it is reachable for a brand-new design with ZERO scoped racks.
+    In that case the workspace shows a friendly empty state and the drawer
+    defaults OPEN on the Racks section so the first rack can be added from inside
+    the editor (you no longer need a rack to reach the editor).
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_editor.html"
+
+    def get_extra_context(self, request, instance):
+        return _design_editor_context(request, instance)
 
 
 @register_model_view(models.Design, "list", path="", detail=False)
