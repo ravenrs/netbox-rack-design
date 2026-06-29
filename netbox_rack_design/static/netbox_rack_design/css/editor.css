@@ -83,51 +83,159 @@
     padding: 1px 3px;
 }
 
-/* ---- Editor layout: compact left rail + rack faces --------------------- */
-/* A flex row: a fixed-width left rail (palette + future role/tenant cards) sits
-   snug to the rack elevation on the right, instead of a wide Bootstrap column
-   that leaves a big empty gap. Wraps to a stack on narrow viewports. */
-.nbx-rd-editor-layout {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;   /* align the rail's top with the rack's top */
-    gap: 1.25rem;
+/* ---- Bounded workspace height (shared by editor + read-only elevation) --- */
+/* The racks (and the editor drawer) scroll WITHIN their own region instead of
+   growing the page, so the racks are the immediately-visible top region. The
+   offset leaves room for NetBox's navbar + the card header/legend above. */
+:root {
+    --nbx-rd-workspace-h: calc(100vh - 13rem);
+    /* Width of ONE active drawer section column. The drawer's total width is this
+       times the number of open sections (1 open ≈ 300px, 3 open ≈ 900px). */
+    --nbx-rd-drawer-col-w: 300px;
 }
 
-.nbx-rd-leftrail {
-    flex: 0 0 280px;
-    max-width: 280px;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;                 /* vertical stack: catalog + role + tenant */
-    /* The rail is rack-tall; the catalog card flexes to fill the space the two
-       small (auto-height) role/tenant cards leave. */
-    max-height: var(--nbx-rd-rack-height, 40rem);
-}
-
-/* Role + tenant cards keep their natural (small) height. */
-.nbx-rd-leftrail > #nbx-rd-role-card,
-.nbx-rd-leftrail > #nbx-rd-tenant-card {
+/* ---- Always-visible single toolbar line --------------------------------- */
+/* ONE horizontal row above the drawer + racks shell that hosts BOTH the
+   state-legend filter (left) and the Role/Tenant selects (right), separated by
+   a `vr` divider. Role + Tenant apply to the NEXT device dragged in. They are
+   the same API-backed DynamicModelChoiceFields (#id_device_role / #id_tenant) —
+   only compacted: an inline label + a width-capped TomSelect so the pair reads
+   as "Role: [v]  Tenant: [v]" instead of full-width cards. The row wraps only
+   when the viewport is too narrow. */
+.nbx-rd-toolbar .form-label {
     flex: 0 0 auto;
 }
 
-/* ---- Quick access: its OWN rack-tall column (a sibling of the rail) ------ */
-.nbx-rd-quick-col {
-    flex: 0 0 240px;
-    max-width: 240px;
-    display: flex;
-    flex-direction: column;
-    /* Explicit height (not just max) so the column is rack-tall regardless of how
-       many favorites it holds; the card fills it and its list scrolls. */
-    height: var(--nbx-rd-rack-height, 40rem);
+/* Slightly tighter than the gap-3 utility so the legend + both selects clear
+   the row even with the expanded nav sidebar; still wraps when truly narrow. */
+.nbx-rd-toolbar {
+    gap: 0.5rem 0.75rem;
 }
 
-/* The card fills the column; only its favorites list scrolls. */
+/* The vertical divider between the legend group and the role/tenant group:
+   keep it a slim, dimmed rule sized to the row content. */
+.nbx-rd-toolbar .nbx-rd-toolbar-sep {
+    align-self: stretch;
+    min-height: 1.25rem;
+    opacity: 0.25;
+}
+
+/* Legend sits inline in the toolbar (no trailing margin of its own); a tad
+   tighter than the standalone legend so the whole row stays on one line. */
+.nbx-rd-toolbar .nbx-rd-legend {
+    margin: 0;
+    gap: 0.5rem;
+}
+
+/* Cap the enhanced TomSelect (and the bare <select> before init) so each
+   control stays compact instead of stretching the flex row full-width. */
+.nbx-rd-toolbar .nbx-rd-toolbar-field .ts-wrapper,
+.nbx-rd-toolbar .nbx-rd-toolbar-field select {
+    min-width: 9rem;
+    max-width: 11rem;
+    margin-bottom: 0;
+    font-size: 0.8125rem;
+}
+
+/* ---- Editor shell: push/collapse tool drawer + rack workspace ----------- */
+/* A flex row. The drawer is the left column (content-sized: it grows wider as
+   more sections open); the rack workspace takes the rest. When the drawer is
+   CLOSED (default) it is removed from flow and the workspace spans the full
+   width and sits at the top. When OPEN, both are visible side by side — so a
+   device type can still be dragged out of the catalog onto a rack face (a pure
+   overlay would cover the racks and break it). */
+.nbx-rd-editor-shell {
+    display: flex;
+    align-items: stretch;
+    gap: 1.25rem;
+    min-width: 0;
+    /* Safety net only: each part keeps its OWN scroll (the racks region shrinks
+       via min-width:0 and scrolls; each drawer column scrolls vertically), so
+       this rarely engages — it catches the all-three-open-on-a-very-narrow-
+       screen case where the drawer columns alone exceed the shell width. */
+    overflow-x: auto;
+}
+
+/* The collapsible tool drawer. A horizontal ROW of INDEPENDENT section columns
+   (Device / Favorites / Racks); any combination of active sections is shown side
+   by side. The drawer is content-sized (flex:0 0 auto) so its total width scales
+   with the number of open columns; each column scrolls its own content.
+   No hard height: as a flex child of the shell (align-items:stretch) the drawer
+   STRETCHES to the shell's height, which the racks sibling defines (see the
+   racks-scroll max-height below). So the drawer always equals the rendered rack
+   area instead of overshooting it with an independent viewport calc. */
+.nbx-rd-drawer {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 1rem;
+    min-height: 0;
+}
+
+/* Drawer sections: each active section is its OWN fixed-width column laid out
+   side by side; an inactive section is display:none and takes no space.
+   editor_panels.js sets .is-active per section, independently. */
+.nbx-rd-drawer-section {
+    display: none;
+}
+
+.nbx-rd-drawer-section.is-active {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    /* Fixed-width column with NO hard height: it stretches (align-items:stretch on
+       the drawer/shell) to the shell height, which the racks define. The cards
+       inside collapse their intrinsic height to ~0 (flex:1 1 0 + min-height:0,
+       below) so the column does NOT inflate the shell with the full catalog —
+       the column ends up exactly as tall as the rack area and the lists scroll. */
+    flex: 0 0 var(--nbx-rd-drawer-col-w);
+    width: var(--nbx-rd-drawer-col-w);
+    min-height: 0;
+    /* The cards inside flex-grow to fill this height and scroll their OWN list
+       region; the column itself does not scroll (overflow only as a safety net). */
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-right: 0.35rem;
+}
+
+/* Each card that owns a scrolling list grows to fill the column height so the
+   list reaches the bottom of the workspace; non-growing cards (the Add-rack
+   form) keep their natural height above it. flex-basis:0 + min-height:0 means the
+   card contributes ~no intrinsic height to the column — so the catalog/favorites
+   list does NOT make the column taller than the racks; it only GROWS to fill the
+   height the column inherits from the racks, then scrolls its list internally. */
+.nbx-rd-drawer-section.is-active > .nbx-rd-palette-card,
+.nbx-rd-drawer-section.is-active > .nbx-rd-quick-card,
+.nbx-rd-drawer-section.is-active > #nbx-rd-design-racks-card {
+    flex: 1 1 0;
+    min-height: 0;
+    margin-bottom: 0;
+}
+
+/* Closed (default): the drawer is removed so the racks take the full width. The
+   workspace is the primary flex child and grows into whatever the drawer leaves. */
+.nbx-rd-editor-shell:not(.drawer-open) .nbx-rd-drawer {
+    display: none;
+}
+
+/* In the EDITOR the racks define the workspace height: size to the rendered rack
+   content but CAP at the viewport-based workspace height. So on a TALL window the
+   shell is only as tall as the racks (and the drawer columns, stretching, match
+   it exactly — no overshoot); on a SHORT window it caps and BOTH the racks and the
+   drawer scroll. `height:auto` overrides the shared hard `height` below (which the
+   read-only elevation keeps, since it has no .nbx-rd-editor-shell ancestor). */
+.nbx-rd-editor-shell > .nbx-rd-racks-scroll {
+    flex: 1 1 auto;
+    height: auto;
+    max-height: var(--nbx-rd-workspace-h);
+}
+
+/* Quick-access card: its favorites list scrolls within a capped height so the
+   drawer stays usable with many entries. */
 .nbx-rd-quick-card {
     display: flex;
     flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
 }
 
 .nbx-rd-quick-card > .card-header {
@@ -135,6 +243,8 @@
 }
 
 .nbx-rd-quick-list {
+    /* Fill the remaining card height (the card fills the column) and scroll only
+       when the favorites list is actually longer — no short fixed cap. */
     flex: 1 1 auto;
     min-height: 4rem;
     overflow-y: auto;
@@ -164,6 +274,61 @@
 .nbx-rd-faces > .nbx-rd-face {
     flex: 0 1 auto;
     min-width: 0;
+}
+
+/* ---- Multi-rack workspace: N rack blocks side by side ------------------- */
+/* The racks region takes the width remaining after the fixed left rail +
+   quick-access columns and lays every visible rack block out HORIZONTALLY,
+   scrolling sideways (never wrapping) when the racks overflow the viewport. */
+.nbx-rd-racks-scroll {
+    min-width: 0;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    gap: 1.75rem;
+    /* Bounded height: the racks scroll sideways (more racks) AND vertically (the
+       full 42U) inside this box so the page itself never grows tall. */
+    height: var(--nbx-rd-workspace-h, calc(100vh - 13rem));
+    overflow: auto;
+    padding-bottom: 0.5rem;
+}
+
+/* One rack block: its own header (name + face toggles), Front/Rear faces and a
+   non-racked tray. Sized to its content so blocks sit snugly side by side. */
+.nbx-rd-rack-block {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+}
+
+/* A rack block hidden via the "Design racks" panel: removed from the workspace
+   visually (its initRack controller still runs; a hidden rack contributes an
+   empty, idempotent Save payload). Reload-free show/hide just toggles this. */
+.nbx-rd-rack-block.hidden {
+    display: none;
+}
+
+.nbx-rd-rack-block-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid var(--tblr-border-color, #dee2e6);
+}
+
+.nbx-rd-rack-block-title {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Inside a single rack block the Front + Rear faces don't need to grow to fill
+   the (content-sized) block, so cancel the grow the shared rule applies. */
+.nbx-rd-rack-block .nbx-rd-faces {
+    flex: 0 0 auto;
 }
 
 /* ---- Full-depth "blocked" copy on the opposite (non-mounted) face ------- */
@@ -242,22 +407,94 @@
     margin-right: 0.3rem;
 }
 
-@media (max-width: 767.98px) {
-    /* On narrow viewports the rail + quick-access columns go full width and
-       wrap above the rack. */
-    .nbx-rd-leftrail,
-    .nbx-rd-quick-col {
-        flex-basis: 100%;
-        max-width: 100%;
-        max-height: none;
-        height: auto;
+/* On narrower viewports shrink EACH drawer column so several open side by side
+   (and the racks beside them) stay usable. The drawer's width is N columns, so
+   reducing the per-column width keeps the all-three-open case from crowding out
+   the rack workspace on a 13" / small screen. */
+@media (max-width: 1199.98px) {
+    :root {
+        --nbx-rd-drawer-col-w: 16rem;
     }
+}
 
-    /* When the quick-access column wraps full-width, cap its list so it doesn't
-       grow unbounded. */
-    .nbx-rd-quick-list {
-        max-height: 14rem;
+@media (max-width: 767.98px) {
+    :root {
+        --nbx-rd-drawer-col-w: 14rem;
     }
+}
+
+/* ---- "Design racks" panel: per-rack show/hide + remove ------------------ */
+/* Capped, scrollable list of the design's scoped racks. Each row pairs a
+   visibility toggle (left) with the rack name and a destructive remove (right). */
+/* The Design-racks card grows to fill the column below the (natural-height)
+   Add-rack form; its header stays pinned and only the list scrolls. */
+#nbx-rd-design-racks-card {
+    display: flex;
+    flex-direction: column;
+}
+
+#nbx-rd-design-racks-card > .card-header {
+    flex: 0 0 auto;
+}
+
+.nbx-rd-design-racks-list {
+    /* Fill the remaining card height and scroll only when the list overflows —
+       no short fixed cap that leaves dead space below. */
+    flex: 1 1 auto;
+    min-height: 4rem;
+    overflow-y: auto;
+    border-top: 1px solid var(--tblr-border-color, #dee2e6);
+}
+
+.nbx-rd-design-rack-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.6rem;
+}
+
+.nbx-rd-design-rack-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.8125rem;
+}
+
+/* A hidden rack reads muted in the list (its block is removed from the view). */
+.nbx-rd-design-rack-row.is-hidden .nbx-rd-design-rack-name {
+    opacity: 0.55;
+}
+
+.nbx-rd-visi-toggle,
+.nbx-rd-design-rack-remove {
+    flex: 0 0 auto;
+    padding: 0;
+    width: 1.5rem;
+    height: 1.5rem;
+    line-height: 1;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    border-radius: 3px;
+    color: var(--tblr-secondary, #6c757d);
+}
+
+.nbx-rd-visi-toggle:hover {
+    color: var(--tblr-primary, #066fd1);
+    background-color: var(--tblr-bg-surface-secondary, rgba(0, 0, 0, 0.06));
+}
+
+/* Destructive control: neutral until hovered, then danger red. */
+.nbx-rd-design-rack-remove:hover {
+    color: var(--tblr-danger, #d63939);
+    background-color: var(--tblr-bg-surface-secondary, rgba(0, 0, 0, 0.06));
+}
+
+.nbx-rd-visi-toggle .mdi,
+.nbx-rd-design-rack-remove .mdi {
+    font-size: 1.05rem;
 }
 
 /* ---- Device-type catalog card ------------------------------------------- */
@@ -266,9 +503,6 @@
 .nbx-rd-palette-card {
     display: flex;
     flex-direction: column;
-    /* Fill the rail's remaining height (after the role/tenant cards); the list
-       inside scrolls. min-height:0 lets the flex child actually shrink. */
-    flex: 1 1 auto;
     min-height: 8rem;
 }
 
@@ -281,7 +515,9 @@
     padding: 0.5rem 0.75rem;
 }
 
-/* The scrolling region: a flush list-group that fills the remaining card height. */
+/* The scrolling region: a flush list-group that fills the remaining card height
+   (the card fills the full column) and scrolls only when the catalog is longer —
+   no short fixed cap that leaves the card stub-height with empty space beneath. */
 .nbx-rd-palette-list {
     flex: 1 1 auto;
     min-height: 6rem;

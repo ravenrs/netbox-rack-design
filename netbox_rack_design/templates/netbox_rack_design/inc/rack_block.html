@@ -1,0 +1,167 @@
+{% load i18n %}
+{% load static %}
+{% load rack_design %}
+
+{# ------------------------------------------------------------------------- #}
+{# Shared per-rack block: one rack rendered with BOTH its Front and Rear      #}
+{# faces side by side, full-depth opposite-face hatch and the hover-card      #}
+{# data-* attributes. Used by BOTH the interactive editor                     #}
+{# (design_editor.html, editable=True) and the read-only projected elevation  #}
+{# (design_elevation.html, editable=False) so the two can never drift apart.  #}
+{#                                                                            #}
+{# Context:                                                                   #}
+{#   b         the per-rack bundle from views._project_rack_bundle:           #}
+{#             {rack, front, rear, non_racked, widgets, rack_meta, hidden?}   #}
+{#   editable  True  -> editor affordances (drag grids, per-tile × remove,    #}
+{#                      embedded widget JSON payload for editor.js).           #}
+{#             False -> static, read-only (locked tiles, no remove buttons,   #}
+{#                      no JSON payload). View-only Front/Rear toggles + the   #}
+{#                      hover card still work.                                 #}
+{#                                                                            #}
+{# Widget indices (editor only): the page builds `widgets` in the order       #}
+{# (*front, *rear, *non_racked); each tile is stamped with its GLOBAL index   #}
+{# via gs-id/data-widget-index so editor.js can pair JSON to DOM.             #}
+{# ------------------------------------------------------------------------- #}
+
+{% with rack=b.rack front=b.front rear=b.rear non_racked=b.non_racked %}
+{% with front_len=front|length rear_len=rear|length %}
+{% with rid=rack.pk|stringformat:"s" %}
+<div class="nbx-rd-rack-block{% if editable and b.hidden %} hidden{% endif %}"
+     id="rd-rack-{{ rack.pk }}"
+     data-rack-id="{{ rack.pk }}"
+     data-u-height="{{ b.rack_meta.u_height }}"
+     data-desc-units="{{ b.rack_meta.desc_units|yesno:'true,false' }}">
+
+  {# ---- Per-rack header: name + site/location + face toggles ---- #}
+  <div class="nbx-rd-rack-block-header">
+    <div class="nbx-rd-rack-block-title">
+      <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
+      {% if rack.location %}<span class="text-muted small">· {{ rack.location }}</span>
+      {% elif rack.site %}<span class="text-muted small">· {{ rack.site }}</span>{% endif %}
+    </div>
+    {# Independent on/off toggles per rack: each shows/hides its OWN face. #}
+    {# Both start active; the JS refuses to hide the last visible face.    #}
+    <div class="btn-group btn-group-sm" role="group" aria-label="{% trans 'Face' %}">
+      <button type="button" class="btn btn-outline-primary active"
+              aria-pressed="true" data-rd-show-front>{% trans "Front" %}</button>
+      <button type="button" class="btn btn-outline-primary active"
+              aria-pressed="true" data-rd-show-rear>{% trans "Rear" %}</button>
+    </div>
+  </div>
+
+  {# ---- Rack faces: Front + Rear side by side (independent toggles). ---- #}
+  <div class="nbx-rd-faces">
+    {# ---- Front face ---- #}
+    <div class="text-center nbx-rd-face" data-rd-face="front" id="nbx-rd-face-front-{{ rid }}">
+      <h3 class="h5">{% trans "Front" %}</h3>
+      <div class="d-flex justify-content-center">
+        <ul class="nbx-rd-unit-numbers">
+          {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+        </ul>
+        <div class="grid-stack nbx-rd-rack{% if editable %} nbx-rd-editable{% endif %}"
+             id="nbx-rd-grid-front-{{ rid }}"
+             data-rack-id="{{ rack.pk }}"
+             data-face="front"
+             gs-column="1"
+             gs-max-row="{{ rack.u_height|mul2 }}"
+             gs-min-row="{{ rack.u_height|mul2 }}">
+          {% for slot in front %}
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
+                 gs-w="1"
+                 gs-h="{{ slot.u_height|mul2 }}"
+                 gs-x="0"
+                 gs-y="{{ slot|slot_gs_y:rack }}"
+                 {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0 }}" data-widget-index="{{ forloop.counter0 }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
+              <div class="grid-stack-item-content"
+                   {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                   data-name="{{ slot.label }}"
+                   {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                   {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                        aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
+                <span class="nbx-rd-label">{{ slot.label }}</span>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    {# ---- Rear face ---- #}
+    <div class="text-center nbx-rd-face" data-rd-face="rear" id="nbx-rd-face-rear-{{ rid }}">
+      <h3 class="h5">{% trans "Rear" %}</h3>
+      <div class="d-flex justify-content-center">
+        <ul class="nbx-rd-unit-numbers">
+          {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+        </ul>
+        <div class="grid-stack nbx-rd-rack{% if editable %} nbx-rd-editable{% endif %}"
+             id="nbx-rd-grid-rear-{{ rid }}"
+             data-rack-id="{{ rack.pk }}"
+             data-face="rear"
+             gs-column="1"
+             gs-max-row="{{ rack.u_height|mul2 }}"
+             gs-min-row="{{ rack.u_height|mul2 }}">
+          {% for slot in rear %}
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
+                 gs-w="1"
+                 gs-h="{{ slot.u_height|mul2 }}"
+                 gs-x="0"
+                 gs-y="{{ slot|slot_gs_y:rack }}"
+                 {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0|add:front_len }}" data-widget-index="{{ forloop.counter0|add:front_len }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
+              <div class="grid-stack-item-content"
+                   {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
+                   data-name="{{ slot.label }}"
+                   {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                   {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                        aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
+                <span class="nbx-rd-label">{{ slot.label }}</span>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>{# /.nbx-rd-faces #}
+
+  {# ---- Per-rack non-racked tray ---- #}
+  {# Editor: always shown as a drop target. Read-only: shown only when there  #}
+  {# are non-racked placements (no empty drop affordance in view mode).       #}
+  {% if editable or non_racked %}
+  <div class="nbx-rd-tray-wrap mt-3">
+    <h3 class="h6">{% trans "Non-racked tray" %}</h3>
+    <div class="grid-stack nbx-rd-tray"
+         id="nbx-rd-grid-tray-{{ rid }}"
+         data-rack-id="{{ rack.pk }}"
+         data-face=""
+         gs-column="1"
+         gs-min-row="2">
+      {% for slot in non_racked %}
+        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+             gs-w="1"
+             gs-h="2"
+             gs-x="0"
+             {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0|add:front_len|add:rear_len }}" data-widget-index="{{ forloop.counter0|add:front_len|add:rear_len }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
+          <div class="grid-stack-item-content"
+               {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
+               data-name="{{ slot.label }}"
+               {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+               {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+               title="{{ slot.label }} ({{ slot.state }})">
+            {% if editable %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
+                    aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
+            <span class="nbx-rd-label">{{ slot.label }}</span>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {# Per-rack editor payload (editor only): one widget per projected slot, #}
+  {# keyed by the rack pk so editor.js can hydrate each block independently. #}
+  {% if editable %}{% with eid="rd-editor-data-"|add:rid %}{{ b.widgets|json_script:eid }}{% endwith %}{% endif %}
+</div>{# /.nbx-rd-rack-block #}
+{% endwith %}{% endwith %}{% endwith %}

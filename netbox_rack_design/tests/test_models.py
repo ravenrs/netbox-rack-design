@@ -6,6 +6,7 @@ These cover behaviour that the generic suites do NOT exercise: the custom
 The CRUD/permissions/changelog matrix lives in test_api.py and test_views.py.
 """
 
+from dcim.models import Rack, Site
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
@@ -39,6 +40,8 @@ class DesignTestCase(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
 
     def test_str_includes_version(self):
         design = Design.objects.create(title="Plan", site=self.site, version=2)
@@ -78,6 +81,53 @@ class DesignTestCase(TestCase):
             title="First", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
         design.full_clean()  # must not raise
+
+    def test_racks_can_be_added(self):
+        design = Design.objects.create(title="Scoped", site=self.site)
+        design.racks.add(*self.racks)
+        self.assertEqual(
+            set(design.racks.all()),
+            set(self.racks),
+        )
+
+    def test_same_site_racks_validate(self):
+        # Racks in the design's own site pass validation.
+        design = Design.objects.create(title="Scoped", site=self.site)
+        design.racks.add(*self.racks)
+        design.full_clean()  # must not raise
+
+    def test_rack_from_other_site_rejected(self):
+        other_site = Site.objects.create(name="Other Site", slug="other-site")
+        foreign_rack = Rack.objects.create(name="Foreign Rack", site=other_site)
+        design = Design.objects.create(title="Scoped", site=self.site)
+        design.racks.add(foreign_rack)
+        with self.assertRaises(ValidationError) as ctx:
+            design.full_clean()
+        self.assertIn("racks", ctx.exception.message_dict)
+
+    def test_seed_logic_pre_seeds_from_placements(self):
+        # Mirrors the 0005 data migration's seed query: a design with placements
+        # targeting in-site racks should end up scoping exactly those racks.
+        design = Design.objects.create(title="Seed me", site=self.site)
+        DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[0],
+            target_position=10,
+        )
+        rack_ids = list(
+            Rack.objects.filter(
+                pk__in=DesignPlacement.objects.filter(
+                    design=design, target_rack__isnull=False
+                )
+                .values_list("target_rack_id", flat=True)
+                .distinct(),
+                site_id=design.site_id,
+            ).values_list("pk", flat=True)
+        )
+        design.racks.add(*rack_ids)
+        self.assertEqual(set(design.racks.all()), {self.racks[0]})
 
 
 class DesignPlacementTestCase(TestCase):

@@ -1,13 +1,24 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
-from dcim.models import Device
+from dcim.models import Device, Rack, Site
 from django.urls import reverse
 from rest_framework import status
 from users.models import Token, User
-from utilities.testing import APITestCase, APIViewTestCases, create_tags
+from utilities.testing import (
+    APITestCase,
+    APIViewTestCases,
+    create_tags,
+    create_test_device,
+)
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignGroup, DesignPlacement, FavoriteDeviceType
+from ..models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    FavoriteDeviceType,
+    HiddenDesignRack,
+)
 from .utils import create_dcim_environment
 
 
@@ -39,15 +50,13 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     model = Design
     view_namespace = "plugins-api:netbox_rack_design"
     brief_fields = ["display", "id", "status", "title", "url", "version"]
-    bulk_update_data = {
-        "summary": "Bulk-updated summary",
-        "status": DesignStatusChoices.STATUS_REJECTED,
-    }
 
     @classmethod
     def setUpTestData(cls):
         env = create_dcim_environment()
         site = env["site"]
+        cls.site = site
+        cls.racks = env["racks"]
 
         Design.objects.create(title="Design 1", site=site)
         Design.objects.create(title="Design 2", site=site)
@@ -55,17 +64,27 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
 
         tags = create_tags("Alpha", "Bravo", "Charlie")
 
+        # bulk_update_data must differ from setUpTestData; assigning the M2M by
+        # id exercises rack write on PATCH for all three existing objects.
+        cls.bulk_update_data = {
+            "summary": "Bulk-updated summary",
+            "status": DesignStatusChoices.STATUS_REJECTED,
+            "racks": [cls.racks[0].pk],
+        }
+
         cls.create_data = [
             {
                 "title": "Design 4",
                 "site": site.pk,
                 "status": DesignStatusChoices.STATUS_DRAFT,
+                "racks": [r.pk for r in cls.racks],
                 "tags": [t.pk for t in tags],
             },
             {
                 "title": "Design 5",
                 "site": site.pk,
                 "status": DesignStatusChoices.STATUS_DRAFT,
+                "racks": [cls.racks[0].pk],
             },
             {
                 "title": "Design 6",
@@ -73,6 +92,35 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
                 "status": DesignStatusChoices.STATUS_DRAFT,
             },
         ]
+
+    def test_get_design_returns_racks(self):
+        """A serialized Design exposes its scoped racks as brief Rack reprs."""
+        self.add_permissions("netbox_rack_design.view_design")
+        design = Design.objects.create(title="Scoped", site=self.site)
+        design.racks.add(*self.racks)
+
+        url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[design.pk])
+        response = self.client.get(url, **self.header)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned = {r["id"] for r in response.data["racks"]}
+        self.assertEqual(returned, {r.pk for r in self.racks})
+
+    def test_set_racks_by_id_on_create(self):
+        """POST can assign racks by id, writing only the Design M2M through-rows."""
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.view_design"
+        )
+        data = {
+            "title": "Created with racks",
+            "site": self.site.pk,
+            "status": DesignStatusChoices.STATUS_DRAFT,
+            "racks": [r.pk for r in self.racks],
+        }
+        url = reverse("plugins-api:netbox_rack_design-api:design-list")
+        response = self.client.post(url, data, format="json", **self.header)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        design = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(set(design.racks.all()), set(self.racks))
 
 
 class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
@@ -581,6 +629,522 @@ class SaveLayoutTest(APITestCase):
         self.assertTrue(
             DesignPlacement.objects.filter(pk=existing_add.pk).exists()
         )
+
+    # --- slice 2d: multi-rack save round-trip (the conservative-guard contract)
+
+    def _multi_rack_payload(self, rack_a, rack_b, add_position=5):
+        """A two-rack payload: edit rack A (move + remove) AND add into rack B."""
+        return self._payload([
+            {
+                "rack_id": rack_a.pk,
+                "front": [
+                    # Move Device 1 (rack A / U1) to a free unit in rack A.
+                    {"kind": "move", "device_id": self.devices[0].pk,
+                     "u_position": 10, "face": "front"},
+                    # Flag Device 2 (rack A / U2) for removal.
+                    {"kind": "remove", "device_id": self.devices[1].pk},
+                ],
+            },
+            {
+                "rack_id": rack_b.pk,
+                "front": [
+                    # Brand-new catalog add into the (empty) rack B.
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": add_position, "face": "front"},
+                ],
+            },
+        ])
+
+    def test_multi_rack_save_reconciles_both_racks_in_one_call(self):
+        """One save-layout POST spanning TWO racks reconciles both at once."""
+        self._grant_all()
+        rack_a = self.racks[0]
+        rack_b = self.racks[1]
+        response = self.client.post(
+            self._url(self.design),
+            self._multi_rack_payload(rack_a, rack_b),
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 3)
+
+        # Rack A: the move landed in rack A at U10.
+        move = placements.get(kind=DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(move.device_id, self.devices[0].pk)
+        self.assertEqual(move.target_rack_id, rack_a.pk)
+        self.assertEqual(float(move.target_position), 10.0)
+        # Rack A: the remove flags Device 2 (no destination rack).
+        remove = placements.get(kind=DesignPlacementKindChoices.KIND_REMOVE)
+        self.assertEqual(remove.device_id, self.devices[1].pk)
+        self.assertIsNone(remove.target_rack_id)
+        # Rack B: the add targets rack B (no real device created).
+        add = placements.get(kind=DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(add.target_rack_id, rack_b.pk)
+        self.assertEqual(float(add.target_position), 5.0)
+        self.assertIsNone(add.device_id)
+
+        # Real devices are never mutated.
+        self.devices[0].refresh_from_db()
+        self.assertEqual(self.devices[0].rack_id, rack_a.pk)
+        self.assertEqual(float(self.devices[0].position), 1.0)
+
+    def test_multi_rack_save_is_idempotent_on_resubmit(self):
+        """Re-POSTing the same two-rack layout makes no duplicate / spurious change."""
+        self._grant_all()
+        rack_a = self.racks[0]
+        rack_b = self.racks[1]
+
+        first = self.client.post(
+            self._url(self.design),
+            self._multi_rack_payload(rack_a, rack_b),
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(first, status.HTTP_200_OK)
+        after_first = set(
+            DesignPlacement.objects.filter(design=self.design).values_list("pk", flat=True)
+        )
+        self.assertEqual(len(after_first), 3)
+        add = DesignPlacement.objects.get(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD
+        )
+
+        # Reload-style resubmit: the editor now knows the add's placement_id, and
+        # the move/remove re-assert the same intent. Nothing actually changed, so
+        # the reconcile must report 304 and leave the exact same rows in place.
+        resubmit = self._payload([
+            {
+                "rack_id": rack_a.pk,
+                "front": [
+                    {"kind": "move", "device_id": self.devices[0].pk,
+                     "u_position": 10, "face": "front"},
+                    {"kind": "remove", "device_id": self.devices[1].pk},
+                ],
+            },
+            {
+                "rack_id": rack_b.pk,
+                "front": [
+                    {"kind": "add", "placement_id": add.pk,
+                     "u_position": 5, "face": "front"},
+                ],
+            },
+        ])
+        second = self.client.post(
+            self._url(self.design), resubmit, format="json", **self.header
+        )
+        self.assertHttpStatus(second, status.HTTP_304_NOT_MODIFIED)
+        after_second = set(
+            DesignPlacement.objects.filter(design=self.design).values_list("pk", flat=True)
+        )
+        # No duplicates created; the identical row set survives.
+        self.assertEqual(after_first, after_second)
+
+    def test_saving_rack_a_only_does_not_disturb_rack_b(self):
+        """A save scoped to rack A leaves rack B's existing placements untouched."""
+        self._grant_all()
+        rack_a = self.racks[0]
+        rack_b = self.racks[1]
+
+        # A real device living in rack B, with a move placement keeping it in
+        # rack B (a move/remove row is exactly the data-loss-prone kind the
+        # conservative guard protects).
+        device_b = create_test_device("Device B", site=self.site, rack=rack_b, position=3, face="front")
+        move_b = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=device_b,
+            target_rack=rack_b,
+            target_position=20,
+            target_face="front",
+        )
+        before = (move_b.target_rack_id, float(move_b.target_position), move_b.target_face)
+
+        # Submit ONLY rack A (move Device 1). Rack B is never mentioned.
+        payload = self._payload([
+            {
+                "rack_id": rack_a.pk,
+                "front": [
+                    {"kind": "move", "device_id": self.devices[0].pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        # Rack A reconciled.
+        self.assertTrue(
+            DesignPlacement.objects.filter(
+                design=self.design,
+                kind=DesignPlacementKindChoices.KIND_MOVE,
+                device_id=self.devices[0].pk,
+                target_rack_id=rack_a.pk,
+            ).exists()
+        )
+        # Rack B's placement is completely untouched (not deleted, not modified).
+        move_b.refresh_from_db()
+        self.assertEqual(
+            (move_b.target_rack_id, float(move_b.target_position), move_b.target_face),
+            before,
+        )
+
+
+class DesignRackScopeTest(APITestCase):
+    """
+    Tests for the DesignViewSet add-rack / remove-rack scope actions (Phase A).
+
+    Adding enforces the same-site rule and object permissions; removing only
+    detaches from design.racks and never deletes the rack or its placements.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]
+        cls.device_type = env["device_type"]
+        cls.design = Design.objects.create(title="Scope design", site=cls.site)
+
+        # A rack in a DIFFERENT site -- adding it must be rejected.
+        cls.other_site = Site.objects.create(name="Site 2", slug="site-2")
+        cls.foreign_rack = Rack.objects.create(name="Foreign Rack", site=cls.other_site)
+
+    def _add_url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-add-rack",
+            kwargs={"pk": design.pk},
+        )
+
+    def _remove_url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-remove-rack",
+            kwargs={"pk": design.pk},
+        )
+
+    def test_add_rack_same_site_succeeds(self):
+        """A same-site rack is added to the scope; the updated scope is returned."""
+        self.add_permissions("netbox_rack_design.change_design")
+        rack = self.racks[0]
+        response = self.client.post(
+            self._add_url(self.design), {"rack_id": rack.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["rack_ids"], [rack.pk])
+        self.assertIn(rack, self.design.racks.all())
+
+    def test_add_rack_is_idempotent(self):
+        """Re-adding a rack already in scope is a no-op (still one through-row)."""
+        self.add_permissions("netbox_rack_design.change_design")
+        rack = self.racks[0]
+        self.design.racks.add(rack)
+        response = self.client.post(
+            self._add_url(self.design), {"rack_id": rack.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(self.design.racks.count(), 1)
+
+    def test_add_rack_cross_site_rejected(self):
+        """A rack from another site is rejected (same-site rule), scope unchanged."""
+        self.add_permissions("netbox_rack_design.change_design")
+        response = self.client.post(
+            self._add_url(self.design),
+            {"rack_id": self.foreign_rack.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertNotIn(self.foreign_rack, self.design.racks.all())
+
+    def test_add_rack_nonexistent_rejected(self):
+        """A non-existent rack_id → 400."""
+        self.add_permissions("netbox_rack_design.change_design")
+        response = self.client.post(
+            self._add_url(self.design), {"rack_id": 9999999}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_add_rack_without_change_permission_denied(self):
+        """A user lacking change_design → 403, scope unchanged."""
+        rack = self.racks[0]
+        response = self.client.post(
+            self._add_url(self.design), {"rack_id": rack.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.design.racks.count(), 0)
+
+    def test_remove_rack_zero_affected_detaches_immediately(self):
+        """A rack with no placements targeting it detaches without confirmation."""
+        self.add_permissions("netbox_rack_design.change_design")
+        rack = self.racks[0]
+        self.design.racks.add(rack)
+        response = self.client.post(
+            self._remove_url(self.design), {"rack_id": rack.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["deleted_count"], 0)
+        self.assertEqual(response.data["rack_ids"], [])
+        self.assertNotIn(rack, self.design.racks.all())
+        self.assertTrue(Rack.objects.filter(pk=rack.pk).exists())
+
+    def test_remove_rack_with_affected_requires_confirmation(self):
+        """Affected placements + no confirm → 409, nothing deleted or detached."""
+        self.add_permissions("netbox_rack_design.change_design")
+        rack = self.racks[0]
+        self.design.racks.add(rack)
+        placement = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=10,
+        )
+        response = self.client.post(
+            self._remove_url(self.design), {"rack_id": rack.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertTrue(response.data["requires_confirmation"])
+        self.assertEqual(response.data["affected_count"], 1)
+        self.assertEqual(response.data["affected"][0]["placement_id"], placement.pk)
+        # Nothing was deleted or detached.
+        self.assertIn(rack, self.design.racks.all())
+        self.assertTrue(DesignPlacement.objects.filter(pk=placement.pk).exists())
+
+    def test_remove_rack_confirmed_deletes_target_placements_only(self):
+        """confirm=true deletes target_rack==R placements; unrelated ones survive."""
+        self.add_permissions("netbox_rack_design.change_design")
+        rack = self.racks[0]
+        other_rack = self.racks[1]
+        self.design.racks.set([rack, other_rack])
+
+        # Affected: an add into R and a move into R.
+        add_into_r = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=10,
+        )
+        move_into_r = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=rack,
+            target_position=11,
+        )
+        # Unrelated: a remove-kind placement for a device in R (target_rack is
+        # NULL, destination is not R) and an add targeting a different rack.
+        remove_in_r = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=self.devices[1],
+        )
+        add_into_other = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=other_rack,
+            target_position=5,
+        )
+
+        response = self.client.post(
+            self._remove_url(self.design),
+            {"rack_id": rack.pk, "confirm": True},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["deleted_count"], 2)
+        self.assertEqual(response.data["rack_ids"], [other_rack.pk])
+
+        # Target-rack==R placements are gone.
+        self.assertFalse(DesignPlacement.objects.filter(pk=add_into_r.pk).exists())
+        self.assertFalse(DesignPlacement.objects.filter(pk=move_into_r.pk).exists())
+        # Unrelated placements survive untouched.
+        self.assertTrue(DesignPlacement.objects.filter(pk=remove_in_r.pk).exists())
+        self.assertTrue(DesignPlacement.objects.filter(pk=add_into_other.pk).exists())
+        # Rack detached; real devices/racks untouched.
+        self.assertNotIn(rack, self.design.racks.all())
+        self.assertTrue(Rack.objects.filter(pk=rack.pk).exists())
+        self.devices[0].refresh_from_db()
+        self.assertEqual(self.devices[0].rack_id, self.racks[0].pk)
+
+    def test_remove_rack_without_change_permission_denied(self):
+        """A user lacking change_design → 403; scope unchanged."""
+        rack = self.racks[0]
+        self.design.racks.add(rack)
+        response = self.client.post(
+            self._remove_url(self.design), {"rack_id": rack.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertIn(rack, self.design.racks.all())
+
+
+class HiddenDesignRackTest(APITestCase):
+    """
+    Tests for the user-scoped per-design rack visibility endpoint (Phase A).
+
+    We store HIDDEN rows, so the core properties are: hide/show toggling,
+    show-all clearing, and strict per-user isolation.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Visibility design", site=cls.site)
+        cls.design.racks.set(cls.racks)
+
+    def setUp(self):
+        super().setUp()  # builds self.user / self.token / self.header
+        self.user_b = User.objects.create_user(username="user_b")
+        self.token_b = Token.objects.create(user=self.user_b)
+        self.header_b = {"HTTP_AUTHORIZATION": f"Token {self.token_b.key}"}
+
+    def _list_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:hiddendesignrack-list")
+
+    def _toggle_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:hiddendesignrack-toggle")
+
+    def _show_all_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:hiddendesignrack-show-all")
+
+    def test_toggle_hides_then_shows(self):
+        """First toggle hides a rack (creates a row); second shows it (removes it)."""
+        body = {"design_id": self.design.pk, "rack_id": self.racks[0].pk}
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["hidden"])
+        self.assertEqual(response.data["hidden_rack_ids"], [self.racks[0].pk])
+        self.assertTrue(
+            HiddenDesignRack.objects.filter(
+                user=self.user, design=self.design, rack=self.racks[0]
+            ).exists()
+        )
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertFalse(response.data["hidden"])
+        self.assertEqual(response.data["hidden_rack_ids"], [])
+        self.assertFalse(
+            HiddenDesignRack.objects.filter(
+                user=self.user, design=self.design, rack=self.racks[0]
+            ).exists()
+        )
+
+    def test_list_returns_only_current_users_hidden_racks(self):
+        """GET ?design_id= returns ONLY the requesting user's hidden rack ids."""
+        HiddenDesignRack.objects.create(
+            user=self.user, design=self.design, rack=self.racks[0]
+        )
+        HiddenDesignRack.objects.create(
+            user=self.user_b, design=self.design, rack=self.racks[1]
+        )
+
+        response = self.client.get(
+            self._list_url(), {"design_id": self.design.pk}, **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["hidden_rack_ids"], [self.racks[0].pk])
+
+        response = self.client.get(
+            self._list_url(), {"design_id": self.design.pk}, **self.header_b
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["hidden_rack_ids"], [self.racks[1].pk])
+
+    def test_list_requires_design_id(self):
+        """GET without ?design_id → 400."""
+        response = self.client.get(self._list_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_show_all_clears_only_current_users_rows(self):
+        """show-all clears the requesting user's hidden rows but not user B's."""
+        HiddenDesignRack.objects.create(
+            user=self.user, design=self.design, rack=self.racks[0]
+        )
+        HiddenDesignRack.objects.create(
+            user=self.user, design=self.design, rack=self.racks[1]
+        )
+        b_row = HiddenDesignRack.objects.create(
+            user=self.user_b, design=self.design, rack=self.racks[0]
+        )
+
+        response = self.client.post(
+            self._show_all_url(), {"design_id": self.design.pk}, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["hidden_rack_ids"], [])
+        self.assertFalse(
+            HiddenDesignRack.objects.filter(user=self.user, design=self.design).exists()
+        )
+        # User B's row survives.
+        self.assertTrue(HiddenDesignRack.objects.filter(pk=b_row.pk).exists())
+
+    def test_toggle_as_user_a_never_affects_user_b(self):
+        """User B's hidden state is untouched when user A toggles the same rack."""
+        b_row = HiddenDesignRack.objects.create(
+            user=self.user_b, design=self.design, rack=self.racks[0]
+        )
+        body = {"design_id": self.design.pk, "rack_id": self.racks[0].pk}
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["hidden"])
+
+        # A separate row was created for user A; user B's row survives.
+        self.assertTrue(HiddenDesignRack.objects.filter(pk=b_row.pk).exists())
+        self.assertEqual(
+            HiddenDesignRack.objects.filter(
+                design=self.design, rack=self.racks[0]
+            ).count(),
+            2,
+        )
+
+    def test_toggle_bad_design_or_rack_rejected(self):
+        """A non-existent design_id or rack_id → 400, no row created."""
+        response = self.client.post(
+            self._toggle_url(),
+            {"design_id": 9999999, "rack_id": self.racks[0].pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(
+            self._toggle_url(),
+            {"design_id": self.design.pk, "rack_id": 9999999},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(HiddenDesignRack.objects.filter(user=self.user).count(), 0)
+
+    def test_unauthenticated_is_rejected(self):
+        """No token → 401/403 on list, toggle, and show-all."""
+        for response in (
+            self.client.get(self._list_url(), {"design_id": self.design.pk}),
+            self.client.post(
+                self._toggle_url(),
+                {"design_id": self.design.pk, "rack_id": self.racks[0].pk},
+                format="json",
+            ),
+            self.client.post(
+                self._show_all_url(), {"design_id": self.design.pk}, format="json"
+            ),
+        ):
+            self.assertIn(
+                response.status_code,
+                (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+            )
 
 
 class FavoriteDeviceTypeTest(APITestCase):

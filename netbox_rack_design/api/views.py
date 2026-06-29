@@ -14,12 +14,21 @@ from tenancy.models import Tenant
 
 from .. import filtersets
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignGroup, DesignPlacement, FavoriteDeviceType
+from ..models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    FavoriteDeviceType,
+    HiddenDesignRack,
+)
 from .serializers import (
     DesignGroupSerializer,
     DesignPlacementSerializer,
+    DesignRackScopeSerializer,
     DesignSerializer,
     FavoriteToggleSerializer,
+    HiddenRackShowAllSerializer,
+    HiddenRackToggleSerializer,
     SaveLayoutSerializer,
 )
 
@@ -28,6 +37,7 @@ __all__ = (
     "DesignViewSet",
     "DesignPlacementViewSet",
     "FavoriteDeviceTypeViewSet",
+    "HiddenDesignRackViewSet",
 )
 
 
@@ -42,11 +52,12 @@ def _norm_pos(value):
     return None if value is None else float(value)
 
 
-class SaveLayoutPermissions(TokenPermissions):
+class ChangeDesignPermissions(TokenPermissions):
     """
-    Save-layout is a write that EDITS an existing Design (not creation), so a
-    POST to it must require ``change_design`` rather than the default
-    ``add_design`` that TokenPermissions maps POST to.
+    These detail @actions (save-layout, add-rack, remove-rack) are writes that
+    EDIT an existing Design (not creation), so a POST to them must require
+    ``change_design`` rather than the default ``add_design`` that
+    TokenPermissions maps POST to.
     """
 
     perms_map = {
@@ -55,15 +66,142 @@ class SaveLayoutPermissions(TokenPermissions):
     }
 
 
+# Backwards-compatible alias (the save-layout action referenced this name).
+SaveLayoutPermissions = ChangeDesignPermissions
+
+
 class DesignViewSet(NetBoxModelViewSet):
-    queryset = Design.objects.prefetch_related("placements", "depends_on", "tags")
+    queryset = Design.objects.prefetch_related("placements", "depends_on", "racks", "tags")
     serializer_class = DesignSerializer
     filterset_class = filtersets.DesignFilterSet
 
     def get_permissions(self):
-        if getattr(self, "action", None) == "save_layout":
-            return [SaveLayoutPermissions()]
+        if getattr(self, "action", None) in ("save_layout", "add_rack", "remove_rack"):
+            return [ChangeDesignPermissions()]
         return super().get_permissions()
+
+    @action(detail=True, methods=["post"], url_path="add-rack")
+    def add_rack(self, request, pk=None):
+        """
+        Add a rack to this design's planning scope (the ``design.racks`` M2M).
+
+        Enforces the same-site rule (a rack from another site is rejected),
+        mirroring ``Design.clean()`` / the design form. Respects NetBox object
+        permissions for editing the Design. Idempotent: re-adding a rack already
+        in scope is a no-op. Returns the updated rack scope (``rack_ids``).
+
+        URL name: plugins-api:netbox_rack_design-api:design-add-rack
+        Path:     /api/plugins/rack-design/designs/<pk>/add-rack/
+        """
+        # Restrict to designs this user may change (object-level permission).
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+
+        body = DesignRackScopeSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        rack_id = body.validated_data["rack_id"]
+
+        rack = Rack.objects.filter(pk=rack_id).first()
+        if rack is None:
+            return Response(
+                {"rack_id": ["Rack does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Same-site rule, identical to Design.clean(): a scoped rack must belong
+        # to the design's site.
+        if rack.site_id != design.site_id:
+            return Response(
+                {"rack_id": ["This rack is not in the design's site."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        design.racks.add(rack)
+
+        rack_ids = list(design.racks.values_list("pk", flat=True))
+        return Response({"rack_ids": rack_ids}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="remove-rack")
+    def remove_rack(self, request, pk=None):
+        """
+        Remove a rack from this design's planning scope (DESTRUCTIVE, confirmed).
+
+        Planned placements whose DESTINATION is this rack (strictly
+        ``target_rack == R`` -- the planned adds into R and the move-ins to R)
+        become meaningless once R leaves the scope and are DELETED as part of the
+        removal. Remove-kind placements that merely flag a real device in R (their
+        destination is not R) are NOT touched unless their target_rack is also R.
+
+        Two-step confirmation:
+          * If there is at least one affected placement and the request is NOT
+            confirmed (``confirm`` is false): nothing is deleted or detached.
+            Responds 409 with ``{"requires_confirmation": true, "affected_count",
+            "affected": [...]}``.
+          * If ``confirm`` is true, OR there are zero affected placements: in a
+            single transaction, delete the affected placements then detach R from
+            ``design.racks``. Responds 200 with ``{"deleted_count", "rack_ids"}``.
+
+        Never touches real dcim.Device/Rack -- only the design's own placements and
+        the M2M link. Respects NetBox object permissions for editing the Design.
+
+        URL name: plugins-api:netbox_rack_design-api:design-remove-rack
+        Path:     /api/plugins/rack-design/designs/<pk>/remove-rack/
+        """
+        # Restrict to designs this user may change (object-level permission).
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+
+        body = DesignRackScopeSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        rack_id = body.validated_data["rack_id"]
+        confirm = body.validated_data["confirm"]
+
+        rack = Rack.objects.filter(pk=rack_id).first()
+        if rack is None:
+            return Response(
+                {"rack_id": ["Rack does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Placements made meaningless by the removal: strictly those targeting R.
+        affected = DesignPlacement.objects.filter(design=design, target_rack=rack)
+
+        if affected.exists() and not confirm:
+            return Response(
+                {
+                    "requires_confirmation": True,
+                    "affected_count": affected.count(),
+                    "affected": [
+                        {
+                            "placement_id": p.pk,
+                            "kind": p.kind,
+                            "device_or_type": str(
+                                p.device or p.device_type or ""
+                            ),
+                            "u_position": (
+                                float(p.target_position)
+                                if p.target_position is not None
+                                else None
+                            ),
+                        }
+                        for p in affected
+                    ],
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Confirmed (or nothing to delete): delete affected placements + detach R.
+        with transaction.atomic():
+            deleted_count = affected.count()
+            affected.delete()
+            design.racks.remove(rack)
+
+        rack_ids = list(design.racks.values_list("pk", flat=True))
+        return Response(
+            {"deleted_count": deleted_count, "rack_ids": rack_ids},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"], url_path="save-layout")
     def save_layout(self, request, pk=None):
@@ -563,3 +701,98 @@ class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
         # Already starred → toggle off.
         favorite.delete()
         return Response({"device_type_id": device_type_id, "favorite": False})
+
+
+class HiddenDesignRackViewSet(viewsets.ViewSet):
+    """
+    User-scoped per-design rack visibility for the multi-rack editor workspace.
+
+    Like FavoriteDeviceTypeViewSet, this is deliberately NOT a NetBoxModelViewSet:
+    every query is filtered by ``request.user`` and the client NEVER supplies a
+    user. We store HIDDEN rows, so an empty set means "all visible". Hiding a rack
+    is purely personal view state -- it never affects another user and never
+    changes the design's data or its ``racks`` scope.
+
+    Endpoints:
+      GET  /api/plugins/rack-design/hidden-design-racks/?design_id=<id>
+           -> {"design_id": <id>, "hidden_rack_ids": [...]}
+      POST /api/plugins/rack-design/hidden-design-racks/toggle/
+           body {"design_id", "rack_id"} -> hide/show one rack
+      POST /api/plugins/rack-design/hidden-design-racks/show-all/
+           body {"design_id"} -> clear all hidden rows for the design
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _hidden_ids(self, user, design_id):
+        return list(
+            HiddenDesignRack.objects.filter(user=user, design_id=design_id)
+            .values_list("rack_id", flat=True)
+        )
+
+    def list(self, request):
+        """Return the requesting user's hidden rack ids for ?design_id=<id>."""
+        design_id = request.query_params.get("design_id")
+        if not design_id:
+            return Response(
+                {"design_id": ["This query parameter is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({
+            "design_id": int(design_id),
+            "hidden_rack_ids": self._hidden_ids(request.user, design_id),
+        })
+
+    @action(detail=False, methods=["post"], url_path="toggle")
+    def toggle(self, request):
+        """
+        Hide or show one (design, rack) for the requesting user (idempotent).
+
+        Returns {"design_id", "rack_id", "hidden": true|false, "hidden_rack_ids":
+        [...]} where ``hidden`` reflects the resulting state and
+        ``hidden_rack_ids`` is the user's full hidden set for the design.
+        """
+        body = HiddenRackToggleSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        design_id = body.validated_data["design_id"]
+        rack_id = body.validated_data["rack_id"]
+
+        if not Design.objects.filter(pk=design_id).exists():
+            return Response(
+                {"design_id": ["Design does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not Rack.objects.filter(pk=rack_id).exists():
+            return Response(
+                {"rack_id": ["Rack does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        hidden, created = HiddenDesignRack.objects.get_or_create(
+            user=request.user, design_id=design_id, rack_id=rack_id
+        )
+        if created:
+            resulting = True
+        else:
+            # Already hidden → show it again.
+            hidden.delete()
+            resulting = False
+
+        return Response({
+            "design_id": design_id,
+            "rack_id": rack_id,
+            "hidden": resulting,
+            "hidden_rack_ids": self._hidden_ids(request.user, design_id),
+        })
+
+    @action(detail=False, methods=["post"], url_path="show-all")
+    def show_all(self, request):
+        """Clear ALL of the user's hidden rows for a design (show every rack)."""
+        body = HiddenRackShowAllSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        design_id = body.validated_data["design_id"]
+
+        HiddenDesignRack.objects.filter(
+            user=request.user, design_id=design_id
+        ).delete()
+        return Response({"design_id": design_id, "hidden_rack_ids": []})

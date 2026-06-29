@@ -7,6 +7,7 @@ from .views import (
     DesignPlacementViewSet,
     DesignViewSet,
     FavoriteDeviceTypeViewSet,
+    HiddenDesignRackViewSet,
 )
 
 app_name = "netbox_rack_design"
@@ -19,6 +20,11 @@ router.register(
     "favorite-device-types",
     FavoriteDeviceTypeViewSet,
     basename="favoritedevicetype",
+)
+router.register(
+    "hidden-design-racks",
+    HiddenDesignRackViewSet,
+    basename="hiddendesignrack",
 )
 
 urlpatterns = router.urls

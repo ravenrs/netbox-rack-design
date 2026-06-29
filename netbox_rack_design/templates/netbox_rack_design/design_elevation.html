@@ -3,15 +3,23 @@
 {% load i18n %}
 {% load rack_design %}
 
-{# Read-only projected rack elevation, rendered with GridStack (staticGrid). #}
-{# Consumes the projection.project_rack contract: design, rack, front, rear,  #}
-{# non_racked, face. Front/Rear toggle is client-side; the tray below lists   #}
-{# position-less placements. State tints come from rack_design.css.           #}
+{# Read-only projected elevation of ALL the design's scoped racks, rendered    #}
+{# identically to the editor canvas (every scoped rack side by side, BOTH      #}
+{# Front and Rear faces, full-depth opposite-face hatch and a hover card) but  #}
+{# with NO edit affordances: no catalog/quick-access, no add-rack/design-racks #}
+{# panels, no drag, no × remove, no favorites, no Save. Static GridStack only. #}
+{#                                                                            #}
+{# Reuses the SAME per-rack block markup as the editor via                     #}
+{# inc/rack_block.html (editable=False); the projection comes from the SAME    #}
+{# views._project_rack_bundle helper the editor uses. #}
 
 {% block head %}
   {{ block.super }}
   <link rel="stylesheet" href="{% static 'netbox_rack_design/css/gridstack.min.css' %}">
-  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}?v={{ asset_version }}">
+  {# editor.css supplies the shared multi-rack layout, the full-depth hatch and #}
+  {# the hover-card styling — none of which imply editability. #}
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/editor.css' %}?v={{ asset_version }}">
 {% endblock head %}
 
 {% block content %}
@@ -19,25 +27,40 @@
   <div class="col col-md-12">
     <div class="card">
       <h2 class="card-header">
-        {% blocktrans with rack=rack.name design=design.title %}Projected elevation: {{ rack }} ({{ design }}){% endblocktrans %}
+        {% blocktrans with design=object.title %}Projected elevation: {{ design }}{% endblocktrans %}
+        {% if perms.netbox_rack_design.change_design %}
         <div class="card-actions">
-          <div class="btn-group btn-group-sm" role="group" aria-label="{% trans 'Face' %}">
-            <button type="button" class="btn btn-outline-primary{% if face != 'rear' %} active{% endif %}"
-                    id="nbx-rd-show-front">{% trans "Front" %}</button>
-            <button type="button" class="btn btn-outline-primary{% if face == 'rear' %} active{% endif %}"
-                    id="nbx-rd-show-rear">{% trans "Rear" %}</button>
-          </div>
-          {% if perms.netbox_rack_design.change_design %}
-          <a href="{% url 'plugins:netbox_rack_design:design_editor' pk=design.pk rack_id=rack.pk %}"
+          <a href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=object.pk %}"
              class="btn btn-sm btn-warning">
-            <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Edit layout" %}
+            <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Open editor" %}
           </a>
-          {% endif %}
         </div>
+        {% endif %}
       </h2>
 
-      <div class="card-body">
-        {% include 'netbox_rack_design/inc/elevation_grid.html' %}
+      {# Read-only root: scopes the static-grid init, the per-rack face toggles #}
+      {# and the hover card (see rack_design.js). #}
+      <div class="card-body" id="rd-elevation">
+
+        {# Legend — also acts as a per-state filter (see legend_filter.js). #}
+        <div class="nbx-rd-legend mb-3" data-rd-legend>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
+          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+        </div>
+
+        {% if rack_blocks %}
+        <div class="nbx-rd-racks-scroll" id="nbx-rd-racks-scroll">
+        {% for b in rack_blocks %}
+          {% include 'netbox_rack_design/inc/rack_block.html' with b=b editable=False %}
+        {% endfor %}
+        </div>{# /.nbx-rd-racks-scroll #}
+        {% else %}
+        <p class="text-muted mb-0">{% trans "This design has no racks in scope yet." %}</p>
+        {% endif %}
+
       </div>
     </div>
   </div>
@@ -47,21 +70,6 @@
 {% block javascript %}
   {{ block.super }}
   <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
-  <script src="{% static 'netbox_rack_design/js/rack_design.js' %}" defer></script>
-  <script type="text/javascript">
-    (function () {
-      var front = document.getElementById('nbx-rd-face-front');
-      var rear = document.getElementById('nbx-rd-face-rear');
-      var btnFront = document.getElementById('nbx-rd-show-front');
-      var btnRear = document.getElementById('nbx-rd-show-rear');
-      function show(faceFront) {
-        if (front) { front.style.display = faceFront ? '' : 'none'; }
-        if (rear) { rear.style.display = faceFront ? 'none' : ''; }
-        if (btnFront) { btnFront.classList.toggle('active', faceFront); }
-        if (btnRear) { btnRear.classList.toggle('active', !faceFront); }
-      }
-      if (btnFront) { btnFront.addEventListener('click', function () { show(true); }); }
-      if (btnRear) { btnRear.addEventListener('click', function () { show(false); }); }
-    })();
-  </script>
+  <script src="{% static 'netbox_rack_design/js/rack_design.js' %}?v={{ asset_version }}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}

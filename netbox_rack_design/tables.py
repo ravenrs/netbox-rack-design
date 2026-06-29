@@ -80,7 +80,7 @@ class ElevationTable(tables.Table):
         design = record["design"]
         rack = record["rack"]
         view_url = reverse(
-            "plugins:netbox_rack_design:design_elevation",
+            "plugins:netbox_rack_design:design_elevation_rack",
             kwargs={"pk": design.pk, "rack_id": rack.pk},
         )
         edit_url = reverse(
