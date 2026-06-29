@@ -1,0 +1,2982 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://ravenrs.github.io/netbox-rack-design/changelog/">
+      
+      
+        <link rel="prev" href="../contributing/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/icon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Changelog - NetBox Rack Design</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#Changelog" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="NetBox Rack Design" class="md-header__button md-logo" aria-label="NetBox Rack Design" data-md-component="logo">
+      
+  <img src="../assets/icon.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Rack Design
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Changelog
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/ravenrs/netbox-rack-design" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ravenrs/netbox-rack-design
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="NetBox Rack Design" class="md-nav__button md-logo" aria-label="NetBox Rack Design" data-md-component="logo">
+      
+  <img src="../assets/icon.svg" alt="logo">
+
+    </a>
+    NetBox Rack Design
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/ravenrs/netbox-rack-design" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ravenrs/netbox-rack-design
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#Changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changelog
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Changelog">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#070---2026-06-29" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.7.0] - 2026-06-29
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.7.0] - 2026-06-29">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Multi-rack-designs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-rack designs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Multi-rack-editor-workspace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-rack editor workspace
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Read-only-elevation-view" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only elevation view
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Editor-UX-overhaul" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editor UX overhaul
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060---2026-06-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.6.0] - 2026-06-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.6.0] - 2026-06-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Independent-FrontRear-face-toggles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Independent Front/Rear face toggles
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Device-hover-card" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Device hover card
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Full-depth-devices-across-both-faces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Full-depth devices across both faces
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050---2026-06-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.5.0] - 2026-06-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.5.0] - 2026-06-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Per-user-favorite-device-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-user favorite device types
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Quick-access-column-in-the-editor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick access column in the editor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#User-scoped-favorites-API" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User-scoped favorites API
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040---2026-06-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.4.0] - 2026-06-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.4.0] - 2026-06-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Device-type-catalog-palette" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Device-type catalog palette
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Role-and-tenant-on-planned-adds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Role and tenant on planned adds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Editor-polish--regression-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editor polish &amp; regression coverage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030---2026-06-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.3.0] - 2026-06-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.3.0] - 2026-06-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Interactive-single-rack-layout-editor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactive single-rack layout editor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Save-layout-API" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Save-layout API
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Standalone-Elevations-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standalone Elevations list
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Rack-page-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rack-page integration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020---2026-06-25" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.2.0] - 2026-06-25
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.2.0] - 2026-06-25">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010---2026-06-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.1.0] - 2026-06-24
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.1.0] - 2026-06-24">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Release-Notes-Template-for-Future-Versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Notes Template for Future Versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#Changelog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changelog
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Changelog">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#070---2026-06-29" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.7.0] - 2026-06-29
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.7.0] - 2026-06-29">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Multi-rack-designs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-rack designs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Multi-rack-editor-workspace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-rack editor workspace
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Read-only-elevation-view" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only elevation view
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Editor-UX-overhaul" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editor UX overhaul
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#060---2026-06-27" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.6.0] - 2026-06-27
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.6.0] - 2026-06-27">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Independent-FrontRear-face-toggles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Independent Front/Rear face toggles
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Device-hover-card" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Device hover card
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Full-depth-devices-across-both-faces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Full-depth devices across both faces
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#050---2026-06-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.5.0] - 2026-06-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.5.0] - 2026-06-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Per-user-favorite-device-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-user favorite device types
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Quick-access-column-in-the-editor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick access column in the editor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#User-scoped-favorites-API" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User-scoped favorites API
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#040---2026-06-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.4.0] - 2026-06-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.4.0] - 2026-06-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Device-type-catalog-palette" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Device-type catalog palette
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Role-and-tenant-on-planned-adds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Role and tenant on planned adds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Editor-polish--regression-coverage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editor polish &amp; regression coverage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#030---2026-06-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.3.0] - 2026-06-26
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.3.0] - 2026-06-26">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Release Summary">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Interactive-single-rack-layout-editor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactive single-rack layout editor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Save-layout-API" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Save-layout API
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Standalone-Elevations-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Standalone Elevations list
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Rack-page-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rack-page integration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Upgrade_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#020---2026-06-25" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.2.0] - 2026-06-25
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.2.0] - 2026-06-25">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#010---2026-06-24" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        [0.1.0] - 2026-06-24
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="[0.1.0] - 2026-06-24">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#Release-Summary_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Summary
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Added_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Fixed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Changed_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Deprecated_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deprecated
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Removed_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Security_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#Release-Notes-Template-for-Future-Versions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Release Notes Template for Future Versions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>Changelog</h1>
+
+<h2 id="Changelog">Changelog<a class="headerlink" href="#Changelog" title="Permanent link">&para;</a></h2>
+<p>All notable changes to this project will be documented in this file.</p>
+<p>The format is based on <a href="https://keepachangelog.com/en/1.0.0/">Keep a Changelog</a>,
+and this project adheres to <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
+<h3 id="070---2026-06-29">[0.7.0] - 2026-06-29<a class="headerlink" href="#070---2026-06-29" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary">Release Summary<a class="headerlink" href="#Release-Summary" title="Permanent link">&para;</a></h4>
+<p><strong>One design, every rack it touches</strong> — Rack Design grows from a single-rack editor into a multi-rack workspace.</p>
+<p>0.6.0 made a single rack's elevation read like the real thing; 0.7.0 lets a <strong>design span multiple racks</strong>
+and reworks the editor around that. This minor, fully backward-compatible release adds an explicit
+<strong>rack scope</strong> to each design (a <code>racks</code> set, validated to the design's site), renders <strong>all of a design's
+racks side by side</strong> in one editor with a single design-level Save, and adds a <strong>read-only elevation view</strong>
+that shows the whole projected design — every rack, both faces — without an editing surface. It also ships
+a substantial editor-UX round: a redesigned, collapsible <strong>tool drawer</strong> with three independent
+Device / Favorites / Racks panels, a compact one-line <strong>role + tenant</strong> toolbar merged with the state legend,
+and an <strong>empty-state</strong> editor that walks you through adding your first rack. As always, the editor only
+composes <strong>design placements</strong>; your live <code>Device</code> and <code>Rack</code> records are never modified.</p>
+<p>This release adds three <strong>additive, backward-compatible</strong> migrations: <code>0004</code> adds the <code>Design.racks</code>
+relationship, <code>0005</code> seeds it from the racks each existing design already touches, and <code>0006</code> adds a
+per-user rack-visibility table. There are <strong>no breaking changes</strong> — existing designs, placements, the REST
+API, and GraphQL all continue to work, and the migrations reverse cleanly.</p>
+<h5 id="Multi-rack-designs">Multi-rack designs<a class="headerlink" href="#Multi-rack-designs" title="Permanent link">&para;</a></h5>
+<p>A design now carries an explicit <strong>rack scope</strong> — a set of racks (<code>Design.racks</code>) the design plans against,
+validated to live in the design's own site. Migration <code>0005</code> backfills this from the distinct target racks
+of each design's existing placements, so every current design keeps exactly the racks it already touches.
+New REST endpoints manage the scope: <code>designs/&lt;pk&gt;/add-rack/</code> (enforces same-site) and
+<code>designs/&lt;pk&gt;/remove-rack/</code>. Removing a rack is <strong>destructive and confirmed</strong>: it returns <code>409</code> with the
+list of placements that would be affected unless called with <code>confirm: true</code>, at which point it deletes the
+placements targeting that rack and detaches it in a single transaction.</p>
+<h5 id="Multi-rack-editor-workspace">Multi-rack editor workspace<a class="headerlink" href="#Multi-rack-editor-workspace" title="Permanent link">&para;</a></h5>
+<p>The editor is now a <strong>design-level workspace</strong> that renders every visible scoped rack <strong>side by side</strong>
+instead of one rack at a time, with a single Save that persists the whole design's layout at once. The old
+single-rack tab switcher is gone. Each rack renders through a shared <code>inc/rack_block.html</code> partial (the same
+markup the read-only view uses), and a per-user <strong><code>HiddenDesignRack</code></strong> store lets you hide racks you aren't
+working on without changing the design — with <code>hidden-design-racks/</code> list, <code>toggle/</code>, and <code>show-all/</code>
+endpoints backing it. Opening a design with no racks yet shows an <strong>empty state</strong> with an "Add your first
+rack" entry point instead of an error.</p>
+<h5 id="Read-only-elevation-view">Read-only elevation view<a class="headerlink" href="#Read-only-elevation-view" title="Permanent link">&para;</a></h5>
+<p>A new <strong>read-only elevation view</strong> at <code>designs/&lt;pk&gt;/elevation/</code> renders the entire projected design — all
+scoped racks, both faces, with full-depth devices hatched on their opposite face and the device hover card —
+with no editing controls. It shares the exact projection the editor uses, so the two always agree. The old
+per-rack elevation URL now redirects to this view.</p>
+<h5 id="Editor-UX-overhaul">Editor UX overhaul<a class="headerlink" href="#Editor-UX-overhaul" title="Permanent link">&para;</a></h5>
+<ul>
+<li><strong>Tool drawer.</strong> The editor's side tools are now a collapsible push-sidebar split into <strong>three independent
+  toggles — Device, Favorites, and Racks</strong> — that can be opened in any combination and stack side by side as
+  columns; the open/closed state of each is persisted in <code>localStorage</code>.</li>
+<li><strong>Role + tenant toolbar.</strong> The planned-add <strong>device role</strong> and <strong>tenant</strong> selectors now live in a compact,
+  always-visible one-line toolbar merged with the state legend, removing the previous duplicate hint.</li>
+<li><strong>Layout polish.</strong> Drawer columns flex-stretch to match the rendered rack heights, so the catalog scrolls
+  internally instead of overshooting, at both tall and short viewports.</li>
+</ul>
+<h4 id="Added">Added<a class="headerlink" href="#Added" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Multi-rack designs.</strong> A new <code>Design.racks</code> many-to-many rack scope (validated to the design's site),
+  with migration <code>0004</code> (schema) and <code>0005</code> (seed each design's scope from its placements' target racks). The
+  scope is editable through the design form (a site-filtered rack selector) and exposed on the REST API
+  serializer.</li>
+<li><strong>Rack-scope REST actions:</strong> <code>designs/&lt;pk&gt;/add-rack/</code> (same-site enforced) and <code>designs/&lt;pk&gt;/remove-rack/</code>
+  (destructive/confirmed — returns <code>409</code> + the affected placements unless <code>confirm: true</code>, then deletes the
+  rack's placements and detaches it in one transaction).</li>
+<li><strong>Multi-rack editor workspace</strong> rendering all visible scoped racks side by side via a shared
+  <code>inc/rack_block.html</code> partial, with one design-level Save (<code>design_editor.html</code>, <code>editor.js</code>,
+  <code>editor_panels.js</code>, <code>editor.css</code>).</li>
+<li><strong>Read-only elevation view</strong> at <code>designs/&lt;pk&gt;/elevation/</code> showing the whole projected design (all racks,
+  both faces, full-depth hatch, hover card) with no editing controls (<code>design_elevation.html</code>).</li>
+<li><strong>Per-user rack visibility.</strong> A <code>HiddenDesignRack</code> model (migration <code>0006</code>) lets each user hide scoped racks
+  from their own editor view, with <code>hidden-design-racks/</code> list, <code>toggle/</code>, and <code>show-all/</code> endpoints. Hiding a
+  rack is per-user and never alters the design.</li>
+<li><strong>Editor tool drawer</strong> with three independent Device / Favorites / Racks toggles (any combination, stacked
+  as columns), persisted in <code>localStorage</code>, and an <strong>empty-state</strong> with an "Add your first rack" entry point.</li>
+</ul>
+<h4 id="Changed">Changed<a class="headerlink" href="#Changed" title="Permanent link">&para;</a></h4>
+<ul>
+<li>The editor now renders an entire design's racks <strong>side by side in one workspace</strong> with a single Save,
+  replacing the previous single-rack-at-a-time tab switcher.</li>
+<li>The planned-add <strong>device role</strong> and <strong>tenant</strong> selectors moved into a compact always-visible one-line
+  toolbar merged with the state legend.</li>
+<li>The per-rack elevation URL now <strong>redirects</strong> to the new design-level read-only elevation view.</li>
+</ul>
+<h4 id="Fixed">Fixed<a class="headerlink" href="#Fixed" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Deprecated">Deprecated<a class="headerlink" href="#Deprecated" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Removed">Removed<a class="headerlink" href="#Removed" title="Permanent link">&para;</a></h4>
+<ul>
+<li>The single-rack elevation grid partial (<code>inc/elevation_grid.html</code>) and the editor's single-rack tab
+  switcher, superseded by the shared <code>inc/rack_block.html</code> and the multi-rack workspace.</li>
+</ul>
+<h4 id="Security">Security<a class="headerlink" href="#Security" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Upgrade">Upgrade<a class="headerlink" href="#Upgrade" title="Permanent link">&para;</a></h4>
+<p><code>pip install -U netbox-rack-design</code> and restart NetBox.</p>
+<ul>
+<li><strong>Run <code>python manage.py migrate</code></strong> — this release adds migrations <code>0004_design_racks</code> (the <code>Design.racks</code>
+  relationship), <code>0005_seed_design_racks</code> (seeds each existing design's rack scope from its placements'
+  target racks), and <code>0006_hiddendesignrack</code> (a per-user rack-visibility table). All three are <strong>additive</strong>
+  (no changes to existing columns, no destructive data rewrite), safe against existing designs, and reverse
+  cleanly. There are <strong>no breaking changes</strong>.</li>
+<li><strong>Run <code>python manage.py collectstatic</code></strong> — the editor's bundled JS/CSS were reworked for the multi-rack
+  workspace, the tool drawer, and the new shared rack partial (new <code>editor_panels.js</code>), so the updated static
+  assets must be collected for the editor to render correctly.</li>
+<li><strong>No configuration changes</strong> are needed — existing <code>PLUGINS_CONFIG</code> settings continue to work unchanged.</li>
+</ul>
+<hr />
+<h3 id="060---2026-06-27">[0.6.0] - 2026-06-27<a class="headerlink" href="#060---2026-06-27" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary_1">Release Summary<a class="headerlink" href="#Release-Summary_1" title="Permanent link">&para;</a></h4>
+<p><strong>See both faces at once</strong> — Rack Design's elevation editor now renders front and rear side by side.</p>
+<p>0.5.0 made the device-type catalog personal; 0.6.0 makes the rack elevation read like the real
+thing. This minor, fully backward-compatible release replaces the single-face view with
+<strong>independent Front and Rear toggles</strong>: both faces render at the same time, so network gear on
+the front and servers on the rear are visible together. The toggles are independent on/off
+switches (you can show either or both) and the editor <strong>never lets you hide both faces</strong> at once.
+Hovering any tile now pops a <strong>device hover card</strong> showing the device's name, role, and tenant —
+gracefully omitting whichever fields are empty. Finally, <strong>full-depth devices are now honored
+across both faces</strong>, matching NetBox core's own rack-elevation rendering.</p>
+<p>There are <strong>no breaking changes</strong> and <strong>no database migration</strong> in this release — the changes are
+limited to the projection layer, the editor template/JS/CSS, the save-layout payload, and two new
+template filters.</p>
+<h5 id="Independent-FrontRear-face-toggles">Independent Front/Rear face toggles<a class="headerlink" href="#Independent-FrontRear-face-toggles" title="Permanent link">&para;</a></h5>
+<p>The elevation editor now exposes Front and Rear as <strong>independent on/off toggles</strong> and renders both
+faces side by side, so you can plan the front and rear of a rack together instead of flipping
+between them. Either face can be hidden on its own, but the editor <strong>always keeps at least one
+face visible</strong> — it will not allow both to be turned off.</p>
+<h5 id="Device-hover-card">Device hover card<a class="headerlink" href="#Device-hover-card" title="Permanent link">&para;</a></h5>
+<p>Hovering a placed tile now shows a <strong>hover card</strong> with the device's <strong>name, role, and tenant</strong>.
+When a field isn't set (no role, or no tenant), it is simply omitted from the card rather than
+shown blank. Two new template filters, <code>slot_role_name</code> and <code>slot_tenant_name</code>, resolve the
+display values.</p>
+<h5 id="Full-depth-devices-across-both-faces">Full-depth devices across both faces<a class="headerlink" href="#Full-depth-devices-across-both-faces" title="Permanent link">&para;</a></h5>
+<p><strong>Full-depth devices are now correctly shown on both faces</strong>, matching NetBox core's rack-elevation
+behaviour. A full-depth device renders its normal coloured state on the face it is mounted on,
+while the <strong>opposite face</strong> shows core's "blocked" diagonal hatch (the same <code>#f7f7f7</code>/<code>#ffc0c0</code>
+45° stripe pattern core uses) labelled with the device name. The opposite-face rendering is
+<strong>passive</strong>: it is not draggable, carries no <code>×</code>/star controls, and is <strong>excluded from the save
+payload</strong>, so it can never create a duplicate <code>DesignPlacement</code>. This applies to existing devices
+and across every design kind (add, move-in, move-out ghost, and remove), driven by a new
+<code>opposite_face</code> flag on the projection slot contract and the editor payload.</p>
+<h4 id="Added_1">Added<a class="headerlink" href="#Added_1" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Independent Front/Rear face toggles</strong> in the elevation editor: both faces render side by side
+  and each can be toggled on/off independently, with a guard that <strong>never allows both faces to be
+  hidden</strong> (<code>design_editor.html</code>, <code>editor.js</code>, <code>editor.css</code>).</li>
+<li><strong>Device hover card</strong> on placed tiles showing the device <strong>name, role, and tenant</strong>, omitting
+  empty fields, backed by two new template filters <code>slot_role_name</code> and <code>slot_tenant_name</code>
+  (<code>templatetags/rack_design.py</code>).</li>
+<li>New <code>opposite_face</code> flag on the projection slot contract and the editor widget payload so
+  full-depth devices can be represented on the face they do not occupy.</li>
+<li>Tests covering full-depth opposite-face projection and the new behaviour
+  (<code>tests/test_fulldepth.py</code>).</li>
+</ul>
+<h4 id="Fixed_1">Fixed<a class="headerlink" href="#Fixed_1" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Full-depth devices now correctly occupy both faces</strong>, matching NetBox core's rack-elevation
+  rendering. The mounted face shows the normal coloured state; the opposite face shows core's
+  "blocked" diagonal hatch (<code>#f7f7f7</code>/<code>#ffc0c0</code>, 45°) with the device name. The opposite-face
+  tile is passive — not draggable, no <code>×</code>/star controls — and is <strong>excluded from the save
+  payload</strong>, so it never creates a duplicate <code>DesignPlacement</code>. Applies to existing devices and
+  to all design kinds (add / move-in / move-out ghost / remove) (<code>projection.py</code>, <code>views.py</code>,
+  <code>editor.js</code>, <code>editor.css</code>).</li>
+</ul>
+<h4 id="Changed_1">Changed<a class="headerlink" href="#Changed_1" title="Permanent link">&para;</a></h4>
+<ul>
+<li>The elevation editor now renders <strong>both rack faces simultaneously</strong> instead of a single face at
+  a time (see the independent toggles above).</li>
+</ul>
+<h4 id="Deprecated_1">Deprecated<a class="headerlink" href="#Deprecated_1" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Removed_1">Removed<a class="headerlink" href="#Removed_1" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Security_1">Security<a class="headerlink" href="#Security_1" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Upgrade_1">Upgrade<a class="headerlink" href="#Upgrade_1" title="Permanent link">&para;</a></h4>
+<p><code>pip install -U netbox-rack-design</code> and restart NetBox.</p>
+<ul>
+<li><strong>No database migration is required</strong> this release — <code>python manage.py migrate</code> is a no-op for
+  this plugin (the changes are limited to the projection layer, editor template/JS/CSS, the
+  save-layout payload, and two template filters; no models changed).</li>
+<li><strong>Run <code>python manage.py collectstatic</code></strong> — the editor's bundled JS/CSS were updated for the
+  independent face toggles, the device hover card, and the full-depth opposite-face rendering, so
+  the new static assets must be collected for the editor to render correctly.</li>
+<li><strong>No configuration changes</strong> are needed — existing <code>PLUGINS_CONFIG</code> settings continue to work
+  unchanged.</li>
+</ul>
+<hr />
+<h3 id="050---2026-06-26">[0.5.0] - 2026-06-26<a class="headerlink" href="#050---2026-06-26" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary_2">Release Summary<a class="headerlink" href="#Release-Summary_2" title="Permanent link">&para;</a></h4>
+<p><strong>Pin the gear you reach for</strong> — Rack Design gets per-user favorite device types.</p>
+<p>0.4.0 gave the single-rack editor a searchable device-type catalog to drag new gear from;
+0.5.0 makes that catalog <em>personal</em>. This minor, fully backward-compatible release lets each
+user <strong>star a device type</strong> to pin it to a dedicated <strong>Quick access</strong> column in the editor,
+so the handful of types you plan with most are always one click — and one drag — away,
+without scrolling or re-filtering the full catalog. Favorites are <strong>per-user</strong>: starring a
+type affects only your own Quick access column, never anyone else's, and they are persisted
+through a new user-scoped favorites REST API. The Quick access column is <strong>independent of the
+catalog's search/manufacturer filter</strong>, so narrowing the catalog never hides your pinned
+types — your favorites stay put while you search.</p>
+<p>As with every editor surface, this is purely a planning convenience: drag-to-plan from Quick
+access composes <strong>design placements</strong> exactly like the main catalog, and your live <code>Device</code>
+records are never touched.</p>
+<p>There are <strong>no breaking changes</strong>. This release adds a single database migration that only
+<strong>adds one new table</strong> (<code>FavoriteDeviceType</code>); it introduces no changes to existing models,
+placements, the public REST API, or GraphQL, and reverses cleanly.</p>
+<h5 id="Per-user-favorite-device-types">Per-user favorite device types<a class="headerlink" href="#Per-user-favorite-device-types" title="Permanent link">&para;</a></h5>
+<p>Each row in the device-type catalog now carries a <strong>star toggle</strong>. Starring a type adds it to
+your <strong>Quick access</strong> column at the top of the palette; un-starring removes it. Favorites are
+scoped to the logged-in user via a <code>FavoriteDeviceType</code> model (a unique <code>(user, device_type)</code>
+pair), so two users planning the same rack see their own independent Quick access lists.</p>
+<h5 id="Quick-access-column-in-the-editor">Quick access column in the editor<a class="headerlink" href="#Quick-access-column-in-the-editor" title="Permanent link">&para;</a></h5>
+<p>The Quick access column lists your starred device types as ready-to-drag tiles, <strong>drag one
+straight onto a free rack unit</strong> to plan an add — the same planning surface the main catalog
+uses. The column is rendered <strong>independently of the catalog's type-ahead search and
+manufacturer filter</strong>, so filtering the catalog to find something never empties or reorders
+your pinned favorites.</p>
+<h5 id="User-scoped-favorites-API">User-scoped favorites API<a class="headerlink" href="#User-scoped-favorites-API" title="Permanent link">&para;</a></h5>
+<p>A new favorites endpoint backs the stars: a <strong>GET</strong> returns the current user's favorite device
+types, and a <strong>POST</strong> toggles a device type in or out of that set (<code>FavoriteToggleSerializer</code>,
+wired through <code>api/views.py</code> and the API router). All reads and writes are scoped to the
+requesting user, so one user can never see or modify another's favorites.</p>
+<h4 id="Added_2">Added<a class="headerlink" href="#Added_2" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Per-user favorite device types.</strong> A new <code>FavoriteDeviceType</code> model (per-user <code>(user,
+  device_type)</code> with a uniqueness constraint) lets each user pin the device types they plan
+  with most.</li>
+<li><strong>"Quick access" favorites column</strong> in the single-rack editor: starred device types render
+  as drag-to-plan tiles in a dedicated column that is <strong>independent of the catalog's
+  search/manufacturer filter</strong> (<code>design_editor.html</code>, <code>editor.js</code>, <code>editor.css</code>).</li>
+<li><strong>Star toggles</strong> on catalog rows to add/remove a device type from your favorites.</li>
+<li><strong>User-scoped favorites REST API</strong>: a GET list of the current user's favorites and a POST
+  toggle action, both scoped to the requesting user (<code>FavoriteToggleSerializer</code> in
+  <code>api/serializers.py</code>, the view in <code>api/views.py</code>, router entry in <code>api/urls.py</code>).</li>
+<li>API and view tests covering the favorites endpoint (list + toggle, user scoping) and the
+  editor's Quick access wiring.</li>
+</ul>
+<h4 id="Changed_2">Changed<a class="headerlink" href="#Changed_2" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A — no changes to existing behavior, data model, or public API.</li>
+</ul>
+<h4 id="Fixed_2">Fixed<a class="headerlink" href="#Fixed_2" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Deprecated_2">Deprecated<a class="headerlink" href="#Deprecated_2" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Removed_2">Removed<a class="headerlink" href="#Removed_2" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Security_2">Security<a class="headerlink" href="#Security_2" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Upgrade_2">Upgrade<a class="headerlink" href="#Upgrade_2" title="Permanent link">&para;</a></h4>
+<p><code>pip install -U netbox-rack-design</code> and restart NetBox.</p>
+<ul>
+<li><strong>Run <code>python manage.py migrate</code></strong> — this release adds migration
+  <code>0003_favoritedevicetype</code>, which only <strong>adds one new table</strong> (<code>FavoriteDeviceType</code>). It is
+  additive (no changes to existing tables, no data rewrite, no backfill), safe against existing
+  designs, and reversible. There are <strong>no breaking changes</strong>.</li>
+<li><strong>Run <code>python manage.py collectstatic</code></strong> — the editor's bundled JS/CSS were updated for the
+  Quick access favorites column and star toggles, so the new static assets must be collected
+  for the editor to render correctly.</li>
+<li><strong>No configuration changes</strong> are needed — existing <code>PLUGINS_CONFIG</code> settings continue to
+  work unchanged.</li>
+</ul>
+<hr />
+<h3 id="040---2026-06-26">[0.4.0] - 2026-06-26<a class="headerlink" href="#040---2026-06-26" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary_3">Release Summary<a class="headerlink" href="#Release-Summary_3" title="Permanent link">&para;</a></h4>
+<p><strong>Plan new gear, not just rearrange it</strong> — Rack Design gets a device-type catalog.</p>
+<p>0.3.0 let you drag the rack's <em>existing</em> devices around; 0.4.0 lets you plan brand-new
+ones. This minor, fully backward-compatible release adds an interactive <strong>device-type
+catalog palette</strong> to the single-rack editor: search the catalog, narrow it by
+manufacturer, and <strong>drag a device type straight onto a free rack unit</strong> to plan a new
+add — no leaving the editor to pre-create anything. Each planned add can now also carry
+an intended <strong>device role</strong> and <strong>tenant</strong>, chosen through NetBox's own dynamic selects,
+so the plan records <em>what</em> you intend to rack and <em>whose</em> it is. As always the editor
+only composes <strong>design placements</strong>; your live <code>Device</code> records are never touched until
+a design is later executed.</p>
+<p>This release also fixes a visual glitch where multi-unit state tiles rendered
+semi-transparent (letting the grid bleed through), adds <strong>cache-busting</strong> to the bundled
+editor JS/CSS so browsers reliably pick up new assets after an upgrade, and ships a new
+committed <strong>headless end-to-end regression suite</strong> for the editor's client-side
+behaviour.</p>
+<p>There are <strong>no breaking changes</strong>. This release adds a database migration that only
+<strong>adds two nullable fields</strong> (<code>device_role</code>, <code>tenant</code>) to <code>DesignPlacement</code>, so it is
+safe to apply against existing data and reverses cleanly.</p>
+<h5 id="Device-type-catalog-palette">Device-type catalog palette<a class="headerlink" href="#Device-type-catalog-palette" title="Permanent link">&para;</a></h5>
+<p>A new palette in the editor lists the device types you can plan. <strong>Type-ahead search</strong>
+filters by name and a <strong>manufacturer filter</strong> narrows the catalog to a single vendor.
+<strong>Drag a device type onto an empty unit</strong> and the editor plans an <em>add</em> placement at that
+position — the same planning surface that already handled moves and removals, now able to
+introduce devices that don't yet exist in the rack.</p>
+<h5 id="Role-and-tenant-on-planned-adds">Role and tenant on planned adds<a class="headerlink" href="#Role-and-tenant-on-planned-adds" title="Permanent link">&para;</a></h5>
+<p>A planned add can now record an intended <strong>device role</strong> and <strong>tenant</strong>, selected via
+NetBox <strong>dynamic (API-backed) selects</strong> in the editor. The two new <code>DesignPlacement</code>
+fields are <strong>add-only</strong>: <code>clean()</code> rejects setting a role or tenant on a <em>move</em> or
+<em>remove</em> placement, keeping the data model honest. Both fields are optional and surface
+through the REST API and GraphQL.</p>
+<h5 id="Editor-polish--regression-coverage">Editor polish &amp; regression coverage<a class="headerlink" href="#Editor-polish--regression-coverage" title="Permanent link">&para;</a></h5>
+<ul>
+<li><strong>Opaque multi-U tiles.</strong> Tiles spanning more than one rack unit were rendering
+  semi-transparent, letting the grid lines show through and muddying the colour coding;
+  they are now fully opaque so add/move/remove states read clearly.</li>
+<li><strong>Asset cache-busting.</strong> The bundled editor <code>*.js</code>/<code>*.css</code> are now requested with a
+  version query string (<code>?v=</code>) derived from the asset set, so an upgraded plugin's new
+  editor assets are loaded instead of a stale cached copy.</li>
+<li><strong>Headless e2e regression suite.</strong> A new committed Playwright suite under <code>tests/e2e/</code>
+  exercises the editor's real client-side DOM/GridStack behaviour (catalog drag-in, the
+  context-sensitive <code>×</code>, the payload <code>buildRackPayload</code> would emit). It is strictly
+  <strong>read-only</strong> against the dev database and <strong>skips cleanly</strong> when Playwright/Chrome or a
+  dev server isn't present, so it stays out of the normal headless suite while remaining
+  runnable on demand.</li>
+</ul>
+<h4 id="Added_3">Added<a class="headerlink" href="#Added_3" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Device-type catalog palette</strong> in the single-rack editor: type-ahead search + a
+  manufacturer filter, and <strong>drag-and-drop a device type onto a free unit</strong> to plan a new
+  add (<code>editor.js</code>, <code>design_editor.html</code>, <code>editor.css</code>).</li>
+<li><strong><code>device_role</code> and <code>tenant</code> on planned adds.</strong> Two new optional, nullable FK fields on
+  <code>DesignPlacement</code> (to <code>dcim.DeviceRole</code> / <code>tenancy.Tenant</code>), selected via NetBox dynamic
+  selects, add-only and validated as such in <code>clean()</code>, and exposed through the form, the
+  REST API serializer, and GraphQL.</li>
+<li><strong>Committed headless e2e regression suite</strong> (<code>tests/e2e/test_editor_e2e.py</code>) for the
+  editor's client-side behaviour — read-only and self-skipping when prerequisites are
+  absent.</li>
+<li>Expanded API and view tests covering the new fields and the catalog/editor wiring.</li>
+</ul>
+<h4 id="Fixed_3">Fixed<a class="headerlink" href="#Fixed_3" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Multi-unit state tiles</strong> in the editor were semi-transparent and let the grid bleed
+  through; they now render fully opaque so the add/move/remove colour coding is legible.</li>
+</ul>
+<h4 id="Changed_3">Changed<a class="headerlink" href="#Changed_3" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Bundled editor JavaScript/CSS are now loaded with an <code>asset_version</code> cache-busting query
+  string so upgraded assets aren't served stale from the browser cache.</li>
+</ul>
+<h4 id="Deprecated_3">Deprecated<a class="headerlink" href="#Deprecated_3" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Removed_3">Removed<a class="headerlink" href="#Removed_3" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Security_3">Security<a class="headerlink" href="#Security_3" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Upgrade_3">Upgrade<a class="headerlink" href="#Upgrade_3" title="Permanent link">&para;</a></h4>
+<p><code>pip install -U netbox-rack-design</code> and restart NetBox.</p>
+<ul>
+<li><strong>Run <code>python manage.py migrate</code></strong> — this release adds migration
+  <code>0002_designplacement_device_role_designplacement_tenant</code>, which only <strong>adds two
+  nullable fields</strong> to <code>DesignPlacement</code>. It is additive (no data rewrite, no backfill),
+  safe against existing designs, and reversible. There are <strong>no breaking changes</strong>.</li>
+<li><strong>Run <code>python manage.py collectstatic</code></strong> — the editor's bundled JS/CSS were updated for
+  the catalog palette and role/tenant selects (and now carry cache-busting), so the new
+  static assets must be collected for the editor to render correctly.</li>
+<li><strong>No configuration changes</strong> are needed — existing <code>PLUGINS_CONFIG</code> settings continue to
+  work unchanged.</li>
+</ul>
+<hr />
+<h3 id="030---2026-06-26">[0.3.0] - 2026-06-26<a class="headerlink" href="#030---2026-06-26" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary_4">Release Summary<a class="headerlink" href="#Release-Summary_4" title="Permanent link">&para;</a></h4>
+<p><strong>The rack comes to life</strong> — Rack Design becomes <em>interactive</em>.</p>
+<p>0.2.0 let you <em>see</em> a projected rack elevation; 0.3.0 lets you <em>change</em> it. This minor,
+fully backward-compatible release adds a drag-and-drop <strong>single-rack layout editor</strong> so
+you can plan a rack visually — move a device to a new unit, mark one for removal, or
+back out an add — and save the result as design placements, all without ever touching
+your live NetBox devices. It also adds a standalone, filterable <strong>Elevations</strong> list so
+you can jump straight to any rack's projected layout, and surfaces designs on the core
+rack pages.</p>
+<p>Nothing about existing designs, placements, the REST API, GraphQL, or configuration
+changes in an incompatible way — every prior URL, field, and endpoint behaves as before.
+There are <strong>no breaking changes</strong> and <strong>no database migrations</strong> in this release.</p>
+<h5 id="Interactive-single-rack-layout-editor">Interactive single-rack layout editor<a class="headerlink" href="#Interactive-single-rack-layout-editor" title="Permanent link">&para;</a></h5>
+<p>Open a design's rack and drag devices around a live GridStack elevation. The editor
+understands the three placement kinds and gives you a single, <strong>context-sensitive ×
+control</strong> whose meaning depends on what you're looking at:</p>
+<ul>
+<li>on an <strong>existing</strong> device → flags it for <strong>removal</strong>;</li>
+<li>on a device you've <strong>moved</strong> → <strong>cancels the move</strong>, snapping it back to its original unit;</li>
+<li>on a device you just <strong>added</strong> → <strong>cancels the add</strong>, removing it from the plan.</li>
+</ul>
+<p>While you drag, a live <strong>move-visualization ghost</strong> previews the target position so you
+can see exactly where a device will land before you let go. The editor is purely a
+planning surface: it composes and edits <strong>design placements</strong> and never mutates the real
+<code>Device</code> records underneath.</p>
+<h5 id="Save-layout-API">Save-layout API<a class="headerlink" href="#Save-layout-API" title="Permanent link">&para;</a></h5>
+<p>A new save-layout REST action persists what you drew. Rather than blindly rewriting the
+design, it <strong>diffs the submitted layout against the current <code>DesignPlacement</code> rows</strong> and
+applies only the differences. Every created or changed placement is run through full
+<code>clean()</code>/<code>full_clean</code> <strong>validation</strong> (e.g. unit availability) before it is saved, so an
+invalid layout is rejected rather than half-written. The action is <strong>idempotent</strong> —
+saving the same layout again is a no-op and round-trips cleanly — and <strong>deletes
+conservatively</strong>, so re-saving never silently drops placement data you didn't intend to
+remove. As with the editor, <strong>real Devices are never modified</strong>; only design placements
+are written.</p>
+<h5 id="Standalone-Elevations-list">Standalone Elevations list<a class="headerlink" href="#Standalone-Elevations-list" title="Permanent link">&para;</a></h5>
+<p>A new top-level, <strong>filterable Elevations list view</strong> lets you browse projected rack
+elevations directly, without first drilling into a specific design — filter down to the
+rack or design you care about and open its projected layout in one step.</p>
+<h5 id="Rack-page-integration">Rack-page integration<a class="headerlink" href="#Rack-page-integration" title="Permanent link">&para;</a></h5>
+<p>The core <strong>rack</strong> detail pages now carry a <strong>rack-designs panel</strong> listing the designs
+that touch the rack, each linking through to its editor/elevation, and a new
+<strong>navigation</strong> entry exposes the Elevations list in the plugin menu.</p>
+<h4 id="Added_4">Added<a class="headerlink" href="#Added_4" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Interactive single-rack layout editor</strong> (<code>design_editor.html</code> + bundled
+  <code>static/netbox_rack_design/js/editor.js</code> and <code>css/editor.css</code>) built on GridStack:
+  drag-and-drop move, mark-for-removal, and cancel-add, driven by one context-sensitive
+  <code>×</code> control (existing → flag removal, moved → cancel move, added → cancel add), with a
+  live move-visualization ghost during drags. Edits design placements only; real Devices
+  are never touched.</li>
+<li><strong>Save-layout REST action</strong> that diffs the submitted layout against current
+  <code>DesignPlacement</code> rows, validates every change with <code>full_clean</code>, is idempotent across
+  round-trips, and deletes conservatively so no layout data is lost.</li>
+<li><strong>Standalone, filterable Elevations list view</strong> (<code>elevation_browser.html</code>) for
+  browsing projected rack elevations directly, plus a shared <code>inc/elevation_grid.html</code>
+  partial and <code>legend_filter.js</code> for legend-driven filtering.</li>
+<li><strong>Rack-designs panel</strong> on the core <code>dcim.rack</code> detail page listing designs that touch
+  the rack, each linking to its editor/elevation.</li>
+<li><strong>Navigation entry</strong> surfacing the Elevations list in the plugin menu.</li>
+<li>Accompanying API and view tests covering the save-layout action, the Elevations list,
+  and the editor wiring.</li>
+</ul>
+<h4 id="Changed_4">Changed<a class="headerlink" href="#Changed_4" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A — no changes to existing behavior, data model, or public API.</li>
+</ul>
+<h4 id="Fixed_4">Fixed<a class="headerlink" href="#Fixed_4" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Deprecated_4">Deprecated<a class="headerlink" href="#Deprecated_4" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Removed_4">Removed<a class="headerlink" href="#Removed_4" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Security_4">Security<a class="headerlink" href="#Security_4" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A</li>
+</ul>
+<h4 id="Upgrade_4">Upgrade<a class="headerlink" href="#Upgrade_4" title="Permanent link">&para;</a></h4>
+<p><code>pip install -U netbox-rack-design</code> and restart NetBox.</p>
+<ul>
+<li><strong>Run <code>python manage.py collectstatic</code></strong> — this release ships new bundled static
+  assets (the editor's JavaScript/CSS and the legend filter) that must be collected so
+  the editor renders correctly.</li>
+<li><strong>No database migrations</strong> are required (<code>python manage.py migrate</code> is a no-op for this
+  plugin) and <strong>no configuration changes</strong> are needed — existing <code>PLUGINS_CONFIG</code>
+  settings continue to work unchanged.</li>
+</ul>
+<hr />
+<h3 id="020---2026-06-25">[0.2.0] - 2026-06-25<a class="headerlink" href="#020---2026-06-25" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary_5">Release Summary<a class="headerlink" href="#Release-Summary_5" title="Permanent link">&para;</a></h4>
+<p><strong>Projected rack elevations</strong> — the first <em>visual</em> surface of NetBox Rack Design.</p>
+<p>Until now a design was only a list of placement records; you couldn't actually <em>see</em>
+the rack it described. This minor, backward-compatible release renders any design as a
+full rack elevation showing how the rack <strong>would</strong> look once the design is applied:
+planned <strong>adds</strong>, <strong>moves</strong>, and <strong>removals</strong> overlaid on the rack's real devices —
+computed entirely in memory, with <strong>zero changes to your live NetBox data</strong> (nothing
+is materialized until an explicit Apply, which arrives in a later release).</p>
+<p>The elevation is drawn with a bundled GridStack layout (front/rear faces plus a
+non-racked tray) and uses clear visual encoding so the plan reads at a glance:</p>
+<ul>
+<li><strong>green</strong> — a device the design <em>adds</em>;</li>
+<li><strong>cyan</strong> — a device <em>moved in</em>, with a faded <strong>ghost</strong> left at the slot it vacates;</li>
+<li><strong>red, struck-through</strong> — a device marked for <em>removal</em>;</li>
+<li><strong>neutral</strong> (the device role color) — existing devices the design leaves untouched.</li>
+</ul>
+<p>Open it from a design at <code>/plugins/rack-design/designs/&lt;id&gt;/racks/&lt;rack_id&gt;/</code>, or
+straight from the core <strong>Rack</strong> detail page via an optional panel that lists every
+design touching that rack. This is the read-only foundation for the interactive
+drag-and-drop editor coming in a future release.</p>
+<p>This release also fixes two bugs, declares the project's Apache-2.0 license in the
+package metadata, and ships the project icon.</p>
+<p><strong>Upgrade:</strong> <code>pip install -U netbox-rack-design</code> and restart NetBox. No database
+migrations and no configuration changes are required. The rack-page panel is enabled
+by default; set <code>enable_rack_panel = False</code> in <code>PLUGINS_CONFIG</code> to hide it.</p>
+<h4 id="Added_5">Added<a class="headerlink" href="#Added_5" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Projected rack elevation (read-only).</strong> A new <code>DesignElevationView</code> renders, for a
+  given design and rack, the front/rear/non-racked layout the design would produce —
+  existing devices in place, plus the design's add/move/remove placements overlaid at
+  their target units with state-based colour coding and a legend. The projection is
+  computed by <code>projection.project_rack()</code> purely in memory; real devices are never
+  modified. Reachable at <code>/plugins/rack-design/designs/&lt;pk&gt;/racks/&lt;rack_id&gt;/</code>.</li>
+<li><strong>Rack-page panel.</strong> An optional <code>PluginTemplateExtension</code> on the core <code>dcim.rack</code>
+  detail page lists the designs whose placements touch that rack, each linking to its
+  projected elevation. Gated by the new <code>enable_rack_panel</code> config setting (default
+  <code>True</code>); renders nothing when no design touches the rack.</li>
+<li>Bundled GridStack assets and plugin CSS/JS under <code>static/netbox_rack_design/</code> (no
+  external CDN), plus a <code>rack_design</code> template-tag library powering the elevation
+  template.</li>
+</ul>
+<h4 id="Fixed_5">Fixed<a class="headerlink" href="#Fixed_5" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Placement <strong>kind badges</strong> (Add/Move/Remove) now render in their intended colours
+  instead of grey — <code>DesignPlacement</code> was missing the <code>get_kind_color()</code> accessor that
+  NetBox's choice-field column relies on.</li>
+<li><strong>Approving a brand-new design no longer errors.</strong> <code>Design.clean()</code> previously raised
+  an unhandled error (HTTP 500) when a first/standalone design was created directly with
+  status <em>Approved</em>, because the "at most one approved version per plan" check queried
+  against an unsaved version root. The check is now skipped until the root is persisted.
+  Covered by a regression test.</li>
+</ul>
+<h4 id="Changed_5">Changed<a class="headerlink" href="#Changed_5" title="Permanent link">&para;</a></h4>
+<ul>
+<li>The project's <strong>Apache-2.0 license is now declared in the package metadata</strong>
+  (<code>license = "Apache-2.0"</code> in <code>pyproject.toml</code>) and the full <code>LICENSE</code> text ships with
+  the distribution — previously the published package carried no license metadata.</li>
+<li>Added the <strong>project icon</strong> (CC0) under <code>docs/assets/</code> and wired it into the README and
+  the MkDocs theme logo/favicon.</li>
+</ul>
+<hr />
+<h3 id="010---2026-06-24">[0.1.0] - 2026-06-24<a class="headerlink" href="#010---2026-06-24" title="Permanent link">&para;</a></h3>
+<h4 id="Release-Summary_6">Release Summary<a class="headerlink" href="#Release-Summary_6" title="Permanent link">&para;</a></h4>
+<p>Initial release of NetBox Rack Design — a generic, public plugin that adds a
+versioned <strong>design layer</strong> for planning rack changes on top of real NetBox data.
+This first release delivers the data model and full management surface (Stage 1);
+the interactive visual editor and apply/conflict/power features follow in later stages.</p>
+<h4 id="Added_6">Added<a class="headerlink" href="#Added_6" title="Permanent link">&para;</a></h4>
+<ul>
+<li><strong>Models:</strong> <code>Design</code> (versioned, sequenced, with dependencies and optional grouping),
+  <code>DesignGroup</code> (hierarchical container), and <code>DesignPlacement</code> (add / move / remove
+  actions, validated against <code>Rack.get_available_units()</code>).</li>
+<li>Full CRUD UI for all three models, including detail pages with related-object panels.</li>
+<li>REST API at <code>/api/plugins/rack-design/</code> (designs, design-groups, placements).</li>
+<li>GraphQL types and filters on the unified <code>/graphql</code> endpoint.</li>
+<li>Global search, navigation menu, change logging, journaling, custom fields, and tags.</li>
+<li>Config-driven statuses (<code>planned_statuses</code> / <code>removal_statuses</code> / <code>default_status</code>)
+  via <code>PLUGINS_CONFIG</code> — nothing organization-specific is hardcoded.</li>
+<li>Test suite built on NetBox's standard test cases, plus MkDocs documentation.</li>
+</ul>
+<h4 id="Fixed_6">Fixed<a class="headerlink" href="#Fixed_6" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A (initial release)</li>
+</ul>
+<h4 id="Changed_6">Changed<a class="headerlink" href="#Changed_6" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A (initial release)</li>
+</ul>
+<h4 id="Deprecated_5">Deprecated<a class="headerlink" href="#Deprecated_5" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A (initial release)</li>
+</ul>
+<h4 id="Removed_5">Removed<a class="headerlink" href="#Removed_5" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A (initial release)</li>
+</ul>
+<h4 id="Security_5">Security<a class="headerlink" href="#Security_5" title="Permanent link">&para;</a></h4>
+<ul>
+<li>N/A (initial release)</li>
+</ul>
+<hr />
+<h3 id="Release-Notes-Template-for-Future-Versions">Release Notes Template for Future Versions<a class="headerlink" href="#Release-Notes-Template-for-Future-Versions" title="Permanent link">&para;</a></h3>
+<p>When creating a new release, use this template:</p>
+<div class="highlight"><pre><span></span><code><span class="gu">## [X.Y.Z] - YYYY-MM-DD</span>
+
+<span class="gu">### Release Summary</span>
+Brief narrative summary describing the release type (major/minor/patch) and key highlights.
+
+<span class="gu">### **Breaking Changes**</span>
+&lt;!-- Only include this section if there are breaking changes --&gt;
+<span class="k">-</span><span class="w"> </span><span class="gs">**[#issue]**</span> Description of breaking change and migration path
+<span class="k">-</span><span class="w"> </span>Link to detailed migration guide if needed
+
+<span class="gu">### Added</span>
+<span class="k">-</span><span class="w"> </span>New features and capabilities
+
+<span class="gu">### Fixed</span>
+<span class="k">-</span><span class="w"> </span>Bug fixes with issue references
+
+<span class="gu">### Changed</span>
+<span class="k">-</span><span class="w"> </span>Changes to existing functionality
+
+<span class="gu">### Deprecated</span>
+<span class="k">-</span><span class="w"> </span>Features marked for future removal
+
+<span class="gu">### Removed</span>
+<span class="k">-</span><span class="w"> </span>Features that have been removed
+
+<span class="gu">### Security</span>
+<span class="k">-</span><span class="w"> </span>Security improvements and fixes
+</code></pre></div>
+<hr />
+<p><strong>Best Practice</strong>: For clear release communication, ensure each release includes:
+1. Narrative summary characterizing the release type (major/minor/patch)
+2. Clear indicators for bugs, features, or enhancements
+3. Bold "Breaking Changes" header when applicable with migration guidance
+4. Detailed changelog with issue references</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/netbox-community/cookiecutter-netbox-plugin" target="_blank" rel="noopener" title="Tweet" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M459.4 151.7c.3 4.5.3 9.1.3 13.6 0 138.7-105.6 298.6-298.6 298.6-59.5 0-114.7-17.2-161.1-47.1 8.4 1 16.6 1.3 25.3 1.3 49.1 0 94.2-16.6 130.3-44.8-46.1-1-84.8-31.2-98.1-72.8 6.5 1 13 1.6 19.8 1.6 9.4 0 18.8-1.3 27.6-3.6-48.1-9.7-84.1-52-84.1-103v-1.3c14 7.8 30.2 12.7 47.4 13.3-28.3-18.8-46.8-51-46.8-87.4 0-19.5 5.2-37.4 14.3-53C87.4 130.8 165 172.4 252.1 176.9c-1.6-7.8-2.6-15.9-2.6-24C249.5 95.1 296.3 48 354.4 48c30.2 0 57.5 12.7 76.7 33.1 23.7-4.5 46.5-13.3 66.6-25.3-7.8 24.4-24.4 44.8-46.1 57.8 21.1-2.3 41.6-8.1 60.4-16.2-14.3 20.8-32.2 39.3-52.6 54.3"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://github.com/netbox-community/cookiecutter-netbox-plugin" target="_blank" rel="noopener" title="Facebook" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M512 256C512 114.6 397.4 0 256 0S0 114.6 0 256c0 120 82.7 220.8 194.2 248.5V334.2h-52.8V256h52.8v-33.7c0-87.1 39.4-127.5 125-127.5 16.2 0 44.2 3.2 55.7 6.4V172c-6-.6-16.5-1-29.6-1-42 0-58.2 15.9-58.2 57.2V256h83.6l-14.4 78.2H287v175.9C413.8 494.8 512 386.9 512 256"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://github.com/ravenrs/netbox-rack-design" target="_blank" rel="noopener" title="Github" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="mailto:ravenrs@gmail.com" target="_blank" rel="noopener" title="" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m20 8-8 5-8-5V6l8 5 8-5m0-2H4c-1.11 0-2 .89-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.indexes", "navigation.instant", "navigation.tabs.sticky"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
