@@ -6,18 +6,21 @@
 
 **Plan rack changes as versioned designs — on top of your real NetBox data, without touching it until you're ready.**
 
-NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: planned devices stay real `dcim.Device` records (`status=planned`), and each change is captured as a structured placement instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox — the prerequisite for projected rack elevations, conflict detection, and power projection arriving in later stages.
+NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with an explicit Apply step, conflict detection, and power projection arriving in later stages.
 
 The plugin is fully generic and public — nothing organization-specific is hardcoded. Status names and behavior are driven entirely by `PLUGINS_CONFIG`, and only native NetBox mechanisms are used (change logging, tags, custom fields, permissions, REST + GraphQL APIs, global search).
 
 ## Features
 
-This is the **Stage 1** release: the data model and the standard NetBox object surface for it. The interactive visual editor and the apply/conflict/power features are planned (see [Roadmap](#roadmap)).
+Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. The apply/conflict/power features are planned (see [Roadmap](#roadmap)).
 
 - **Three models** for capturing rack plans:
-  - **Design** — a proposed set of rack changes for a site. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, and may optionally belong to a group. Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
+  - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, and may optionally belong to a group. Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
   - **DesignGroup** — an optional, hierarchical container that links related designs into a larger effort (multi-stage work or cross-site coordination). Purely organizational; never affects execution order.
-  - **DesignPlacement** — a single proposed change within a design: **add** a new device from the device-type catalog, **move** an existing device, or **remove** (planned) one. Target slots are validated against NetBox's own `Rack.get_available_units()` collision logic. Real devices are never mutated.
+  - **DesignPlacement** — a single proposed change within a design: **add** a new device from the device-type catalog (with an intended role and tenant), **move** an existing device, or **remove** (planned) one. Target slots are validated against NetBox's own `Rack.get_available_units()` collision logic. Real devices are never mutated.
+- **Interactive multi-rack visual editor** — a GridStack drag-and-drop editor that renders all of a design's racks side by side, across both front and rear faces, for composing adds/moves/removes. Includes a searchable **device-type catalog palette**, **per-user favorite device types** for quick access, and **per-user rack visibility** to focus the workspace. Every edit writes placements only — live devices are never touched.
+- **Projected rack elevations** — a read-only elevation view showing how a design's racks *would* look once applied (all racks, both faces, full-depth devices rendered across both faces), plus a filterable elevations list.
+- **Rack-page integration** — an optional panel on the core `dcim.rack` detail page listing the designs that touch that rack, each linking to its editor and elevation.
 - **Config-driven statuses** — which device statuses count as "planned" and which mark a planned removal are read from `PLUGINS_CONFIG`, never hardcoded.
 - Full **CRUD UI** with list/detail/edit/bulk views and a navigation menu.
 - **REST API** at `/api/plugins/rack-design/`.
@@ -28,15 +31,15 @@ This is the **Stage 1** release: the data model and the standard NetBox object s
 
 ## Screenshots
 
-_Screenshots coming with the Stage 2 visual editor._
+_Screenshots coming soon. In the meantime, see the [documentation](https://ravenrs.github.io/netbox-rack-design/) for the editor and elevation views._
 
 ## Compatibility
 
 | Plugin Version | Minimum NetBox Version | Maximum NetBox Version | Python    |
 |----------------|------------------------|------------------------|-----------|
-| 0.1.0          | 4.4.0                  | 4.4.99                 | 3.12+     |
+| 0.7.0          | 4.4.0                  | 4.4.99                 | 3.12+     |
 
-The supported NetBox range is enforced at load time via the plugin's `min_version` / `max_version`. See [COMPATIBILITY.md](COMPATIBILITY.md) for the maintained matrix.
+The supported NetBox range is enforced at load time via the plugin's `min_version` / `max_version`. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full per-version matrix.
 
 ## Dependencies
 
@@ -101,9 +104,14 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 
 ## Roadmap
 
-Planned for upcoming stages:
+**Delivered**
 
-- **Interactive visual rack editor** — drag-and-drop adds/moves/removes across multi-rack, front/rear, and non-racked views (GridStack-based), writing placements without mutating live devices.
+- **Projected rack elevations (read-only)** — see how a design's racks *would* look once applied, with front/rear faces and full-depth devices rendered across both faces.
+- **Interactive visual rack editor** — GridStack drag-and-drop adds/moves/removes across a **multi-rack workspace** and both rack faces, writing placements without mutating live devices. Includes a searchable device-type catalog palette, per-user favorite device types, and per-user rack visibility.
+- **Multi-rack designs** — a design carries an explicit, site-validated rack scope and a read-only elevation view spanning all of its racks.
+
+**Planned for upcoming stages**
+
 - **Apply ("Make in NetBox")** — an explicit step that materializes an approved design into real planned devices and applies removal statuses.
 - **Conflict detection** — block approval of designs that conflict with an approved baseline, including dependency conflicts between designs.
 - **Power projection** — config-driven capacity vs. projected consumption per design.
