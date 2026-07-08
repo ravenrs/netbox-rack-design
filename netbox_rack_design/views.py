@@ -305,6 +305,8 @@ def _design_editor_context(request, design):
         # Drives the empty-state markup + the drawer's default-open override.
         "has_racks": bool(all_rack_blocks),
         "save_url": f"/api/plugins/rack-design/designs/{design.pk}/save-layout/",
+        # Read-only naming preview for the editor's add auto-fill (Phase 3).
+        "preview_name_url": f"/api/plugins/rack-design/designs/{design.pk}/preview-name/",
         # User-scoped favorite device types (the catalog palette's stars).
         "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
         "asset_version": _asset_version(),

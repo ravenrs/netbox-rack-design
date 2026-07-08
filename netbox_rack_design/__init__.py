@@ -38,6 +38,17 @@ class RackdesignConfig(PluginConfig):
         "default_status": "draft",
         # Show the rack-page panel listing designs that touch a rack.
         "enable_rack_panel": True,
+        # --- Naming-convention engine (see naming.py) --------------------------
+        # How a placement's proposed name is computed.
+        #   "sequence" -> "<design title>-<n>"
+        #   "template" -> a str.format template over real model objects
+        #   "script"   -> a dotted path to fn(placement) -> str
+        "naming_mode": "sequence",
+        # Template used when naming_mode == "template". Dotted attribute paths on
+        # the real Design/Device objects; {design.name} aliases the design title.
+        "naming_template": "{design.name}-{n}",
+        # Dotted path to a callable used when naming_mode == "script".
+        "naming_script": "",
     }
 
 

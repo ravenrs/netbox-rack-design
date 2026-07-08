@@ -72,6 +72,8 @@
       <div class="card-body"
            id="rd-editor"
            data-design-id="{{ object.pk }}"
+           data-design-title="{{ object.title }}"
+           data-preview-name-url="{{ preview_name_url }}"
            data-save-url="{{ save_url }}"
            data-favorites-url="{{ favorites_url }}"
            data-csrf-token="{{ csrf_token }}">
@@ -152,6 +154,13 @@
                        autocomplete="off"
                        aria-label="{% trans 'Search device types' %}">
                 <div class="nbx-rd-palette-status text-muted small mt-1" id="nbx-rd-palette-status"></div>
+                {# Discoverability: a dragged-in device is auto-named by the naming #}
+                {# engine and the name is editable on its tile. In template mode the #}
+                {# tokens are dotted NetBox-model paths. #}
+                <div class="text-muted small mt-1 nbx-rd-naming-hint">
+                  <i class="mdi mdi-information-outline" aria-hidden="true"></i>
+                  {% blocktrans %}Dropped devices are auto-named; edit the name on the tile. Template tokens are dotted model paths, e.g. <code>{design.name}</code>, <code>{device.site.name}</code>.{% endblocktrans %}
+                </div>
               </div>
               {# Only this list scrolls; the controls above stay pinned. #}
               <div class="list-group list-group-flush nbx-rd-palette-list" id="nbx-rd-palette-list"></div>

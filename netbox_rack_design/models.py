@@ -322,12 +322,23 @@ class DesignPlacement(NetBoxModel):
         self._validate_target_slot()
 
     def _validate_target_slot(self):
-        """Reuse NetBox's own collision logic to check the target slot is free."""
+        """Reuse NetBox's own collision logic to check the target slot is free.
+
+        The slot must be free in the DESIGN's PROJECTED layout, not in the raw
+        physical rack: a device the same design moves or removes out of its real
+        slot no longer occupies it, so another device may legitimately move in
+        (e.g. a swap). The set of such vacated device PKs is injected by the
+        save-layout view (which sees the whole submitted batch) as
+        ``_projected_vacated_device_ids``; absent that context we fall back to
+        the design's persisted move/remove placements so the same rule holds for
+        single-placement edits through the form/API.
+        """
         device_type = self.device_type or (self.device.device_type if self.device else None)
         if device_type is None:
             return
         rack_face = None if device_type.is_full_depth else (self.target_face or None)
         exclude = [self.device.pk] if self.device_id else []
+        exclude += [pk for pk in self._vacated_device_ids() if pk not in exclude]
         available = self.target_rack.get_available_units(
             u_height=device_type.u_height, rack_face=rack_face, exclude=exclude
         )
@@ -335,6 +346,32 @@ class DesignPlacement(NetBoxModel):
             raise ValidationError(
                 {"target_position": f"U{self.target_position} is not available in {self.target_rack}."}
             )
+
+    def _vacated_device_ids(self):
+        """PKs of devices this design frees from their real slots, so they don't
+        count as occupying the target rack when validating another placement.
+
+        Prefers the batch context the save-layout view injects (it knows every
+        device the current submit moves/removes, including ones not yet
+        persisted); otherwise reads the design's already-saved move/remove rows.
+        """
+        injected = getattr(self, "_projected_vacated_device_ids", None)
+        if injected is not None:
+            return {pk for pk in injected if pk}
+        if self.design_id is None:
+            return set()
+        return set(
+            DesignPlacement.objects.filter(
+                design_id=self.design_id,
+                kind__in=(
+                    DesignPlacementKindChoices.KIND_MOVE,
+                    DesignPlacementKindChoices.KIND_REMOVE,
+                ),
+                device_id__isnull=False,
+            )
+            .exclude(pk=self.pk)
+            .values_list("device_id", flat=True)
+        )
 
 
 class FavoriteDeviceType(models.Model):

@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
-from .. import filtersets
+from .. import filtersets, naming
 from ..choices import DesignPlacementKindChoices
 from ..models import (
     Design,
@@ -29,6 +29,7 @@ from .serializers import (
     FavoriteToggleSerializer,
     HiddenRackShowAllSerializer,
     HiddenRackToggleSerializer,
+    PreviewNameSerializer,
     SaveLayoutSerializer,
 )
 
@@ -70,15 +71,100 @@ class ChangeDesignPermissions(TokenPermissions):
 SaveLayoutPermissions = ChangeDesignPermissions
 
 
+class ViewDesignPermissions(TokenPermissions):
+    """
+    The preview-name @action is a POST that computes a would-be name without any
+    write, so it must require only ``view_design`` rather than the ``add_design``
+    that TokenPermissions maps POST to by default.
+    """
+
+    perms_map = {
+        **TokenPermissions.perms_map,
+        "POST": ["%(app_label)s.view_%(model_name)s"],
+    }
+
+
 class DesignViewSet(NetBoxModelViewSet):
     queryset = Design.objects.prefetch_related("placements", "depends_on", "racks", "tags")
     serializer_class = DesignSerializer
     filterset_class = filtersets.DesignFilterSet
 
     def get_permissions(self):
-        if getattr(self, "action", None) in ("save_layout", "add_rack", "remove_rack"):
+        action = getattr(self, "action", None)
+        if action in ("save_layout", "add_rack", "remove_rack"):
             return [ChangeDesignPermissions()]
+        if action == "preview_name":
+            return [ViewDesignPermissions()]
         return super().get_permissions()
+
+    @action(detail=True, methods=["post"], url_path="preview-name")
+    def preview_name(self, request, pk=None):
+        """
+        Compute the would-be name for a PROSPECTIVE placement WITHOUT saving.
+
+        Builds an UNSAVED DesignPlacement on this design from the request body
+        (resolving FKs by PK, tolerating missing ones), then asks the naming
+        engine for the name and whether it already collides in the design's site.
+        Performs NO writes: no placement is saved and no dcim object is mutated.
+
+        Body (all optional except enough to identify the kind):
+          kind ("add"|"move"|"remove", default "add"), device_type, device,
+          device_role, tenant, target_rack (PKs), target_position, target_face,
+          index (the ordinal the tile would take).
+
+        Returns {"name": "<generated>", "exists_in_site": <bool>}.
+
+        URL name: plugins-api:netbox_rack_design-api:design-preview-name
+        Path:     /api/plugins/rack-design/designs/<pk>/preview-name/
+        """
+        # Read-only preview: scope to designs this user may view.
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        body = PreviewNameSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        # Resolve each supplied FK by PK; a non-null PK that does not resolve is a
+        # clear 400 (mirrors the other actions). A missing/null PK is tolerated.
+        resolved = {}
+        for field, model in (
+            ("device_type", DeviceType),
+            ("device", Device),
+            ("device_role", DeviceRole),
+            ("tenant", Tenant),
+            ("target_rack", Rack),
+        ):
+            pk_value = data.get(field)
+            if pk_value is None:
+                resolved[field] = None
+                continue
+            obj = model.objects.filter(pk=pk_value).first()
+            if obj is None:
+                return Response(
+                    {field: [f"{model.__name__} does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            resolved[field] = obj
+
+        placement = DesignPlacement(
+            design=design,
+            kind=data.get("kind", DesignPlacementKindChoices.KIND_ADD),
+            device=resolved["device"],
+            device_type=resolved["device_type"],
+            device_role=resolved["device_role"],
+            tenant=resolved["tenant"],
+            target_rack=resolved["target_rack"],
+            target_position=data.get("target_position"),
+            target_face=data.get("target_face") or "",
+        )
+
+        name = naming.generate_name(placement, index=data.get("index"))
+        exists = naming.name_exists_in_site(name, design.site, exclude_placement=None)
+        return Response(
+            {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
+        )
 
     @action(detail=True, methods=["post"], url_path="add-rack")
     def add_rack(self, request, pk=None):
@@ -251,6 +337,14 @@ class DesignViewSet(NetBoxModelViewSet):
         # branch. Combined with stale deletions below to decide 200 vs 304.
         self._made_db_change = False
 
+        # Devices this submit frees from their real slots: any device the payload
+        # moves or removes, plus an "existing" tile the editor actually relocated
+        # (target U/face differs from the device's real position). These must not
+        # count as occupying the rack when we validate another device moving into
+        # the slot they vacate (the swap / move-into-vacated case). Computed once
+        # over the whole batch so cross-rack and not-yet-persisted moves are seen.
+        self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
+
         try:
             with transaction.atomic():
                 for rack_data in data["racks"]:
@@ -355,7 +449,49 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.target_face or "",
             placement.device_role_id,
             placement.tenant_id,
+            placement.proposed_name or "",
         )
+
+    @staticmethod
+    def _compute_vacated_device_ids(data):
+        """Device PKs the whole submit frees from their real slots.
+
+        A device vacates its physical slot when the payload removes it, moves it,
+        or lists it as "existing" at a position/face different from where it
+        really sits. Such devices must not count as occupying the rack when we
+        validate another device moving into the slot they leave (swap / move into
+        a vacated slot). Injected into each placement's slot validation so the
+        collision check reflects the design's PROJECTED layout, not raw reality.
+        """
+        candidate_ids = set()
+        # (device_id -> (u_position, face)) the payload asserts as "existing".
+        existing_targets = {}
+        for rack_data in data["racks"]:
+            for face_key in ("front", "rear", "other"):
+                for item in rack_data.get(face_key, []):
+                    device_id = item.get("device_id")
+                    if not device_id:
+                        continue
+                    kind = item.get("kind")
+                    if kind in ("move", "remove"):
+                        candidate_ids.add(device_id)
+                    elif kind == "existing":
+                        pos = item.get("u_position")
+                        face = "" if face_key == "other" else (item.get("face") or "")
+                        existing_targets[device_id] = (
+                            _norm_pos(pos), face, rack_data.get("rack_id"),
+                        )
+        # An "existing" tile that was actually relocated also vacates its slot.
+        if existing_targets:
+            devices = Device.objects.filter(pk__in=existing_targets).only(
+                "pk", "rack_id", "position", "face"
+            )
+            for dev in devices:
+                target_pos, target_face, target_rack_id = existing_targets[dev.pk]
+                real = (_norm_pos(dev.position), dev.face or "", dev.rack_id)
+                if (target_pos, target_face, target_rack_id) != real:
+                    candidate_ids.add(dev.pk)
+        return candidate_ids
 
     @staticmethod
     def _item_is_full_depth(item):
@@ -472,6 +608,12 @@ class DesignViewSet(NetBoxModelViewSet):
                     target_rack=rack,
                     target_position=u_position,
                     target_face=face,
+                    # Editor-chosen name (auto-filled from the naming engine and/or
+                    # user-edited). Absent => "" (the model field is blank=True).
+                    proposed_name=(item.get("proposed_name") or ""),
+                )
+                new_add._projected_vacated_device_ids = getattr(
+                    self, "_batch_vacated_device_ids", None
                 )
                 try:
                     new_add.full_clean()
@@ -517,17 +659,22 @@ class DesignViewSet(NetBoxModelViewSet):
             add.target_rack = rack
             add.target_position = u_position
             add.target_face = face
-            # Only overwrite role/tenant when the editor actually sent them, so a
-            # plain reposition that omits the keys preserves the existing values
-            # (and stays idempotent).
+            # Only overwrite role/tenant/name when the editor actually sent them,
+            # so a plain reposition that omits the keys preserves the existing
+            # values (and stays idempotent).
             if "device_role_id" in item:
                 add.device_role_id = device_role_id
             if "tenant_id" in item:
                 add.tenant_id = tenant_id
+            if "proposed_name" in item:
+                add.proposed_name = item.get("proposed_name") or ""
             # Idempotent: an unmoved add round-trips without a write.
             if self._snapshot(add) == before:
                 desired_placement_ids.add(add.pk)
                 return add
+            add._projected_vacated_device_ids = getattr(
+                self, "_batch_vacated_device_ids", None
+            )
             try:
                 add.full_clean()
                 add.save()
@@ -616,6 +763,13 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.target_position = u_position
             placement.target_face = face
 
+        # Persist the editor-chosen proposed name when the editor sent one (the
+        # §4a move dialog's keep-old / rename choice). Omitted => leave the
+        # placement's existing name untouched, so an unrelated reposition that
+        # never opened the dialog stays idempotent.
+        if "proposed_name" in item:
+            placement.proposed_name = item.get("proposed_name") or ""
+
         # Idempotency guard: if we matched an existing placement and none of its
         # meaningful fields changed, do NOT write (no full_clean/save) so an
         # untouched round-trip neither bumps last_updated nor reports a change.
@@ -623,6 +777,12 @@ class DesignViewSet(NetBoxModelViewSet):
             desired_placement_ids.add(placement.pk)
             return placement
 
+        # Validate the target slot against the design's PROJECTED layout: devices
+        # this same submit moves/removes out of their real slots don't block a
+        # device moving in (the swap / move-into-vacated case).
+        placement._projected_vacated_device_ids = getattr(
+            self, "_batch_vacated_device_ids", None
+        )
         try:
             placement.full_clean()
             placement.save()
