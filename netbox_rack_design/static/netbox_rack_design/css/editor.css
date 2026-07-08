@@ -51,6 +51,62 @@
     pointer-events: none;
 }
 
+/* ---- Add-tile editable proposed name + collision warning (Phase 3) ------- */
+/* An add tile stacks its device-type label above a compact, editable name input
+   so the auto-filled (and user-overridable) proposed name is visible and typeable
+   right on the tile. The input is the only interactive child besides the × button;
+   GridStack's draggable.cancel keeps a click/drag on it from starting a drag. */
+.grid-stack-item.nbx-rd-state-add > .grid-stack-item-content {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 1px;
+    overflow: hidden;
+}
+
+.nbx-rd-name-input {
+    /* Compact: it has to fit inside even a 1U tile. Height tracks the line so it
+       never forces the tile taller; the field scrolls its own text. */
+    height: 1.1rem;
+    min-height: 0;
+    padding: 0 0.25rem;
+    font-size: 0.7rem;
+    line-height: 1.1rem;
+    border-radius: 2px;
+}
+
+.nbx-rd-name-input:focus {
+    /* Sit above neighbouring tiles while editing so the field is fully usable. */
+    position: relative;
+    z-index: 3;
+}
+
+/* Non-blocking "name already exists in site" badge, top-left so it never overlaps
+   the top-right × remove button. */
+.nbx-rd-name-warning {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 2;
+    line-height: 1;
+    color: var(--tblr-danger, #d63939);
+    pointer-events: none;
+}
+
+.nbx-rd-name-warning .mdi {
+    font-size: 0.85rem;
+}
+
+/* A faint red ring on the tile content echoes the badge for the collision case. */
+.grid-stack-item-content.nbx-rd-name-collision {
+    box-shadow: inset 0 0 0 1px rgba(var(--tblr-danger-rgb, 214, 57, 57), 0.7);
+}
+
+/* The discoverability hint under the catalog search (template-token note). */
+.nbx-rd-naming-hint code {
+    font-size: 0.72rem;
+}
+
 /* A tile the user dragged/flagged but hasn't saved yet: dashed amber outline. */
 .grid-stack-item.nbx-rd-dirty > .grid-stack-item-content {
     outline: 2px dashed var(--tblr-warning, #f59f00);
@@ -61,6 +117,17 @@
 .grid-stack-item.nbx-rd-error > .grid-stack-item-content {
     outline: 2px solid var(--tblr-danger, #d63939);
     outline-offset: -2px;
+}
+
+/* Cross-rack move affordance: while a real-device tile is dragged, hint every
+   rack face grid as a potential drop target (a device can be dropped onto its own
+   rack — a within-rack move — or any other rack — a cross-rack move). A faint
+   dashed primary outline reads as "droppable here" without competing with the
+   amber dirty / red error outlines on individual tiles. */
+.nbx-rd-dragging-tile .grid-stack.nbx-rd-rack.nbx-rd-editable {
+    outline: 2px dashed rgba(var(--tblr-primary-rgb, 4, 111, 209), 0.5);
+    outline-offset: 2px;
+    border-radius: 3px;
 }
 
 /* The non-racked tray: a wider, single-column drop target below the rack. */
@@ -371,6 +438,126 @@
     font-style: normal;
 }
 
+/* A VACATED full-depth footprint: the opposite-face hatch mirrored under a
+   move-out ghost. It marks where a full-depth device is being moved FROM, so it
+   must read as tentative/vacated (dashed, faded) rather than a live blocked
+   slot -- symmetric with the dashed move-out ghost on the mounted face. */
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-ghost > .grid-stack-item-content {
+    border: 1px dashed var(--nbx-rack-slot-border, #adb5bd) !important;
+    opacity: 0.55;
+}
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-ghost > .grid-stack-item-content .nbx-rd-label {
+    font-style: italic;
+}
+
+/* ---- Phase 3: state-tinted shadow variants (spec §3, §7 goal 3) -------- */
+/* A shadow's fill now follows its OWNER's lifecycle state, same accent colour
+   as the owner's own body tile (rack_design.css's .nbx-rd-state-* tints),
+   layered as a second background over the plain hatch pattern so the tile
+   still reads unambiguously as "hatched, not a body" while telling the
+   planner AT A GLANCE which shadow just moved with its device. */
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-add > .grid-stack-item-content {
+    background-image:
+        linear-gradient(rgba(var(--tblr-success-rgb), 0.28), rgba(var(--tblr-success-rgb), 0.28)),
+        repeating-linear-gradient(45deg, #f7f7f7 0, #f7f7f7 12.5px, #ffc0c0 12.5px, #ffc0c0 25px) !important;
+    border: 1px solid var(--tblr-success, #2fb344) !important;
+}
+
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-move_in > .grid-stack-item-content {
+    background-image:
+        linear-gradient(rgba(var(--tblr-cyan-rgb), 0.28), rgba(var(--tblr-cyan-rgb), 0.28)),
+        repeating-linear-gradient(45deg, #f7f7f7 0, #f7f7f7 12.5px, #ffc0c0 12.5px, #ffc0c0 25px) !important;
+    border: 1px solid var(--tblr-cyan, #0492cf) !important;
+}
+
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-remove > .grid-stack-item-content {
+    background-image:
+        linear-gradient(rgba(var(--tblr-danger-rgb), 0.28), rgba(var(--tblr-danger-rgb), 0.28)),
+        repeating-linear-gradient(45deg, #f7f7f7 0, #f7f7f7 12.5px, #ffc0c0 12.5px, #ffc0c0 25px) !important;
+    border: 1px solid var(--tblr-danger, #d63939) !important;
+}
+
+/* A pre-existing double-booking: this shadow's mirrored rows are ALREADY held
+   by a live body on the opposite face (spec §7 Phase 3 bug 4c). Rendered
+   visibly conflicting -- a stronger red tint + dashed danger border -- rather
+   than silently skipped, so the planner sees the double-booking instead of a
+   missing shadow. rdCheckInvariants' I1 overlap check names both devices. */
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-conflict > .grid-stack-item-content {
+    background-image:
+        linear-gradient(rgba(var(--tblr-danger-rgb), 0.4), rgba(var(--tblr-danger-rgb), 0.4)),
+        repeating-linear-gradient(45deg, #f7f7f7 0, #f7f7f7 12.5px, #ffc0c0 12.5px, #ffc0c0 25px) !important;
+    border: 2px dashed var(--tblr-danger, #d63939) !important;
+    z-index: 1;
+}
+
+/* "Crossed-out" hatch (spec §3: move_out_ghost and remove shadows both read as
+   clearly leaving/removed, not a live occupant): the same dashed-cross overlay
+   already used by the mounted-face move-out ghost (rack_design.css), reused
+   here for the opposite-face hatch. */
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-crossed > .grid-stack-item-content {
+    position: relative;
+}
+.grid-stack-item.nbx-rd-opposite.nbx-rd-opposite-crossed > .grid-stack-item-content::after {
+    content: "" !important;
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='none' viewBox='0 0 100 100'%3E%3Cline x1='0' y1='0' x2='100' y2='100' stroke='%236c757d' stroke-width='2' stroke-dasharray='5,4'/%3E%3Cline x1='100' y1='0' x2='0' y2='100' stroke='%236c757d' stroke-width='2' stroke-dasharray='5,4'/%3E%3C/svg%3E");
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+}
+
+/* ---- Phase 4: displacement side stripe (spec §3, §4.3, §8.2) ------------ */
+/* A ghost (a moved-away device's vacated origin) or a remove-flagged device
+   that has just been legally displaced by a new placement (spec §4.2/§4.3)
+   collapses from a full tile to a narrow side reservation stripe -- the same
+   look as NetBox core's rack elevation reservation hatch, recoloured red
+   (spec §8.2 decision). The element never moves or resizes; only its OWN
+   content is hidden so the new occupant, rendered in a separate tile at the
+   exact same rows, reads unambiguously as the live occupant underneath. */
+.grid-stack-item.nbx-rd-displaced {
+    z-index: 4;
+    pointer-events: none;
+}
+
+.grid-stack-item.nbx-rd-displaced > .grid-stack-item-content {
+    background: transparent !important;
+    background-image: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    pointer-events: none;
+}
+
+/* Strip the crossed-hatch overlay some displaced states also carry (a
+   move_out_ghost / a full-depth remove's own shadow) -- the stripe alone
+   marks it now. */
+.grid-stack-item.nbx-rd-displaced > .grid-stack-item-content::after {
+    content: none !important;
+}
+
+.grid-stack-item.nbx-rd-displaced > .grid-stack-item-content > *:not(.nbx-rd-stripe) {
+    visibility: hidden;
+}
+
+.nbx-rd-stripe {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 7px;
+    visibility: visible !important;
+    pointer-events: auto;
+    cursor: default;
+    border-left: 1px solid var(--tblr-danger, #d63939);
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0,
+        transparent 3px,
+        var(--tblr-danger, #d63939) 3px,
+        var(--tblr-danger, #d63939) 6px
+    );
+}
+
 /* ---- Device hover card (name / role / tenant) -------------------------- */
 /* A floating card appended to <body> and absolutely positioned by editor.js on
    hover. pointer-events:none guarantees it never blocks dragging a tile or the
@@ -608,4 +795,24 @@
     padding: 1px 3px;
     opacity: 0.9;
     list-style: none;
+}
+
+/* Cursor-governed placement (spec §4.1, ruling 2026-07-08): the red DENY
+   indicator drawn at the CURSOR's target rows while a dragged device hovers
+   an illegal slot. Rendered by editor.js's pointer tracker; while it is
+   active the vendor placeholder (which may be parked on a stale last-valid
+   slot) is hidden so the only preview on screen is the cursor's. */
+.nbx-rd-cursor-deny {
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: rgba(214, 57, 57, 0.30);
+    border: 1px dashed var(--tblr-red, #d63939);
+    border-radius: 2px;
+    pointer-events: none;
+    z-index: 30;
+}
+
+.nbx-rd-deny-active .grid-stack-placeholder {
+    display: none !important;
 }
