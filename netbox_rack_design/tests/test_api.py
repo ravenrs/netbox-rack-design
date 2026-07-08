@@ -1,6 +1,7 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
 from dcim.models import Device, Rack, Site
+from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
 from users.models import Token, User
@@ -189,6 +190,21 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
             },
         ]
 
+    def test_proposed_name_round_trips(self):
+        """proposed_name is writable on create and returned on read."""
+        self.add_permissions(
+            "netbox_rack_design.add_designplacement",
+            "netbox_rack_design.view_designplacement",
+        )
+        data = dict(self.create_data[0])
+        data["proposed_name"] = "preview-rt-node"
+        url = reverse("plugins-api:netbox_rack_design-api:designplacement-list")
+        response = self.client.post(url, data, format="json", **self.header)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["proposed_name"], "preview-rt-node")
+        placement = DesignPlacement.objects.get(pk=response.data["id"])
+        self.assertEqual(placement.proposed_name, "preview-rt-node")
+
 
 class SaveLayoutTest(APITestCase):
     """Tests for the DesignViewSet save-layout action (Stage 2, increment 2a)."""
@@ -270,6 +286,99 @@ class SaveLayoutTest(APITestCase):
         response = self.client.post(self._url(self.design), payload, format="json", **self.header)
         self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
         self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_swap_two_devices_succeeds(self):
+        """Two devices swapping slots in one submit is valid: each vacates the
+        slot the other moves into, so the projected layout has no collision.
+
+        Regression: collision was validated against the PHYSICAL rack (excluding
+        only the device being moved), so a swap 400'd because each target still
+        looked occupied by the other real device.
+        """
+        self._grant_all()
+        rack = self.racks[0]
+        d1, d2 = self.devices[0], self.devices[1]  # U1, U2 (both front, half-depth)
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": d1.pk, "u_position": 2, "face": "front"},
+                    {"kind": "move", "device_id": d2.pk, "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = {p.device_id: p for p in DesignPlacement.objects.filter(design=self.design)}
+        self.assertEqual(len(placements), 2)
+        self.assertEqual(float(placements[d1.pk].target_position), 2.0)
+        self.assertEqual(float(placements[d2.pk].target_position), 1.0)
+        # Real devices are never mutated.
+        d1.refresh_from_db()
+        d2.refresh_from_db()
+        self.assertEqual((float(d1.position), float(d2.position)), (1.0, 2.0))
+
+    def test_move_into_slot_vacated_by_another_move_succeeds(self):
+        """Moving a device into a U that another moved-away device vacated is
+        valid (the vacating move need not be a mutual swap)."""
+        self._grant_all()
+        rack = self.racks[0]
+        d1, d2 = self.devices[0], self.devices[1]  # U1, U2
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    # d2 leaves U2 for a free U; d1 moves into the vacated U2.
+                    {"kind": "move", "device_id": d2.pk, "u_position": 5, "face": "front"},
+                    {"kind": "move", "device_id": d1.pk, "u_position": 2, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = {p.device_id: float(p.target_position)
+                      for p in DesignPlacement.objects.filter(design=self.design)}
+        self.assertEqual(placements, {d1.pk: 2.0, d2.pk: 5.0})
+
+    def test_move_into_slot_vacated_by_remove_succeeds(self):
+        """Removing a device frees its slot for another device to move in."""
+        self._grant_all()
+        rack = self.racks[0]
+        d1, d2 = self.devices[0], self.devices[1]  # U1, U2
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "remove", "device_id": d2.pk},
+                    {"kind": "move", "device_id": d1.pk, "u_position": 2, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        by_kind = {p.kind: p for p in DesignPlacement.objects.filter(design=self.design)}
+        self.assertEqual(float(by_kind[DesignPlacementKindChoices.KIND_MOVE].target_position), 2.0)
+        self.assertEqual(by_kind[DesignPlacementKindChoices.KIND_REMOVE].device_id, d2.pk)
+
+    def test_move_onto_unmoved_device_still_returns_400(self):
+        """The projected-layout relaxation must NOT let a device move onto a slot
+        held by a device that stays put — that is still a real collision."""
+        self._grant_all()
+        rack = self.racks[0]
+        d1, d2 = self.devices[0], self.devices[1]  # U1, U2
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": d1.pk, "u_position": 2, "face": "front"},
+                    # d2 stays at its real U2 (submitted as existing, not moved).
+                    {"kind": "existing", "device_id": d2.pk, "u_position": 2, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
 
     def test_noop_payload_returns_304(self):
@@ -790,6 +899,133 @@ class SaveLayoutTest(APITestCase):
             (move_b.target_rack_id, float(move_b.target_position), move_b.target_face),
             before,
         )
+
+
+def _plugins_config(**overrides):
+    """Build a PLUGINS_CONFIG dict for the plugin with the given naming overrides."""
+    cfg = {
+        "naming_mode": "sequence",
+        "naming_template": "{design.name}-{n}",
+        "naming_script": "",
+    }
+    cfg.update(overrides)
+    return {"netbox_rack_design": cfg}
+
+
+class PreviewNameTest(APITestCase):
+    """
+    Tests for the DesignViewSet preview-name action (Phase 2).
+
+    The endpoint computes the would-be name for a PROSPECTIVE placement without
+    persisting anything: no DesignPlacement is saved and no dcim object mutated.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]
+        cls.device_type = env["device_type"]
+        cls.device_role = env["device_role"]
+        cls.tenant = env["tenant"]
+        cls.design = Design.objects.create(title="DC-Preview", site=cls.site)
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-preview-name",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_preview_add_returns_sequence_name(self):
+        """An 'add' preview returns the sequence-mode '<title>-<n>' name."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {"kind": "add", "device_type": self.device_type.pk, "index": 1}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "DC-Preview-1")
+        self.assertFalse(response.data["exists_in_site"])
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template", naming_template="{device.site.name}-{n}"
+        )
+    )
+    def test_preview_template_mode_resolves_dotted_path(self):
+        """Template mode resolves a dotted path over the placement context."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {"kind": "add", "device_type": self.device_type.pk, "index": 3}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        # {device.site.name} for an 'add' resolves to the design's site name.
+        self.assertEqual(response.data["name"], "Site 1-3")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_exists_in_site_true_for_real_device(self):
+        """exists_in_site flips true when a real device already uses the name."""
+        self.add_permissions("netbox_rack_design.view_design")
+        create_test_device("DC-Preview-1", site=self.site)
+        body = {"kind": "add", "device_type": self.device_type.pk, "index": 1}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "DC-Preview-1")
+        self.assertTrue(response.data["exists_in_site"])
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_exists_in_site_true_for_other_placement(self):
+        """exists_in_site flips true when another placement uses the name in-site."""
+        self.add_permissions("netbox_rack_design.view_design")
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=1,
+            proposed_name="DC-Preview-9",
+        )
+        body = {"kind": "add", "device_type": self.device_type.pk, "index": 9}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "DC-Preview-9")
+        self.assertTrue(response.data["exists_in_site"])
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_preview_writes_nothing(self):
+        """The endpoint persists no placement and creates no dcim Device."""
+        self.add_permissions("netbox_rack_design.view_design")
+        placements_before = DesignPlacement.objects.count()
+        devices_before = Device.objects.count()
+        body = {
+            "kind": "add",
+            "device_type": self.device_type.pk,
+            "device_role": self.device_role.pk,
+            "tenant": self.tenant.pk,
+            "target_rack": self.racks[1].pk,
+            "target_position": 5,
+            "target_face": "front",
+            "index": 1,
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(DesignPlacement.objects.count(), placements_before)
+        self.assertEqual(Device.objects.count(), devices_before)
+
+    def test_bad_device_type_returns_400(self):
+        """An unknown device_type PK → 400 with a clear message; nothing written."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {"kind": "add", "device_type": 9999999}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("device_type", response.data)
+
+    def test_preview_without_view_permission_denied(self):
+        """A user lacking view_design → 403."""
+        body = {"kind": "add", "device_type": self.device_type.pk}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
 
 
 class DesignRackScopeTest(APITestCase):

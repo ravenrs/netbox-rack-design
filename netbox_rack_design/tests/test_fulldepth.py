@@ -294,6 +294,34 @@ class FullDepthSaveLayoutTest(APITestCase):
         self.assertHttpStatus(again, status.HTTP_304_NOT_MODIFIED)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
 
+    def test_full_depth_move_onto_occupied_opposite_face_returns_400(self):
+        """A full-depth device needs BOTH faces free. Moving it to a U whose
+        opposite face is occupied by another (un-moved) device must be rejected —
+        the same conflict the editor now surfaces live on the tile before save."""
+        self._grant_all()
+        # A half-depth device sits on the REAR at U10; that U's rear is occupied.
+        hd_type = _half_depth_type(self.mf)
+        Device.objects.create(
+            name="rear-blocker", site=self.site, rack=self.rack,
+            position=10, face="rear", device_type=hd_type, role=self.role,
+        )
+        response = self._post([
+            {
+                "rack_id": self.rack.pk,
+                "front": [{
+                    "kind": "move", "device_id": self.device.pk,
+                    "device_type_id": self.fd_type.pk, "u_position": 10, "face": "front",
+                }],
+                "rear": [{
+                    "kind": "move", "device_id": self.device.pk,
+                    "device_type_id": self.fd_type.pk, "u_position": 10, "face": "rear",
+                }],
+            },
+        ])
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
     def test_full_depth_remove_on_both_faces_yields_single_placement(self):
         """Removing a full-depth device (submitted on both faces) → exactly ONE placement."""
         self._grant_all()

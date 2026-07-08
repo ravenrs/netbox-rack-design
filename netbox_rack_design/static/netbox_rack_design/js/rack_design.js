@@ -106,9 +106,10 @@
 
         function fillCard(content) {
             var name = content.getAttribute("data-name");
+            var deviceType = content.getAttribute("data-device-type-name");
             var role = content.getAttribute("data-role-name");
             var tenant = content.getAttribute("data-tenant-name");
-            if (!name && !role && !tenant) { return false; }
+            if (!name && !deviceType && !role && !tenant) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -116,7 +117,7 @@
                 n.textContent = name;
                 hcard.appendChild(n);
             }
-            [["Role", role], ["Tenant", tenant]].forEach(function (pair) {
+            [["Type", deviceType], ["Role", role], ["Tenant", tenant]].forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");
                 row.className = "nbx-rd-hovercard-row";

@@ -13,6 +13,7 @@ __all__ = (
     "DesignSerializer",
     "DesignPlacementSerializer",
     "SaveLayoutSerializer",
+    "PreviewNameSerializer",
     "FavoriteToggleSerializer",
     "DesignRackScopeSerializer",
     "HiddenRackToggleSerializer",
@@ -99,8 +100,13 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     face = serializers.ChoiceField(
         choices=("front", "rear", ""), required=False, allow_blank=True, default=""
     )
-    # Accepted for forward-compatibility with 'add'; ignored this slice.
-    proposed_name = serializers.CharField(required=False, allow_blank=True, default="")
+    # The editor-chosen proposed name for an 'add' (auto-filled from the naming
+    # engine, user-editable) or a 'move' (the §4a keep/rename choice). Optional and
+    # WITHOUT a default so the viewset can tell "the editor sent a name" (set it)
+    # from "the editor omitted it" (leave the placement's existing name untouched).
+    proposed_name = serializers.CharField(
+        required=False, allow_blank=True, max_length=64
+    )
     # When true on an 'add' item, the user flagged the planned addition for
     # cancellation via the editor's × — the add placement is DELETED on save.
     cancel = serializers.BooleanField(required=False, default=False)
@@ -136,6 +142,39 @@ class SaveLayoutSerializer(serializers.Serializer):
 
     design_id = serializers.IntegerField()
     racks = SaveLayoutRackSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
+# Name-preview request serializer (Phase 2)
+#
+# Validates the *shape* of a prospective placement so the editor can ask the
+# naming engine what a tile WOULD be named without persisting anything. It is
+# not a ModelSerializer: the viewset builds an UNSAVED DesignPlacement from these
+# values, resolves the FKs by PK (tolerating missing ones), and never writes.
+# ---------------------------------------------------------------------------
+
+
+class PreviewNameSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/preview-name/."""
+
+    kind = serializers.ChoiceField(
+        choices=("add", "move", "remove"), required=False, default="add"
+    )
+    # FKs are accepted as bare PKs; the viewset resolves them (400 on a bad PK).
+    device_type = serializers.IntegerField(required=False, allow_null=True)
+    device = serializers.IntegerField(required=False, allow_null=True)
+    device_role = serializers.IntegerField(required=False, allow_null=True)
+    tenant = serializers.IntegerField(required=False, allow_null=True)
+    target_rack = serializers.IntegerField(required=False, allow_null=True)
+    target_position = serializers.DecimalField(
+        max_digits=4, decimal_places=1, required=False, allow_null=True
+    )
+    target_face = serializers.CharField(
+        required=False, allow_blank=True, default=""
+    )
+    # The ordinal the prospective tile would take, so the editor can preview a
+    # name for a not-yet-persisted position without first saving the placement.
+    index = serializers.IntegerField(required=False, allow_null=True)
 
 
 # ---------------------------------------------------------------------------

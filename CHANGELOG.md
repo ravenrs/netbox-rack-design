@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-08
+
+### Release Summary
+**The editor grows up** — a ground-up rework of how the multi-rack editor decides, renders and verifies device placement, plus a configurable naming engine for planned devices.
+
+This minor, fully backward-compatible release replaces the editor's "let the grid engine move things and clean up after" approach with an explicit object model and a validate-before-commit pipeline, specified in `docs/editor-behavior-spec.md` and enforced by a spec-conformance test matrix (`docs/editor-conformance-matrix.md`). The result is an editor that behaves predictably under every gesture we could enumerate: nothing ever moves except the tile in your hand, full-depth devices carry their opposite-face shadow with them (live, while you drag), placing onto a vacating slot is an explicit confirmed action with a NetBox-style reservation marker, and a device dragged back home — across any number of racks, even after saving and reloading — silently becomes itself again. There are **no schema changes** (no new migrations) and **no breaking changes**; live `Device`/`Rack` records remain untouched, as always.
+
+### Added
+- **Naming-convention engine** for planned devices (`naming.py`): proposed names are computed per placement with three configurable modes — `sequence` (`<design>-<n>`), `template` (a `str.format` template over dotted NetBox-model attribute paths, e.g. `{design.name}`, `{device.site.name}`), and `script` (a dotted path to a custom callable). Configured via plugin settings `naming_mode` / `naming_template` / `naming_script`; the proposed name flows through the editor's rename dialog, the save path and the REST payload.
+- **Editor behavior specification** (`docs/editor-behavior-spec.md`) — the authoritative rules for placement, shadows, ghosts, displacement and dialogs — and a **spec-conformance matrix** (`docs/editor-conformance-matrix.md`, ~54 rule×context rows) mapping every rule to its covering test.
+- **Displacement flow**: dropping a device onto a slot whose occupant is vacating (moved away or flagged removed) asks for confirmation, then collapses the vacating occupant to a **red reservation side stripe** (NetBox-reservation look, old name on hover, mirrored on the opposite face for full-depth devices); the stripe reverts to the normal ghost/removed rendering if the new occupant leaves. Exactly one device can be planned into a vacated slot.
+- **Live full-depth shadows**: a full-depth device's opposite-face hatch is now part of the device — it follows the tile in real time during a drag (a live rear-side legality preview), lands atomically with it, tints by the owner's state (existing / add / move-in / removed-crossed), and renders a visible red **conflict hatch** when a pre-existing layout double-books the opposite face instead of silently disappearing.
+- **Cursor-governed placement**: the drag preview follows the cursor only — no "suggested placement" fallback. Illegal rows show a red deny indicator; releasing there snaps a moved tile back home and discards a palette drag-in entirely (no phantom add, Save stays untouched).
+- **Cross-rack homecoming**: dragging a moved device back onto its own origin ghost — directly, after multiple hops, or after save + reload — silently restores the original placement (ghost and mirror removed, no duplicate entities).
+- **Deterministic e2e regression net**: self-provisioning Playwright suites sweeping devices in 0.5U steps across both faces and multiple racks (76/87/120-step sweeps, dense-pack rejection, displacement dialogs, homecoming chains), each step asserting a **full-world diff** — any bystander tile changing any class or position anywhere fails the test.
+
+### Fixed
+- Dense-rack drag crash: `RangeError: Maximum call stack size exceeded` from GridStack's collision cascade when dragging onto a fully packed rack — placement is now decided before commit and engine push/repack is neutralized during gestures, so the cascade cannot start.
+- Bystander tiles being silently relocated during drags, hatch redraws, editor init on double-booked layouts, and rejected foreign drops (several distinct engine paths, including two that bypassed all collision hooks).
+- Full-depth shadows: orphaned after rejected drags or cross-rack departures, missing for palette adds and removed devices, stale move-tint after a rejected foreign drop, wrong-name ghost mirrors after grouped moves.
+- Rename/displacement dialog never appearing for cross-rack moves (an early return skipped adopted tiles on every path), and dialogs getting stuck open forever when confirmed/dismissed during the opening animation (Bootstrap `hide()` no-ops mid-fade).
+- A device released while hovering occupied units no longer teleports to the last-valid preview slot; re-dragged palette adds are validated like every other move.
+
+### Changed
+- The editor's shadow/ghost rendering pipeline is now event-driven from each device's own lifecycle (the global recompute pass is gone), and every placement decision routes through a single model-based validator (`rdCanPlaceAt`) covering bodies, shadows, ghosts and both faces of full-depth devices.
+- Dev tooling: `pre-commit` pinned to 4.6.0 in `requirements_dev.txt`.
+
 ## [0.7.0] - 2026-06-29
 
 ### Release Summary

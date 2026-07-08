@@ -212,3 +212,37 @@ class DesignPlacementTestCase(TestCase):
         )
         with self.assertRaises(ValidationError):
             placement.full_clean()
+
+    def test_move_onto_slot_vacated_by_persisted_remove_is_valid(self):
+        """Single-placement validation (no batch context) reads the design's
+        already-persisted move/remove rows to know which devices vacated their
+        real slots. A persisted remove of Device 2 frees U2 for Device 1."""
+        # Device 2 sits at Rack1/U2; a persisted remove vacates that slot.
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=self.devices[1],
+        )
+        move = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],  # really at U1
+            target_rack=self.racks[0],
+            target_position=2,  # into the slot the remove freed
+            target_face="front",
+        )
+        move.full_clean()  # should not raise
+
+    def test_move_onto_slot_held_by_unvacated_device_is_invalid(self):
+        """Without any move/remove vacating it, U2 is still held by Device 2 →
+        moving Device 1 onto it must still fail (the relaxation is scoped)."""
+        move = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=2,
+            target_face="front",
+        )
+        with self.assertRaises(ValidationError):
+            move.full_clean()

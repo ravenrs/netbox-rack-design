@@ -90,6 +90,22 @@ def slot_role_name(slot):
 
 
 @register.filter()
+def slot_device_type_name(slot):
+    """
+    Device-type MODEL name for a slot's hover card.
+
+    The projection sets ``device_type`` on EVERY slot that has one: a planned
+    ``add`` carries its chosen catalog type, while existing / move / remove slots
+    carry the real device's type (see ``projection.py``). Returns "" only when the
+    type is genuinely unknown so the template can omit the line entirely.
+    """
+    device_type = slot.get("device_type")
+    if device_type is not None and device_type.model:
+        return device_type.model
+    return ""
+
+
+@register.filter()
 def slot_tenant_name(slot):
     """
     Tenant NAME for a slot's hover card (real device's tenant, or a planned
