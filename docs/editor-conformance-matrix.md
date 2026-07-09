@@ -3,13 +3,18 @@
 Cross-reference of every behavioral rule in `docs/editor-behavior-spec.md` §4
 (movement rules) against the contexts it applies in, and the test(s) that
 prove it. Built 2026-07-08 alongside the fix for the confirmed live
-cross-rack "homecoming" bug (§4.6). Status legend:
+cross-rack "homecoming" bug (§4.6). Updated 2026-07-09 in a post-release
+hardening pass that closed the two remaining "Known gaps" (issues #21/#22)
+and added dedicated regression coverage for the §4a rename-dialog
+cancel/× contract (issue #17). Status legend:
 
 - **covered** — a deterministic e2e test exercises this exact rule in this
   exact context and was GREEN at the time this matrix was written.
 - **NEW** — did not exist before this pass; written and verified as part of
   this work (falsifiability where noted: failed on pre-fix code, passes
   after the fix).
+- **CLOSED (date)** — a row that was previously an open gap, now covered by
+  a named test; falsifiability/verdict noted inline.
 - **N/A** — the context does not apply to this rule (reason given).
 
 Test files: `tests/e2e/test_editor_sweep.py` (classes
@@ -50,6 +55,7 @@ Test files: `tests/e2e/test_editor_sweep.py` (classes
 | Pipeline assertion on every committed rack-crossing sweep hop | cross-rack sweep, every hop | ≥1 rename/displacement dialog answered per committed crossing; exact-true-origin homecoming exempt (silent per §4.4/§8.3) | `_sweep`'s `dialog_pipeline_skipped` violation check, active in `test_sweep_existing_fulldepth_across_racks` | **NEW** |
 | Displacement dialog also fires for a move_in landing on a vacated slot | cross-rack / adopted tile | same §4.3 flow as an existing-kind mover | exercised by the cross-rack sweep whenever the subject crosses rack B's ghost rows (dialogs answered per step; stripe toggling covered by the world diff) | **NEW** |
 | Dialog never stranded by a fast confirm/dismiss | any dialog | a confirm/dismiss click during the show-fade still closes the dialog | exercised by every dialog-driving test at shim speed (~60ms after open) — pre-fix the FIRST click was silently swallowed by Bootstrap's `_isTransitioning` guard, stranding the dialog open forever (and making the old test-side dismissals no-ops) | **NEW** (transition-safe `requestHide` in both dialog builders) |
+| §4a rename dialog Cancel/× fully reverts the committed move (issue #17) | cross-rack | dismissing via the Cancel button OR the × close button both run `cancelMove` (full revert: device back at origin rack/face/position, world byte-identical, no dialog left in the DOM) | `EditorCrossRackSweepTestCase::test_rename_dialog_cancel_button_fully_reverts_cross_rack_move`, `::test_rename_dialog_close_x_fully_reverts_cross_rack_move` | **CLOSED (2026-07-09)** — `showMoveNameDialog` on this checkout's HEAD already wired the explicit `finishCancel()+requestHide()` handlers to both affordances (matching `showDisplaceConfirmDialog`'s proven pattern), so the tests pass without a code change; falsifiability was verified by temporarily reverting to the old Bootstrap-delegation-only pattern and confirming the exact documented failure (`Page.wait_for_function: Timeout 5000ms exceeded` waiting for the dialog to close) before restoring the fix |
 
 ## §4.1c — One occupant per vacated slot (ruling 2026-07-08)
 
@@ -79,7 +85,7 @@ Test files: `tests/e2e/test_editor_sweep.py` (classes
 | Cancel restores OLD's ghost/remove rendering | same-rack | stripe removed, ghost/remove styling back | `test_e6_displace_ghost_cancel` | covered |
 | Moving NEW away restores OLD | same-rack | OLD un-stripes when NEW leaves | `test_e7_displace_ghost_then_move_new_away` | covered |
 | Palette add onto vacating slot | palette add | `add` styling, same displacement flow | `test_e11_displace_ghost_via_palette_add` | covered |
-| Displacement via cross-rack adoption | cross-rack | dialog + stripe semantics identical to same-rack | none dedicated | NEW-gap (not written this pass — see "Known gaps" below) |
+| Displacement via cross-rack adoption (issue #21) | cross-rack | dialog fires after validation; confirm → NEW `move_in`, OLD collapses to the red "was:" stripe + mirror hatch (both full-depth); cancel → full revert, ghost/mirror restored | `EditorCrossRackSweepTestCase::test_cross_rack_drop_onto_vacating_slot_displaces_confirm`, `::test_cross_rack_drop_onto_vacating_slot_displaces_cancel` | **CLOSED (2026-07-09)** — clean pass on current code (coverage gap, not a bug); new rack-B fixture (`dev_b_ghost_full`, 2U full-depth ghost source) added so both OLD and NEW are full-depth and the mirror-hatch collapse is actually exercised |
 
 ## §4.4 — Move within one face
 
@@ -135,34 +141,33 @@ Test files: `tests/e2e/test_editor_sweep.py` (classes
 | I2 exactly one shadow per full-depth device, opposite face, own units | every step | hatch-count/face/y/class assertions every step | `EditorSweepTestCase`, `EditorCrossRackSweepTestCase` | covered |
 | I3 console/page error free | every step | `self.errors == []` assertions | all classes | covered |
 | **Full-world diff**: every entity NOT owned by the swept subject is byte-identical (classes, geometry, title, owner identity) step-to-step | every step, both faces, both racks | zero "bystander" drift anywhere, not just the swept tile | `EditorSweepTestCase::test_sweep_existing_fulldepth_device` (76 steps), `EditorCrossRackSweepTestCase::test_sweep_existing_fulldepth_across_racks` (87 steps), `test_sweep_palette_add_across_faces` (31 steps), plus before/after diffs on `test_foreign_drop_onto_shadow_rejected_restores_all` and both new homecoming tests | **NEW** — this is the upgrade added in this pass specifically because scoped per-subject checks were provably insufficient to catch cross-rack duplicate-entity/orphan-shadow class bugs; ran clean (0 violations) on the fixed code across all of the above |
+| **Full-world diff extended to the 3 short targeted classes (issue #22)** | every gesture in `EditorDensePackRejectTestCase` / `EditorHatchOverlapNoPushTestCase` / `EditorShadowOwnershipTestCase` | strict (subject-exempt=null) diff for a rejection; subject-exempt diff for a legal move | `test_drop_onto_occupied_units_on_packed_rack_is_rejected` (strict), `test_overlapping_hatches_never_push_rear_bodies`, `test_mid_drag_shadow_tracks_candidate_position`, `test_remove_state_shadow_is_crossed_out` (all subject-exempt) | **CLOSED (2026-07-09)** — ran clean (0 new violations) on current code; `test_conflict_shadow_rendered_and_reported` intentionally left without a diff (it performs no gesture, so there is no before/after to compare) |
 
 ## Known gaps (honest accounting, not silently left uncovered)
 
-- **Displacement via a cross-rack adoption** (dropping a foreign tile onto a
-  ghost/remove-flagged slot in the destination rack): since the 2026-07-08
-  §4.1b fix (adopted move_in tiles now run the full displacement + rename
-  pipeline), the cross-rack sweep exercises this whenever its subject
-  crosses rack B's ghost rows and the `_sweep` dialog-pipeline assertion
-  requires the dialogs to fire on every committed crossing. A dedicated
-  targeted test (moveTo onto `_bghost_orig_gsy`, asserting the stripe on
-  the destination ghost specifically) is still a recommended follow-up.
+- ~~Displacement via a cross-rack adoption~~ **CLOSED (2026-07-09, issue
+  #21)**: a dedicated test now drops a foreign (rack-A) tile directly onto
+  rack B's ghost slot and asserts the full §4.3 contract (dialog after
+  validation, NEW `move_in`, OLD's stripe + mirror hatch, cancel → full
+  revert). See `EditorCrossRackSweepTestCase::test_cross_rack_drop_onto_vacating_slot_displaces_confirm`
+  / `::test_cross_rack_drop_onto_vacating_slot_displaces_cancel`.
 - ~~Cursor governance for palette drag-ins~~ **CLOSED (2026-07-08, palette
   pass)**: the tracker now arms at pointer-down on the palette item; a
   release over illegal cursor rows discards the drag-in entirely (no add,
   no dirty residue) with the deny indicator shown mid-drag. See the §4.1a
   palette rows (`test_palette_release_over_occupied_rows_creates_no_add`,
   `test_palette_cursor_release_on_vacated_slot_fires_displacement`).
-- **EditorDisplacementTestCase / EditorShadowOwnershipTestCase /
-  EditorHatchOverlapNoPushTestCase** were re-run under this work (all green)
-  but their per-step assertions were NOT upgraded to the new full-world
-  diff net — that upgrade was applied to the two long position sweeps
-  (`EditorSweepTestCase`, `EditorCrossRackSweepTestCase`), which are the
-  ones that actually iterate many steps and are where a scoped check
-  provably missed a bystander drift. The short, few-step displacement/
-  shadow-ownership tests already assert on every relevant entity directly
-  (stripe, mirror, dialog) rather than sampling one subject across dozens
-  of steps, so the marginal value of the full-world diff there is lower;
-  flagged here rather than silently claimed as upgraded.
+- ~~EditorDisplacementTestCase / EditorShadowOwnershipTestCase /
+  EditorHatchOverlapNoPushTestCase not upgraded to the full-world diff
+  net~~ **CLOSED (2026-07-09, issue #22)** for `EditorHatchOverlapNoPushTestCase`
+  and `EditorShadowOwnershipTestCase` (both now assert a full-world diff on
+  every gesture-driving test). `EditorDisplacementTestCase` remains on its
+  existing per-entity assertions (stripe, mirror, dialog) by design — its
+  short/few-step tests already assert on every relevant entity directly, so
+  the marginal value of a full-world diff there is lower; not silently
+  claimed as upgraded. `EditorShadowOwnershipTestCase::test_conflict_shadow_rendered_and_reported`
+  is also intentionally excluded (no gesture is performed, so there is no
+  before/after to diff).
 
 ## Fix design (as implemented)
 
@@ -251,11 +256,50 @@ Same file:
   `markDirty` itself on successful registration) — a discarded drag-in
   leaves the Save button untouched.
 
+## §9 — Non-racked tray (0.9.0)
+
+Test file: `tests/e2e/test_editor_tray.py` (`EditorTrayTestCase`), plus
+backend unit tests `netbox_rack_design/tests/test_projection.py`,
+`netbox_rack_design/tests/test_models.py` (tray-target `clean()` rows), and
+`netbox_rack_design/tests/test_api.py::SaveLayoutTest` (tray save-contract
+rows). Spec: `docs/editor-behavior-spec.md` §9.
+
+| Row | Rule | Context | Expected behavior | Covering test | Status |
+|---|---|---|---|---|---|
+| T-tray-1 | Real position-less device projects as `existing` tray slot | load, real DCIM device with `rack=R, position=None` | tile renders in R's tray with `nbx-rd-state-existing`; a rack with none renders an empty tray | `test_projection.py::TrayProjectionTestCase` (backend); `test_editor_tray.py::test_tray_1_real_device_renders_as_existing`, `::test_tray_1_negative_rack_without_tray_devices_is_empty` | **NEW** — falsified pre-fix on both layers: backend `AssertionError: 'PDU-A1' not found in {}` with `_existing_tray_slots` neutralized; e2e `expected exactly one tray tile ..., got []` |
+| T-tray-1 | Tray slot carries no face/row (spec §9.2) | projection + render | `slot["face"] == ""` regardless of the device's real face; I1/I2/I4-clean on load | `test_projection.py::test_real_tray_device_appears_as_existing`; `test_editor_tray.py::test_tray_1_model_check_is_clean` | **NEW** — a first implementation leaked the device's real face into the slot, which editor.js's origin comparison then misread as "moved" (rendered `move_in` instead of `existing`); fixed in `projection.py` + the `atOrigin` tray special-case in `editor.js` (see below) |
+| T-tray-2 | units → tray (dismount) | same-rack, real racked device dragged into the tray | origin gets a crossed ghost; tray entry renders `move_in`; §4a rename dialog opens (kind=`existing` always prompts) | `test_editor_tray.py::test_tray_2_units_to_tray_then_homecoming_is_silent` (first half) | **NEW** |
+| T-tray-2/T-tray-4 | back onto own tray-origin ghost = homecoming | same-rack, drag the tray tile back onto its real U/face | silent restore (no new dialog), ghost cleared, `existing` restored, I1/I2/I4-clean | `test_editor_tray.py::test_tray_2_units_to_tray_then_homecoming_is_silent` (second half) | **NEW** |
+| T-tray-3 | tray → units (mount) | tray tile dragged onto a free U | full §4.2 blocking + §4.3 displacement rules apply at the target; shadow grows if full-depth | mechanism: `onPaletteDrop`'s non-palette branch → `maybePromptMove` runs unchanged for a tray-origin subject (no tray-specific bypass on the *destination* face side); exercised indirectly by T-tray-2's return leg (a clean target). **Displacement-onto-a-vacated-U-from-a-tray-origin and the full-depth-shadow-on-landing sub-cases are not yet covered by a dedicated test.** | **partial** (mechanism reused from §4.1–§4.3, not independently re-verified for a tray-origin subject) |
+| T-tray-4 | tray → tray (cross-rack reassociation) | drag a tray tile onto ANOTHER rack's tray | backend: move placement persists with the new rack, no position | `test_api.py::SaveLayoutTest::test_tray_to_tray_reassociation_persists_new_rack_no_position` | covered (backend only) |
+| T-tray-4 | tray → tray (cross-rack), the DRAG gesture itself | same | a real device tile dragged from rack A's tray onto rack B's tray: `acceptWidgets` permits it, §4a rename dialog opens, origin tray keeps a list-style ghost (no rows/shadow), destination renders `move_in`, I1/I2/I4-clean | `test_editor_tray.py::test_tray_4_cross_rack_accept_widgets_permits_foreign_tile`, `::test_tray_4_cross_rack_reassociation_drag_and_homecoming` | **CLOSED (2026-07-09)** — falsified pre-fix: `makeAccept(isTray)` unconditionally rejected a foreign real tile at a tray target (`!isTray && isForeignRealTile(el)`), so a real mouse drag never even fired `dropped`/`added` (native GridStack rejection); confirmed live on design 6 via a direct `acceptWidgets(el)` probe (`accepted: false` before, `true` after). Fixing acceptance alone was not enough: `ensureTempGhost`, `cancelMove`, `restoreTile`, and `restoreFromGhost` all resolved a tray origin via `faceGrids[face]` (undefined for `face=""`), so the origin ghost was silently never created and a cancelled/reverted tray-origin move left the tile stranded on a face grid at `move_in`/dirty (also confirmed live on design 6 before the fix, then clean after) — all four now route through a new `targetFor(face)` helper that resolves `""` to the tray grid/host with a fixed 2-row height and an appended (never overlapping) row |
+| T-tray-5 | homecoming after save + reload | tray-origin ghost persisted to DB, page reloaded, tile dragged back | identity-based restore survives a reload (same mechanism as §4.6, extended to tray origins by `findOwnGhostEntryIndex`, which is state-agnostic about face) | not independently tested for a tray origin (§4.6's `test_homecoming_after_save_and_reload_persistent_ghost` covers a face origin only) | **known gap** |
+| T-tray-6 | palette → tray (new off-rack device) | drop a catalog device type into the tray | `add`-styled entry, `u_position=None`, no dialog (adds use their own inline name field), no displacement | `test_editor_tray.py::test_tray_6_palette_add_into_tray`; backend `test_api.py::SaveLayoutTest::test_palette_add_into_tray_persists_placement_with_no_position` | **NEW** — pre-fix the tray's `dropped` handler unconditionally rejected every palette drop (`"Reject off-rack palette drops: a brand-new add needs a U."`); now routed through `onPaletteDrop` with `face=""`, which short-circuits the row/collision/displacement logic |
+| T-tray-6 | discard on release outside any legal target | palette drag released off every grid | no add, no dirty residue | not independently tested (mechanism: GridStack's own `acceptWidgets` — a drop outside any registered grid never fires `dropped` at all) | **known gap** (no dedicated regression) |
+| T-tray-7 | I4: one entity per device, world-wide | units→tray→units round trip | `window.__rdModel.check()` reports zero I4 violations at every step | `test_editor_tray.py::test_tray_2_units_to_tray_then_homecoming_is_silent` (asserts `check() == []` after each leg); `editor.js::rdCheckInvariants` I4 block | **NEW** — falsified in dev: an early version of I4 double-counted every tray device (it is present in both `model.devices` and `rack.trayDevices` by construction) and produced a false-positive `I4 device ... has 2 live entities: rack N units/, rack N tray` on every tray load; fixed by excluding non-front/rear faces from the `model.devices` half of the count |
+| T-tray-layout | tray is a list — append-only, non-overlapping, no bystander movement | 2 existing + 1 palette add + 1 units→tray move | 4 distinct rows; the 2 pre-existing tiles' rows unchanged; container grows to fit | `test_editor_tray.py::test_tray_layout_appends_without_overlap_or_bystander_movement` | **NEW** — falsified pre-fix on a live dev-instance report: `AssertionError: 3 != 4 ... {'e2e-tray-pdu-...': 0, ..., 'e2e-tray-rackeddev-...': 0}` (the moved-in device landed exactly on top of the first PDU); fixed by giving every tray slot an explicit sequential `gs-y` at render time (`rack_block.html`) and re-asserting the next free row on every `dropped` event (`editor.js::trayAppendRow`) |
+| T-tray-layout | origin tray ghost gets its OWN row + standard ghost visual | tray→tray cross-rack move that empties an earlier row | the ghost lands BELOW the bottom-most remaining tile (never on a bystander's rows), bystanders keep their rows, and the ghost carries the standard move_out_ghost visual (translucent rgba grey, dashed border, italic, no inline role background) | `test_editor_tray.py::test_tray_4_origin_ghost_row_and_style_parity` | **CLOSED (2026-07-09, live-acceptance regression)** — falsified pre-fix verbatim: `origin tray ghost (rows 2..3) overlaps remaining tile e2e-tray-pdu2-... (rows 2..3)`. Root cause was NOT CSS (the ghost's own class/computed style was already correct — rgba(108,117,125,0.12), dashed, italic): `trayAppendRow` computed the append row as `count*2`, which broke the moment a tile LEFT the tray (bystanders keep non-contiguous rows), landing the ghost on the remaining tile's row; the ghost's 12%-alpha background then composited over the solid role-colored neighbour into what read live as "a solid dark role-colored ghost with a struck label" (design 6, dra4-pdu-rf11-a1). Fixed: `trayAppendRow` now returns max(y+h) over the remaining tiles. Re-verified live: ghost at gs-y=4 below b1 at gs-y=2, correct translucent styling, model check clean |
+| T-tray-layout | tray COMPACTION — a list has no holes | any tray departure / ghost destruction / cancel-revert | remaining tray tiles renumber to contiguous rows 0,2,4,... preserving relative order; container shrinks back to content height. Spec §9.4 ruling (2026-07-09): §4.1's no-bystander-movement constrains RACK positions (U), not list reflow | `test_editor_tray.py::test_tray_compaction_after_cancel_return`, `::test_tray_compaction_after_double_round_trip` (the user's exact live repro: both tiles out then both home) | **CLOSED (2026-07-09, live-acceptance regression #2)** — falsified pre-fix verbatim: scenario (a) `Lists differ: [2, 4] != [0, 2]`; scenario (b) `Lists differ: [8, 10] != [0, 2] ... containerHeight: 131.95` vs 65.98 on load (returned tiles appended below their then-live ghosts; the destroyed ghosts' rows stayed empty — the reported "big dead gap above"). Fixed: `compactTray()` in editor.js, run from `refreshGhosts`' settle pass under its push-suppression bracket, renumbering ONLY this rack's tray tiles (attached via `grid.update`, engine-detached temp ghosts via `_writePosAttr`). Re-verified live on design 6: both PDUs out → ghosts compact at rows 0/2; both home → tiles at rows 0/2, container back to 44px, model check clean |
+| §9.5 | Save contract: mount / dismount / tray→tray | save-layout API | mount = `target_position` set; dismount = `target_rack` set + `target_position=None`; tray→tray = new rack, no position; same-site check for tray targets only (no slot-availability check) | `test_api.py::SaveLayoutTest::test_dismount_to_tray_persists_move_with_no_position`, `::test_mount_from_tray_persists_move_with_position`, `::test_tray_to_tray_reassociation_persists_new_rack_no_position`, `::test_tray_device_resubmitted_as_existing_is_idempotent_noop`; `test_models.py::test_move_with_no_position_is_a_valid_tray_target`, `::test_add_with_no_position_is_a_valid_tray_target`, `::test_tray_target_in_other_site_rejected` | **NEW** |
+
+Honest gaps carried forward from this pass (not silently dropped, listed
+so a future pass has a punch list): displacement-onto-a-vacated-U landing
+FROM a tray origin (mechanism is shared code, not independently
+re-verified); homecoming-after-reload for a tray origin specifically
+(mechanism is shared/state-agnostic, not independently re-verified);
+discard-on-release-outside-any-legal-target for a tray-bound palette drag
+(no dedicated regression, relies on GridStack's own `acceptWidgets` never
+firing `dropped` off-grid). The cross-rack tray→tray DRAG gesture (initially
+listed here as a gap) was escalated mid-pass by explicit user report and is
+now CLOSED — see the T-tray-4 row above.
+
 ## Summary
 
 - Spec rules enumerated (§4.1 incl. the 2026-07-08 hard-rule additions
   §4.1a/b/c with the palette context, §4.2–§4.8, I1–I3, full-world
-  upgrade): **~54 rule×context rows** across the tables above.
+  upgrade): **~56 rule×context rows** across the tables above (was ~54
+  before the 2026-07-09 post-release hardening pass added the issue #17
+  and #21 rows and the issue #22 full-world-diff-extension row).
 - Previously covered (existing tests, unchanged): **~30** (incl. the
   one-occupant blocking mechanism and the legal palette-add pipeline,
   which were already correct).
@@ -267,6 +311,19 @@ Same file:
   assertion), second-device-blocked, transition-safe dialogs, palette
   discard-on-illegal-release (+ deny, + dirty hygiene), palette
   displacement under the armed tracker.
+- Newly covered in the 2026-07-09 post-release hardening pass (issues
+  #17/#21/#22): **6** new tests —
+  `test_rename_dialog_cancel_button_fully_reverts_cross_rack_move`,
+  `test_rename_dialog_close_x_fully_reverts_cross_rack_move` (issue #17,
+  both green — the underlying `showMoveNameDialog` fix was already
+  shipped; falsifiability verified by temporarily reproducing and
+  re-fixing the exact old-pattern failure), `test_cross_rack_drop_onto_vacating_slot_displaces_confirm`,
+  `test_cross_rack_drop_onto_vacating_slot_displaces_cancel` (issue #21,
+  both green — closes the dedicated cross-rack displacement-on-adoption
+  gap with a new full-depth rack-B ghost fixture), plus the full-world
+  diff net wired into 4 existing tests across
+  `EditorDensePackRejectTestCase`/`EditorHatchOverlapNoPushTestCase`/
+  `EditorShadowOwnershipTestCase` (issue #22, 0 new violations found).
 - Fixed: (1) the cross-rack homecoming 5-entity bug (duplicate entity +
   orphan shadow leak); (2) the cursor-fallback commit bug (device landing
   on rows the user never pointed at); (3) the skipped dialog pipeline for
@@ -274,6 +331,9 @@ Same file:
   (5) the palette-fallback add bug (gray placeholder over impossible
   positions, add committed at the fallback slot) + the dirty-residue of
   discarded drag-ins.
-- Honest gaps: a dedicated targeted displacement-on-adoption test;
-  full-world diff not extended to the 3 short targeted classes — both
-  documented above rather than silently claimed as done.
+- Honest gaps: none currently open from this pass's brief. The only
+  remaining note is that `EditorDisplacementTestCase` was deliberately NOT
+  upgraded to the full-world diff net (its short/few-step tests already
+  assert on every relevant entity directly; see "Known gaps" above), and
+  `EditorShadowOwnershipTestCase::test_conflict_shadow_rendered_and_reported`
+  has no gesture to diff.

@@ -332,3 +332,72 @@ of errors.
 2. §3 stripe — **NetBox reservation hatch recolored red** (same diagonal-stripe
    pattern as core rack reservations).
 3. §4.4 — moving a device back onto its own ghost restores **silently**, no dialog.
+
+---
+
+## 9. Non-racked tray (planned — 0.9.0)
+
+Status: **spec draft 2026-07-09** (user request: real off-rack devices — 0U/vertical
+PDUs, rear-door units, cable managers — must be visible and plannable).
+
+### 9.1 What the tray represents
+
+Each rack's tray is the projection of "devices associated with this rack but not
+mounted at a U": in DCIM terms, `Device.rack == R and Device.position is None`.
+Today only *planned* position-less placements render there; real position-less
+devices are invisible. 0.9.0 makes the tray show reality plus plan, exactly like
+the faces do.
+
+### 9.2 Model
+
+- A tray slot is a `Device` with `face = ""`/`u = None`; it claims **no Units**.
+  Tray claims never collide (a tray is an unordered list, not a grid) and cast
+  **no shadow** (there is no opposite face off-rack).
+- `RDRack.trayDevices` (already present in the read-model) becomes fully
+  populated: `existing` tray devices from DCIM + planned tray placements, each a
+  normal `RDDevice` with `face: "tray"`-equivalent semantics.
+- Invariants: I1/I2 exclude tray devices (no rows, no shadow); new **I4**: a
+  device appears at most once per design world (body in units XOR tray XOR
+  ghost-origin pair) — the §4.6 one-entity rule extended to the tray.
+
+### 9.3 Moves (all reuse the §4.1 pipeline: validate → dialog → atomic commit)
+
+| Gesture | Meaning | Rules |
+|---|---|---|
+| units → tray (same or other rack) | plan a dismount-to-0U / accessory reassignment | origin gets a ghost + crossed mirror per §3; tray entry renders `move_in`; rename dialog per naming feature |
+| tray → units | plan a mount at a U | full §4.2 blocking rules + §4.3 displacement apply at the target; full-depth devices gain their shadow on landing |
+| tray → tray (cross-rack) | reassociate with another rack | origin tray keeps a ghost entry (list-style, no rows); dialog per cross-rack move |
+| back onto own tray ghost | homecoming | silent restore per §4.4/§4.6 — identity-based, any hop count, survives save+reload |
+| palette → tray | plan a new off-rack device | `add` styling; cursor-governed (§4.1): the tray highlights as the legal target under the cursor |
+
+- Cursor governance applies: the tray is a legal target only when the cursor is
+  over it; a release elsewhere snaps back / discards per §4.1.
+- Displacement (§4.3) does not apply inside the tray (no exclusive slots), so
+  tray drops never displace and never dialog for displacement — only the rename
+  dialog fires where naming requires it.
+
+### 9.4 Rendering
+
+- `existing` tray devices: normal tile styling, laid out as a horizontal list.
+- Planned states reuse the §3 table (add/move_in/move_out_ghost/remove) minus
+  shadows/stripes (n/a off-rack).
+- Legend filters apply to tray tiles the same as to face tiles.
+- The tray is a compact list: rows renumber to contiguous after any removal;
+  the §4.1 no-bystander-movement rule constrains rack positions (U), not list
+  reflow (coordinator-approved interpretation, 2026-07-09).
+
+### 9.5 Save contract
+
+- Mount (tray → U): placement gains `target_position`/`target_face` as usual.
+- Dismount (U → tray): placement with `target_rack = R`, `target_position = None`.
+- Reassociation (tray → tray): move placement with the new rack, no position.
+- Server validation mirrors §4.2 for unit targets; tray targets validate only
+  same-site rack membership (no slot availability applies).
+
+### 9.6 Tests (derive per the conformance-matrix discipline, test-first)
+
+- T-tray-1: real 0U device renders in the tray as `existing` on load.
+- T-tray-2..5: each row of the §9.3 table, confirm + cancel variants, full-world
+  diff per step, homecoming contract for the return legs.
+- T-tray-6: palette add into tray; discard on release outside any legal target.
+- T-tray-7: I4 holds across a units→tray→units round-trip (single entity).

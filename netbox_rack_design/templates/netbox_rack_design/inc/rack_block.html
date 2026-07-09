@@ -141,10 +141,16 @@
          gs-column="1"
          gs-min-row="2">
       {% for slot in non_racked %}
+        {# The tray is a LIST (spec §9.2/§9.4), not a grid with meaningful #}
+        {# rows: every item gets its own sequential row (index * 2, since   #}
+        {# every tray tile is a fixed gs-h="2") so items never overlap and  #}
+        {# the container grows to fit -- server-render order first, session #}
+        {# drops append after (see editor.js's tray "dropped" handler).     #}
         <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
              gs-w="1"
              gs-h="2"
              gs-x="0"
+             gs-y="{{ forloop.counter0|mul2 }}"
              {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0|add:front_len|add:rear_len }}" data-widget-index="{{ forloop.counter0|add:front_len|add:rear_len }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
           <div class="grid-stack-item-content"
                {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
