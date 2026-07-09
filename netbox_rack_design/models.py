@@ -313,13 +313,28 @@ class DesignPlacement(NetBoxModel):
         if kind == DesignPlacementKindChoices.KIND_REMOVE:
             return  # No target for a removal.
 
-        # add / move require a target placement.
+        # add / move require a target rack; the target position is optional --
+        # None means a tray (non-racked) target (spec §9.5: mount vs dismount vs
+        # tray-to-tray reassociation are all distinguished by target_position
+        # being set vs None, never by a separate flag).
         if not self.target_rack:
             raise ValidationError({"target_rack": "A target rack is required."})
         if self.target_position is None:
-            raise ValidationError({"target_position": "A target position is required."})
+            self._validate_tray_target()
+            return
 
         self._validate_target_slot()
+
+    def _validate_tray_target(self):
+        """
+        A position-less (tray) target validates only same-site rack membership
+        (spec §9.5) -- there is no slot availability to check since a tray is
+        an unordered list, not a grid.
+        """
+        if self.design_id and self.target_rack.site_id != self.design.site_id:
+            raise ValidationError(
+                {"target_rack": "Target rack must be in the design's site."}
+            )
 
     def _validate_target_slot(self):
         """Reuse NetBox's own collision logic to check the target slot is free.

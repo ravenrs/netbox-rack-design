@@ -736,7 +736,9 @@ class DesignViewSet(NetBoxModelViewSet):
                 device is not None
                 and device.rack_id == rack.pk
                 and _norm_pos(device.position) == _norm_pos(u_position)
-                and (full_depth or (device.face or "") == face)
+                # A tray target (u_position None) carries no face -- the real
+                # device's face (front/rear/blank) is irrelevant off-rack (§9.5).
+                and (full_depth or u_position is None or (device.face or "") == face)
             )
             if at_real:
                 if existing is not None:

@@ -21,7 +21,12 @@ The projection starts from the rack's *real* installed devices (via NetBox's own
                (``remove``).
 
 Anything whose target has no position (a position-less ``add``/``move``) is
-returned in a separate ``non_racked`` list rather than dropped.
+returned in a separate ``non_racked`` list rather than dropped. ``non_racked``
+also includes real DCIM devices that ARE associated with this rack but have no
+``position`` (``Device.rack == rack and Device.position is None`` -- 0U
+accessories such as vertical PDUs, rear-door units, cable managers): these are
+the tray's "reality" layer (spec §9.1), rendered as ``existing`` slots exactly
+like a racked existing device, just without a U/face.
 
 ------------------------------------------------------------------------------
 RESULT CONTRACT  (this is the shape the template / API consumes)
@@ -200,6 +205,43 @@ def _existing_slots(rack, face, excluded_device_ids):
     return slots
 
 
+def _existing_tray_slots(rack, excluded_device_ids):
+    """
+    Real devices associated with this rack but not mounted at a U (DCIM
+    ``Device.rack == rack`` and ``Device.position is None``), as 'existing'
+    non-racked slots (spec §9.1/§9.2: 0U/vertical PDUs, rear-door units, cable
+    managers, etc). Devices referenced by the design (moves/removes) are
+    excluded here -- they get their own design-aware slots.
+
+    A tray slot's ``face`` is always "" (spec §9.2: "A tray slot is a Device
+    with face = ''/u = None; it claims no Units") -- a tray is an unordered
+    list, not a grid, so the device's REAL ``face`` field (which may be
+    front/rear/blank, e.g. from a full-depth-agnostic 0U accessory) carries no
+    layout meaning here and must not leak into the slot's own face, which the
+    editor JS treats as a location identifier equivalent to "front"/"rear".
+    """
+    slots = []
+    devices = (
+        rack.devices.filter(position__isnull=True)
+        .exclude(pk__in=excluded_device_ids)
+        .select_related("device_type")
+        .order_by("name", "pk")
+    )
+    for device in devices:
+        slots.append(
+            _slot(
+                u_position=None,
+                u_height=_u_height(device.device_type),
+                face="",
+                label=device.name or str(device),
+                state=ProjectedSlotState.EXISTING,
+                device=device,
+                device_type=device.device_type,
+            )
+        )
+    return slots
+
+
 def project_rack(design, rack):
     """
     Compute the projected elevation of ``rack`` under ``design``.
@@ -232,7 +274,10 @@ def project_rack(design, rack):
 
     front = _existing_slots(rack, DeviceFaceChoices.FACE_FRONT, design_device_ids)
     rear = _existing_slots(rack, DeviceFaceChoices.FACE_REAR, design_device_ids)
-    non_racked = []
+    # Real position-less devices (the tray's "reality" layer, spec §9.1) come
+    # first; design-driven non_racked entries (adds/moves with no target
+    # position) are appended below by the _append() helper.
+    non_racked = _existing_tray_slots(rack, design_device_ids)
 
     def _append(slot, full_depth=False):
         # A position-less slot (e.g. a target-less add/move) is never face-mirrored.
