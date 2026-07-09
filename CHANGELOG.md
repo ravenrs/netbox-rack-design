@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-09
+
+### Release Summary
+**Displacement you can actually see** — a patch release polishing how displaced devices are marked, everywhere.
+
+The displaced-occupant marker is now a NetBox-reservation-style bar hanging **outside** the rack frame (wider, red diagonal stripes, aligned to the displaced units, on both faces for full-depth devices) instead of a thin sliver squeezed inside the occupying tile next to its remove button — and hovering it shows the standard device hover card with the displaced device's name, type and role. Displaced-pair detection moved into the projection layer, which fixed a real rendering hole on two surfaces: the read-only elevation view showed a saved displacement as two overlapping composited tiles, and the editor itself had the same overlap on a fresh page load (it only rendered correctly during the interactive session that created the displacement). No schema changes, no breaking changes.
+
+### Fixed
+- Read-only elevation view: saved displacements render as one full tile + the outside stripe bar instead of two overlapping tiles.
+- Editor on load: saved displacements now collapse and get their stripe bars immediately (`applySavedDisplacements`), routed through the same ownership records as live gestures so later restores behave identically.
+- Reloaded catalog adds regained their full-depth flag in the widget payload — the rear mirror bar was silently skipped on load.
+- Hovering the stripe bar reliably shows the displaced device's info (hover card on both the editor and elevation pages).
+
+### Changed
+- Stripe bar geometry: outside the rack frame, 10px wide, percentage-tracked to the displaced rows; legend filters apply to it like to the tile it stands for.
+
 ## [0.9.0] - 2026-07-09
 
 ### Release Summary
