@@ -2179,7 +2179,11 @@ window.__rdDisplace = (function () {
             if (el.getAttribute("data-rd-derived-opp")) { return; }
             var span = el.querySelector(".nbx-rd-label");
             if (!span || span.textContent !== label) { return; }
-            var stripe = el.querySelector(".nbx-rd-stripe");
+            // The stripe bar lives OUTSIDE the tile (spec §3, ruling
+            // 2026-07-09), associated by owner label + face data attributes.
+            var stripe = root.querySelector(
+                '.nbx-rd-stripe[data-rd-stripe-for="' + label + '"]'
+                + '[data-rd-stripe-face="' + faceOf(el) + '"]');
             out.push({
                 face: faceOf(el),
                 classes: Array.prototype.slice.call(el.classList),
@@ -2205,7 +2209,11 @@ window.__rdDisplace = (function () {
             '[data-rd-derived-opp][data-rd-owner-widx="' + ownerWidx
             + '"].nbx-rd-opposite-ghost');
         if (!el) { return null; }
-        var stripe = el.querySelector(".nbx-rd-stripe");
+        // The mirror's stripe bar lives OUTSIDE the tile too, associated by
+        // owner widget-index + this (opposite) face.
+        var stripe = root.querySelector(
+            '.nbx-rd-stripe[data-rd-stripe-owner-widx="' + ownerWidx + '"]'
+            + '[data-rd-stripe-face="' + faceOf(el) + '"]');
         return {
             face: faceOf(el),
             classes: Array.prototype.slice.call(el.classList),
@@ -2270,6 +2278,51 @@ window.__rdDisplace = (function () {
         return n;
     }
 
+    // Geometry of every displacement stripe naming `label` (spec §3, user
+    // ruling 2026-07-09: the stripe is a bar OUTSIDE the rack frame): each
+    // bar's bounding box plus the face grid's, so a test can assert the bar
+    // hangs off the grid's RIGHT edge and vertically spans the displaced
+    // rows. Works against BOTH geometries (pre-fix in-tile child, post-fix
+    // wrap-level bar) so the same probe captures the pre-fix failure.
+    function stripeGeometry(label) {
+        var out = [];
+        root.querySelectorAll(".nbx-rd-stripe").forEach(function (bar) {
+            var title = bar.getAttribute("title") || "";
+            if (title.indexOf(label) === -1) { return; }
+            var wrap = bar.closest(".nbx-rd-grid-wrap");
+            var grid = wrap ? wrap.querySelector(".grid-stack") : bar.closest(".grid-stack");
+            var r = bar.getBoundingClientRect();
+            var g = grid ? grid.getBoundingClientRect() : null;
+            out.push({
+                title: title,
+                face: bar.getAttribute("data-rd-stripe-face")
+                    || (grid ? (grid.getAttribute("data-face") || null) : null),
+                bar: { left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height },
+                grid: g ? { left: g.left, right: g.right, top: g.top, bottom: g.bottom, height: g.height } : null,
+            });
+        });
+        return out;
+    }
+
+    // Bounding boxes of every move-out ghost BODY tile matching `label`
+    // (per face) -- the vertical span a face's stripe bar must align to.
+    function ghostBoxes(label) {
+        var out = [];
+        root.querySelectorAll(".grid-stack-item.nbx-rd-state-move_out_ghost").forEach(function (el) {
+            if (el.getAttribute("data-rd-derived-opp")) { return; }
+            var span = el.querySelector(".nbx-rd-label");
+            if (!span || span.textContent !== label) { return; }
+            var host = el.closest(".grid-stack");
+            var r = el.getBoundingClientRect();
+            out.push({
+                face: host ? (host.getAttribute("data-face") || null) : null,
+                top: r.top, bottom: r.bottom, height: r.height,
+                left: r.left, right: r.right,
+            });
+        });
+        return out;
+    }
+
     return {
         baseWidgets: baseWidgets,
         moveTile: moveTile,
@@ -2283,6 +2336,8 @@ window.__rdDisplace = (function () {
         cancelDisplaceDialog: cancelDisplaceDialog,
         dismissAllOtherModals: dismissAllOtherModals,
         applyRenameDialogs: applyRenameDialogs,
+        stripeGeometry: stripeGeometry,
+        ghostBoxes: ghostBoxes,
     };
 })();
 """
@@ -2665,6 +2720,209 @@ class EditorDisplacementTestCase(unittest.TestCase):
         print(f"  OLD mirror after: {mirror_after}")
 
     # =====================================================================
+    # Stripe geometry (spec §3, user ruling 2026-07-09): the displacement
+    # stripe is a bar OUTSIDE the rack frame -- hanging off the face grid's
+    # RIGHT edge, vertically spanning exactly the displaced rows (NetBox
+    # core reservation-bar look, recoloured red) -- NOT a sliver inside the
+    # occupying tile next to its x button. Front bar on the front grid,
+    # mirror bar (full-depth OLD) on the rear grid. Removed on restore (E7).
+    # =====================================================================
+    def test_e5_stripe_bar_outside_rack_frame(self):
+        self._load_editor()
+        idx_a = self._create_ghost_for_dev_a()
+        idx_b, _ = self.widx(kind="existing", face="front", device_id=self._dev_b_id)
+
+        self.page.evaluate(
+            f"() => window.__rdDisplace.moveTile('{idx_b}', {self._dev_a_orig_gsy})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdDisplace.confirmDisplaceDialog()")
+        self.page.wait_for_timeout(300)
+        self.page.evaluate("() => window.__rdDisplace.applyRenameDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        bars = self.page.evaluate(
+            f"() => window.__rdDisplace.stripeGeometry({json.dumps(self._dev_a_label)})")
+        # dev_a is full-depth and dev_b is too, so BOTH faces get a bar.
+        self.assertEqual(
+            sorted(b["face"] for b in bars), ["front", "rear"],
+            f"expected one stripe bar per face: {bars}")
+
+        ghost_boxes = self.page.evaluate(
+            f"() => window.__rdDisplace.ghostBoxes({json.dumps(self._dev_a_label)})")
+        front_ghost = next((g for g in ghost_boxes if g["face"] == "front"), None)
+        self.assertIsNotNone(front_ghost, ghost_boxes)
+
+        for bar in bars:
+            self.assertIsNotNone(bar["grid"], bar)
+            # OUTSIDE the rack frame: the bar's left edge sits at/right of the
+            # grid's right border (small tolerance for the border itself).
+            self.assertGreaterEqual(
+                bar["bar"]["left"], bar["grid"]["right"] - 1,
+                f"stripe bar must hang OUTSIDE the grid's right edge, not "
+                f"inside a tile: {bar}")
+            # Vertically aligned to the displaced rows: same top/height as the
+            # (front) ghost body tile's span, +-3px. Both faces' grids are
+            # top-aligned, so the front ghost's OFFSET within its grid is the
+            # expected offset within each bar's own grid.
+            expected_offset = front_ghost["top"] - next(
+                b["grid"]["top"] for b in bars if b["face"] == "front")
+            self.assertLessEqual(
+                abs((bar["bar"]["top"] - bar["grid"]["top"]) - expected_offset), 3,
+                f"stripe bar must start at the displaced rows: {bar}, "
+                f"expected offset {expected_offset}")
+            self.assertLessEqual(
+                abs(bar["bar"]["height"] - front_ghost["height"]), 3,
+                f"stripe bar must span exactly the displaced rows: {bar}, "
+                f"ghost height {front_ghost['height']}")
+            self.assertIn(self._dev_a_label, bar["title"], bar)
+            # Width ~1.5x the original 7px (user adjustment 2026-07-09).
+            self.assertGreaterEqual(
+                bar["bar"]["right"] - bar["bar"]["left"], 9,
+                f"stripe bar must be ~10px wide (was 7px): {bar}")
+
+        # ---- Hover surface is interactive and shows the displaced device's
+        # info via the editor's device hover-card (user adjustment
+        # 2026-07-09: a bare title tooltip was too weak -- the same card
+        # shown for device tiles must appear, populated with OLD's data).
+        # Wait out the dialogs' fade so no (even mid-transition) modal overlay
+        # covers the bar during the hit test -- the editor removes the modal
+        # element from the DOM once fully hidden.
+        self.page.wait_for_function(
+            "() => !document.querySelector('.nbx-rd-move-modal, .nbx-rd-displace-modal')",
+            timeout=5000)
+        hover = self.page.evaluate(
+            """() => {
+                const bar = document.querySelector(
+                    '.nbx-rd-stripe[data-rd-stripe-face="front"]');
+                if (!bar) { return {error: 'front stripe bar not found'}; }
+                const r = bar.getBoundingClientRect();
+                const hit = document.elementFromPoint(
+                    r.left + r.width / 2, r.top + r.height / 2);
+                const cs = getComputedStyle(bar);
+                bar.dispatchEvent(new PointerEvent('pointerover', {bubbles: true}));
+                const card = document.querySelector('.nbx-rd-hovercard');
+                return {
+                    hitIsBar: hit === bar,
+                    hitDesc: hit ? {tag: hit.tagName,
+                                    cls: (hit.className || '').toString().slice(0, 100),
+                                    z: getComputedStyle(hit).zIndex} : null,
+                    barBox: {left: r.left, top: r.top, w: r.width, h: r.height},
+                    pointerEvents: cs.pointerEvents,
+                    title: bar.getAttribute('title'),
+                    cardVisible: card ? card.style.display !== 'none' : false,
+                    cardText: card ? card.textContent : null,
+                };
+            }""")
+        self.assertNotIn("error", hover, hover)
+        self.assertTrue(hover["hitIsBar"], f"bar must be the actual hover target: {hover}")
+        self.assertEqual(hover["pointerEvents"], "auto", hover)
+        self.assertIn(self._dev_a_label, hover["title"] or "", hover)
+        self.assertTrue(
+            hover["cardVisible"],
+            f"hovering the bar must show the device hover-card: {hover}")
+        self.assertIn(
+            self._dev_a_label, hover["cardText"] or "",
+            f"the hover-card must name the displaced device: {hover}")
+
+        # E7 leg: move NEW away -> the bars are removed with the restore.
+        self.page.evaluate(
+            f"() => window.__rdDisplace.moveTile('{idx_b}', {self._free_gsy})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdDisplace.applyRenameDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        bars_after = self.page.evaluate(
+            f"() => window.__rdDisplace.stripeGeometry({json.dumps(self._dev_a_label)})")
+        self.assertEqual(
+            bars_after, [],
+            f"restoring OLD must remove its stripe bars: {bars_after}")
+
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+        print("\n=== STRIPE-BAR SUMMARY (outside-the-frame geometry) ===")
+        print(f"  bars: {bars}")
+
+    # =====================================================================
+    # SAVED displacement, ON-LOAD rendering parity (spec §3/§4.3, parity
+    # ruling 2026-07-09): a displacement persisted to the DB (a move of OLD
+    # + an add of NEW at OLD's origin rows) must render collapsed + striped
+    # the moment the editor LOADS -- not only after an in-session gesture
+    # ran displaceOne. Pre-fix: two full tiles composited (the user's live
+    # report was the read-only elevation, but the editor's on-load render
+    # had the same hole).
+    # =====================================================================
+    def test_saved_displacement_renders_on_load(self):
+        # Persist the displacement via the API: OLD (dev_a) moves U6 -> U10;
+        # NEW (a catalog add, full-depth like OLD) lands on the vacated U6.
+        move = self._api("POST", "/api/plugins/rack-design/placements/", {
+            "design": self._design_id,
+            "kind": "move",
+            "device": self._dev_a_id,
+            "target_rack": self._rack_id,
+            "target_position": 10,
+            "target_face": "front",
+        })
+        new_label = "e2e-saved-displace-new"
+        add = self._api("POST", "/api/plugins/rack-design/placements/", {
+            "design": self._design_id,
+            "kind": "add",
+            "device_type": self._created["device_types"][0],  # 2U full-depth
+            "target_rack": self._rack_id,
+            "target_position": 6,
+            "target_face": "front",
+            "proposed_name": new_label,
+        })
+        try:
+            self._load_editor()   # FRESH page: only the saved state renders.
+            self.page.wait_for_timeout(300)  # first refreshGhosts settle
+
+            # OLD's persistent ghost is collapsed on load.
+            ghosts = self.page.evaluate(
+                f"() => window.__rdDisplace.ghostInfo({json.dumps(self._dev_a_label)})")
+            self.assertEqual(len(ghosts), 1, ghosts)
+            self.assertTrue(
+                ghosts[0]["displaced"],
+                f"a SAVED displacement must render collapsed ON LOAD: {ghosts}")
+            self.assertIn(self._dev_a_label, ghosts[0]["stripeTitle"] or "", ghosts)
+
+            # The outside stripe bars exist on BOTH faces (OLD is full-depth,
+            # NEW is full-depth) and hang outside the grids.
+            bars = self.page.evaluate(
+                f"() => window.__rdDisplace.stripeGeometry({json.dumps(self._dev_a_label)})")
+            self.assertEqual(
+                sorted(b["face"] for b in bars), ["front", "rear"],
+                f"expected one on-load stripe bar per face: {bars}")
+            for bar in bars:
+                self.assertGreaterEqual(
+                    bar["bar"]["left"], bar["grid"]["right"] - 1, bar)
+
+            # NEW renders as the single live full tile at those rows.
+            new_idx = self.page.evaluate(
+                f"() => window.__rdDisplace.findByLabel({json.dumps(new_label)})")
+            self.assertIsNotNone(new_idx, "NEW's add tile must render on load")
+            info_new = self.page.evaluate(
+                f"() => window.__rdDisplace.tileInfo('{new_idx}')")
+            self.assertIn("nbx-rd-state-add", info_new["classes"], info_new)
+            self.assertNotIn("nbx-rd-displaced", info_new["classes"], info_new)
+
+            violations = [
+                v for v in self.model_check()
+                if self._dev_a_label in v or new_label in v
+            ]
+            self.assertEqual(violations, [], f"read-model must stay clean: {violations}")
+            self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+            print("\n=== SAVED-DISPLACEMENT ON-LOAD SUMMARY ===")
+            print(f"  OLD ghost: {ghosts[0]}")
+            print(f"  bars: {[(b['face'], b['bar']['left'], b['grid']['right']) for b in bars]}")
+        finally:
+            # Leave the shared class design pristine for the other tests.
+            for placement in (add, move):
+                try:
+                    self._api(
+                        "DELETE",
+                        f"/api/plugins/rack-design/placements/{placement['id']}/")
+                except Exception:
+                    pass
+
+    # =====================================================================
     # E11 (spec §4.3, §4.8): a fresh palette-add landing on a vacating slot
     # follows the same flow, styled `add` (not `move_in`). The add is only
     # 1U/half-depth here, so ONLY the front stripe should appear -- OLD's
@@ -3030,10 +3288,15 @@ window.__rdX = (function () {
                 if (el.getAttribute("data-rd-derived-opp")) { return; }
                 var span = el.querySelector(".nbx-rd-label");
                 if (!span || span.textContent !== label) { return; }
-                var stripe = el.querySelector(".nbx-rd-stripe");
                 var host = el.closest(".grid-stack");
+                var face = host ? host.getAttribute("data-face") : null;
+                // The stripe bar lives OUTSIDE the tile (spec §3, ruling
+                // 2026-07-09), associated by owner label + face.
+                var stripe = block.querySelector(
+                    '.nbx-rd-stripe[data-rd-stripe-for="' + label + '"]'
+                    + '[data-rd-stripe-face="' + (face || "") + '"]');
                 out.push({
-                    rackId: rackId, face: host ? host.getAttribute("data-face") : null,
+                    rackId: rackId, face: face,
                     widx: el.getAttribute("data-widget-index"),
                     classes: Array.prototype.slice.call(el.classList),
                     displaced: el.classList.contains("nbx-rd-displaced"),
@@ -3060,10 +3323,15 @@ window.__rdX = (function () {
             if (span && span.textContent === ownerLabel) { hit = el; }
         });
         if (!hit) { return null; }
-        var stripe = hit.querySelector(".nbx-rd-stripe");
         var host = hit.closest(".grid-stack");
+        var face = host ? host.getAttribute("data-face") : null;
+        // Mirror's stripe bar lives OUTSIDE the tile, associated by owner
+        // label + this (opposite) face.
+        var stripe = block.querySelector(
+            '.nbx-rd-stripe[data-rd-stripe-for="' + ownerLabel + '"]'
+            + '[data-rd-stripe-face="' + (face || "") + '"]');
         return {
-            face: host ? host.getAttribute("data-face") : null,
+            face: face,
             classes: Array.prototype.slice.call(hit.classList),
             displaced: hit.classList.contains("nbx-rd-displaced"),
             stripeTitle: stripe ? stripe.getAttribute("title") : null,

@@ -510,11 +510,10 @@
 /* ---- Phase 4: displacement side stripe (spec §3, §4.3, §8.2) ------------ */
 /* A ghost (a moved-away device's vacated origin) or a remove-flagged device
    that has just been legally displaced by a new placement (spec §4.2/§4.3)
-   collapses from a full tile to a narrow side reservation stripe -- the same
-   look as NetBox core's rack elevation reservation hatch, recoloured red
-   (spec §8.2 decision). The element never moves or resizes; only its OWN
-   content is hidden so the new occupant, rendered in a separate tile at the
-   exact same rows, reads unambiguously as the live occupant underneath. */
+   collapses from a full tile: its own content is hidden so the new occupant,
+   rendered in a separate tile at the exact same rows, reads unambiguously as
+   the live occupant. The stripe itself (user ruling 2026-07-09) is a bar
+   OUTSIDE the rack frame -- see .nbx-rd-stripe below. */
 .grid-stack-item.nbx-rd-displaced {
     z-index: 4;
     pointer-events: none;
@@ -535,26 +534,40 @@
     content: none !important;
 }
 
-.grid-stack-item.nbx-rd-displaced > .grid-stack-item-content > *:not(.nbx-rd-stripe) {
+.grid-stack-item.nbx-rd-displaced > .grid-stack-item-content > * {
     visibility: hidden;
 }
 
+/* Positioning anchor: wraps each face grid exactly (see rack_block.html), so
+   the bar's percentage top/height track the grid rows through any resize. */
+.nbx-rd-grid-wrap {
+    position: relative;
+}
+
+/* The displacement stripe bar (spec §3, user ruling 2026-07-09): rendered
+   like NetBox core's rack reservation marker but OUTSIDE the rack frame -- a
+   narrow vertical bar hanging off the face grid's RIGHT edge, vertically
+   spanning exactly the displaced rows (inline top/height %% set by
+   editor.js), red diagonal stripes, hover shows "was: <OLD name>". Never
+   inside the occupying tile (it used to sit right next to the x remove
+   button there). */
 .nbx-rd-stripe {
     position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 7px;
-    visibility: visible !important;
+    left: calc(100% + 2px);
+    /* ~1.5x the original 7px (user adjustment 2026-07-09), stripe pattern
+       scaled proportionally so it stays readable at the wider size. */
+    width: 10px;
+    z-index: 5;
     pointer-events: auto;
     cursor: default;
-    border-left: 1px solid var(--tblr-danger, #d63939);
+    border: 1px solid var(--tblr-danger, #d63939);
+    border-radius: 2px;
     background-image: repeating-linear-gradient(
         45deg,
         transparent 0,
-        transparent 3px,
-        var(--tblr-danger, #d63939) 3px,
-        var(--tblr-danger, #d63939) 6px
+        transparent 4px,
+        var(--tblr-danger, #d63939) 4px,
+        var(--tblr-danger, #d63939) 8px
     );
 }
 
