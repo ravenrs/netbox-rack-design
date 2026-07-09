@@ -1327,6 +1327,13 @@
                 // row holes a departure/ghost-destruction left, still under
                 // this settle pass's push-suppression bracket.
                 compactTray();
+                // Saved displacements (spec §3/§4.3 parity): applied once, on
+                // the FIRST settle -- after syncOwnedShadows has created the
+                // ghost-mirror hatches the full-depth collapse needs.
+                if (!savedDisplacementsApplied) {
+                    savedDisplacementsApplied = true;
+                    applySavedDisplacements();
+                }
             } finally {
                 rdEndPushSuppression();
                 refreshing = false;
@@ -1725,29 +1732,99 @@
             return out;
         }
 
-        function makeStripe(label) {
-            var stripe = document.createElement("div");
-            stripe.className = "nbx-rd-stripe";
-            stripe.setAttribute("title", "was: " + (label || ""));
-            return stripe;
+        // Create the OUTSIDE-the-frame stripe bar for one collapsed element
+        // (spec §3, user ruling 2026-07-09: NetBox core's reservation-bar
+        // look, recoloured red, OUTSIDE the rack frame -- never a sliver
+        // inside the occupying tile next to its x button). The bar is
+        // absolutely positioned against the face grid's .nbx-rd-grid-wrap
+        // anchor; top/height are PERCENTAGES of the grid's row span, so it
+        // keeps tracking the displaced rows through any container resize.
+        // Carries the owner's nbx-rd-state-* class so the legend filters
+        // toggle it exactly like the collapsed tile it stands for, plus
+        // data attributes so tests/diagnostics can associate it by identity.
+        // The richest metadata source for a displaced device (feeds the
+        // hover card): the collapsed element's own content when it carries
+        // the stamped device attributes (a remove-flagged real tile, or a
+        // server-rendered persistent ghost), else the device's LIVE body
+        // tile found by its stable label span (a temp ghost created by
+        // makeGhostElement carries only the label -- the real tile, now
+        // sitting elsewhere, still has its full data-* set).
+        function stripeSourceContent(el, label) {
+            var content = el && el.querySelector(".grid-stack-item-content");
+            if (content && (content.getAttribute("data-device-type-name")
+                    || content.getAttribute("data-role-name")
+                    || content.getAttribute("data-tenant-name"))) {
+                return content;
+            }
+            var hit = null;
+            document.querySelectorAll(".grid-stack-item").forEach(function (cand) {
+                if (hit) { return; }
+                if (cand.getAttribute("data-rd-derived-opp")) { return; }
+                if (cand.hasAttribute("data-rd-temp-ghost")) { return; }
+                if (cand.classList.contains("nbx-rd-state-move_out_ghost")) { return; }
+                var span = cand.querySelector(".nbx-rd-label");
+                if (span && span.textContent === label) {
+                    hit = cand.querySelector(".grid-stack-item-content");
+                }
+            });
+            return hit || content;
+        }
+
+        function makeStripeBar(el, label, widgetIndex) {
+            if (!el) { return null; }
+            var host = el.closest(".grid-stack");
+            if (!host) { return null; }
+            var wrap = host.closest(".nbx-rd-grid-wrap") || host.parentNode;
+            if (!wrap) { return null; }
+            var node = el.gridstackNode;
+            var y = (node && node.y != null) ? node.y : parseInt(el.getAttribute("gs-y"), 10);
+            var h = (node && node.h != null) ? node.h : parseInt(el.getAttribute("gs-h"), 10);
+            var maxRow = parseInt(host.getAttribute("gs-max-row"), 10);
+            if (isNaN(y) || isNaN(h) || isNaN(maxRow) || !maxRow) { return null; }
+            var stateClass = el.classList.contains("nbx-rd-state-remove")
+                ? "nbx-rd-state-remove" : "nbx-rd-state-move_out_ghost";
+            var bar = document.createElement("div");
+            bar.className = "nbx-rd-stripe " + stateClass;
+            bar.setAttribute("title", "was: " + (label || ""));
+            bar.setAttribute("data-rd-stripe-for", label || "");
+            bar.setAttribute("data-rd-stripe-face", host.getAttribute("data-face") || "");
+            if (widgetIndex != null) {
+                bar.setAttribute("data-rd-stripe-owner-widx", widgetIndex);
+            }
+            // Feed the shared device hover-card (user adjustment 2026-07-09:
+            // hovering the bar must answer "what was here" with the same card
+            // device tiles show): stamp the displaced device's data-* set.
+            bar.setAttribute("data-name", "was: " + (label || ""));
+            var src = stripeSourceContent(el, label);
+            if (src) {
+                ["data-device-type-name", "data-role-name", "data-tenant-name"].forEach(function (attr) {
+                    var v = src.getAttribute(attr);
+                    if (v) { bar.setAttribute(attr, v); }
+                });
+            }
+            bar.style.top = (y / maxRow * 100) + "%";
+            bar.style.height = (h / maxRow * 100) + "%";
+            wrap.appendChild(bar);
+            return bar;
         }
 
         // Collapse ONE displaced marker (and its owned opposite-face mirror,
         // if any -- a full-depth ghost's mirror hatch, or a full-depth
-        // remove-flagged device's own shadow) to the side stripe.
+        // remove-flagged device's own shadow) to the side stripe bar.
         // `collapseMirror` is NEW's own full-depth-ness (spec §4.3.3): OLD's
         // mirror hatch only collapses too when NEW's placement ALSO reaches
         // the opposite face -- a half-depth NEW landing on OLD's origin
         // never touches OLD's (still fully vacating) rear footprint, so it
-        // must stay exactly as it already renders.
+        // must stay exactly as it already renders. The bars are OWNED by
+        // this displacement record (`d.stripeEls`) -- created here,
+        // destroyed only by undisplaceOne, never re-derived by a scan.
         function displaceOne(d, collapseMirror) {
+            d.stripeEls = d.stripeEls || [];
             function collapse(el) {
                 if (!el) { return; }
                 el.classList.add("nbx-rd-displaced");
-                var content = el.querySelector(".grid-stack-item-content");
-                if (content && !content.querySelector(".nbx-rd-stripe")) {
-                    content.appendChild(makeStripe(d.label));
-                }
+                var bar = makeStripeBar(el, d.label, d.widgetIndex);
+                if (bar) { d.stripeEls.push(bar); }
             }
             collapse(d.el);
             var mirrorEl = null;
@@ -1764,11 +1841,13 @@
             function restore(el) {
                 if (!el) { return; }
                 el.classList.remove("nbx-rd-displaced");
-                var stripe = el.querySelector(".nbx-rd-stripe");
-                if (stripe) { stripe.remove(); }
             }
             restore(d.el);
             restore(d.mirrorEl);
+            (d.stripeEls || []).forEach(function (bar) {
+                if (bar && bar.parentNode) { bar.parentNode.removeChild(bar); }
+            });
+            d.stripeEls = [];
         }
 
         // Release whatever device `idx` is CURRENTLY displacing (its stripe(s)
@@ -1780,6 +1859,49 @@
             if (!st || !st.displaces || !st.displaces.length) { return; }
             st.displaces.forEach(undisplaceOne);
             st.displaces = [];
+        }
+
+        // Apply SAVED displacements on load (spec §3/§4.3, parity ruling
+        // 2026-07-09): the projection marks a vacating slot displaced (+
+        // displaced_by) server-side, and the widget payload carries it here.
+        // Without this, a saved displacement rendered OVERLAPPED on every
+        // editor load (two full tiles composited) -- the session only ever
+        // looked right because the interactive gesture had run displaceOne.
+        // Runs ONCE, at the end of the FIRST refreshGhosts settle (so the
+        // ghost-mirror hatches -- ghostShadows[idx] -- already exist for the
+        // full-depth mirror collapse). Ownership discipline unchanged: this
+        // routes through the SAME displaceOne/state[].displaces records the
+        // live flow uses, so a later move-NEW-away restores OLD identically.
+        var savedDisplacementsApplied = false;
+        function applySavedDisplacements() {
+            widgets.forEach(function (w, idx) {
+                if (!w || !w.displaced || w.opposite_face) { return; }
+                if (w.kind !== "move_out_ghost" && w.kind !== "remove") { return; }
+                var el = block.querySelector(
+                    '.grid-stack-item[data-widget-index="' + idx + '"]');
+                if (!el || el.getAttribute("data-rd-derived-opp")) { return; }
+                if (el.classList.contains("nbx-rd-displaced")) { return; }
+                // NEW: the live occupant the projection named in displaced_by.
+                var newIdx = null;
+                widgets.forEach(function (cand, ci) {
+                    if (newIdx != null || !cand || cand.opposite_face) { return; }
+                    if (cand.kind !== "add" && cand.kind !== "move_in") { return; }
+                    if (cand.label === w.displaced_by
+                            || cand.proposed_name === w.displaced_by) { newIdx = ci; }
+                });
+                var newSt = (newIdx != null) ? state[newIdx] : null;
+                var d = {
+                    el: el,
+                    kind: (w.kind === "remove") ? "remove" : "ghost",
+                    label: w.label,
+                    widgetIndex: idx,
+                };
+                displaceOne(d, isFullDepthWidget(newSt && newSt.widget));
+                if (newSt) {
+                    newSt.displaces = newSt.displaces || [];
+                    newSt.displaces.push(d);
+                }
+            });
         }
 
         // §4a: when an EXISTING device tile ends a drag away from its origin slot
@@ -3776,15 +3898,20 @@
             hcard.style.top = top + "px";
         }
 
+        // Hover sources: a device tile's content, or a displacement stripe
+        // bar (user adjustment 2026-07-09 -- the bar carries the DISPLACED
+        // device's data-* set, so the card answers "what was here").
+        var HOVER_SOURCE_SELECTOR = ".grid-stack-item-content, .nbx-rd-stripe";
+
         root.addEventListener("pointerover", function (e) {
-            var content = e.target.closest && e.target.closest(".grid-stack-item-content");
+            var content = e.target.closest && e.target.closest(HOVER_SOURCE_SELECTOR);
             if (!content || content === currentContent) { return; }
             if (!fillCard(content)) { hideCard(); return; }
             currentContent = content;
             positionCard(content);
         });
         root.addEventListener("pointerout", function (e) {
-            var content = e.target.closest && e.target.closest(".grid-stack-item-content");
+            var content = e.target.closest && e.target.closest(HOVER_SOURCE_SELECTOR);
             if (!content) { return; }
             if (e.relatedTarget && content.contains(e.relatedTarget)) { return; }
             hideCard();

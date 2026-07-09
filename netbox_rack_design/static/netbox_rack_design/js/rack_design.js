@@ -152,15 +152,21 @@
             hcard.style.top = top + "px";
         }
 
+        // Hover sources: a device tile's content, or a displacement stripe
+        // bar (spec §3 parity, 2026-07-09 -- the read-only elevation renders
+        // a saved displacement as the outside bar, stamped with the DISPLACED
+        // device's data-* set so the card answers "what was here").
+        var HOVER_SOURCE_SELECTOR = ".grid-stack-item-content, .nbx-rd-stripe";
+
         root.addEventListener("pointerover", function (e) {
-            var content = e.target.closest && e.target.closest(".grid-stack-item-content");
+            var content = e.target.closest && e.target.closest(HOVER_SOURCE_SELECTOR);
             if (!content || content === currentContent) { return; }
             if (!fillCard(content)) { hideCard(); return; }
             currentContent = content;
             positionCard(content);
         });
         root.addEventListener("pointerout", function (e) {
-            var content = e.target.closest && e.target.closest(".grid-stack-item-content");
+            var content = e.target.closest && e.target.closest(HOVER_SOURCE_SELECTOR);
             if (!content) { return; }
             if (e.relatedTarget && content.contains(e.relatedTarget)) { return; }
             hideCard();

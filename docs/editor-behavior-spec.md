@@ -138,11 +138,25 @@ GridStack instance purely as a view. All validation questions go through
 | **`displaced`** (new, see §4.3) | not rendered as a full tile — replaced by **side reservation stripe** | side stripe on opposite face too (full-depth) | — |
 
 **Side reservation stripe (`displaced`):** rendered like NetBox core's rack
-reservation marker — a narrow vertical bar on the right edge of the occupied units —
-colored **red**. Hover/tooltip shows the displaced device's name
-("was: `dra4-sl-isp26`"). The new device occupying the slot renders with its own
-movement/add style at full width. This is the picture Petr provided: NetBox
-reservation look, red, old name on hover.
+reservation marker — a narrow vertical bar spanning exactly the displaced
+units — colored **red**. Geometry (user ruling 2026-07-09): the bar renders
+**OUTSIDE the rack frame**, hanging off the elevation's RIGHT edge (exactly
+how core draws reservations alongside the elevation), never inside the
+occupying tile (the earlier in-tile sliver sat cramped against the tile's ×
+remove button). Front-face displacement bars hang off the front elevation; a
+full-depth OLD's mirror bar hangs off the rear elevation. Hover/tooltip shows
+the displaced device's name ("was: `dra4-sl-isp26`"). The new device
+occupying the slot renders with its own movement/add style at full width.
+This is the picture Petr provided: NetBox reservation look, red, old name on
+hover.
+
+The displaced treatment applies to EVERY projection render, not only the
+editor's live session (parity ruling 2026-07-09): the projection layer marks
+a vacating slot whose rows are occupied by a live planned slot as
+`displaced` (+ `displaced_by`), the read-only elevation renders it as the
+stripe bar server-side, and the editor applies the same collapse+bar on LOAD
+from that marking — a saved displacement never renders as two composited
+full tiles anywhere.
 
 Legend filters (`Existing / Add / Move in / Move out (ghost) / Remove`) apply
 uniformly to bodies, shadows, ghosts and stripes of the corresponding state.

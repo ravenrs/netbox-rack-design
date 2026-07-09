@@ -228,6 +228,18 @@ def _slot_to_widget(slot):
         # locks it and excludes it from the save payload (the interactive tile
         # lives on the mounted face).
         "opposite_face": slot.get("opposite_face", False),
+        # Saved displacement (spec §3/§4.3, parity ruling 2026-07-09): the
+        # editor applies the collapsed-tile + outside-stripe treatment on
+        # LOAD from this marking (its live gesture flow re-derives it for
+        # in-session displacements).
+        "displaced": slot.get("displaced", False),
+        "displaced_by": slot.get("displaced_by"),
+        # Full-depth flag for device-LESS widgets (a reloaded catalog add):
+        # editor.js's isFullDepthWidget() resolves real devices via its
+        # server-seeded fullDepthDeviceIds map, but an add has no device_id,
+        # so it needs the type's own flag (already true for SESSION adds,
+        # which stamp it from the palette item's data attribute).
+        "is_full_depth": bool(device_type is not None and device_type.is_full_depth),
     }
 
 

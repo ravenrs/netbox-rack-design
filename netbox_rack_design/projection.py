@@ -69,6 +69,14 @@ Each *slot* is a plain ``dict`` with the following keys (stable contract):
                                             slot. None for plain 'existing'
                                             slots not touched by the design.
 
+    displaced     bool             True on a vacating slot (move_out_ghost/
+                                   remove) whose rows are occupied by a live
+                                   planned slot (add/move_in) on the same
+                                   face (spec §3/§4.3). Renderers show such a
+                                   slot as the outside stripe bar, never a
+                                   full tile under the occupant.
+    displaced_by  str | None       The occupant's label when displaced.
+
 Slots whose ``state`` is ``existing`` come straight from the real rack and were
 not referenced by any placement. Slots touched by the design carry their
 originating ``placement``.
@@ -136,6 +144,15 @@ def _slot(
         # shown but the fill is the hatched "blocked" pattern, no state/role
         # color). The PRIMARY (mounted-face) copy keeps opposite_face=False.
         "opposite_face": opposite_face,
+        # Displacement marking (spec §3/§4.3, parity ruling 2026-07-09): True
+        # on a vacating slot (move_out_ghost/remove) whose rows are occupied
+        # by a live planned slot (add/move_in) on the same face;
+        # ``displaced_by`` then names the occupant. Set by _mark_displaced().
+        # Consumers (the read-only elevation template, the editor's widget
+        # payload) render such a slot as the outside stripe bar, never as a
+        # full tile composited under the occupant.
+        "displaced": False,
+        "displaced_by": None,
     }
 
 
@@ -203,6 +220,48 @@ def _existing_slots(rack, face, excluded_device_ids):
             )
         )
     return slots
+
+
+def _mark_displaced(slots):
+    """
+    Mark every vacating slot (move_out_ghost/remove) whose rows are occupied
+    by a live planned slot (add/move_in) in the SAME face list as
+    ``displaced`` (spec §3/§4.3, parity ruling 2026-07-09), recording the
+    occupant's label in ``displaced_by``.
+
+    Full-depth handling falls out of the per-face slot copies: a full-depth
+    device's ghost/move_in/add is already emitted once per face (see
+    ``_append``), so scanning each face list independently marks the mirror
+    copies too, exactly matching the editor's §4.3.3 mirror-collapse rule.
+
+    A device's own planned slot never displaces its own vacating slot (spec
+    §4.2: a device's own footprint never blocks itself) -- guarded by both
+    placement identity and device identity.
+    """
+    vacating = [
+        s for s in slots
+        if s["state"] in (ProjectedSlotState.MOVE_OUT_GHOST, ProjectedSlotState.REMOVE)
+        and s["u_position"] is not None
+    ]
+    live = [
+        s for s in slots
+        if s["state"] in (ProjectedSlotState.ADD, ProjectedSlotState.MOVE_IN)
+        and s["u_position"] is not None
+    ]
+    for old in vacating:
+        old_start = float(old["u_position"])
+        old_end = old_start + float(old["u_height"])
+        for new in live:
+            if old["placement"] is not None and new["placement"] is old["placement"]:
+                continue
+            if old["device"] is not None and new["device"] is old["device"]:
+                continue
+            new_start = float(new["u_position"])
+            new_end = new_start + float(new["u_height"])
+            if old_start < new_end and new_start < old_end:
+                old["displaced"] = True
+                old["displaced_by"] = new["label"]
+                break
 
 
 def _existing_tray_slots(rack, excluded_device_ids):
@@ -386,6 +445,12 @@ def project_rack(design, rack):
                 ),
                 full_depth=full_depth,
             )
+
+    # Displacement marking (spec §3/§4.3, parity ruling 2026-07-09): per-face
+    # post-pass so the read-only elevation and the editor's on-load render
+    # apply the SAME displaced treatment as the editor's live gesture flow.
+    _mark_displaced(front)
+    _mark_displaced(rear)
 
     # Order each racked face top-of-rack first (descending U), matching
     # get_rack_units default ordering; non_racked keeps insertion order.

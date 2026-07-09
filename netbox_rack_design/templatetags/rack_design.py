@@ -54,6 +54,29 @@ def slot_gs_y(slot, rack):
 
 
 @register.filter()
+def stripe_top_pct(slot, rack):
+    """
+    Top offset of a displaced slot's OUTSIDE stripe bar, as a PERCENTAGE of
+    the face grid's full row span (spec §3, ruling 2026-07-09). Percentages
+    (not pixels) so the bar keeps tracking the rows through any resize --
+    same geometry editor.js's makeStripeBar computes.
+    """
+    max_row = int(rack.u_height) * 2
+    if not max_row:
+        return 0
+    return slot_gs_y(slot, rack) / max_row * 100
+
+
+@register.filter()
+def stripe_height_pct(slot, rack):
+    """Height of a displaced slot's stripe bar, as a percentage (see above)."""
+    max_row = int(rack.u_height) * 2
+    if not max_row:
+        return 0
+    return int(slot["u_height"]) * 2 / max_row * 100
+
+
+@register.filter()
 def slot_color(slot):
     """Background hex color for a slot (its device role color, no leading #)."""
     device = slot.get("device")

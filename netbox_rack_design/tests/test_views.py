@@ -192,6 +192,80 @@ class DesignPlacementTest(ViewTestCases.PrimaryObjectViewTestCase):
         }
 
 
+class DisplacedElevationRenderTest(TestCase):
+    """Displaced-rendering parity in the READ-ONLY elevation (spec §3 stripe,
+    parity ruling 2026-07-09): a SAVED displacement -- OLD's vacating slot
+    occupied by NEW's planned slot at the same rows -- must render OLD as the
+    outside red stripe bar (title/hover data with OLD's info), NOT as a full
+    tile composited under NEW's."""
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+        cls.old_device = env["devices"][0]  # Device 1 @ Rack1/U1/front
+        cls.design = Design.objects.create(title="Displaced elevation", site=cls.site)
+        cls.design.racks.set([cls.rack])
+        # OLD moves away (U1 -> U10) ...
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.old_device,
+            target_rack=cls.rack,
+            target_position=10,
+            target_face="front",
+        )
+        # ... and NEW (a catalog add) lands on the vacated U1.
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=1,
+            target_face="front",
+            proposed_name="NEW-occupant",
+        )
+
+    def _get(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": self.design.pk},
+        )
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        return response.content.decode()
+
+    def test_displaced_old_renders_as_stripe_not_full_tile(self):
+        content = self._get()
+        # The outside stripe bar exists, naming OLD.
+        self.assertIn("nbx-rd-stripe", content)
+        self.assertIn(f"was: {self.old_device.name}", content)
+        # OLD's ghost is NOT rendered as a full tile in the read-only view --
+        # its ONLY footprint at those rows is the stripe (which itself carries
+        # the state class for legend-filter parity); NEW's add tile is the
+        # single full tile there. (Pre-fix: both rendered as full tiles, two
+        # labels composited on top of each other.)
+        self.assertNotIn("grid-stack-item nbx-rd-state-move_out_ghost", content)
+        self.assertIn("nbx-rd-stripe nbx-rd-state-move_out_ghost", content)
+        # NEW renders as its normal full tile.
+        self.assertIn("NEW-occupant", content)
+        self.assertIn("nbx-rd-state-add", content)
+
+    def test_undisplaced_ghost_still_renders_as_tile(self):
+        # Remove NEW: with nothing occupying the vacated rows the ghost must
+        # keep its normal full-tile rendering (stripe only while displaced).
+        DesignPlacement.objects.filter(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD
+        ).delete()
+        content = self._get()
+        self.assertIn("nbx-rd-state-move_out_ghost", content)
+        self.assertNotIn("nbx-rd-stripe", content)
+
+
 class DesignElevationViewTest(TestCase):
     """
     The read-only projected elevation now renders ALL the design's scoped racks

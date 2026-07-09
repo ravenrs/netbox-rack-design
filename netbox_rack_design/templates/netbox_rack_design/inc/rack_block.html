@@ -58,6 +58,11 @@
         <ul class="nbx-rd-unit-numbers">
           {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
         </ul>
+        {# Positioning anchor for the displacement stripe bar (spec §3, user #}
+        {# ruling 2026-07-09): the bar hangs OUTSIDE the grid's right edge,  #}
+        {# absolutely positioned against this wrapper. Created by editor.js  #}
+        {# only; the read-only elevation never renders one.                  #}
+        <div class="nbx-rd-grid-wrap">
         <div class="grid-stack nbx-rd-rack{% if editable %} nbx-rd-editable{% endif %}"
              id="nbx-rd-grid-front-{{ rid }}"
              data-rack-id="{{ rack.pk }}"
@@ -66,6 +71,11 @@
              gs-max-row="{{ rack.u_height|mul2 }}"
              gs-min-row="{{ rack.u_height|mul2 }}">
           {% for slot in front %}
+            {# A DISPLACED vacating slot (spec §3, ruling 2026-07-09) renders  #}
+            {# as the OUTSIDE stripe bar (after the grid, below), never a full #}
+            {# tile composited under the occupant. Editable mode keeps the     #}
+            {# tile: editor.js collapses it and owns the bar (displaceOne).    #}
+            {% if editable or not slot.displaced %}
             <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
@@ -84,8 +94,22 @@
                 <span class="nbx-rd-label">{{ slot.label }}</span>
               </div>
             </div>
+            {% endif %}
           {% endfor %}
         </div>
+        {# Read-only displaced treatment (spec §3, ruling 2026-07-09): the    #}
+        {# outside stripe bar per displaced slot -- same geometry/CSS as the  #}
+        {# editor's makeStripeBar. Editable mode: editor.js owns the bars.    #}
+        {% if not editable %}{% for slot in front %}{% if slot.displaced %}
+        <div class="nbx-rd-stripe nbx-rd-state-{{ slot.state }}"
+             style="top: {{ slot|stripe_top_pct:rack|floatformat:3 }}%; height: {{ slot|stripe_height_pct:rack|floatformat:3 }}%;"
+             title="was: {{ slot.label }}"
+             data-name="was: {{ slot.label }}"
+             {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
+             {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+             {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}></div>
+        {% endif %}{% endfor %}{% endif %}
+        </div>{# /.nbx-rd-grid-wrap #}
       </div>
     </div>
 
@@ -96,6 +120,8 @@
         <ul class="nbx-rd-unit-numbers">
           {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
         </ul>
+        {# Stripe-bar anchor, same as the front face above. #}
+        <div class="nbx-rd-grid-wrap">
         <div class="grid-stack nbx-rd-rack{% if editable %} nbx-rd-editable{% endif %}"
              id="nbx-rd-grid-rear-{{ rid }}"
              data-rack-id="{{ rack.pk }}"
@@ -104,6 +130,7 @@
              gs-max-row="{{ rack.u_height|mul2 }}"
              gs-min-row="{{ rack.u_height|mul2 }}">
           {% for slot in rear %}
+            {% if editable or not slot.displaced %}
             <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
@@ -122,8 +149,20 @@
                 <span class="nbx-rd-label">{{ slot.label }}</span>
               </div>
             </div>
+            {% endif %}
           {% endfor %}
         </div>
+        {# Read-only displaced stripe bars, same as the front face above. #}
+        {% if not editable %}{% for slot in rear %}{% if slot.displaced %}
+        <div class="nbx-rd-stripe nbx-rd-state-{{ slot.state }}"
+             style="top: {{ slot|stripe_top_pct:rack|floatformat:3 }}%; height: {{ slot|stripe_height_pct:rack|floatformat:3 }}%;"
+             title="was: {{ slot.label }}"
+             data-name="was: {{ slot.label }}"
+             {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
+             {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+             {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}></div>
+        {% endif %}{% endfor %}{% endif %}
+        </div>{# /.nbx-rd-grid-wrap #}
       </div>
     </div>
   </div>{# /.nbx-rd-faces #}
