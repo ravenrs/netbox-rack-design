@@ -1230,6 +1230,13 @@ class EditorDensePackRejectTestCase(unittest.TestCase):
             len(before), self.DENSE_RACK_U_HEIGHT,
             f"expected {self.DENSE_RACK_U_HEIGHT} live tiles pre-move, got "
             f"{len(before)}: {before}")
+        # Issue #22: full-world diff net (same helper the two long sweep
+        # classes use) -- a REJECTED drop must leave EVERY entity byte-
+        # identical (classes, geometry, title, owner identity), not merely
+        # every LIVE tile's position (which `_snapshot_all` above already
+        # checked): pass subjectLabel=null so nothing, mover included, is
+        # exempt from the comparison.
+        world_before = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
 
         # Drag the U1 device onto U5's row -- occupied by another live
         # device, on an otherwise completely full rack (Bug: this used to
@@ -1250,6 +1257,15 @@ class EditorDensePackRejectTestCase(unittest.TestCase):
             "a rejected drop on a fully packed rack must leave EVERY tile "
             "(mover included) at its exact prior position -- nothing else "
             "may move as a side effect")
+
+        world_after = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+        world_violations = self.page.evaluate(
+            "([prev, cur]) => window.__rdSweep.diffWorlds(prev, cur, null)",
+            [world_before, world_after])
+        self.assertEqual(
+            world_violations, [],
+            f"full-world diff must be empty after a rejected drop (nothing "
+            f"may differ, subject included): {world_violations}")
 
         mover_after = after.get(str(mover_idx))
         self.assertIsNotNone(mover_after, "mover tile disappeared from the DOM")
@@ -1544,6 +1560,12 @@ class EditorHatchOverlapNoPushTestCase(unittest.TestCase):
         # 1 front full-depth + 5 rear 1U devices.
         self.assertEqual(
             len(before), 6, f"expected 6 live tiles pre-move: {before}")
+        # Issue #22: full-world diff net -- this is a LEGAL move (the mover
+        # itself, its shadow and its origin ghost are all EXPECTED to
+        # change), so the mover's own label is exempt; every bystander
+        # (the 5 rear bodies, and their absence of any stray class/title
+        # drift) must still be byte-identical.
+        world_before = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
 
         # A LEGAL move up by 1U (front and rear target rows are free) --
         # accepted, so the refresh derives the two overlapping rear hatches.
@@ -1560,6 +1582,14 @@ class EditorHatchOverlapNoPushTestCase(unittest.TestCase):
             f"page/console errors during the hatch-overlap move: {self.errors}")
 
         after = self._snapshot_all()
+        world_after = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+        world_violations = self.page.evaluate(
+            "([prev, cur, lbl]) => window.__rdSweep.diffWorlds(prev, cur, lbl)",
+            [world_before, world_after, label])
+        self.assertEqual(
+            world_violations, [],
+            f"full-world diff: no bystander entity may drift after the "
+            f"legal hatch-overlapping move (mover exempt): {world_violations}")
         moved = {
             k: (before[k], after.get(k))
             for k in before
@@ -1857,6 +1887,11 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
         candidate_gsy = self._clean_orig_gsy - 2  # 1U up within the rack
         self.assertGreaterEqual(candidate_gsy, 0, "fixture has no headroom above")
 
+        # Issue #22: full-world diff net -- this is a legal move of
+        # `_clean_label`, exempt below; every OTHER entity (the pre-existing
+        # conflict fixture included) must be byte-identical after the drag.
+        world_before = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+
         # Fire dragBeginAndMove (dragstart -> position write -> change) AND
         # read back the shadow + owner-tile state in the SAME synchronous JS
         # turn -- a separate round-trip would let editor.js's debounced
@@ -1920,6 +1955,15 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
             own_violations, [],
             f"read-model must be clean for the dragged device: {model_violations}")
 
+        world_after = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+        world_violations = self.page.evaluate(
+            "([prev, cur, lbl]) => window.__rdSweep.diffWorlds(prev, cur, lbl)",
+            [world_before, world_after, self._clean_label])
+        self.assertEqual(
+            world_violations, [],
+            f"full-world diff: no bystander entity (incl. the pre-existing "
+            f"conflict fixture) may drift after this legal drag: {world_violations}")
+
     # =====================================================================
     # Remove-state shadow (spec §7 Phase 3 bug 4a): flagging a full-depth
     # EXISTING device for removal must render its opposite-face shadow as a
@@ -1931,6 +1975,11 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
         self._load_editor()
         idx, w = self.widx(
             kind="existing", face="front", device_id=self._clean_device_id)
+
+        # Issue #22: full-world diff net -- flagging `_clean_label` for
+        # removal is the legal change under test (exempt below); nothing
+        # else in the rack (incl. the permanent conflict fixture) may drift.
+        world_before = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
 
         clicked = self.page.evaluate(f"() => window.__rdSweep.clickRemove('{idx}')")
         self.assertTrue(clicked, "clickRemove could not find the × button")
@@ -1969,6 +2018,15 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
             i2_for_device, [],
             f"a remove-flagged full-depth device must NOT be reported as "
             f"having no shadow: {model_violations}")
+
+        world_after = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+        world_violations = self.page.evaluate(
+            "([prev, cur, lbl]) => window.__rdSweep.diffWorlds(prev, cur, lbl)",
+            [world_before, world_after, self._clean_label])
+        self.assertEqual(
+            world_violations, [],
+            f"full-world diff: no bystander entity may drift after flagging "
+            f"a device for removal: {world_violations}")
 
     # =====================================================================
     # Conflict shadow (spec §7 Phase 3 bug 4c): a full-depth device's
@@ -2922,6 +2980,96 @@ window.__rdX = (function () {
         return document.querySelectorAll(".nbx-rd-move-modal").length;
     }
 
+    // Dismiss the (single, freshly-opened) rename dialog via its Cancel
+    // button (spec §4a: any dismissal other than Apply aborts the move --
+    // issue #17). Returns false if no rename dialog is open.
+    function cancelRenameDialogViaCancelButton() {
+        var btn = document.querySelector(".nbx-rd-move-modal .btn-link[data-bs-dismiss]");
+        if (!btn) { return false; }
+        btn.click();
+        return true;
+    }
+
+    // Same, via the modal's x close button instead of the Cancel link --
+    // both are wired to the same finishCancel()+requestHide() handler.
+    function cancelRenameDialogViaCloseButton() {
+        var btn = document.querySelector(".nbx-rd-move-modal .btn-close[data-bs-dismiss]");
+        if (!btn) { return false; }
+        btn.click();
+        return true;
+    }
+
+    // Issue #21 -- displacement dialog helpers, rack-qualified variants of
+    // the ones DISPLACE_HARNESS_JS_TEMPLATE already has (single-rack there;
+    // this harness spans multiple rack blocks).
+    function hasDisplaceDialog() {
+        return !!document.querySelector(".nbx-rd-displace-modal");
+    }
+    function confirmDisplaceDialog() {
+        var btn = document.querySelector(".nbx-rd-displace-modal [data-rd-displace-confirm]");
+        if (!btn) { return false; }
+        btn.click();
+        return true;
+    }
+    function cancelDisplaceDialog() {
+        var btn = document.querySelector(".nbx-rd-displace-modal .btn-link[data-bs-dismiss]");
+        if (!btn) { return false; }
+        btn.click();
+        return true;
+    }
+
+    // Every move_out_ghost body tile (temp or persistent) matching `label`,
+    // across ALL racks, with its stripe/displaced state -- the assertion
+    // surface for the displacement stripe (spec §3, §4.3).
+    function ghostInfo(label) {
+        var out = [];
+        RACKS.forEach(function (rackId) {
+            var block = blockFor(rackId);
+            if (!block) { return; }
+            block.querySelectorAll(".grid-stack-item.nbx-rd-state-move_out_ghost").forEach(function (el) {
+                if (el.getAttribute("data-rd-derived-opp")) { return; }
+                var span = el.querySelector(".nbx-rd-label");
+                if (!span || span.textContent !== label) { return; }
+                var stripe = el.querySelector(".nbx-rd-stripe");
+                var host = el.closest(".grid-stack");
+                out.push({
+                    rackId: rackId, face: host ? host.getAttribute("data-face") : null,
+                    widx: el.getAttribute("data-widget-index"),
+                    classes: Array.prototype.slice.call(el.classList),
+                    displaced: el.classList.contains("nbx-rd-displaced"),
+                    stripeTitle: stripe ? stripe.getAttribute("title") : null,
+                });
+            });
+        });
+        return out;
+    }
+
+    // A full-depth ghost's owned mirror hatch (opposite face), by owner
+    // rack + owner LABEL -- a derived-opp hatch's `.nbx-rd-label` always
+    // matches its owner's (confirmed live: ghost body tiles do not carry
+    // `data-widget-index`, unlike normal live tiles, so owner identity here
+    // is matched by label + the ghost-mirror-specific CSS hook
+    // (`nbx-rd-opposite-ghost`) instead of `data-rd-owner-widx`).
+    function ghostMirrorInfo(ownerRackId, ownerLabel) {
+        var block = blockFor(ownerRackId);
+        if (!block) { return null; }
+        var hit = null;
+        block.querySelectorAll("[data-rd-derived-opp].nbx-rd-opposite-ghost").forEach(function (el) {
+            if (hit) { return; }
+            var span = el.querySelector(".nbx-rd-label");
+            if (span && span.textContent === ownerLabel) { hit = el; }
+        });
+        if (!hit) { return null; }
+        var stripe = hit.querySelector(".nbx-rd-stripe");
+        var host = hit.closest(".grid-stack");
+        return {
+            face: host ? host.getAttribute("data-face") : null,
+            classes: Array.prototype.slice.call(hit.classList),
+            displaced: hit.classList.contains("nbx-rd-displaced"),
+            stripeTitle: stripe ? stripe.getAttribute("title") : null,
+        };
+    }
+
     // Palette drag-in with CURSOR mechanics (spec §4.1 palette context,
     // ruling 2026-07-08). Mirrors a real user gesture the way the editor's
     // pointer tracker sees it: (1) pointerdown ON the palette item (arms
@@ -3209,6 +3357,13 @@ window.__rdX = (function () {
         moveTo: moveTo,
         moveToWithCursorFallback: moveToWithCursorFallback,
         countRenameDialogs: countRenameDialogs,
+        cancelRenameDialogViaCancelButton: cancelRenameDialogViaCancelButton,
+        cancelRenameDialogViaCloseButton: cancelRenameDialogViaCloseButton,
+        hasDisplaceDialog: hasDisplaceDialog,
+        confirmDisplaceDialog: confirmDisplaceDialog,
+        cancelDisplaceDialog: cancelDisplaceDialog,
+        ghostInfo: ghostInfo,
+        ghostMirrorInfo: ghostMirrorInfo,
         dropPaletteItemAt: dropPaletteItemAt,
         dropPaletteItemAtWithCursor: dropPaletteItemAtWithCursor,
         saveDisabled: saveDisabled,
@@ -3334,13 +3489,25 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
             "name": f"e2e-xrack-bghost-{suffix}", "device_type": dt_half1["id"],
             "role": role["id"], "site": site["id"], "rack": rack_b["id"],
             "position": "5.0", "face": "front", "status": "active", **cf_override})
+        # Issue #21: a FULL-DEPTH ghost source in rack B, U3 front (rows
+        # 24-27 on both faces -- clear of every other rack-B fixture AND of
+        # rows 0-3, which several existing cross-rack tests treat as the
+        # rack's known-free landing zone for the subject) -- used only by
+        # the dedicated cross-rack displacement-on-adoption test, so OLD's
+        # mirror-hatch collapse (both OLD and NEW full-depth) is actually
+        # exercised, not just the half-depth OLD case already covered by
+        # the half-depth bghost fixture above.
+        dev_b_ghost_full = cls._api("POST", "/api/dcim/devices/", {
+            "name": f"e2e-xrack-bghostfull-{suffix}", "device_type": dt_full2["id"],
+            "role": role["id"], "site": site["id"], "rack": rack_b["id"],
+            "position": "3.0", "face": "front", "status": "active", **cf_override})
 
         cls._created = dict(
             manufacturer=mfr["id"], role=role["id"], site=site["id"],
             racks=[rack_a["id"], rack_b["id"], rack_c["id"]],
             device_types=[dt_full2["id"], dt_full3["id"], dt_half1["id"]],
             devices=[dev_subject["id"], dev_b_full["id"], dev_b_front["id"],
-                     dev_b_rear["id"], dev_b_ghost["id"]],
+                     dev_b_rear["id"], dev_b_ghost["id"], dev_b_ghost_full["id"]],
         )
         cls._rack_a = rack_a["id"]
         cls._rack_b = rack_b["id"]
@@ -3355,6 +3522,9 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         cls._bghost_orig_gsy = cls._u_to_gsy(5, 2)     # rows 22-23 front
         cls._bghost_target_gsy = cls._u_to_gsy(12, 2)  # rows 8-9 front, free
         cls._dt_half_id = dt_half1["id"]
+        cls._bghostfull_label = dev_b_ghost_full["name"]
+        cls._bghostfull_orig_gsy = cls._u_to_gsy(3, 4)   # rows 24-27, free both faces
+        cls._bghostfull_away_gsy = cls._u_to_gsy(6, 4)   # rows 18-21, free both faces
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"xrack-{suffix}", "site": site["id"],
@@ -3481,6 +3651,18 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
             f"() => window.__rdX.moveTo({json.dumps(self._bghost_label)}, "
             f"{self._rack_b}, 'front', {self._bghost_target_gsy})")
         self.assertTrue(r.get("ok"), f"ghost setup move failed: {r}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+    # -- setup step for the dedicated displacement-on-adoption test (issue
+    # #21): move rack B's FULL-DEPTH ghost source away, leaving a ghost (+
+    # its own mirror hatch, since it is full-depth) at its origin U15 front.
+    def _create_rack_b_full_ghost(self):
+        r = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._bghostfull_label)}, "
+            f"{self._rack_b}, 'front', {self._bghostfull_away_gsy})")
+        self.assertTrue(r.get("ok"), f"full-depth ghost setup move failed: {r}")
         self.page.wait_for_timeout(STEP_SETTLE_MS)
         self.page.evaluate("() => window.__rdX.answerDialogs()")
         self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
@@ -4064,6 +4246,225 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
             "() => (window.__rdModel ? window.__rdModel.check() : "
             "['window.__rdModel missing'])")
         self.assertEqual(model_violations, [], model_violations)
+
+    # =====================================================================
+    # Issue #17 (spec §4.1 "cancel -> revert()"): the §4a rename dialog that
+    # a committed cross-rack move opens must FULLY undo the move when
+    # dismissed via Cancel -- the device goes back to its origin rack/face/
+    # position, the whole world (every entity, not just the subject) is
+    # byte-identical to the pre-gesture snapshot, and no dialog is left in
+    # the DOM. Shared by both dismissal affordances (Cancel button, x close)
+    # -- both are wired to the exact same finishCancel()+requestHide()
+    # handler in showMoveNameDialog.
+    # =====================================================================
+    def _assert_rename_dialog_cancel_fully_reverts(self, dismiss_fn_name):
+        self._load_editor()
+        self._create_rack_b_ghost()
+        # The setup move above opened (and answered) its OWN rename dialog;
+        # wait for its fading overlay to be fully removed so this test's
+        # dialog is unambiguously the one opened by ITS OWN gesture below.
+        self.page.wait_for_function(
+            "() => window.__rdX.countRenameDialogs() === 0", timeout=5000)
+
+        world_before = self.page.evaluate("() => window.__rdX.worldSnapshot()")
+
+        r = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+            f"{self._rack_b}, 'front', 0)")
+        self.assertTrue(r.get("ok"), f"moveTo failed: {r}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        dialogs = self.page.evaluate("() => window.__rdX.countRenameDialogs()")
+        self.assertGreaterEqual(
+            dialogs, 1,
+            "a committed cross-rack move MUST open the §4a rename dialog "
+            "before this test can exercise its cancel path")
+
+        dismissed = self.page.evaluate(f"() => window.__rdX.{dismiss_fn_name}()")
+        self.assertTrue(dismissed, f"could not find/click the {dismiss_fn_name} affordance")
+        # Bootstrap's fade-out + our own hidden.bs.modal cleanup.
+        self.page.wait_for_function(
+            "() => window.__rdX.countRenameDialogs() === 0", timeout=5000)
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # No dialog left open anywhere in the DOM (Cancel/x must not strand
+        # the modal on screen -- the transition-safe requestHide guard).
+        open_modals = self.page.evaluate(
+            "() => document.querySelectorAll('.modal.show').length")
+        self.assertEqual(open_modals, 0, "a dialog was left open in the DOM after cancel")
+
+        info = self.page.evaluate(
+            f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+        self.assertIsNotNone(info, "subject lost after the cancelled move")
+        self.assertEqual(info["rackId"], self._rack_a, f"device must revert to its origin rack: {info}")
+        self.assertEqual(info["face"], "front", info)
+        self.assertEqual(info["y"], self._subject_orig_gsy, f"device must revert to its origin position: {info}")
+        self.assertIn("nbx-rd-state-existing", info["classes"], info)
+
+        world_after = self.page.evaluate("() => window.__rdX.worldSnapshot()")
+        world_violations = self.page.evaluate(
+            "([prev, cur]) => window.__rdX.diffWorlds(prev, cur, null)",
+            [world_before, world_after])
+        self.assertEqual(
+            world_violations, [],
+            f"world must be byte-identical to the pre-gesture snapshot after "
+            f"a cancelled rename dialog (full revert): {world_violations}")
+
+        model_violations = self.page.evaluate(
+            "() => (window.__rdModel ? window.__rdModel.check() : "
+            "['window.__rdModel missing'])")
+        self.assertEqual(model_violations, [], model_violations)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    def test_rename_dialog_cancel_button_fully_reverts_cross_rack_move(self):
+        self._assert_rename_dialog_cancel_fully_reverts("cancelRenameDialogViaCancelButton")
+
+    def test_rename_dialog_close_x_fully_reverts_cross_rack_move(self):
+        self._assert_rename_dialog_cancel_fully_reverts("cancelRenameDialogViaCloseButton")
+
+    # =====================================================================
+    # Issue #21 (spec §4.3, cross-rack context): a device dragged FROM rack A
+    # dropped onto a VACATING slot (a move-out ghost) in rack B must run the
+    # exact same displacement contract as the same-rack case already covered
+    # by EditorDisplacementTestCase's E5/E6 -- validation passes first, the
+    # displacement dialog fires, confirm collapses OLD to the red "was:"
+    # stripe (+ mirror hatch, since both OLD and NEW are full-depth here) and
+    # renders NEW as move_in, and model.clean() stays satisfied throughout.
+    # =====================================================================
+    def test_cross_rack_drop_onto_vacating_slot_displaces_confirm(self):
+        self._load_editor()
+        self._create_rack_b_full_ghost()
+        self.page.wait_for_function(
+            "() => window.__rdX.countRenameDialogs() === 0", timeout=5000)
+
+        r = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+            f"{self._rack_b}, 'front', {self._bghostfull_orig_gsy})")
+        self.assertTrue(r.get("ok"), f"moveTo failed: {r}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        # (1) displacement dialog appears AFTER validation (the drop was not
+        # rejected -- a ghost claim never blocks per §4.2).
+        has_dialog = self.page.evaluate("() => window.__rdX.hasDisplaceDialog()")
+        self.assertTrue(
+            has_dialog,
+            "a cross-rack drop onto a vacating slot must open the "
+            "displacement confirm dialog")
+
+        confirmed = self.page.evaluate("() => window.__rdX.confirmDisplaceDialog()")
+        self.assertTrue(confirmed, "could not find/click the displace-confirm button")
+        self.page.wait_for_timeout(300)  # bootstrap fade-out
+
+        # (2) confirming the displacement chains into the §4a rename dialog
+        # (every committed cross-rack move runs the full dialog pipeline) --
+        # apply it with the default (keep-name) choice.
+        rename_dialogs = self.page.evaluate("() => window.__rdX.countRenameDialogs()")
+        self.assertGreaterEqual(
+            rename_dialogs, 1,
+            "the rename dialog must also fire for a displaced cross-rack adoption")
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # (3) NEW renders as move_in at the slot; OLD collapses to the red
+        # "was:" stripe (both bodies AND, since both are full-depth, their
+        # mirror hatches on the opposite face).
+        info = self.page.evaluate(
+            f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+        self.assertIsNotNone(info, "subject lost after the displaced adoption")
+        self.assertEqual(info["rackId"], self._rack_b, info)
+        self.assertEqual(info["face"], "front", info)
+        self.assertEqual(info["y"], self._bghostfull_orig_gsy, info)
+        self.assertIn("nbx-rd-state-move_in", info["classes"], info)
+        self.assertNotIn("nbx-rd-displaced", info["classes"], info)
+
+        ghosts = self.page.evaluate(
+            f"() => window.__rdX.ghostInfo({json.dumps(self._bghostfull_label)})")
+        self.assertEqual(len(ghosts), 1, ghosts)
+        old_ghost = ghosts[0]
+        self.assertTrue(old_ghost["displaced"], f"OLD's ghost must collapse: {old_ghost}")
+        self.assertIn(
+            self._bghostfull_label, old_ghost["stripeTitle"] or "",
+            f"stripe hover must name OLD: {old_ghost}")
+
+        mirror = self.page.evaluate(
+            f"() => window.__rdX.ghostMirrorInfo({self._rack_b}, "
+            f"{json.dumps(self._bghostfull_label)})")
+        self.assertIsNotNone(mirror, "full-depth OLD's ghost mirror hatch must exist")
+        self.assertTrue(
+            mirror["displaced"],
+            f"OLD's mirror hatch must ALSO collapse (both full-depth): {mirror}")
+
+        model_violations = self.page.evaluate(
+            "() => (window.__rdModel ? window.__rdModel.check() : "
+            "['window.__rdModel missing'])")
+        self.assertEqual(model_violations, [], model_violations)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    # Issue #21 cancel variant: at the displacement dialog, CANCEL instead of
+    # confirming -> full revert (spec §4.3.5: cancel -> revert()), NEW back
+    # at its rack-A origin, OLD's ghost/mirror rendering untouched.
+    def test_cross_rack_drop_onto_vacating_slot_displaces_cancel(self):
+        self._load_editor()
+        self._create_rack_b_full_ghost()
+        self.page.wait_for_function(
+            "() => window.__rdX.countRenameDialogs() === 0", timeout=5000)
+        world_before = self.page.evaluate("() => window.__rdX.worldSnapshot()")
+
+        r = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+            f"{self._rack_b}, 'front', {self._bghostfull_orig_gsy})")
+        self.assertTrue(r.get("ok"), f"moveTo failed: {r}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        has_dialog = self.page.evaluate("() => window.__rdX.hasDisplaceDialog()")
+        self.assertTrue(has_dialog, "expected a displacement confirm dialog to appear")
+
+        cancelled = self.page.evaluate("() => window.__rdX.cancelDisplaceDialog()")
+        self.assertTrue(cancelled, "could not find/click the displace-cancel button")
+        self.page.wait_for_timeout(300)
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        open_modals = self.page.evaluate(
+            "() => document.querySelectorAll('.modal.show').length")
+        self.assertEqual(open_modals, 0, "a dialog was left open in the DOM after cancel")
+
+        info = self.page.evaluate(
+            f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+        self.assertIsNotNone(info, "subject lost after the cancelled displacement")
+        self.assertEqual(info["rackId"], self._rack_a, f"device must revert to its origin rack: {info}")
+        self.assertEqual(info["face"], "front", info)
+        self.assertEqual(info["y"], self._subject_orig_gsy, info)
+        self.assertIn("nbx-rd-state-existing", info["classes"], info)
+
+        ghosts = self.page.evaluate(
+            f"() => window.__rdX.ghostInfo({json.dumps(self._bghostfull_label)})")
+        self.assertEqual(len(ghosts), 1, ghosts)
+        self.assertFalse(
+            ghosts[0]["displaced"],
+            f"a cancelled displacement must leave OLD's ghost rendering untouched: {ghosts}")
+
+        mirror = self.page.evaluate(
+            f"() => window.__rdX.ghostMirrorInfo({self._rack_b}, "
+            f"{json.dumps(self._bghostfull_label)})")
+        self.assertIsNotNone(mirror)
+        self.assertFalse(
+            mirror["displaced"],
+            f"OLD's mirror hatch must also remain untouched: {mirror}")
+
+        world_after = self.page.evaluate("() => window.__rdX.worldSnapshot()")
+        world_violations = self.page.evaluate(
+            "([prev, cur]) => window.__rdX.diffWorlds(prev, cur, null)",
+            [world_before, world_after])
+        self.assertEqual(
+            world_violations, [],
+            f"world must be byte-identical to the pre-gesture snapshot after "
+            f"a cancelled cross-rack displacement (full revert): {world_violations}")
+
+        model_violations = self.page.evaluate(
+            "() => (window.__rdModel ? window.__rdModel.check() : "
+            "['window.__rdModel missing'])")
+        self.assertEqual(model_violations, [], model_violations)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     # =====================================================================
     # P1 (spec §4.1 cursor-governed placement, PALETTE context, ruling
