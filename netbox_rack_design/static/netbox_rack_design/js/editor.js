@@ -955,10 +955,12 @@
         // Accept drops onto THIS rack's grids: a palette/quick-access drag source
         // (a new add), a tile already inside this rack block (front <-> rear <->
         // tray within-rack move), OR a real-device tile from ANOTHER rack block
-        // dropped onto a FACE grid (a cross-rack move — the backend already
-        // reconciles a move whose target_rack differs from the device's rack).
-        // The tray never accepts a foreign device tile (a moved real device keeps
-        // a U/face), only palette adds (which its own handler then rejects).
+        // (a cross-rack move — the backend already reconciles a move whose
+        // target_rack differs from the device's rack). The tray ALSO accepts a
+        // foreign real tile (spec §9.3 "tray -> tray (cross-rack): reassociate
+        // with another rack") -- it flows through the SAME cross-rack adoption
+        // hooks (`added`/`removed` below) as a face target, with `face=""`
+        // (spec §9.2) resolved generically by `faceOfItem`/`adoptForeignTile`.
         function makeAccept(isTray) {
             return function (el) {
                 if (!el) { return false; }
@@ -971,7 +973,7 @@
                 if (el.closest && el.closest(".nbx-rd-rack-block") === block) {
                     return true;
                 }
-                return !isTray && isForeignRealTile(el);
+                return isForeignRealTile(el);
             };
         }
 
@@ -1088,6 +1090,18 @@
             front: { grid: frontGrid, host: frontEl },
             rear: { grid: rearGrid, host: rearEl },
         };
+        // The tray target (spec §9.2: face "" -- no U). A snap-back/cancel
+        // whose ORIGIN was the tray must re-home into the tray host, never
+        // `faceGrids[""]` (undefined) -- that left the tile physically
+        // stranded on whatever face grid the drag/tray-target attempt had
+        // moved it to while the classList was force-set back to "existing",
+        // only for the next refreshGhosts pass to see the mismatch (curFace
+        // "front" != origFace "") and re-flag it "move_in" -- a confirmed
+        // live bug (design 6, F08 tray PDU dragged onto an occupied U then
+        // Cancel: stuck at move_in/dirty on the face grid, never restored).
+        function targetFor(face) {
+            return (face === "") ? { grid: trayGrid, host: trayEl } : faceGrids[face];
+        }
 
         // Re-home a detached tile element into `target` ({grid, host}) at a slot.
         // GridStack.makeWidget only adopts an element that already lives inside the
@@ -1197,11 +1211,14 @@
         function ensureTempGhost(idx, st) {
             if (tempGhosts[idx]) { return; }
             var face = st.origFace;
-            var target = faceGrids[face];
+            var target = targetFor(face);
             if (!target || !target.grid) { return; }
             var w = st.widget;
-            var gsH = Math.round((w.u_height || 1) * 2);
-            var gsY = uPositionToGsY(st.origUPosition, gsH);
+            // A tray origin ghost is a list-style entry, no rows (spec §9.3):
+            // fixed height, appended after whatever else is already there --
+            // never the U-derived gsH/gsY, which are meaningless off-rack.
+            var gsH = (face === "") ? 2 : Math.round((w.u_height || 1) * 2);
+            var gsY = (face === "") ? trayAppendRow(null) : uPositionToGsY(st.origUPosition, gsH);
             var ghost = makeGhostElement(w.label);
             // addWidget -> Engine.addNode -> _fixCollisions can cascade into
             // real tiles when the origin rows are (legitimately) re-occupied;
@@ -1283,9 +1300,14 @@
                     var curFace = faceOfItem(itemEl);
                     var curGsY = node && node.y != null ? node.y : null;
                     var gsH = Math.round((w.u_height || 1) * 2);
-                    var origGsY = uPositionToGsY(st.origUPosition, gsH);
 
-                    var atOrigin = (curFace === st.origFace) && (curGsY === origGsY);
+                    // A tray origin (spec §9.2: face "", no U) has no row to
+                    // compare -- the tray is an unordered list, so "still at
+                    // origin" means only "still in a tray", never a gsY match
+                    // (which is otherwise NaN and would always mismatch).
+                    var atOrigin = (st.origFace === "")
+                        ? (curFace === "")
+                        : (curFace === st.origFace) && (curGsY === uPositionToGsY(st.origUPosition, gsH));
 
                     if (atOrigin) {
                         removeTempGhost(idx);
@@ -1301,6 +1323,10 @@
                     }
                 });
                 syncOwnedShadows();
+                // Tray list compaction (spec §9.4 ruling 2026-07-09): close any
+                // row holes a departure/ghost-destruction left, still under
+                // this settle pass's push-suppression bracket.
+                compactTray();
             } finally {
                 rdEndPushSuppression();
                 refreshing = false;
@@ -1820,11 +1846,14 @@
             var node = itemEl.gridstackNode;
             var curFace = faceOfItem(itemEl);
             var curGsY = (node && node.y != null) ? node.y : null;
-            var origGsY = uPositionToGsY(st.origUPosition, gsH);
             // A cross-rack adoption is ALWAYS a move (its origin U/face live in a
             // different rack's coordinates), so never short-circuit on atOrigin.
-            var atOrigin = !st.crossRack
-                && (curFace === st.origFace) && (curGsY === origGsY);
+            // A tray origin (spec §9.2) has no row to compare -- "still at
+            // origin" means only "still in a tray" (never a gsY match, which is
+            // otherwise NaN and would always mismatch).
+            var atOrigin = !st.crossRack && (st.origFace === ""
+                ? curFace === ""
+                : (curFace === st.origFace) && (curGsY === uPositionToGsY(st.origUPosition, gsH)));
 
             if (atOrigin) {
                 st.moveDialogShown = false;
@@ -1908,7 +1937,7 @@
             if (curFace !== "front" && curFace !== "rear" || curGsY == null) { return; }
 
             function snapBack() {
-                var target = faceGrids[st.origFace];
+                var target = targetFor(st.origFace);
                 var origGsY = uPositionToGsY(st.origUPosition, gsH);
                 refreshing = true;
                 rdBeginPushSuppression();
@@ -1952,8 +1981,10 @@
             curFace = faceOfItem(itemEl);
             curGsY = (node && node.y != null) ? node.y : null;
 
-            var atOrigin = (curFace === st.origFace)
-                && (curGsY === uPositionToGsY(st.origUPosition, gsH));
+            // Tray origin (spec §9.2): no row to compare, only "still in a tray".
+            var atOrigin = (st.origFace === "")
+                ? (curFace === "")
+                : (curFace === st.origFace) && (curGsY === uPositionToGsY(st.origUPosition, gsH));
             if (atOrigin) {
                 restoreDisplaced(idx);
                 return;
@@ -2343,9 +2374,13 @@
             var ost = state[originIdx];
             if (!ost || !ost.widget || ost.widget.device_id !== d.device_id) { return false; }
             var face = faceOfItem(el);
-            if (face !== "front" && face !== "rear") { return false; }
+            // A tray target (face "", spec §9.2) is a valid homecoming
+            // destination too -- e.g. a device dragged tray -> tray back onto
+            // its own rack, or units -> tray landing where it originally left
+            // from. Only the row/column check below is face-grid-specific.
+            if (face !== "front" && face !== "rear" && face !== "") { return false; }
             var node = el.gridstackNode;
-            if (!node || node.y == null) { return false; }
+            if (face !== "" && (!node || node.y == null)) { return false; }
 
             // Clear whatever was marking origIdx's slot vacated -- a temp
             // ghost from this session, and/or a persistent (server-reloaded)
@@ -2444,10 +2479,13 @@
         // the element at its original U/face, restamp it to its original index, and
         // reset that state entry to a plain existing tile.
         function restoreTile(itemEl, face, uPosition, originIdx, srcWidget) {
-            var target = faceGrids[face] || faceGrids.front || faceGrids.rear;
+            var target = targetFor(face) || faceGrids.front || faceGrids.rear;
             if (!target || !target.grid) { return; }
-            var gsH = Math.round(((srcWidget && srcWidget.u_height) || 1) * 2);
-            var gsY = uPositionToGsY(uPosition, gsH);
+            // A tray origin (spec §9.2) is a fixed-height list row, appended
+            // after whatever else is already there -- never the U-derived
+            // gsH/gsY, which are meaningless off-rack.
+            var gsH = (face === "") ? 2 : Math.round(((srcWidget && srcWidget.u_height) || 1) * 2);
+            var gsY = (face === "") ? trayAppendRow(itemEl) : uPositionToGsY(uPosition, gsH);
             removeTempGhost(originIdx);
             refreshing = true;
             try {
@@ -2493,14 +2531,14 @@
             if (!gst) { return; }
             var gw = gst.widget;
             var face = gw.face || "";
-            var gsH = Math.round((gw.u_height || 1) * 2);
-            var gsY = uPositionToGsY(gw.u_position, gsH);
+            var gsH = (face === "") ? 2 : Math.round((gw.u_height || 1) * 2);
+            var gsY = (face === "") ? trayAppendRow(itemEl) : uPositionToGsY(gw.u_position, gsH);
             var gg = (ghostEl.gridstackNode && ghostEl.gridstackNode.grid) || null;
             refreshing = true;
             try {
                 if (gg) { gg.removeWidget(ghostEl, true); }
                 else if (ghostEl.parentNode) { ghostEl.parentNode.removeChild(ghostEl); }
-                homeInto(faceGrids[face] || faceGrids.front || faceGrids.rear, itemEl, gsY, gsH);
+                homeInto(targetFor(face) || faceGrids.front || faceGrids.rear, itemEl, gsY, gsH);
             } finally {
                 refreshing = false;
             }
@@ -2610,7 +2648,14 @@
                 removeTempGhost(idx);
             }
 
-            var target = faceGrids[origFace];
+            var target = targetFor(origFace);
+            // A tray origin has no meaningful row/height (spec §9.2 -- every
+            // tray tile is a fixed gs-h=2 list row, regardless of the
+            // device's real U height): append after whatever else is
+            // already in the tray instead of the U-derived origGsY/gsH
+            // above, which are meaningless off-rack.
+            var homeGsH = gsH;
+            if (origFace === "") { origGsY = trayAppendRow(itemEl); homeGsH = 2; }
             refreshing = true;
             // The snap-back target is the tile's own origin -- already legal
             // by construction. Suppress engine pushes for the whole revert
@@ -2620,11 +2665,12 @@
                 if (target && target.grid) {
                     var curGrid = gridForItem(itemEl);
                     if (curGrid && curGrid !== target.grid) {
-                        // Different face grid: move the DOM node across via homeInto.
+                        // Different grid (face<->face or face<->tray): move the
+                        // DOM node across via homeInto.
                         curGrid.removeWidget(itemEl, false);
-                        homeInto(target, itemEl, origGsY, gsH);
+                        homeInto(target, itemEl, origGsY, homeGsH);
                     } else {
-                        target.grid.update(itemEl, { x: 0, y: origGsY, w: 1, h: gsH, noMove: false, locked: false });
+                        target.grid.update(itemEl, { x: 0, y: origGsY, w: 1, h: homeGsH, noMove: false, locked: false });
                         syncNodeOrig(itemEl);
                     }
                 }
@@ -2786,7 +2832,14 @@
                 }
 
                 if (faceKey === "other") {
-                    item.kind = isAdd ? "add" : "move";
+                    // Mirrors the front/rear branch below (spec §9.5): send
+                    // "existing" for a non-add tray item and let the backend's
+                    // own at_real comparison (device.position is None, face
+                    // ignored for a tray target) decide whether it is
+                    // genuinely untouched or actually a move -- never hardcode
+                    // "move" here, or a real, never-touched tray device would
+                    // register a spurious move placement on every save.
+                    item.kind = isAdd ? "add" : "existing";
                     buckets.other.push(item);
                     return;
                 }
@@ -2920,6 +2973,18 @@
             var label = el.getAttribute("data-label") || ("Device type " + dtId);
             var model = el.getAttribute("data-model") || label;
             var gsH = Math.max(1, Math.round(uHeight * 2));
+
+            // Palette -> tray (spec §9.3): a new off-rack device has no U/face
+            // to validate, no shadow, and never displaces anything (a tray is
+            // an unordered list, not a grid) -- register it directly with
+            // uPosition=null, skipping every row/collision-based check below,
+            // which assumes face grid geometry that does not apply here.
+            if (face === "") {
+                grid.update(el, { x: 0, w: 1, h: 2 });
+                uPosition = null;
+                finishAdd([]);
+                return;
+            }
 
             grid.update(el, { x: 0, w: 1, h: gsH });
             var node = el.gridstackNode || newNode;
@@ -3135,13 +3200,98 @@
                 onPaletteDrop(face, g, event, previousNode, newNode);
             });
         });
+        // The tray is a LIST (spec §9.2/§9.4), not a grid with meaningful
+        // rows: whatever row GridStack's own drag math (or a cursor's pixel
+        // position) computed for a dropped item is meaningless here and must
+        // be OVERWRITTEN to the next free row -- i.e. APPENDED after every
+        // item already there -- so drops never overlap an existing tile.
+        // Every tray tile carries a fixed gs-h="2" (see the template).
+        function trayAppendRow(el) {
+            // The next free row is BELOW the bottom-most occupied row -- never
+            // a tile count. Counting broke the moment a tile LEFT the tray
+            // (bystanders keep their rows per spec §4.1, so the remaining rows
+            // are not contiguous): after tile A (rows 0-1) departed, tile B
+            // still sat at rows 2-3, and count*2 put A's origin ghost at row 2
+            // -- ON TOP of B. The ghost's translucent grey then composited
+            // over B's solid role color into what read as "a solid
+            // role-colored ghost" (confirmed live, design 6 acceptance).
+            var next = 0;
+            trayEl.querySelectorAll(".grid-stack-item").forEach(function (o) {
+                if (o === el) { return; }
+                var n = o.gridstackNode;
+                var y = (n && n.y != null) ? n.y : parseInt(o.getAttribute("gs-y"), 10);
+                var h = (n && n.h != null) ? n.h : parseInt(o.getAttribute("gs-h"), 10);
+                if (isNaN(y)) { y = 0; }
+                if (isNaN(h)) { h = 2; }
+                if (y + h > next) { next = y + h; }
+            });
+            return next;
+        }
+
+        // Tray COMPACTION (spec §9.4, coordinator ruling 2026-07-09): the
+        // tray is a COMPACT list -- after any removal (a tile departing for
+        // another grid, a ghost destroyed on homecoming, a cancel-revert) the
+        // remaining tiles renumber to contiguous rows 0,2,4,... preserving
+        // their current relative order, and the container shrinks back to
+        // content height. §4.1's no-bystander-movement rule constrains RACK
+        // positions (U), not list reflow, so renumbering tray rows is
+        // expressly allowed. Touches ONLY this rack's tray tiles' row
+        // attributes -- never face tiles. Runs from refreshGhosts' settle
+        // pass (every tray-membership change schedules one) under the
+        // caller's push-suppression bracket.
+        function compactTray() {
+            if (!trayGrid || !trayEl) { return; }
+            var items = [];
+            trayEl.querySelectorAll(".grid-stack-item").forEach(function (el) {
+                var n = el.gridstackNode;
+                var y = (n && n.y != null) ? n.y : parseInt(el.getAttribute("gs-y"), 10);
+                items.push({ el: el, y: isNaN(y) ? 0 : y });
+            });
+            items.sort(function (a, b) { return a.y - b.y; });
+            var row = 0;
+            items.forEach(function (it) {
+                if (it.y !== row) {
+                    var n = it.el.gridstackNode;
+                    if (n && n.grid) {
+                        trayGrid.update(it.el, { x: 0, y: row, h: 2 });
+                        syncNodeOrig(it.el);
+                    } else if (n) {
+                        // An engine-DETACHED element (a temp ghost -- see
+                        // ensureTempGhost's removeWidget note): update() needs
+                        // an attached node, so reposition via the same private
+                        // re-render GridStack itself paints nodes with.
+                        n.x = 0;
+                        n.y = row;
+                        n._orig = { x: 0, y: row };
+                        trayGrid._writePosAttr(it.el, n);
+                    } else {
+                        it.el.setAttribute("gs-y", String(row));
+                    }
+                }
+                row += 2;
+            });
+        }
+
         if (trayGrid) {
             trayGrid.on("dropped", function (event, previousNode, newNode) {
                 var el = newNode && newNode.el;
-                if (el && el.getAttribute("data-device-type-id") != null) {
-                    // Reject off-rack palette drops: a brand-new add needs a U.
-                    trayGrid.removeWidget(el, true);
+                if (el) {
+                    rdBeginPushSuppression();
+                    try {
+                        trayGrid.update(el, { x: 0, y: trayAppendRow(el), w: 1, h: 2 });
+                        syncNodeOrig(el);
+                    } finally {
+                        rdEndPushSuppression();
+                    }
                 }
+                // Palette -> tray (spec §9.3, 0.9.0): a new off-rack device is
+                // now a legal drop target -- route it through the SAME
+                // onPaletteDrop pipeline as a face drop (face="" short-
+                // circuits the row/collision-specific logic there). A real
+                // device tile dropped here (within-rack or cross-rack move
+                // into the tray) also runs through onPaletteDrop's "not a
+                // palette add" branch, which resolves via maybePromptMove.
+                onPaletteDrop("", trayGrid, event, previousNode, newNode);
             });
         }
 
@@ -4052,7 +4202,7 @@
         return model;
     }
 
-    // ---- Invariant checks (spec §6: I1, I2) ------------------------------------
+    // ---- Invariant checks (spec §6: I1, I2; spec §9.2: I4) ---------------------
 
     // Live (non-vacating) lifecycle states: only these participate in the I1
     // overlap check. Ghosts and remove-flagged devices never block (spec §4.2).
@@ -4130,6 +4280,49 @@
                 "I2 rack " + (s.rackId != null ? s.rackId : "?") + " " + s.face + " rows "
                 + rdRowRangeLabel(s.y, s.rows) + ": orphan shadow labelled '" + s.label
                 + "' has no owning device"
+            );
+        });
+
+        // I4 (spec §9.2): a device appears AT MOST ONCE, LIVE, across the whole
+        // world -- its body in units (front/rear, any rack) XOR its body in a
+        // tray (any rack) -- never both. A moved device's origin ghost is NOT a
+        // live claim (RD_LIVE_STATES excludes move_out_ghost/remove), so the
+        // normal body+origin-ghost pair for a move/dismount/mount/reassociation
+        // is expected structure, not a violation; only a SECOND live body for
+        // the same deviceId (e.g. stuck in both units and tray at once) trips
+        // this. Devices with no resolvable identity (deviceId == null -- a
+        // brand-new, not-yet-saved catalog add) are not checked here; I1
+        // already covers their occupancy.
+        var rdLiveByDeviceId = {};
+        model.devices.forEach(function (d) {
+            // Tray devices are ALSO present in model.devices (rdBuildModel's
+            // pass 1 pushes every tile there regardless of face), so counting
+            // them here too would double-count every tray device against its
+            // own rack.trayDevices entry below -- only a real units body
+            // (face front/rear) counts as a "units" location.
+            if (d.face !== "front" && d.face !== "rear") { return; }
+            if (d.deviceId == null || !RD_LIVE_STATES[d.state]) { return; }
+            (rdLiveByDeviceId[d.deviceId] = rdLiveByDeviceId[d.deviceId] || []).push(
+                { rackId: d.rackId, where: "units/" + d.face, label: d.label }
+            );
+        });
+        Object.keys(model.racks).forEach(function (rid) {
+            model.racks[rid].trayDevices.forEach(function (d) {
+                if (d.deviceId == null || !RD_LIVE_STATES[d.state]) { return; }
+                (rdLiveByDeviceId[d.deviceId] = rdLiveByDeviceId[d.deviceId] || []).push(
+                    { rackId: d.rackId, where: "tray", label: d.label }
+                );
+            });
+        });
+        Object.keys(rdLiveByDeviceId).forEach(function (deviceId) {
+            var entries = rdLiveByDeviceId[deviceId];
+            if (entries.length <= 1) { return; }
+            var where = entries.map(function (e) {
+                return "rack " + e.rackId + " " + e.where;
+            }).join(", ");
+            out.push(
+                "I4 device " + deviceId + " (" + entries[0].label + ") has "
+                + entries.length + " live entities: " + where
             );
         });
 

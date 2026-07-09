@@ -246,3 +246,41 @@ class DesignPlacementTestCase(TestCase):
         )
         with self.assertRaises(ValidationError):
             move.full_clean()
+
+    def test_move_with_no_position_is_a_valid_tray_target(self):
+        """A move with target_rack set and target_position=None is a dismount
+        to the tray (spec §9.5) -- no slot to validate, so it must pass."""
+        move = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[1],
+        )
+        move.full_clean()  # should not raise
+        self.assertIsNone(move.target_position)
+
+    def test_add_with_no_position_is_a_valid_tray_target(self):
+        """A palette-add with no target_position plans a new off-rack device
+        (spec §9.3 palette -> tray) and must pass validation."""
+        add = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[0],
+        )
+        add.full_clean()  # should not raise
+
+    def test_tray_target_in_other_site_rejected(self):
+        """A tray target must still stay within the design's site (spec §9.5)
+        even though there is no slot to check."""
+        other_site = Site.objects.create(name="Other Site 2", slug="other-site-2")
+        foreign_rack = Rack.objects.create(name="Foreign Rack 2", site=other_site)
+        move = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=foreign_rack,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            move.full_clean()
+        self.assertIn("target_rack", ctx.exception.message_dict)

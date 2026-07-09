@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-09
+
+### Release Summary
+**The tray becomes real** — non-racked devices (0U/vertical PDUs, rear-door units, cable managers) are now first-class citizens of the editor.
+
+This minor, fully backward-compatible release makes each rack's "Non-racked tray" show reality, not just plans: real DCIM devices mounted in a rack without a U position now render in the tray as existing tiles and are plannable exactly like racked devices — drag them into rack units (plan a mount), out of units into the tray (plan a 0U dismount), or into another rack's tray (reassociate), with the same validation, rename dialogs, origin ghosts and silent identity-based homecoming the editor applies everywhere else. The tray behaves as a compact append-only list: items never overlap, drops append, rows renumber after removals and the container grows and shrinks with content. There are **no schema changes** (the placement fields were already nullable — only validation logic was relaxed) and **no breaking changes**.
+
+### Added
+- **Real non-racked devices in the tray**: devices with a rack but no position project as `existing` tray slots (face is meaningless off-rack and normalizes to none); racks without such devices show an empty tray, exactly as before.
+- **Full tray move semantics** (spec `docs/editor-behavior-spec.md` §9): units↔tray mount/dismount, cross-rack tray→tray reassociation, palette adds into the tray, and identity-based homecoming — returning a device onto its own tray ghost (any hop count) silently restores the original placement. Origin trays keep a properly-styled ghost entry while the hardware hasn't moved yet.
+- **Compact list layout**: tray items each get their own row, drops append below the bottom-most tile, rows renumber to contiguous after any removal, and existing items are never shuffled by a new drop.
+- **New I4 model invariant**: a device exists exactly once across the whole editor world (racked body, tray body, or ghost pair) — checked on every sweep step alongside I1/I2.
+- **Save contracts** for position-less placements: mount (position gained), dismount (rack kept, position cleared), tray→tray reassociation (rack changed, no position) — each covered by API tests, and untouched real tray devices round-trip as no-ops.
+- Editor e2e suite `tests/e2e/test_editor_tray.py` (11 deterministic tests) plus projection/model/API test coverage (backend suite grows to 311 tests).
+
+### Fixed
+- Regression coverage hardening (post-0.8.0): rename-dialog Cancel/× full-revert guards, dedicated cross-rack displacement-on-adoption tests, and full-world diff assertions extended to the dense-pack/hatch-overlap/shadow-ownership suites.
+- A cancelled tray-origin move no longer strands the tile on a face grid — cancel/ghost/restore paths resolve tray origins correctly.
+- Tray drops no longer land on top of existing tiles, and departures no longer leave dead empty rows behind.
+- The tray payload no longer registers spurious move placements for untouched real tray devices on save.
+
 ## [0.8.0] - 2026-07-08
 
 ### Release Summary

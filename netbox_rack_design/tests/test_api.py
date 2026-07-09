@@ -361,6 +361,137 @@ class SaveLayoutTest(APITestCase):
         self.assertEqual(float(by_kind[DesignPlacementKindChoices.KIND_MOVE].target_position), 2.0)
         self.assertEqual(by_kind[DesignPlacementKindChoices.KIND_REMOVE].device_id, d2.pk)
 
+    # --- 0.9.0: non-racked tray save contract (spec §9.5) ------------------
+
+    def test_dismount_to_tray_persists_move_with_no_position(self):
+        """U -> tray (dismount): a 'move' item in the 'other' bucket persists a
+        move placement with target_rack set and target_position=None."""
+        self._grant_all()
+        rack = self.racks[0]
+        device = self.devices[0]  # real: Rack1/U1/front
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "other": [
+                    {"kind": "move", "device_id": device.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(placement.device_id, device.pk)
+        self.assertEqual(placement.target_rack_id, rack.pk)
+        self.assertIsNone(placement.target_position)
+        self.assertEqual(placement.target_face, "")
+        # Real device is never mutated.
+        device.refresh_from_db()
+        self.assertEqual(float(device.position), 1.0)
+
+    def test_mount_from_tray_persists_move_with_position(self):
+        """Tray -> U (mount): a real position-less device moved onto a U
+        persists a move placement with target_position set."""
+        self._grant_all()
+        rack = self.racks[0]
+        pdu = create_test_device(
+            "PDU-Mount", site=self.site, rack=rack, position=None, face="",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": pdu.pk, "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(placement.device_id, pdu.pk)
+        self.assertEqual(float(placement.target_position), 10.0)
+        self.assertEqual(placement.target_face, "front")
+        pdu.refresh_from_db()
+        self.assertIsNone(pdu.position)
+
+    def test_tray_to_tray_reassociation_persists_new_rack_no_position(self):
+        """Tray -> tray (cross-rack reassociation): a real position-less device
+        moved to another rack's tray persists a move placement with the new
+        rack and no position."""
+        self._grant_all()
+        origin_rack, other_rack = self.racks[0], self.racks[1]
+        pdu = create_test_device(
+            "PDU-Reassoc", site=self.site, rack=origin_rack, position=None, face="",
+        )
+        payload = self._payload([
+            {
+                "rack_id": other_rack.pk,
+                "other": [
+                    {"kind": "move", "device_id": pdu.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(placement.device_id, pdu.pk)
+        self.assertEqual(placement.target_rack_id, other_rack.pk)
+        self.assertIsNone(placement.target_position)
+        pdu.refresh_from_db()
+        self.assertEqual(pdu.rack_id, origin_rack.pk)  # real device untouched
+
+    def test_tray_device_resubmitted_as_existing_is_idempotent_noop(self):
+        """A real position-less device resubmitted unchanged in the 'other'
+        bucket as 'existing' is a no-op (304), regardless of its real face --
+        a tray target carries no face (spec §9.5)."""
+        self._grant_all()
+        rack = self.racks[0]
+        pdu = create_test_device(
+            "PDU-Noop", site=self.site, rack=rack, position=None, face="rear",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "other": [
+                    {"kind": "existing", "device_id": pdu.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_304_NOT_MODIFIED)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_palette_add_into_tray_persists_placement_with_no_position(self):
+        """Palette -> tray (spec §9.3): a brand-new catalog add with no
+        u_position persists an add placement with target_position=None."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "other": [
+                    {"kind": "add", "device_type_id": self.device_type.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_ADD)
+        self.assertIsNone(placement.device_id)
+        self.assertEqual(placement.target_rack_id, rack.pk)
+        self.assertIsNone(placement.target_position)
+
     def test_move_onto_unmoved_device_still_returns_400(self):
         """The projected-layout relaxation must NOT let a device move onto a slot
         held by a device that stays put — that is still a real collision."""
