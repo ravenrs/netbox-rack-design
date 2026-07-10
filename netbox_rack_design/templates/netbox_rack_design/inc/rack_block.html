@@ -84,14 +84,16 @@
                  {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0 }}" data-widget-index="{{ forloop.counter0 }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
-                   data-name="{{ slot.label }}"
+                   data-name="{{ slot.display_label }}"
                    {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                    {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
-                   title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                   {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
+                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
-                <span class="nbx-rd-label">{{ slot.label }}</span>
+                {% if slot.display_label != slot.label %}<span class="nbx-rd-label nbx-rd-label-hidden">{{ slot.label }}</span><span class="nbx-rd-name-display">{{ slot.display_label }}</span>{% else %}<span class="nbx-rd-label">{{ slot.label }}</span>{% endif %}
               </div>
             </div>
             {% endif %}
@@ -139,14 +141,16 @@
                  {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0|add:front_len }}" data-widget-index="{{ forloop.counter0|add:front_len }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
-                   data-name="{{ slot.label }}"
+                   data-name="{{ slot.display_label }}"
                    {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                    {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
-                   title="{{ slot.label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
+                   {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
+                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
-                <span class="nbx-rd-label">{{ slot.label }}</span>
+                {% if slot.display_label != slot.label %}<span class="nbx-rd-label nbx-rd-label-hidden">{{ slot.label }}</span><span class="nbx-rd-name-display">{{ slot.display_label }}</span>{% else %}<span class="nbx-rd-label">{{ slot.label }}</span>{% endif %}
               </div>
             </div>
             {% endif %}
@@ -193,14 +197,15 @@
              {% if editable %}gs-id="w-{{ rid }}-{{ forloop.counter0|add:front_len|add:rear_len }}" data-widget-index="{{ forloop.counter0|add:front_len|add:rear_len }}"{% else %}gs-no-move="true" gs-no-resize="true" gs-locked="true"{% endif %}>
           <div class="grid-stack-item-content"
                {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
-               data-name="{{ slot.label }}"
+               data-name="{{ slot.display_label }}"
                {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
                {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
-               title="{{ slot.label }} ({{ slot.state }})">
+               {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · tray"{% endif %}
+               title="{{ slot.display_label }} ({{ slot.state }})">
             {% if editable %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                     aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
-            <span class="nbx-rd-label">{{ slot.label }}</span>
+            {% if slot.display_label != slot.label %}<span class="nbx-rd-label nbx-rd-label-hidden">{{ slot.label }}</span><span class="nbx-rd-name-display">{{ slot.display_label }}</span>{% else %}<span class="nbx-rd-label">{{ slot.label }}</span>{% endif %}
           </div>
         </div>
       {% endfor %}

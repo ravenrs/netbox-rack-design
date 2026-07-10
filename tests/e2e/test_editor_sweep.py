@@ -2278,6 +2278,24 @@ window.__rdDisplace = (function () {
         return n;
     }
 
+    // APPLY the open §4a rename dialog choosing "Set a new name" = `name`
+    // (the user-typed rename path, vs applyRenameDialogs' keep-name default).
+    function applyRenameDialogsWithName(name) {
+        var n = 0;
+        document.querySelectorAll(".nbx-rd-move-modal").forEach(function (modal) {
+            var newRadio = modal.querySelector("#nbx-rd-move-new");
+            var input = modal.querySelector(".nbx-rd-move-new-input");
+            var apply = modal.querySelector("[data-rd-move-apply]");
+            if (!newRadio || !input || !apply) { return; }
+            newRadio.checked = true;
+            newRadio.dispatchEvent(new Event("change", {bubbles: true}));
+            input.value = name;
+            apply.click();
+            n++;
+        });
+        return n;
+    }
+
     // Geometry of every displacement stripe naming `label` (spec §3, user
     // ruling 2026-07-09: the stripe is a bar OUTSIDE the rack frame): each
     // bar's bounding box plus the face grid's, so a test can assert the bar
@@ -2336,6 +2354,7 @@ window.__rdDisplace = (function () {
         cancelDisplaceDialog: cancelDisplaceDialog,
         dismissAllOtherModals: dismissAllOtherModals,
         applyRenameDialogs: applyRenameDialogs,
+        applyRenameDialogsWithName: applyRenameDialogsWithName,
         stripeGeometry: stripeGeometry,
         ghostBoxes: ghostBoxes,
     };
@@ -2839,6 +2858,150 @@ class EditorDisplacementTestCase(unittest.TestCase):
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
         print("\n=== STRIPE-BAR SUMMARY (outside-the-frame geometry) ===")
         print(f"  bars: {bars}")
+
+    # =====================================================================
+    # Tile label = ASSIGNED name + identity hover card + ghost<->body hover
+    # link (three user rulings 2026-07-10, spec §3 rendering additions).
+    # =====================================================================
+    def test_rename_updates_visible_label_card_and_ghost_link(self):
+        self._load_editor()
+        idx_b, w_b = self.widx(kind="existing", face="front", device_id=self._dev_b_id)
+        new_name = "renamed-dev-b-42"
+
+        # Move dev_b to a free slot; rename it via the dialog's NEW-name path.
+        moved = self.page.evaluate(
+            f"() => window.__rdDisplace.moveTile('{idx_b}', {self._free_gsy})")
+        self.assertTrue(moved, "moveTile could not find dev_b")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        n = self.page.evaluate(
+            f"() => window.__rdDisplace.applyRenameDialogsWithName({json.dumps(new_name)})")
+        self.assertEqual(n, 1, "expected exactly one rename dialog")
+        self.page.wait_for_function(
+            "() => !document.querySelector('.nbx-rd-move-modal, .nbx-rd-displace-modal')",
+            timeout=5000)
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        # (1) The tile's VISIBLE label is the assigned name; the stable
+        # identity span keeps the device's real name (hidden).
+        labels = self.page.evaluate(
+            f"""() => {{
+                const el = document.querySelector(
+                    '.grid-stack-item[data-widget-index="{idx_b}"]');
+                const identity = el.querySelector('.nbx-rd-label');
+                const display = el.querySelector('.nbx-rd-name-display');
+                return {{
+                    identityText: identity ? identity.textContent : null,
+                    identityHidden: identity
+                        ? identity.classList.contains('nbx-rd-label-hidden') : null,
+                    displayText: display ? display.textContent : null,
+                    visibleText: display && display.offsetParent !== null
+                        ? display.textContent
+                        : (identity && identity.offsetParent !== null
+                            ? identity.textContent : null),
+                }};
+            }}""")
+        self.assertEqual(
+            labels["displayText"], new_name,
+            f"the tile must SHOW the assigned name: {labels}")
+        self.assertEqual(
+            labels["identityText"], self._dev_b_label,
+            f"the identity span must keep the device's real name: {labels}")
+        self.assertTrue(labels["identityHidden"], labels)
+        self.assertEqual(labels["visibleText"], new_name, labels)
+
+        # (2) The hover card tells the identity story: NEW name + OLD name.
+        card = self.page.evaluate(
+            f"""() => {{
+                const el = document.querySelector(
+                    '.grid-stack-item[data-widget-index="{idx_b}"]');
+                const content = el.querySelector('.grid-stack-item-content');
+                content.dispatchEvent(new PointerEvent('pointerover', {{bubbles: true}}));
+                const c = document.querySelector('.nbx-rd-hovercard');
+                return {{
+                    visible: c ? c.style.display !== 'none' : false,
+                    text: c ? c.textContent : null,
+                }};
+            }}""")
+        self.assertTrue(card["visible"], card)
+        self.assertIn(new_name, card["text"] or "", card)
+        self.assertIn(
+            self._dev_b_label, card["text"] or "",
+            f"the card must show the device's real (old) name too: {card}")
+
+        # (3) Ghost <-> body hover link: hovering the move_in body highlights
+        # the origin ghost; leaving clears it; and the reverse direction.
+        link = self.page.evaluate(
+            f"""() => {{
+                const body = document.querySelector(
+                    '.grid-stack-item[data-widget-index="{idx_b}"]');
+                const ghost = document.querySelector(
+                    '.grid-stack-item.nbx-rd-state-move_out_ghost'
+                    + '[data-rd-device-id="{self._dev_b_id}"]');
+                if (!ghost) {{ return {{error: 'ghost not found by device id'}}; }}
+                const out = {{}};
+                body.dispatchEvent(new PointerEvent('pointerover', {{bubbles: true}}));
+                out.ghostLinkedOnBodyHover =
+                    ghost.classList.contains('nbx-rd-hover-linked');
+                body.dispatchEvent(new PointerEvent('pointerout', {{bubbles: true}}));
+                out.ghostClearedOnLeave =
+                    !ghost.classList.contains('nbx-rd-hover-linked');
+                ghost.dispatchEvent(new PointerEvent('pointerover', {{bubbles: true}}));
+                out.bodyLinkedOnGhostHover =
+                    body.classList.contains('nbx-rd-hover-linked');
+                ghost.dispatchEvent(new PointerEvent('pointerout', {{bubbles: true}}));
+                out.bodyClearedOnLeave =
+                    !body.classList.contains('nbx-rd-hover-linked');
+                return out;
+            }}""")
+        self.assertNotIn("error", link, link)
+        self.assertTrue(link["ghostLinkedOnBodyHover"], link)
+        self.assertTrue(link["ghostClearedOnLeave"], link)
+        self.assertTrue(link["bodyLinkedOnGhostHover"], link)
+        self.assertTrue(link["bodyClearedOnLeave"], link)
+
+        violations = [v for v in self.model_check() if self._dev_b_label in v]
+        self.assertEqual(violations, [], f"read-model must stay clean: {violations}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+        print("\n=== RENAME LABEL/CARD/LINK SUMMARY ===")
+        print(f"  labels: {labels}")
+        print(f"  card text: {card['text']}")
+        print(f"  link: {link}")
+
+    def test_palette_add_shows_assigned_name(self):
+        """A palette ADD's tile shows the ASSIGNED name once one exists
+        (typed into the inline input, or auto-filled by the naming engine)
+        -- never the device-type model while a name is set."""
+        self._load_editor()
+        # Drop a fresh palette add at a free slot (harness primitive).
+        self.page.evaluate(
+            f"() => window.__rdDisplace.dropPaletteItemAt("
+            f"{self._dt_half_id}, 1, 'palette-add-under-test', false, 'front', "
+            f"{self._u_to_gsy(self._rack_u_height, 3, 2)})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+        typed_name = "typed-add-name-7"
+        result = self.page.evaluate(
+            f"""() => {{
+                // The freshest add tile: the one carrying the inline name input.
+                const input = document.querySelector('.nbx-rd-name-input');
+                if (!input) {{ return {{error: 'no add name input found'}}; }}
+                const content = input.closest('.grid-stack-item-content');
+                input.value = {json.dumps(typed_name)};
+                input.dispatchEvent(new Event('input', {{bubbles: true}}));
+                const identity = content.querySelector('.nbx-rd-label');
+                const display = content.querySelector('.nbx-rd-name-display');
+                return {{
+                    identityText: identity ? identity.textContent : null,
+                    identityHidden: identity
+                        ? identity.classList.contains('nbx-rd-label-hidden') : null,
+                    displayText: display ? display.textContent : null,
+                }};
+            }}""")
+        self.assertNotIn("error", result, result)
+        self.assertEqual(
+            result["displayText"], typed_name,
+            f"the add tile must SHOW the assigned name, not the type model: {result}")
+        self.assertTrue(result["identityHidden"], result)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     # =====================================================================
     # SAVED displacement, ON-LOAD rendering parity (spec §3/§4.3, parity
@@ -3782,6 +3945,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         cls._rack_c = rack_c["id"]
         cls._site_id = site["id"]
         cls._subject_label = dev_subject["name"]
+        cls._subject_device_id = dev_subject["id"]
         cls._subject_orig_gsy = cls._u_to_gsy(6, 4)
         cls._bfull_label = dev_b_full["name"]
         # dev_b_full: 3U at U8 -> gsH 6 -> gs rows [12, 18) on BOTH faces.
@@ -4584,6 +4748,63 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         self.assertEqual(model_violations, [], model_violations)
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
+    # =====================================================================
+    # Ghost <-> body hover link, CROSS-RACK (user ruling 2026-07-10): a
+    # committed cross-rack move leaves the ghost in rack A and the move_in
+    # body in rack B -- hovering either must highlight the other across
+    # blocks (both live in the same DOM; identity via data-rd-device-id).
+    # =====================================================================
+    def test_hover_links_ghost_and_body_cross_rack(self):
+        self._load_editor()
+        r = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+            f"{self._rack_b}, 'front', 0)")
+        self.assertTrue(r.get("ok"), f"moveTo failed: {r}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        link = self.page.evaluate(
+            f"""() => {{
+                const did = "{self._subject_device_id}";
+                let body = null, ghost = null;
+                document.querySelectorAll(
+                    '.grid-stack-item[data-rd-device-id="' + did + '"]'
+                ).forEach(el => {{
+                    if (el.classList.contains('nbx-rd-state-move_out_ghost')) {{
+                        ghost = el;
+                    }} else if (!el.getAttribute('data-rd-derived-opp')) {{
+                        body = el;
+                    }}
+                }});
+                if (!body || !ghost) {{
+                    return {{error: 'pair not found', body: !!body, ghost: !!ghost}};
+                }}
+                const bodyRack = body.closest('.nbx-rd-rack-block')
+                    .getAttribute('data-rack-id');
+                const ghostRack = ghost.closest('.nbx-rd-rack-block')
+                    .getAttribute('data-rack-id');
+                const out = {{bodyRack, ghostRack}};
+                body.dispatchEvent(new PointerEvent('pointerover', {{bubbles: true}}));
+                out.ghostLinked = ghost.classList.contains('nbx-rd-hover-linked');
+                body.dispatchEvent(new PointerEvent('pointerout', {{bubbles: true}}));
+                out.ghostCleared = !ghost.classList.contains('nbx-rd-hover-linked');
+                ghost.dispatchEvent(new PointerEvent('pointerover', {{bubbles: true}}));
+                out.bodyLinked = body.classList.contains('nbx-rd-hover-linked');
+                ghost.dispatchEvent(new PointerEvent('pointerout', {{bubbles: true}}));
+                out.bodyCleared = !body.classList.contains('nbx-rd-hover-linked');
+                return out;
+            }}""")
+        self.assertNotIn("error", link, link)
+        # The pair genuinely spans two racks (the cross-rack part of the rule).
+        self.assertEqual(link["ghostRack"], str(self._rack_a), link)
+        self.assertEqual(link["bodyRack"], str(self._rack_b), link)
+        self.assertTrue(link["ghostLinked"], f"cross-rack ghost must highlight: {link}")
+        self.assertTrue(link["ghostCleared"], link)
+        self.assertTrue(link["bodyLinked"], f"cross-rack body must highlight: {link}")
+        self.assertTrue(link["bodyCleared"], link)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
     def test_rename_dialog_cancel_button_fully_reverts_cross_rack_move(self):
         self._assert_rename_dialog_cancel_fully_reverts("cancelRenameDialogViaCancelButton")
 
@@ -4828,6 +5049,53 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         self.assertEqual(
             self.errors, [],
             f"page/console errors during the palette displacement: {self.errors}")
+
+    # =====================================================================
+    # Live bug (2026-07-10, Petr: "dropped on 23, landed on 22"): a palette
+    # add whose CURSOR is over the LOWER half of a whole unit must still land
+    # ON that unit -- not one unit lower. A unit spans two 0.5U rows and a
+    # pointer at the unit's visual centre floors to its lower row; with the
+    # palette gesture's grabRows==0 the raw 0.5U row was used as the tile top,
+    # so a centre/lower-half release fell a unit low. Cursor governance must
+    # snap a whole-U add to the U-grid: pointing anywhere inside a unit lands
+    # the device ON it.
+    # =====================================================================
+    def test_palette_cursor_lower_half_lands_on_that_unit(self):
+        self._load_editor()
+        # U12 front = rows 8-9 (free); the unit below, U11 = rows 10-11 (free).
+        target_top = self._u_to_gsy(12, 2)    # 8 -- U12's top 0.5U row
+        cursor_lower_half = target_top + 1    # 9 -- U12's LOWER 0.5U row (its centre)
+        # The drag HELPER's grab offset makes the engine park the clone a 0.5U
+        # row off (here ON the cursor row, an ODD row -> a HALF-unit slot), and
+        # because the cursor is INSIDE that engine span the old code trusted it
+        # (`inSpan`) and committed the half-unit landing. Force exactly that.
+        engine_low = cursor_lower_half        # 9 -- odd helper park, cursor in-span
+        r = self.page.evaluate(
+            f"() => window.__rdX.dropPaletteItemAtWithCursor({self._rack_b}, "
+            f"'{self._dt_half_id}', 1, 'e2e-pal-align', false, 'front', "
+            f"{engine_low}, {cursor_lower_half})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.assertFalse(
+            r.get("denyVisible"),
+            "an empty in-rack unit must not raise the deny indicator")
+        info = self.page.evaluate(
+            "() => window.__rdX.subjectInfo('e2e-pal-align')")
+        self.assertIsNotNone(info, "the palette add did not register")
+        self.assertEqual(info["rackId"], self._rack_b, info)
+        self.assertEqual(info["face"], "front", info)
+        self.assertEqual(
+            info["y"], target_top,
+            f"a palette add whose cursor is over U12 (rows {target_top}-"
+            f"{target_top + 1}) must land ON U12 (gs-y {target_top}), not a unit "
+            f"lower; got gs-y {info['y']}")
+        self.assertIn("nbx-rd-state-add", info["classes"], info)
+        model_violations = self.page.evaluate(
+            "() => (window.__rdModel ? window.__rdModel.check() : "
+            "['window.__rdModel missing'])")
+        self.assertEqual(model_violations, [], model_violations)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     # =====================================================================
     # Targeted regression (the live bug, 2026-07-08): a foreign (cross-rack)

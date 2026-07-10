@@ -15,6 +15,7 @@ from ..models import Design, DesignPlacement
 from ..naming import (
     generate_name,
     name_exists_in_site,
+    pending_names,
     placement_ordinal,
 )
 from .utils import create_dcim_environment
@@ -26,6 +27,12 @@ def sample_naming_fn(placement):
 
 
 not_callable_value = "I am a string, not a function"
+
+
+def raising_naming_fn(placement):
+    """Module-level callable that always raises, to exercise the runtime-error
+    fallback in ``script`` mode."""
+    raise RuntimeError("boom")
 
 
 def _plugins_config(**overrides):
@@ -106,6 +113,35 @@ class NamingEngineTestCase(TestCase):
     def test_sequence_mode_explicit_index(self):
         # An explicit index bypasses the ordinal query.
         self.assertEqual(generate_name(self.p_add, index=7), "DC-Build-7")
+
+    # --- pending (in-editor, unsaved) names (user bug 2026-07-10) ----------
+
+    def test_pending_names_helper(self):
+        # Default: no attribute -> empty list; the injected attribute is
+        # surfaced as-is (the same pattern as _projected_vacated_device_ids).
+        placement = DesignPlacement(design=self.design)
+        self.assertEqual(pending_names(placement), [])
+        placement._rd_pending_names = ["a-1", "b-2"]
+        self.assertEqual(pending_names(placement), ["a-1", "b-2"])
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_sequence_mode_skips_pending_sibling_names(self):
+        """Two unsaved same-session siblings must not receive the same
+        sequence name: the built-in mode bumps past any pending name that
+        matches its own '<title>-<digits>' family (the user's duplicate-name
+        bug, reproduced at the engine level)."""
+        placement = DesignPlacement(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+        )
+        placement._rd_pending_names = ["DC-Build-7", "DC-Build-9", "unrelated-1"]
+        # index=7 collides with a pending sibling; the highest pending family
+        # ordinal is 9, so the next free is 10.
+        self.assertEqual(generate_name(placement, index=7), "DC-Build-10")
+        # No pending collision: the index is used untouched.
+        placement._rd_pending_names = ["unrelated-1"]
+        self.assertEqual(generate_name(placement, index=7), "DC-Build-7")
 
     # --- template mode -----------------------------------------------------
 
@@ -194,21 +230,24 @@ class NamingEngineTestCase(TestCase):
     def test_script_mode(self):
         self.assertEqual(generate_name(self.p_add), f"script:{self.p_add.pk}")
 
+    # A broken script config must NOT raise (which would 500 the preview
+    # endpoint and leave a blank name): it falls back to the default sequence
+    # name so a mis-configured or not-yet-loaded script degrades gracefully
+    # (user requirement 2026-07-10). Each case asserts the sequence fallback.
+
     @override_settings(
         PLUGINS_CONFIG=_plugins_config(naming_mode="script", naming_script="")
     )
-    def test_script_mode_empty_path_raises(self):
-        with self.assertRaises(ValueError):
-            generate_name(self.p_add)
+    def test_script_mode_empty_path_falls_back_to_sequence(self):
+        self.assertEqual(generate_name(self.p_add, index=4), "DC-Build-4")
 
     @override_settings(
         PLUGINS_CONFIG=_plugins_config(
             naming_mode="script", naming_script="no.such.module.fn"
         )
     )
-    def test_script_mode_bad_path_raises(self):
-        with self.assertRaises(ValueError):
-            generate_name(self.p_add)
+    def test_script_mode_bad_path_falls_back_to_sequence(self):
+        self.assertEqual(generate_name(self.p_add, index=4), "DC-Build-4")
 
     @override_settings(
         PLUGINS_CONFIG=_plugins_config(
@@ -216,9 +255,18 @@ class NamingEngineTestCase(TestCase):
             naming_script="netbox_rack_design.tests.test_naming.not_callable_value",
         )
     )
-    def test_script_mode_not_callable_raises(self):
-        with self.assertRaises(ValueError):
-            generate_name(self.p_add)
+    def test_script_mode_not_callable_falls_back_to_sequence(self):
+        self.assertEqual(generate_name(self.p_add, index=4), "DC-Build-4")
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="script",
+            naming_script="netbox_rack_design.tests.test_naming.raising_naming_fn",
+        )
+    )
+    def test_script_mode_runtime_error_falls_back_to_sequence(self):
+        # A script that RAISES while computing a name also degrades to default.
+        self.assertEqual(generate_name(self.p_add, index=4), "DC-Build-4")
 
     # --- collision check ---------------------------------------------------
 

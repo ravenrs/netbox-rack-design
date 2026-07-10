@@ -158,6 +158,29 @@ stripe bar server-side, and the editor applies the same collapse+bar on LOAD
 from that marking — a saved displacement never renders as two composited
 full tiles anywhere.
 
+**Tile label = assigned name (user ruling 2026-07-10):** once a placement
+carries a `proposed_name` (auto-filled by the naming engine, typed into an
+add's inline field, or chosen in the §4a rename dialog), the tile's VISIBLE
+label shows that name — falling back to the device-type model (adds) or the
+device's real name (moves) only while no name exists. Implementation note:
+the visible name is a separate display span layered over the stable
+`.nbx-rd-label` identity span, which is never rewritten (it anchors ghost
+pairing, the read-model and the test harnesses); ghost (origin) tiles keep
+showing the physical device's real name.
+
+**Hover card = identity story (user ruling 2026-07-10):** hovering a
+`move_in` tile (or a renamed add) shows the full picture — the plan's new
+name, the device's real dcim name ("Was"), old tenant, type, role, and the
+target rack/U ("To"). Hovering a ghost shows where the device WENT (new name
++ destination rack/U, resolvable from the paired move placement for saved
+moves). Applies to the editor and the read-only elevation alike (both hover
+cards read the same `data-*` attributes).
+
+**Ghost ↔ body hover link (user ruling 2026-07-10):** hovering a `move_in`
+body highlights its origin ghost and vice versa (`.nbx-rd-hover-linked`
+outline/glow) — same-rack, cross-rack and tray ghosts alike, paired by
+device identity (`data-rd-device-id`), cleared on mouse-leave.
+
 Legend filters (`Existing / Add / Move in / Move out (ghost) / Remove`) apply
 uniformly to bodies, shadows, ghosts and stripes of the corresponding state.
 

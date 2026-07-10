@@ -159,6 +159,11 @@ class DesignViewSet(NetBoxModelViewSet):
             target_position=data.get("target_position"),
             target_face=data.get("target_face") or "",
         )
+        # Same-session sibling names (user bug 2026-07-10): stamped onto the
+        # unsaved placement (same pattern as _projected_vacated_device_ids)
+        # so the naming engine -- the built-in sequence mode AND naming
+        # scripts via naming.pending_names() -- can count unsaved siblings.
+        placement._rd_pending_names = data.get("pending_names") or []
 
         name = naming.generate_name(placement, index=data.get("index"))
         exists = naming.name_exists_in_site(name, design.site, exclude_placement=None)

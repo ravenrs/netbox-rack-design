@@ -175,6 +175,15 @@ class PreviewNameSerializer(serializers.Serializer):
     # The ordinal the prospective tile would take, so the editor can preview a
     # name for a not-yet-persisted position without first saving the placement.
     index = serializers.IntegerField(required=False, allow_null=True)
+    # Names already assigned in the CURRENT editor session (unsaved siblings,
+    # invisible to the DB) so the naming engine never hands two same-session
+    # previews the same name (user bug 2026-07-10). Capped defensively.
+    pending_names = serializers.ListField(
+        child=serializers.CharField(max_length=200, allow_blank=True),
+        required=False,
+        default=list,
+        max_length=500,
+    )
 
 
 # ---------------------------------------------------------------------------

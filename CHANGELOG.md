@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-10
+
+### Release Summary
+**Naming you can trust and placement you can see** — a minor, fully backward-compatible release that hardens the naming engine and makes palette placement obvious.
+
+The naming engine gains a shipped, stock-runnable example and, crucially, **graceful degradation**: a mis-configured or unreachable `naming_script` (wrong dotted path, module not loaded yet, or a script that raises) no longer errors — it falls back to the default `sequence` name and logs a warning, so a bad config can never block planning. On the editor side, dragging a device from the palette now lands deterministically on the exact rack unit under the cursor (no more half-unit / off-by-one drops that depended on where you grabbed the palette row), the dragged tile turns translucent, and a green landing-preview band shows precisely where it will drop (red when the slot is illegal). Full-depth devices now read consistently: the front tile shows the planned name while the rear shadow always shows the device's hardware identity. No schema changes, no breaking changes, no migrations.
+
+### Added
+- **Shipped naming example** (`netbox_rack_design.naming_example`): a small, stock-runnable `build_name(placement)` demonstrating a family counter and A/B phase-paired PDU slots (`a1, b1, a2, b2, …`). Uses absolute imports so it keeps working verbatim when copied into NetBox's `SCRIPTS_ROOT`. Enable via `"naming_script": "netbox_rack_design.naming_example.build_name"`.
+- **Drag landing preview**: while dragging a palette add or moving a tile, the tile turns translucent and a green band marks the exact rows it will occupy on release (red deny band over illegal rows).
+- **Device naming docs** (`docs/device-naming.md`): all three modes, a fully-commented example, a step-by-step "verify on your instance" walkthrough, and two `SCRIPTS_ROOT` integration variants (UI Add vs. file copy).
+
+### Fixed
+- **Deterministic palette placement**: a whole-U palette add now snaps to the rack unit under the cursor regardless of where the palette row was grabbed — fixes intermittent off-by-one/half-unit landings (e.g. "dropped on U23, landed on U22").
+- **Consistent full-depth rear face**: the rear shadow always shows the device's stable identity/type, never the mutable planned-name overlay, so every rear hatch reads uniformly (previously an add whose name preview hadn't returned yet leaked the name onto some rear hatches and not others).
+- **Robust script-mode naming**: an unresolvable or raising `naming_script` falls back to the default sequence name (with a logged warning) instead of failing the name-preview request.
+
+### Changed
+- Preview-name requests carry the session's already-assigned sibling names (`pending_names`) so same-session palette adds get consecutive family numbers instead of colliding.
+
 ## [0.9.1] - 2026-07-09
 
 ### Release Summary

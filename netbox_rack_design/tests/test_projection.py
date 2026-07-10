@@ -143,6 +143,59 @@ class DisplacedProjectionTestCase(TestCase):
                 f"a device's own move_in must not displace its own ghost: {ghosts[0]}")
 
 
+class DisplayLabelProjectionTestCase(TestCase):
+    """Tile label = ASSIGNED name (user ruling 2026-07-10): a slot's visible
+    ``display_label`` is the placement's proposed_name when one exists,
+    falling back to the identity label. The identity ``label`` itself is
+    UNCHANGED (it anchors ghost pairing, harnesses, and the read-model);
+    only the display layer shows the new name. Ghost (origin) slots keep the
+    device's real name as their display -- the origin marker names what is
+    physically there today."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]
+        cls.device_type = env["device_type"]
+        cls.design = Design.objects.create(title="Rename plan", site=cls.site)
+
+    def test_renamed_move_in_display_label_is_proposed_name(self):
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],  # "Device 1" @ U1
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+            proposed_name="renamed-node-42",
+        )
+        result = project_rack(self.design, self.racks[0])
+        move_ins = [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_IN]
+        self.assertEqual(len(move_ins), 1)
+        # Identity label unchanged; display shows the assigned name.
+        self.assertEqual(move_ins[0]["label"], self.devices[0].name)
+        self.assertEqual(move_ins[0]["display_label"], "renamed-node-42")
+        # The origin ghost keeps the physical device's name as its display.
+        ghosts = [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_OUT_GHOST]
+        self.assertEqual(len(ghosts), 1)
+        self.assertEqual(ghosts[0]["display_label"], self.devices[0].name)
+
+    def test_unnamed_move_display_label_falls_back_to_device_name(self):
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+        )
+        result = project_rack(self.design, self.racks[0])
+        move_ins = [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_IN]
+        self.assertEqual(move_ins[0]["display_label"], self.devices[0].name)
+
+
 class TrayProjectionTestCase(TestCase):
     @classmethod
     def setUpTestData(cls):

@@ -39,22 +39,45 @@ Three modes are supported, selected by the plugin config key ``naming_mode``
 
 ``script``
     Import the dotted path in config key ``naming_script`` to a callable
-    ``fn(placement) -> str`` and return its result. A clear ``ValueError`` is
-    raised if the path is empty, unimportable, or not callable.
+    ``fn(placement) -> str`` and return its result. If the path is empty,
+    unimportable, or not callable -- OR the script raises while computing a
+    name -- :func:`generate_name` logs a warning and **falls back to the
+    built-in ``sequence`` name** so a mis-configured or buggy script never
+    breaks name preview.
+
+Pending (in-editor, unsaved) sibling names
+------------------------------------------
+Two placements previewed in ONE editor session are invisible to each other in
+the database, so a purely DB-driven "next number" hands both the SAME name
+(confirmed live, 2026-07-10: two same-family palette adds both got
+``dra4-dcs7010t-46``). The preview API therefore stamps the client-supplied
+list of names already assigned in the session onto the (unsaved) placement as
+``placement._rd_pending_names``; :func:`pending_names` surfaces it (default
+``[]``). The built-in ``sequence`` mode consults it, and ``script``-mode
+callables SHOULD too when they compute family counters::
+
+    from netbox_rack_design.naming import pending_names
+    for name in pending_names(placement):
+        ...  # count it exactly like a persisted sibling's proposed_name
 
 The module is import-safe: no database access happens at import time.
 """
 
+import logging
+import re
 import string
 
 from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
+
+logger = logging.getLogger("netbox_rack_design.naming")
 
 __all__ = (
     "DEFAULT_NAMING_MODE",
     "DEFAULT_NAMING_TEMPLATE",
     "AVAILABLE_CONTEXT",
     "generate_name",
+    "pending_names",
     "placement_ordinal",
     "name_exists_in_site",
 )
@@ -200,6 +223,17 @@ def _build_context(placement, n):
     }
 
 
+def pending_names(placement):
+    """
+    Names already assigned in the CURRENT editor session (unsaved siblings),
+    as injected by the preview API onto ``placement._rd_pending_names``.
+    Returns ``[]`` when nothing was injected. Naming scripts should treat
+    these exactly like persisted siblings' ``proposed_name`` values when
+    computing family counters (see the module docstring).
+    """
+    return list(getattr(placement, "_rd_pending_names", None) or [])
+
+
 def placement_ordinal(placement):
     """
     Return the placement's 1-based ordinal among its design's placements in model
@@ -216,7 +250,13 @@ def placement_ordinal(placement):
 
 
 def _run_script(placement):
-    """Resolve and invoke the configured ``naming_script`` callable."""
+    """Resolve and invoke the configured ``naming_script`` callable.
+
+    Raises ``ValueError`` if the configured path is empty, unimportable, or not
+    callable. Any exception the script itself raises propagates unchanged. The
+    caller (:func:`generate_name`) is responsible for turning these into a safe
+    fallback name so a mis-configured or buggy script never breaks name preview.
+    """
     path = get_plugin_config(PLUGIN_NAME, "naming_script", "")
     if not path:
         raise ValueError(
@@ -231,6 +271,22 @@ def _run_script(placement):
     return fn(placement)
 
 
+def _sequence_name(placement, n):
+    """The built-in default: ``"<design title>-<n>"``, bumped past any PENDING
+    (same-session, unsaved) sibling already holding an ordinal in this design's
+    ``"<title>-<digits>"`` family, so two previews in one session never collide
+    (user bug 2026-07-10; see the module docstring)."""
+    family = re.compile(r"^" + re.escape(placement.design.title) + r"-(\d+)$")
+    highest_pending = 0
+    for name in pending_names(placement):
+        match = family.match(name or "")
+        if match:
+            highest_pending = max(highest_pending, int(match.group(1)))
+    if highest_pending >= n:
+        n = highest_pending + 1
+    return f"{placement.design.title}-{n}"
+
+
 def generate_name(placement, *, index=None):
     """
     Compute the proposed name for ``placement`` per the configured naming mode.
@@ -240,6 +296,14 @@ def generate_name(placement, *, index=None):
 
     Never writes to ``dcim`` and never suffixes/mutates for collisions (callers
     use :func:`name_exists_in_site` to warn).
+
+    Robust to a broken ``script`` mode: if the configured ``naming_script``
+    cannot be resolved (wrong/empty dotted path, not importable, not callable)
+    OR the script raises while computing a name, this **falls back to the
+    built-in default** :func:`_sequence_name` and logs a warning -- a
+    mis-configured or buggy naming script degrades to sensible default names
+    rather than breaking name preview (and it is only ever reached from the
+    read-only preview endpoint, so nothing else is affected).
     """
     mode = get_plugin_config(PLUGIN_NAME, "naming_mode", DEFAULT_NAMING_MODE)
     n = index if index is not None else placement_ordinal(placement)
@@ -252,10 +316,19 @@ def generate_name(placement, *, index=None):
         return _FORMATTER.vformat(template, (), context)
 
     if mode == "script":
-        return _run_script(placement)
+        try:
+            return _run_script(placement)
+        except Exception:  # noqa: BLE001 - any failure degrades to the default
+            path = get_plugin_config(PLUGIN_NAME, "naming_script", "")
+            logger.warning(
+                "naming_script %r failed; falling back to the default sequence "
+                "name. Fix the 'naming_script' plugin config to restore custom "
+                "naming.", path, exc_info=True,
+            )
+            return _sequence_name(placement, n)
 
-    # "sequence" (default) and any unrecognised mode fall back to the simple form.
-    return f"{placement.design.title}-{n}"
+    # "sequence" (default) and any unrecognised mode.
+    return _sequence_name(placement, n)
 
 
 def name_exists_in_site(name, site, *, exclude_placement=None):
