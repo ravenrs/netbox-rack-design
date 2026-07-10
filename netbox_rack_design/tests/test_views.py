@@ -192,6 +192,53 @@ class DesignPlacementTest(ViewTestCases.PrimaryObjectViewTestCase):
         }
 
 
+class RenamedMoveRenderTest(TestCase):
+    """Tile label = ASSIGNED name (user ruling 2026-07-10), server-side: a
+    SAVED renamed move renders the NEW name as the tile's visible label
+    (display span) while the stable identity label stays the device's real
+    name (hidden, still in the DOM for identity/read-model matching)."""
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.rack = env["racks"][0]
+        cls.device = env["devices"][0]  # "Device 1" @ U1
+        cls.design = Design.objects.create(title="Rename render", site=cls.site)
+        cls.design.racks.set([cls.rack])
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.device,
+            target_rack=cls.rack,
+            target_position=10,
+            target_face="front",
+            proposed_name="renamed-node-42",
+        )
+
+    def test_saved_rename_renders_new_name_as_visible_label(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": self.design.pk},
+        )
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        # The display span shows the assigned name...
+        self.assertIn("nbx-rd-name-display", content)
+        self.assertIn("renamed-node-42", content)
+        # ...while the identity span (device's real name) stays in the DOM,
+        # hidden, for identity matching.
+        self.assertIn("nbx-rd-label-hidden", content)
+        self.assertIn(self.device.name, content)
+        # The identity-story hover data rides along: the device's real (old)
+        # name + where it is going (user ruling 2026-07-10).
+        self.assertIn(f'data-old-name="{self.device.name}"', content)
+        self.assertIn("data-moved-to=", content)
+
+
 class DisplacedElevationRenderTest(TestCase):
     """Displaced-rendering parity in the READ-ONLY elevation (spec §3 stripe,
     parity ruling 2026-07-09): a SAVED displacement -- OLD's vacating slot

@@ -216,9 +216,28 @@ ul.nbx-rd-unit-numbers li {
 /* Keep the slot label legible above the ghost's dashed-cross overlay, and give
    it a solid backing so the diagonal lines don't run through the text. */
 .nbx-rd-rack .grid-stack-item-content .nbx-rd-label,
+.nbx-rd-rack .grid-stack-item-content .nbx-rd-name-display,
 .nbx-rd-chip .nbx-rd-label {
     position: relative;
     z-index: 1;
+}
+
+/* Tile label = ASSIGNED name (user ruling 2026-07-10): once a proposed name
+   exists, the VISIBLE label is a separate .nbx-rd-name-display span and the
+   stable .nbx-rd-label identity span is hidden (still in the DOM -- it
+   anchors ghost pairing, the read-model, and the test harnesses, and is
+   deliberately never rewritten). */
+.nbx-rd-label-hidden {
+    display: none !important;
+}
+
+/* Hover-linked move pair (user ruling 2026-07-10): hovering a move_in body
+   highlights its origin ghost and vice versa -- a clear visual link. */
+.grid-stack-item.nbx-rd-hover-linked {
+    outline: 2px solid var(--tblr-info, #4299e1);
+    outline-offset: 1px;
+    box-shadow: 0 0 8px rgba(66, 153, 225, 0.85);
+    z-index: 6;
 }
 
 .nbx-rd-state-move_out_ghost > .grid-stack-item-content .nbx-rd-label,

@@ -790,6 +790,71 @@ class EditorAddSweepTestCase(unittest.TestCase):
     def test_add_and_sweep_one_u(self):
         self._add_and_sweep(self._dt_half1, "addsweep-one-u", False)
 
+    # =====================================================================
+    # Rear-shadow identity (user ruling 2026-07-10, revised): a full-depth
+    # add's FRONT body shows the generated/planned name, but its REAR shadow
+    # must always show the device's stable IDENTITY (its type/label), never
+    # the mutable name overlay -- so every rear hatch reads uniformly as the
+    # hardware. (The bug: an add whose async preview-name hadn't returned yet
+    # showed the type on the rear while its already-named siblings leaked the
+    # NAME onto their rear hatches -> inconsistent rear faces.)
+    # =====================================================================
+    def test_full_depth_rear_shadow_shows_identity_not_name(self):
+        self._load_editor()
+        label = "rear-identity-full"
+        idx = self.page.evaluate(
+            f"() => window.__rdAdd.dropPaletteItem("
+            f"{self._dt_full3['id']}, {float(self._dt_full3['u_height'])}, "
+            f"{json.dumps(label)}, true)")
+        self.assertIsNotNone(idx, "dropPaletteItem did not stamp a widget index")
+        # Let the async preview-name resolve and stamp the body's name overlay,
+        # then let a shadow re-sync run (this is exactly the window in which the
+        # old code leaked the name onto the rear hatch).
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 8)
+        self.page.evaluate(f"() => window.__rdAdd.moveTile('{idx}', 0)")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 4)
+
+        info = self.page.evaluate(
+            "(payload) => {"
+            "  const [idx, label] = payload;"
+            "  const body = document.querySelector("
+            "    '.grid-stack-item[data-widget-index=\"' + idx + '\"]');"
+            "  const bodyDisp = body ? body.querySelector('.nbx-rd-name-display') : null;"
+            "  let hatch = null;"
+            "  document.querySelectorAll('[data-rd-derived-opp]').forEach(el => {"
+            "    const lab = el.querySelector('.nbx-rd-label');"
+            "    if (lab && lab.textContent === label) hatch = el;"
+            "  });"
+            "  const hatchDisp = hatch ? hatch.querySelector('.nbx-rd-name-display') : null;"
+            "  const hatchLabel = hatch ? hatch.querySelector('.nbx-rd-label') : null;"
+            "  return {"
+            "    bodyHasName: !!bodyDisp,"
+            "    bodyName: bodyDisp ? bodyDisp.textContent : null,"
+            "    hatchFound: !!hatch,"
+            "    hatchHasNameOverlay: !!hatchDisp,"
+            "    hatchIdentityText: hatchLabel ? hatchLabel.textContent : null,"
+            "    hatchIdentityHidden: hatchLabel ? hatchLabel.classList.contains('nbx-rd-label-hidden') : null,"
+            "  };"
+            "}",
+            [idx, label])
+        self.assertTrue(info["hatchFound"], f"rear shadow not found: {info}")
+        # The body carries a name overlay (the generated name) -- proving the
+        # naming pipeline ran and the shadow's identity is a DELIBERATE choice.
+        self.assertTrue(
+            info["bodyHasName"],
+            f"the front body should carry its generated name overlay: {info}")
+        self.assertFalse(
+            info["hatchHasNameOverlay"],
+            f"the rear shadow must NOT carry a name overlay -- it shows the "
+            f"device identity: {info}")
+        self.assertEqual(
+            info["hatchIdentityText"], label,
+            f"the rear shadow must show the device identity/type label: {info}")
+        self.assertFalse(
+            info["hatchIdentityHidden"],
+            f"the rear shadow's identity label must be visible: {info}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

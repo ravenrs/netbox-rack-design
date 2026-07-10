@@ -109,6 +109,13 @@
             var deviceType = content.getAttribute("data-device-type-name");
             var role = content.getAttribute("data-role-name");
             var tenant = content.getAttribute("data-tenant-name");
+            // Identity story for planned changes (user ruling 2026-07-10):
+            // the device's real dcim name/tenant + where it went/is going.
+            // Mirrors the editor's fillCard exactly.
+            var oldName = content.getAttribute("data-old-name");
+            var oldTenant = content.getAttribute("data-old-tenant");
+            var newName = content.getAttribute("data-new-name");
+            var movedTo = content.getAttribute("data-moved-to");
             if (!name && !deviceType && !role && !tenant) { return false; }
             hcard.textContent = "";
             if (name) {
@@ -117,7 +124,15 @@
                 n.textContent = name;
                 hcard.appendChild(n);
             }
-            [["Type", deviceType], ["Role", role], ["Tenant", tenant]].forEach(function (pair) {
+            [
+                ["Was", (oldName && oldName !== name) ? oldName : null],
+                ["New name", (newName && newName !== name) ? newName : null],
+                ["Type", deviceType],
+                ["Role", role],
+                ["Tenant", tenant],
+                ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
+                ["To", movedTo],
+            ].forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");
                 row.className = "nbx-rd-hovercard-row";

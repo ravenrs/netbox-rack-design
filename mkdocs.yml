@@ -5,6 +5,7 @@ repo_name: ravenrs/netbox-rack-design
 #strict: true
 nav:
   - Home: index.md
+  - Device naming: device-naming.md
   - Contributing: contributing.md
   - Changelog: changelog.md
 theme:

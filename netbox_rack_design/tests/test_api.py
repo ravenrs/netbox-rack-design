@@ -1095,6 +1095,32 @@ class PreviewNameTest(APITestCase):
         self.assertEqual(response.data["name"], "Site 1-3")
 
     @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_pending_names_prevent_same_session_duplicates(self):
+        """User bug 2026-07-10: two palette adds in one session both got the
+        same generated name -- the preview API computed against the DB only,
+        so unsaved in-editor siblings were invisible. The editor now sends
+        `pending_names`; the engine must return a DIFFERENT, consecutive name
+        when the naive same-index second request carries the first's name."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body1 = {"kind": "add", "device_type": self.device_type.pk, "index": 5}
+        r1 = self.client.post(self._url(), body1, format="json", **self.header)
+        self.assertHttpStatus(r1, status.HTTP_200_OK)
+        name1 = r1.data["name"]
+        self.assertEqual(name1, "DC-Preview-5")
+
+        body2 = {
+            "kind": "add", "device_type": self.device_type.pk, "index": 5,
+            "pending_names": [name1],
+        }
+        r2 = self.client.post(self._url(), body2, format="json", **self.header)
+        self.assertHttpStatus(r2, status.HTTP_200_OK)
+        self.assertNotEqual(
+            r2.data["name"], name1,
+            "the second same-family preview must not repeat an unsaved "
+            "sibling's name")
+        self.assertEqual(r2.data["name"], "DC-Preview-6")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
     def test_exists_in_site_true_for_real_device(self):
         """exists_in_site flips true when a real device already uses the name."""
         self.add_permissions("netbox_rack_design.view_design")

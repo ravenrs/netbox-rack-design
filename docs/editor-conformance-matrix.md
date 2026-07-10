@@ -258,6 +258,26 @@ Same file:
   `markDirty` itself on successful registration) — a discarded drag-in
   leaves the Save button untouched.
 
+## §3 additions — naming/identity UX (user rulings 2026-07-10)
+
+| Rule | Context | Expected behavior | Covering test | Status |
+|---|---|---|---|---|
+| Tile label = ASSIGNED name | add (session) | typing into the add's inline name field (or the naming engine's async fill) makes the tile SHOW that name; the stable `.nbx-rd-label` identity span keeps the creation label, hidden | `EditorDisplacementTestCase::test_palette_add_shows_assigned_name` | **CLOSED (2026-07-10)** — falsified pre-fix verbatim (setTileDisplayName no-op'd): `AssertionError: None != 'typed-add-name-7' ... {'identityText': 'palette-add-under-test', 'identityHidden': False, 'displayText': None}` |
+| Tile label = ASSIGNED name | move (session rename) | the §4a dialog's chosen name becomes the tile's visible label; identity span keeps the device's real name (hidden) | `EditorDisplacementTestCase::test_rename_updates_visible_label_card_and_ghost_link` (part 1) | **CLOSED (2026-07-10)** — falsified pre-fix: `AssertionError: None != 'renamed-dev-b-42' ... 'visibleText': 'e2e-displace-new-...'` |
+| Tile label = ASSIGNED name | saved move, server render | projection gains `display_label` (= proposed_name or identity label); template renders the display span + hides the identity span; ghost slots keep the real name | `test_projection.py::DisplayLabelProjectionTestCase` (2 tests); `test_views.py::RenamedMoveRenderTest` | **CLOSED (2026-07-10)** — falsified pre-fix: projection `KeyError: 'display_label'`; view `'nbx-rd-name-display' not found` |
+| Hover card = identity story | move_in / renamed add | card shows NEW name + "Was" (real dcim name) + type/role/tenant (+ "Old tenant"/"To" where set); ghost cards show "New name"/"To" (destination) for saved moves | session: `test_rename_updates_visible_label_card_and_ghost_link` (part 2 — card text contains both names); server attrs: `RenamedMoveRenderTest` (`data-old-name`/`data-moved-to` assertions); both fillCard implementations (editor.js + rack_design.js) extended identically | **CLOSED (2026-07-10)** |
+| Ghost ↔ body hover link | same-rack | hovering the move_in body adds `.nbx-rd-hover-linked` to the origin ghost, and vice versa; cleared on leave | `test_rename_updates_visible_label_card_and_ghost_link` (part 3, all four directions) | **CLOSED (2026-07-10)** — mechanism falsified alongside the label no-op run |
+| Ghost ↔ body hover link | cross-rack | pair spans two rack blocks (asserted: ghost in rack A, body in rack B); both directions + clear | `EditorCrossRackSweepTestCase::test_hover_links_ghost_and_body_cross_rack` | **CLOSED (2026-07-10)** |
+| Ghost ↔ body hover link | tray ghosts | same mechanism -- `data-rd-device-id` is stamped on temp ghosts at creation (incl. tray-origin ones) and matching has no face/row logic | mechanism-covered (no dedicated tray-link test; the attribute stamping + class matching are face-agnostic) | **partial** (honest gap: no dedicated tray-ghost link regression) |
+
+Identity-safety note (the coordinator's warning, verified): the visible-name
+change is a DISPLAY overlay — `.nbx-rd-label` (the identity string used by
+`rdLabelFor`, the read-model's pass-3 fallback, `stripeSourceContent`, and
+every harness `tileByLabel`/`worldSnapshot` label key) is never rewritten,
+so no label-based lookup changes behavior. Verified by grep + full suite
+re-runs (the cross-rack sweeps apply rename dialogs on every hop and kept
+matching subjects by the stable identity span).
+
 ## §9 — Non-racked tray (0.9.0)
 
 Test file: `tests/e2e/test_editor_tray.py` (`EditorTrayTestCase`), plus

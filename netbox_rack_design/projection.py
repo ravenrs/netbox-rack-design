@@ -128,6 +128,7 @@ def _slot(
     device_type=None,
     placement=None,
     opposite_face=False,
+    display_label=None,
 ):
     """Build a single projected-slot dict following the documented contract."""
     return {
@@ -135,6 +136,11 @@ def _slot(
         "u_height": u_height,
         "face": face,
         "label": label,
+        # Tile label = ASSIGNED name (user ruling 2026-07-10): the VISIBLE
+        # name. A renamed move shows its proposed_name here while ``label``
+        # stays the stable IDENTITY string (the device's real name) that
+        # anchors ghost pairing, harnesses, and the read-model.
+        "display_label": display_label if display_label is not None else label,
         "state": state,
         "device": device,
         "device_type": device_type,
@@ -442,6 +448,10 @@ def project_rack(design, rack):
                     device=device,
                     device_type=device_type,
                     placement=placement,
+                    # The plan's new identity for the device (user ruling
+                    # 2026-07-10): the tile SHOWS the assigned name; the
+                    # identity `label` above stays the device's real name.
+                    display_label=placement.proposed_name or None,
                 ),
                 full_depth=full_depth,
             )

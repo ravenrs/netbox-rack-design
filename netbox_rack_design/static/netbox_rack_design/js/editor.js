@@ -257,11 +257,33 @@
         return addOrdinalCounter;
     }
 
+    // Names already assigned in THIS editor session across every rack --
+    // unsaved placements are invisible to the DB, so without this every
+    // same-family preview returned the SAME next number (user bug
+    // 2026-07-10: two palette adds both named dra4-dcs7010t-46). Collected
+    // fresh per request from every rack controller's live state.
+    function collectPendingNames() {
+        var names = [];
+        Object.keys(controllersByRackId).forEach(function (rid) {
+            var ctrl = controllersByRackId[rid];
+            if (ctrl && typeof ctrl.pendingNames === "function") {
+                ctrl.pendingNames().forEach(function (name) {
+                    if (name && names.indexOf(name) === -1) { names.push(name); }
+                });
+            }
+        });
+        return names;
+    }
+
     // Read-only POST to the preview-name endpoint. Resolves to the response
     // {name, exists_in_site} or null on any failure (the auto-fill is a
     // convenience, never blocking — a failure just leaves the name blank).
+    // Every request carries the session's current pending names so the
+    // naming engine can count unsaved siblings (see collectPendingNames).
     function previewName(body) {
         if (!previewNameUrl) { return Promise.resolve(null); }
+        body = body || {};
+        if (!body.pending_names) { body.pending_names = collectPendingNames(); }
         return fetch(previewNameUrl, {
             method: "POST",
             credentials: "same-origin",
@@ -269,7 +291,7 @@
                 "Content-Type": "application/json",
                 "X-CSRFToken": getCsrfToken(),
             },
-            body: JSON.stringify(body || {}),
+            body: JSON.stringify(body),
         }).then(function (resp) {
             if (!resp.ok) { return null; }
             return resp.json();
@@ -284,6 +306,35 @@
     // Esc, or a backdrop click) ABORTS the move and calls onCancel() — the drag
     // is undone, not silently confirmed. Built fresh each open and removed on hide
     // so no state leaks between drags.
+    // Tile label = ASSIGNED name (user ruling 2026-07-10). The visible name
+    // is a SEPARATE `.nbx-rd-name-display` span layered over the stable
+    // `.nbx-rd-label` identity span (which is deliberately never rewritten --
+    // it anchors ghost pairing, the read-model, and the test harnesses).
+    // Passing a blank/equal name removes the display span and unhides the
+    // identity span again.
+    function setTileDisplayName(content, name) {
+        if (!content) { return; }
+        var identity = content.querySelector(".nbx-rd-label");
+        var display = content.querySelector(".nbx-rd-name-display");
+        var identityText = identity ? identity.textContent : "";
+        if (name && name !== identityText) {
+            if (!display) {
+                display = document.createElement("span");
+                display.className = "nbx-rd-name-display";
+                if (identity && identity.nextSibling) {
+                    content.insertBefore(display, identity.nextSibling);
+                } else {
+                    content.appendChild(display);
+                }
+            }
+            display.textContent = name;
+            if (identity) { identity.classList.add("nbx-rd-label-hidden"); }
+        } else {
+            if (display) { display.remove(); }
+            if (identity) { identity.classList.remove("nbx-rd-label-hidden"); }
+        }
+    }
+
     function showMoveNameDialog(oldName, currentName, onConfirm, onCancel) {
         var keepName = (designTitle ? designTitle + "-" : "") + (oldName || "");
 
@@ -633,10 +684,45 @@
         }
         var maxRow = rdMaxRow(host);
         if (!maxRow) { return; }
+        rdHideAllow();  // deny and allow are mutually exclusive
         var rowPx = host.getBoundingClientRect().height / maxRow;
         rdDenyEl.style.top = (topRow * rowPx) + "px";
         rdDenyEl.style.height = (gsH * rowPx) + "px";
         host.classList.add("nbx-rd-deny-active");
+    }
+
+    // The positive counterpart of the deny box: a translucent landing preview
+    // marking the EXACT rows the dragged/added tile will occupy on release,
+    // so the drop target is visible under the (translucent) drag helper
+    // (user request 2026-07-10). Same geometry as rdShowDeny, opposite intent.
+    var rdAllowEl = null;
+    function rdHideAllow() {
+        if (rdAllowEl && rdAllowEl.parentNode) {
+            rdAllowEl.parentNode.classList.remove("nbx-rd-allow-active");
+            rdAllowEl.parentNode.removeChild(rdAllowEl);
+        }
+    }
+    function rdShowAllow(host, topRow, gsH) {
+        if (!rdAllowEl) {
+            rdAllowEl = document.createElement("div");
+            rdAllowEl.className = "nbx-rd-cursor-allow";
+        }
+        if (rdAllowEl.parentNode !== host) {
+            rdHideAllow();
+            host.appendChild(rdAllowEl);
+        }
+        var maxRow = rdMaxRow(host);
+        if (!maxRow) { return; }
+        rdHideDeny();  // deny and allow are mutually exclusive
+        var rowPx = host.getBoundingClientRect().height / maxRow;
+        rdAllowEl.style.top = (topRow * rowPx) + "px";
+        rdAllowEl.style.height = (gsH * rowPx) + "px";
+        host.classList.add("nbx-rd-allow-active");
+    }
+    // Hide BOTH cursor indicators (teardown / off-grid).
+    function rdClearCursorInds() {
+        rdHideDeny();
+        rdHideAllow();
     }
 
     // The cursor's candidate placement for the active gesture: the host the
@@ -647,7 +733,18 @@
         if (!g || !g.lastHost || g.lastRow == null) { return null; }
         var maxRow = rdMaxRow(g.lastHost);
         if (!maxRow) { return null; }
-        var top = Math.max(0, Math.min(g.lastRow - g.grabRows, maxRow - g.gsH));
+        var top = g.lastRow - g.grabRows;
+        // A whole-U PALETTE add snaps to the U-grid. A unit spans two 0.5U
+        // rows, so a pointer at a unit's visual centre floors to its LOWER
+        // row; with the palette gesture's grabRows==0 that raw row became the
+        // tile top and the add fell a unit low (live bug 2026-07-10, Petr:
+        // "dropped on 23, landed on 22"). An integer-U device (even gsH) has
+        // only even valid tops, and floor-to-even is exactly the unit that
+        // contains the cursor row -- so pointing anywhere inside a unit lands
+        // the device ON it. Moves are untouched: their grabRows already
+        // preserves the source tile's own U-alignment.
+        if (g.palette && g.gsH % 2 === 0) { top -= top % 2; }
+        top = Math.max(0, Math.min(top, maxRow - g.gsH));
         var block = g.lastHost.closest(".nbx-rd-rack-block");
         return {
             host: g.lastHost,
@@ -665,7 +762,7 @@
         if (!host) {
             g.lastHost = null;
             g.lastRow = null;
-            rdHideDeny();
+            rdClearCursorInds();
             return;
         }
         var row = rdRowAt(host, rdLastPointer.y);
@@ -673,11 +770,12 @@
         g.lastHost = host;
         g.lastRow = row;
         var cand = rdCursorCandidate();
-        if (!cand) { rdHideDeny(); return; }
+        if (!cand) { rdClearCursorInds(); return; }
         var verdict = rdCanPlaceAt(
             g.el, cand.rackId, cand.face, cand.top, g.gsH, g.isFullDepth);
         if (verdict.ok) {
-            rdHideDeny();
+            // Show WHERE it lands: the snapped candidate rows (green preview).
+            rdShowAllow(host, cand.top, g.gsH);
         } else {
             rdShowDeny(host, cand.top, g.gsH);
         }
@@ -719,7 +817,7 @@
                 isFullDepth: pal.getAttribute("data-is-full-depth") === "true",
                 grabRows: 0, lastHost: null, lastRow: null,
             };
-            rdHideDeny();
+            rdClearCursorInds();
             rdPendingGrab = null;
             return;
         }
@@ -755,7 +853,7 @@
     // when it is inside the tile. No pointer data at all -> stays untracked.
     function rdBeginCursorGesture(el, gsH, isFullDepth) {
         rdCursorGesture = null;
-        rdHideDeny();
+        rdClearCursorInds();
         if (!el || gsH <= 0) { return; }
         var grabRows = null;
         if (rdPendingGrab && rdPendingGrab.el === el
@@ -782,7 +880,7 @@
 
     function rdEndCursorGesture() {
         rdCursorGesture = null;
-        rdHideDeny();
+        rdClearCursorInds();
     }
 
     // ========================================================================
@@ -906,6 +1004,20 @@
         widgets.forEach(function (w) {
             if (w.opposite_face && w.device_id != null) {
                 fullDepthDeviceIds[w.device_id] = true;
+            }
+        });
+
+        // Stamp each server-rendered tile with its device identity (user
+        // ruling 2026-07-10, ghost<->body hover link): `data-rd-device-id`
+        // travels WITH the element through moves/adoptions/re-taggings, so a
+        // move_in body and its origin ghost can find each other by pure DOM
+        // identity from ANY rack block, with no per-rack closure lookups.
+        widgets.forEach(function (w, idx) {
+            if (!w || w.device_id == null || w.opposite_face) { return; }
+            var el = block.querySelector(
+                '.grid-stack-item[data-widget-index="' + idx + '"]');
+            if (el && !el.getAttribute("data-rd-derived-opp")) {
+                el.setAttribute("data-rd-device-id", w.device_id);
             }
         });
 
@@ -1168,10 +1280,16 @@
         var curDragIdx = null;
         var curDragEl = null;
 
-        function makeGhostElement(label) {
+        function makeGhostElement(label, deviceId) {
             var item = document.createElement("div");
             item.className = "grid-stack-item nbx-rd-state-move_out_ghost";
             item.setAttribute("data-rd-temp-ghost", "1");
+            // Device identity for the ghost<->body hover link (user ruling
+            // 2026-07-10) -- same attribute the hydration pass stamps on
+            // server-rendered tiles.
+            if (deviceId != null) {
+                item.setAttribute("data-rd-device-id", deviceId);
+            }
             var content = document.createElement("div");
             content.className = "grid-stack-item-content";
             content.setAttribute("title", (label || "") + " (move out)");
@@ -1219,7 +1337,7 @@
             // never the U-derived gsH/gsY, which are meaningless off-rack.
             var gsH = (face === "") ? 2 : Math.round((w.u_height || 1) * 2);
             var gsY = (face === "") ? trayAppendRow(null) : uPositionToGsY(st.origUPosition, gsH);
-            var ghost = makeGhostElement(w.label);
+            var ghost = makeGhostElement(w.label, w.device_id);
             // addWidget -> Engine.addNode -> _fixCollisions can cascade into
             // real tiles when the origin rows are (legitimately) re-occupied;
             // this helper also runs OUTSIDE the gesture bracket (deferred
@@ -1582,6 +1700,20 @@
                 classes.push("nbx-rd-opposite-conflict");
             }
             st.shadowEl = placeOrMoveShadow(st.shadowEl, target, gsY, gsH, w.label, classes, idx, rackId);
+            // The rear shadow always shows the device's STABLE IDENTITY -- the
+            // device-type model for an add, the real name for an existing
+            // device -- never the mutable planned-name overlay (user ruling
+            // 2026-07-10, revised: the front body reads "what will it be called",
+            // the rear hatch reads "what hardware is it"). Previously the shadow
+            // was given `w.proposed_name`, which leaked the name onto it
+            // inconsistently -- an add whose async preview-name hadn't returned
+            // yet showed the type while its already-named siblings showed the
+            // name. Force-clear any overlay a prior sync applied so every rear
+            // hatch reads uniformly.
+            if (st.shadowEl) {
+                setTileDisplayName(
+                    st.shadowEl.querySelector(".grid-stack-item-content"), "");
+            }
         }
 
         // Re-sync ONE ghost's own mirror hatch (its full-depth device's vacated
@@ -2010,6 +2142,11 @@
                     if (content) {
                         content.setAttribute("data-name", name || oldName);
                         content.setAttribute("title", oldName + " → " + name);
+                        // The tile SHOWS the plan's new identity (user
+                        // ruling 2026-07-10); the hover card tells the
+                        // identity story (new name + the device's real one).
+                        setTileDisplayName(content, name);
+                        content.setAttribute("data-old-name", oldName);
                     }
                     markDirty();
                 }, function () {
@@ -3124,34 +3261,43 @@
             var pg = rdCursorGesture;
             if (pg && pg.palette && pg.lastHost && pg.lastRow != null) {
                 var dropHost = el.closest(".grid-stack");
-                var inSpan = (pg.lastHost === dropHost)
-                    && pg.lastRow >= gsY && pg.lastRow < gsY + gsH;
-                if (!inSpan) {
-                    var cand = rdCursorCandidate();
-                    var verdict = cand
-                        ? rdCanPlaceAt(el, cand.rackId, cand.face, cand.top, gsH, isFullDepth)
-                        : { ok: false };
-                    if (!verdict.ok || !cand || pg.lastHost !== dropHost) {
-                        rdEndCursorGesture();
-                        rdBeginPushSuppression();
-                        try {
-                            grid.removeWidget(el, true);
-                        } finally {
-                            rdEndPushSuppression();
-                        }
-                        return;
-                    }
+                // Cursor governs a palette add UNCONDITIONALLY. The engine's
+                // landing (`gsY`) is derived from the drag HELPER, whose offset
+                // from the pointer varies with where on the (tall) palette row
+                // the user grabbed -- so trusting it made the SAME gesture land
+                // on a different (often HALF-)unit drop-to-drop (live bug
+                // 2026-07-10: "drop on 23, lands 22/23/23.5"). Place on the unit
+                // UNDER THE CURSOR instead (rdCursorCandidate snaps a whole-U add
+                // to the U-grid). An earlier `inSpan` shortcut kept the engine's
+                // slot whenever the cursor fell inside its span -- exactly the
+                // jittery half-unit case -- so it is gone: the cursor decides
+                // every time. Illegal rows, or a cursor over a different grid
+                // than the drop, DISCARD the drag-in cleanly (no add, no dirty
+                // residue); legal -> commit at the cursor's snapped rows.
+                var cand = rdCursorCandidate();
+                var verdict = cand
+                    ? rdCanPlaceAt(el, cand.rackId, cand.face, cand.top, gsH, isFullDepth)
+                    : { ok: false };
+                if (!verdict.ok || !cand || pg.lastHost !== dropHost) {
+                    rdEndCursorGesture();
                     rdBeginPushSuppression();
                     try {
-                        grid.update(el, { x: 0, y: cand.top, w: 1, h: gsH });
-                        syncNodeOrig(el);
+                        grid.removeWidget(el, true);
                     } finally {
                         rdEndPushSuppression();
                     }
-                    node = el.gridstackNode || node;
-                    gsY = cand.top;
-                    uPosition = gsYToUPosition(gsY, gsH);
+                    return;
                 }
+                rdBeginPushSuppression();
+                try {
+                    grid.update(el, { x: 0, y: cand.top, w: 1, h: gsH });
+                    syncNodeOrig(el);
+                } finally {
+                    rdEndPushSuppression();
+                }
+                node = el.gridstackNode || node;
+                gsY = cand.top;
+                uPosition = gsYToUPosition(gsY, gsH);
                 rdEndCursorGesture();
             }
 
@@ -3280,6 +3426,9 @@
                     widget.nameUserSet = true;
                     widget.proposed_name = nameInput.value;
                     content.setAttribute("data-name", nameInput.value || label);
+                    // The tile SHOWS the assigned name, falling back to the
+                    // type model while blank (user ruling 2026-07-10).
+                    setTileDisplayName(content, nameInput.value);
                     markDirty();
                 });
 
@@ -3299,6 +3448,9 @@
                         nameInput.value = data.name || "";
                         widget.proposed_name = data.name || "";
                         content.setAttribute("data-name", data.name || label);
+                        // The tile SHOWS the naming engine's assigned name
+                        // the moment it lands (user ruling 2026-07-10).
+                        setTileDisplayName(content, data.name || "");
                     }
                     applyWarn(!!data.exists_in_site);
                 });
@@ -3453,12 +3605,27 @@
         // shadowEl/ghostShadows[] references every later mutation then moves.
         refreshGhosts();
 
+        // Every name assigned in THIS session within this rack (adds' typed/
+        // auto-filled names, moves' dialog-chosen names) -- feeds the
+        // preview API's pending_names so unsaved siblings never receive the
+        // same generated name (user bug 2026-07-10).
+        function pendingNames() {
+            var names = [];
+            state.forEach(function (st) {
+                if (!st || !st.widget || st.removed) { return; }
+                var name = st.widget.proposed_name;
+                if (name) { names.push(name); }
+            });
+            return names;
+        }
+
         var controller = {
             rackId: rackId,
             buildRackPayload: buildRackPayload,
             highlightError: highlightError,
             freezeOthers: freezeOthers,
             thaw: thaw,
+            pendingNames: pendingNames,
             // Gesture-end settle hook (thawAllTiles calls it for every rack).
             scheduleRefresh: scheduleRefresh,
             // Cross-rack move surface used by OTHER rack controllers.
@@ -3855,6 +4022,12 @@
             var deviceType = content.getAttribute("data-device-type-name");
             var role = content.getAttribute("data-role-name");
             var tenant = content.getAttribute("data-tenant-name");
+            // Identity story for planned changes (user ruling 2026-07-10):
+            // the device's real dcim name/tenant + where it went/is going.
+            var oldName = content.getAttribute("data-old-name");
+            var oldTenant = content.getAttribute("data-old-tenant");
+            var newName = content.getAttribute("data-new-name");
+            var movedTo = content.getAttribute("data-moved-to");
             if (!name && !deviceType && !role && !tenant) { return false; }
             hcard.textContent = "";
             if (name) {
@@ -3863,7 +4036,15 @@
                 n.textContent = name;
                 hcard.appendChild(n);
             }
-            [["Type", deviceType], ["Role", role], ["Tenant", tenant]].forEach(function (pair) {
+            [
+                ["Was", (oldName && oldName !== name) ? oldName : null],
+                ["New name", (newName && newName !== name) ? newName : null],
+                ["Type", deviceType],
+                ["Role", role],
+                ["Tenant", tenant],
+                ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
+                ["To", movedTo],
+            ].forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");
                 row.className = "nbx-rd-hovercard-row";
@@ -3903,14 +4084,52 @@
         // device's data-* set, so the card answers "what was here").
         var HOVER_SOURCE_SELECTOR = ".grid-stack-item-content, .nbx-rd-stripe";
 
+        // ---- Ghost <-> body hover link (user ruling 2026-07-10) ----------
+        // Hovering a move_in body highlights its origin ghost, and hovering a
+        // ghost highlights the destination body -- same-rack, cross-rack and
+        // tray alike (all blocks share this DOM). Identity: the
+        // `data-rd-device-id` attribute stamped on every real-device tile at
+        // hydration and on every temp ghost at creation; a ghost pairs with
+        // the one non-ghost body carrying the same device id (derived
+        // hatches are excluded -- they carry no data-rd-device-id).
+        var linkedEls = [];
+        function clearHoverLink() {
+            linkedEls.forEach(function (el) {
+                el.classList.remove("nbx-rd-hover-linked");
+            });
+            linkedEls = [];
+        }
+        function applyHoverLink(item) {
+            clearHoverLink();
+                if (!item) { return; }
+            var did = item.getAttribute("data-rd-device-id");
+            if (!did) { return; }
+            var isGhost = item.classList.contains("nbx-rd-state-move_out_ghost");
+            root.querySelectorAll(
+                '.grid-stack-item[data-rd-device-id="' + did + '"]'
+            ).forEach(function (cand) {
+                if (cand === item) { return; }
+                var candGhost = cand.classList.contains("nbx-rd-state-move_out_ghost");
+                if (candGhost === isGhost) { return; }   // link ghost <-> body only
+                cand.classList.add("nbx-rd-hover-linked");
+                linkedEls.push(cand);
+            });
+        }
+
         root.addEventListener("pointerover", function (e) {
             var content = e.target.closest && e.target.closest(HOVER_SOURCE_SELECTOR);
+            var item = e.target.closest && e.target.closest(".grid-stack-item");
+            applyHoverLink(item);
             if (!content || content === currentContent) { return; }
             if (!fillCard(content)) { hideCard(); return; }
             currentContent = content;
             positionCard(content);
         });
         root.addEventListener("pointerout", function (e) {
+            var item = e.target.closest && e.target.closest(".grid-stack-item");
+            if (item && !(e.relatedTarget && item.contains(e.relatedTarget))) {
+                clearHoverLink();
+            }
             var content = e.target.closest && e.target.closest(HOVER_SOURCE_SELECTOR);
             if (!content) { return; }
             if (e.relatedTarget && content.contains(e.relatedTarget)) { return; }

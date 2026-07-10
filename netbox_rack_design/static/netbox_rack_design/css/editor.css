@@ -17,6 +17,16 @@
     cursor: grabbing;
 }
 
+/* While a device is actively dragged (a palette add or a moved tile), fade the
+   helper so the rack rows -- and the green landing preview drawn at the
+   snapped drop target -- stay visible underneath it (user request
+   2026-07-10). The clone still shows its label/type so you know what you hold,
+   just at reduced opacity. */
+.grid-stack .grid-stack-item.ui-draggable-dragging,
+.nbx-rd-palette-item.ui-draggable-dragging {
+    opacity: 0.45;
+}
+
 /* Each tile holds a label and a small remove button in its top-right corner. */
 .nbx-rd-rack .grid-stack-item-content,
 .nbx-rd-tray .grid-stack-item-content {
@@ -827,5 +837,25 @@
 }
 
 .nbx-rd-deny-active .grid-stack-placeholder {
+    display: none !important;
+}
+
+/* The positive counterpart: a GREEN landing preview at the CURSOR's snapped
+   target rows while a dragged/added device hovers a LEGAL slot, so the drop
+   destination is obvious under the translucent drag helper (user request
+   2026-07-10). Same geometry as the deny box; while it is active the vendor
+   placeholder is likewise hidden so the cursor's preview is the only one. */
+.nbx-rd-cursor-allow {
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: rgba(47, 179, 68, 0.25);
+    border: 1px dashed var(--tblr-green, #2fb344);
+    border-radius: 2px;
+    pointer-events: none;
+    z-index: 30;
+}
+
+.nbx-rd-allow-active .grid-stack-placeholder {
     display: none !important;
 }
