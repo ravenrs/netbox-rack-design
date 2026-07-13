@@ -4028,7 +4028,8 @@
             var oldTenant = content.getAttribute("data-old-tenant");
             var newName = content.getAttribute("data-new-name");
             var movedTo = content.getAttribute("data-moved-to");
-            if (!name && !deviceType && !role && !tenant) { return false; }
+            var power = content.getAttribute("data-power");
+            if (!name && !deviceType && !role && !tenant && !power) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -4057,6 +4058,40 @@
                 row.appendChild(val);
                 hcard.appendChild(row);
             });
+            // Power supplies: one row per PSU (name + allocated draw), an
+            // "(nc)" marker on any port not cabled to power. data-power is
+            // "name:draw:conn|..." (conn 1/0, blank for a catalog template).
+            if (power) {
+                var total = 0;
+                power.split("|").forEach(function (entry) {
+                    var parts = entry.split(":");
+                    var pname = parts[0];
+                    var draw = parseInt(parts[1], 10) || 0;
+                    var conn = parts[2];
+                    total += draw;
+                    var prow = document.createElement("div");
+                    prow.className = "nbx-rd-hovercard-row";
+                    var pkey = document.createElement("span");
+                    pkey.className = "nbx-rd-hovercard-key";
+                    pkey.textContent = "PS " + pname;
+                    var pval = document.createElement("span");
+                    pval.textContent = draw + " W"
+                        + (conn === "0" ? " (nc)" : "");
+                    prow.appendChild(pkey);
+                    prow.appendChild(pval);
+                    hcard.appendChild(prow);
+                });
+                var trow = document.createElement("div");
+                trow.className = "nbx-rd-hovercard-row";
+                var tkey = document.createElement("span");
+                tkey.className = "nbx-rd-hovercard-key";
+                tkey.textContent = "Allocated";
+                var tval = document.createElement("span");
+                tval.textContent = total + " W";
+                trow.appendChild(tkey);
+                trow.appendChild(tval);
+                hcard.appendChild(trow);
+            }
             return true;
         }
 

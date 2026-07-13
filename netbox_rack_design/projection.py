@@ -86,6 +86,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from dcim.choices import DeviceFaceChoices
+from netbox.plugins import get_plugin_config
 
 from .choices import DesignPlacementKindChoices
 
@@ -94,6 +95,21 @@ __all__ = (
     "ProjectedElevation",
     "project_rack",
 )
+
+PLUGIN_NAME = "netbox_rack_design"
+
+# Power projection defaults (docs/power-projection-spec.md §2 Tier 1). Overridable
+# via PLUGINS_CONFIG keys: power_capacity_default_w, power_draw_basis,
+# power_warn_pct, power_critical_pct.
+DEFAULT_POWER_CAPACITY_W = 1000
+DEFAULT_POWER_BASIS = "allocated"
+DEFAULT_POWER_WARN_PCT = 80
+DEFAULT_POWER_CRITICAL_PCT = 100
+# Roles treated as power INFRASTRUCTURE, not consumers: a PDU distributes power
+# to the devices plugged into it, so counting its input draw would double-count
+# those devices. Excluded from the consumption sum (config key
+# power_exclude_roles). Matched case-insensitively against the device role slug.
+DEFAULT_POWER_EXCLUDE_ROLES = ("pdu", "unmanageable-pdu")
 
 
 class ProjectedSlotState:
@@ -115,6 +131,12 @@ class ProjectedElevation:
     front: list = field(default_factory=list)
     rear: list = field(default_factory=list)
     non_racked: list = field(default_factory=list)
+    # Power projection (Tier 1, crude/zero-config) -- see
+    # docs/power-projection-spec.md. Rack-level summary populated by
+    # _project_power() at the end of project_rack(); each counting slot also
+    # gets per-slot ``draw_w``/``draw_known`` for the heatmap. Keys:
+    # draw_w, capacity_w, util_pct, state, unknown_draw_count, basis.
+    power: dict = field(default_factory=dict)
 
 
 def _slot(
@@ -159,6 +181,15 @@ def _slot(
         # full tile composited under the occupant.
         "displaced": False,
         "displaced_by": None,
+        # Power projection (docs/power-projection-spec.md §1): the device's
+        # projected draw in watts and whether any power data was found. Filled
+        # by _project_power() for draw-counting slots (existing/add/move_in);
+        # 0/False on vacating (ghost/remove) slots that don't consume.
+        "draw_w": 0.0,
+        "draw_known": False,
+        # Per-PSU detail for the hover card (name / draw / connected), filled by
+        # _project_power() for draw-counting slots.
+        "power_ports": [],
     }
 
 
@@ -305,6 +336,217 @@ def _existing_tray_slots(rack, excluded_device_ids):
             )
         )
     return slots
+
+
+# ---------------------------------------------------------------------------
+# Power projection (Tier 1, crude / zero-config) -- docs/power-projection-spec.md
+# ---------------------------------------------------------------------------
+
+# States whose device actually CONSUMES power in the planned world. A vacating
+# ghost (move_out_ghost) and a flagged removal do not (the body draws at its
+# target, or is gone).
+_DRAW_COUNTING_STATES = frozenset(
+    (ProjectedSlotState.EXISTING, ProjectedSlotState.ADD, ProjectedSlotState.MOVE_IN)
+)
+
+
+def _port_draw(obj, basis):
+    """Draw (watts) of one PowerPort or PowerPortTemplate for ``basis``
+    ('allocated'|'maximum'), falling back to the other field when the chosen one
+    is unset. Returns None when neither is set."""
+    primary = getattr(obj, f"{basis}_draw", None)
+    if primary:
+        return primary
+    other = "maximum" if basis == "allocated" else "allocated"
+    return getattr(obj, f"{other}_draw", None)
+
+
+def _device_draw_w(device, device_type, basis):
+    """Projected draw of a device in watts, plus a status:
+
+    * ``"known"``   -- a draw was resolved (from the device's PowerPorts, or
+      failing that its type's PowerPortTemplates).
+    * ``"unknown"`` -- the device HAS power ports (or its type defines port
+      templates) but none carry a draw value -- a powered device we can't
+      account for. Flagged so the total isn't silently under-reported.
+    * ``"passive"`` -- the device has NO power ports at all (patch panels,
+      cable managers, blanking panels): it legitimately draws nothing, so it is
+      neither counted nor flagged.
+
+    Returns ``(watts, status)`` (watts is 0.0 unless status == "known").
+    """
+    has_ports = False
+    if device is not None:
+        ports = list(device.powerports.all())
+        if ports:
+            has_ports = True
+            vals = [v for v in (_port_draw(p, basis) for p in ports) if v is not None]
+            if vals:
+                return float(sum(vals)), "known"
+    dt = device_type or (device.device_type if device is not None else None)
+    if dt is not None:
+        templates = list(dt.powerporttemplates.all())
+        if templates:
+            has_ports = True
+            vals = [v for v in (_port_draw(t, basis) for t in templates) if v is not None]
+            if vals:
+                return float(sum(vals)), "known"
+    return 0.0, ("unknown" if has_ports else "passive")
+
+
+def _rack_capacity_w(rack, default_w):
+    """Rack power capacity in watts: the sum of the rack's PowerFeeds'
+    ``available_power`` when any feed is modeled (NetBox's real electrical
+    model), else the configured flat fallback."""
+    from dcim.models import PowerFeed
+
+    total = 0.0
+    any_feed = False
+    for feed in PowerFeed.objects.filter(rack=rack):
+        available = feed.available_power
+        if available:
+            total += float(available)
+            any_feed = True
+    return total if any_feed else float(default_w)
+
+
+def _device_power_ports(device, device_type, basis):
+    """Per-PSU detail for the hover card: a list of
+    ``{"name", "draw", "connected"}`` for the device's real PowerPorts, or its
+    type's PowerPortTemplates for a planned add (``connected`` is None then --
+    a template has no cabling). ``draw`` is the chosen-basis draw (0 if unset)."""
+    out = []
+    if device is not None:
+        ports = list(device.powerports.all())
+        if ports:
+            for p in ports:
+                out.append({
+                    "name": p.name,
+                    "draw": _port_draw(p, basis) or 0,
+                    "connected": getattr(p, "cable_id", None) is not None,
+                })
+            return out
+    dt = device_type or (device.device_type if device is not None else None)
+    if dt is not None:
+        for t in dt.powerporttemplates.all():
+            out.append({"name": t.name, "draw": _port_draw(t, basis) or 0,
+                        "connected": None})
+    return out
+
+
+def _device_unconnected(device):
+    """True when a REAL device HAS power ports but at least one is not cabled to
+    power (a connection gap). False for adds (no real device), passive gear (no
+    power ports), and fully-cabled devices."""
+    if device is None:
+        return False
+    ports = list(device.powerports.all())
+    if not ports:
+        return False
+    return any(getattr(p, "cable_id", None) is None for p in ports)
+
+
+def _slot_role_slug(slot):
+    """The device's role slug for a slot: the real device's role (existing/move)
+    or the placement's chosen role (add). Lowercased; '' when unknown."""
+    device = slot.get("device")
+    role = None
+    if device is not None and getattr(device, "role_id", None):
+        role = device.role
+    else:
+        placement = slot.get("placement")
+        if placement is not None and getattr(placement, "device_role_id", None):
+            role = placement.device_role
+    return (role.slug if role else "").lower()
+
+
+def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_pct,
+                   exclude_roles=()):
+    """Populate per-slot ``draw_w``/``draw_known`` and return the rack-level
+    power summary. Sums each consuming device once (a full-depth device appears
+    on both faces but must not double-count) over the planned world.
+
+    Devices whose role is in ``exclude_roles`` (power infrastructure -- PDUs)
+    are NOT counted as consumers: their input draw is the aggregate of the
+    devices they feed, so counting it double-counts. They get draw_w=0 and are
+    left out of the total (and the unknown tally)."""
+    exclude = {r.lower() for r in exclude_roles}
+    seen = set()
+    draw_total = 0.0
+    unconnected_devices = []
+    for face_slots in (elevation.front, elevation.rear, elevation.non_racked):
+        for slot in face_slots:
+            if slot["state"] not in _DRAW_COUNTING_STATES:
+                continue
+            # Per-PSU detail for the hover card (all consumers + PDUs alike).
+            slot["power_ports"] = _device_power_ports(
+                slot["device"], slot["device_type"], basis)
+            # Power infrastructure (PDU): not a consumer -> 0, excluded from
+            # the total, never flagged.
+            if _slot_role_slug(slot) in exclude:
+                slot["draw_w"] = 0.0
+                slot["draw_known"] = True
+                continue
+            watts, status = _device_draw_w(slot["device"], slot["device_type"], basis)
+            slot["draw_w"] = watts
+            # Passive gear (no power ports) reads as "known 0" -- it draws
+            # nothing by design, so the heatmap treats it as a low consumer,
+            # not the unknown hatch. Only a powered-but-undrawn device is unknown.
+            slot["draw_known"] = status != "unknown"
+            device = slot["device"]
+            placement = slot["placement"]
+            if device is not None:
+                key = ("dev", device.pk)
+            elif placement is not None and placement.pk is not None:
+                key = ("pl", placement.pk)
+            else:
+                key = ("id", id(slot))
+            if key in seen:
+                continue
+            seen.add(key)
+            draw_total += watts
+            # Connection completeness (user ruling 2026-07-13): flag a REAL
+            # device that HAS power ports but at least one is NOT cabled to
+            # power -- a planning gap ("device with ports not connected"). Keep
+            # the count AND names for the hover. Passive gear (no power ports)
+            # is skipped, and adds (no real device yet) aren't cabled so aren't
+            # flagged.
+            if _device_unconnected(device):
+                unconnected_devices.append(slot.get("label") or "")
+
+    capacity = _rack_capacity_w(elevation.rack, capacity_default_w)
+    util = (draw_total / capacity * 100.0) if capacity else 0.0
+    if util >= critical_pct:
+        state = "critical"
+    elif util >= warn_pct:
+        state = "warn"
+    else:
+        state = "ok"
+    return {
+        "draw_w": draw_total,
+        "capacity_w": capacity,
+        "util_pct": util,
+        "state": state,
+        "unconnected_count": len(unconnected_devices),
+        "unconnected_devices": unconnected_devices,
+        "basis": basis,
+    }
+
+
+def _power_config():
+    """Resolve the power projection config (PLUGINS_CONFIG with defaults)."""
+    return {
+        "capacity_default_w": get_plugin_config(
+            PLUGIN_NAME, "power_capacity_default_w", DEFAULT_POWER_CAPACITY_W),
+        "basis": get_plugin_config(
+            PLUGIN_NAME, "power_draw_basis", DEFAULT_POWER_BASIS),
+        "warn_pct": get_plugin_config(
+            PLUGIN_NAME, "power_warn_pct", DEFAULT_POWER_WARN_PCT),
+        "critical_pct": get_plugin_config(
+            PLUGIN_NAME, "power_critical_pct", DEFAULT_POWER_CRITICAL_PCT),
+        "exclude_roles": get_plugin_config(
+            PLUGIN_NAME, "power_exclude_roles", DEFAULT_POWER_EXCLUDE_ROLES),
+    }
 
 
 def project_rack(design, rack):
@@ -467,10 +709,14 @@ def project_rack(design, rack):
     front.sort(key=lambda s: s["u_position"], reverse=True)
     rear.sort(key=lambda s: s["u_position"], reverse=True)
 
-    return ProjectedElevation(
+    elevation = ProjectedElevation(
         design=design,
         rack=rack,
         front=front,
         rear=rear,
         non_racked=non_racked,
     )
+    # Power projection (docs/power-projection-spec.md): fills per-slot draw and
+    # the rack-level summary over the planned world just built above.
+    elevation.power = _project_power(elevation, **_power_config())
+    return elevation
