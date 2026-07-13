@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-13
+
+### Release Summary
+**Power projection** — a minor, fully backward-compatible release that shows how much power a planned design will draw, per rack, before it is applied to DCIM.
+
+The editor and the read-only elevation now compute a projected power draw for the *planned* world (existing − removes + adds, moves reassigned) and compare it to a capacity, reusing NetBox's own power model (`PowerPort` / `PowerPortTemplate` draw, `PowerFeed.available_power`). Each rack gets an always-visible **power bar** — projected draw / capacity / utilization %, colored ok/warn/critical — and a **"Power heatmap"** toggle that turns every device tile into a per-device consumption "health bar" (the rack's biggest consumer fills red, the rest proportionally toward green). Hovering a power bar lists the count of devices whose power ports aren't cabled and **pulls those tiles out of the rack** to point them out; hovering any device shows its PSUs and allocated power on the info card. PDUs are treated as power infrastructure (they distribute, not consume) and excluded from the total; passive gear with no power ports is skipped, not flagged. No schema changes, no breaking changes, no migrations.
+
+### Added
+- **Per-rack power bar** (`docs/power-projection-spec.md`): projected draw vs. capacity with ok/warn/critical thresholds, on both the editor and the read-only elevation. Capacity comes from the rack's `PowerFeed`s when modeled, else a configurable fallback.
+- **Power heatmap toggle**: per-device fill bars, max-normalized per rack (biggest consumer = 100% red → green), suppressing the normal state tints while active and restoring them exactly when off.
+- **Connection-gap flag**: the bar shows a ⚠ count of devices whose power ports are not cabled; hovering the bar highlights ("pulls out") those tiles.
+- **PSU detail on the device hover card**: one row per power port (name + allocated draw), a total, and an `(nc)` marker for uncabled ports.
+- **Naming**: a stock-runnable example naming module and graceful fallback (from 0.10.0) remain; power adds a new read-only projection layer only.
+- Config keys: `power_capacity_default_w`, `power_draw_basis` (`allocated`/`maximum`), `power_warn_pct`, `power_critical_pct`, `power_exclude_roles`.
+- Backend tests for draw resolution / capacity / thresholds / PDU exclusion / passive-skip / connection flag, and a deterministic Playwright e2e suite for the bar, heatmap, pull-out and PSU hover.
+
+### Changed
+- Power is strictly read-only: computed server-side in `projection.py` and surfaced on the projection bundle; it never writes to `dcim` and never marks the design dirty.
+
 ## [0.10.0] - 2026-07-10
 
 ### Release Summary

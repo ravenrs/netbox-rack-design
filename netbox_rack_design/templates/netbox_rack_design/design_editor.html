@@ -101,6 +101,17 @@
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
           </div>
           <div class="vr nbx-rd-toolbar-sep d-none d-md-block" aria-hidden="true"></div>
+          {# Power heatmap toggle (docs/power-projection-spec.md §3): recolor #}
+          {# tiles green->red by each device's share of the rack's total draw. #}
+          <label class="nbx-rd-filter" title="{% trans 'Color devices by power consumption (share of rack total)' %}">
+            <input type="checkbox" data-rd-power-heatmap>{% trans "Power heatmap" %}
+          </label>
+          <span class="nbx-rd-heat-legend" aria-hidden="true">
+            <span class="small text-muted">{% trans "low" %}</span>
+            <span class="nbx-rd-heat-scale"></span>
+            <span class="small text-muted">{% trans "high" %}</span>
+          </span>
+          <div class="vr nbx-rd-toolbar-sep d-none d-md-block" aria-hidden="true"></div>
           <div class="nbx-rd-toolbar-field d-flex align-items-center gap-2">
             <label class="form-label small mb-0 text-nowrap" for="id_device_role">{% trans "Role" %}</label>
             {{ palette_form.device_role }}
@@ -298,4 +309,5 @@
   <script src="{% static 'netbox_rack_design/js/editor.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/editor_panels.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/power_heatmap.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}

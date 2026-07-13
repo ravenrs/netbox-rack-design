@@ -49,6 +49,23 @@
     </div>
   </div>
 
+  {# ---- Per-rack power bar (docs/power-projection-spec.md): projected draw #}
+  {# vs capacity, always visible in normal mode. ok/warn/critical color.     #}
+  {% if b.power %}
+  <div class="nbx-rd-power-bar nbx-rd-power-{{ b.power.state }}"
+       data-rd-power-draw="{{ b.power.draw_w|floatformat:0 }}"
+       data-rd-power-capacity="{{ b.power.capacity_w|floatformat:0 }}"
+       data-rd-power-util="{{ b.power.util_pct|floatformat:0 }}"
+       {% if b.power.unconnected_count %}data-rd-power-unconnected="{{ b.power.unconnected_devices|join:'|' }}"{% endif %}
+       title="{% trans 'Projected power' %}: {{ b.power.draw_w|floatformat:0 }} W / {{ b.power.capacity_w|floatformat:0 }} W ({{ b.power.util_pct|floatformat:0 }}%){% if b.power.unconnected_count %} · {{ b.power.unconnected_count }} {% trans 'device(s) with power ports not connected' %}: {{ b.power.unconnected_devices|join:', ' }}{% endif %}">
+    <div class="nbx-rd-power-fill" style="width: {{ b.power.util_pct|floatformat:0 }}%;"></div>
+    <span class="nbx-rd-power-label">
+      {{ b.power.draw_w|floatformat:0 }} / {{ b.power.capacity_w|floatformat:0 }} W
+      · {{ b.power.util_pct|floatformat:0 }}%{% if b.power.unconnected_count %} ⚠ {{ b.power.unconnected_count }}{% endif %}
+    </span>
+  </div>
+  {% endif %}
+
   {# ---- Rack faces: Front + Rear side by side (independent toggles). ---- #}
   <div class="nbx-rd-faces">
     {# ---- Front face ---- #}
@@ -85,6 +102,7 @@
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
                    data-name="{{ slot.display_label }}"
+                   {% if slot.power_ports %}data-power="{% for p in slot.power_ports %}{{ p.name }}:{{ p.draw|floatformat:0 }}:{% if p.connected %}1{% elif p.connected == False %}0{% endif %}{% if not forloop.last %}|{% endif %}{% endfor %}"{% endif %}
                    {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                    {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
@@ -142,6 +160,7 @@
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
                    data-name="{{ slot.display_label }}"
+                   {% if slot.power_ports %}data-power="{% for p in slot.power_ports %}{{ p.name }}:{{ p.draw|floatformat:0 }}:{% if p.connected %}1{% elif p.connected == False %}0{% endif %}{% if not forloop.last %}|{% endif %}{% endfor %}"{% endif %}
                    {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                    {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}

@@ -859,3 +859,119 @@
 .nbx-rd-allow-active .grid-stack-placeholder {
     display: none !important;
 }
+
+/* ============================================================================
+   Power projection (docs/power-projection-spec.md)
+   ========================================================================= */
+
+/* Per-rack power bar (normal mode, always visible): projected draw vs capacity. */
+.nbx-rd-power-bar {
+    position: relative;
+    height: 1.15rem;
+    margin: 0.35rem 0 0.5rem;
+    border-radius: 3px;
+    background: var(--tblr-border-color, #e0e0e0);
+    overflow: hidden;
+    font-size: 0.7rem;
+    line-height: 1.15rem;
+}
+.nbx-rd-power-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    max-width: 100%;               /* clamp when util exceeds 100% */
+    background: var(--tblr-green, #2fb344);
+    transition: width 0.2s ease;
+}
+.nbx-rd-power-warn .nbx-rd-power-fill { background: var(--tblr-yellow, #f59f00); }
+.nbx-rd-power-critical .nbx-rd-power-fill { background: var(--tblr-red, #d63939); }
+.nbx-rd-power-label {
+    position: relative;
+    z-index: 1;
+    padding: 0 0.4rem;
+    color: var(--tblr-body-color, #1a1a1a);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* Heatmap mode (the "галка"): when a rack block carries .nbx-rd-heatmap, the
+   normal state tints are neutralized so the green->red consumption gradient
+   (set inline per tile by editor.js from each device's share of the rack's
+   total draw) is the only fill. */
+.nbx-rd-heatmap .grid-stack-item:not(.nbx-rd-opposite):not(.nbx-rd-state-move_out_ghost)
+        > .grid-stack-item-content {
+    color: #111 !important;
+    /* Per-device consumption "health bar": filled left->right to this device's
+       share of the rack's biggest consumer, colored green(low)->red(top). The
+       fill % and color are set inline per tile by power_heatmap.js. */
+    background-color: #e4e6ea !important;
+    background-image: linear-gradient(
+        to right,
+        var(--nbx-rd-heat-col, #2fb344) var(--nbx-rd-heat-pct, 0%),
+        transparent var(--nbx-rd-heat-pct, 0%)) !important;
+    background-repeat: no-repeat !important;
+}
+/* Devices with no power data read as a neutral hatch, not green (absence of
+   data != zero consumption). */
+.nbx-rd-heatmap .grid-stack-item.nbx-rd-heat-unknown > .grid-stack-item-content {
+    background-color: #b7b7b7 !important;
+    background-image: repeating-linear-gradient(
+        45deg, transparent, transparent 4px,
+        rgba(0, 0, 0, 0.12) 4px, rgba(0, 0, 0, 0.12) 8px) !important;
+}
+
+/* Heatmap gradient legend (shown while the toggle is on). */
+.nbx-rd-heat-legend {
+    display: none;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+}
+.nbx-rd-heatmap-active .nbx-rd-heat-legend { display: inline-flex; }
+.nbx-rd-heat-legend .nbx-rd-heat-scale {
+    width: 90px;
+    height: 0.7rem;
+    border-radius: 3px;
+    background: linear-gradient(to right,
+        #2fb344 0%, #f59f00 55%, #d63939 100%);
+}
+
+/* Power-bar hover popover: draw/capacity + the scrollable list of devices with
+   unconnected power ports. */
+.nbx-rd-power-pop {
+    position: fixed;
+    z-index: 1080;
+    display: none;
+    max-width: 320px;
+    padding: 0.5rem 0.65rem;
+    border-radius: 5px;
+    background: var(--tblr-dark, #1d273b);
+    color: #fff;
+    font-size: 0.78rem;
+    line-height: 1.3;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+}
+.nbx-rd-power-pop-head {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.nbx-rd-power-pop-sub {
+    margin-top: 0.35rem;
+    color: var(--tblr-yellow, #f59f00);
+}
+
+/* Hovering a power bar "pulls out" the tiles of its unconnected devices: they
+   slide out of the rack to the right, lifting above their neighbours with a
+   shadow cast back into the gap they left. Neutral grey edge, no loud color. */
+.grid-stack-item.nbx-rd-power-flagged {
+    z-index: 45;
+}
+.grid-stack-item.nbx-rd-power-flagged > .grid-stack-item-content {
+    transform: translateX(10px);
+    border: 1px solid var(--tblr-gray-500, #adb5bd);
+    box-shadow: -7px 0 9px -3px rgba(0, 0, 0, 0.35),
+                3px 2px 8px rgba(0, 0, 0, 0.3);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}

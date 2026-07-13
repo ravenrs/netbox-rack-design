@@ -240,6 +240,11 @@ def _slot_to_widget(slot):
         # so it needs the type's own flag (already true for SESSION adds,
         # which stamp it from the palette item's data attribute).
         "is_full_depth": bool(device_type is not None and device_type.is_full_depth),
+        # Power projection (docs/power-projection-spec.md): the device's
+        # projected draw in watts and whether any power data was found. Drives
+        # the per-rack power bar and the heatmap gradient in the editor.
+        "draw_w": float(slot.get("draw_w") or 0.0),
+        "draw_known": bool(slot.get("draw_known")),
     }
 
 
@@ -267,6 +272,9 @@ def _project_rack_bundle(design, rack):
             "u_height": rack.u_height,
             "desc_units": rack.desc_units,
         },
+        # Power projection summary (docs/power-projection-spec.md): drives the
+        # per-rack power bar shown in normal mode and the heatmap legend.
+        "power": result.power,
     }
 
 
