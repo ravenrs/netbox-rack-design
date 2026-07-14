@@ -2169,6 +2169,32 @@ window.__rdDisplace = (function () {
         };
     }
 
+    // Click the ×/remove button on tile `idx` (cancels a move, flags a
+    // removal, or cancels an add depending on the tile's state).
+    function clickRemove(idx) {
+        var el = tileEl(idx);
+        if (!el) { return false; }
+        var btn = el.querySelector(".nbx-rd-remove-btn");
+        if (!btn) { return false; }
+        btn.click();
+        return true;
+    }
+
+    // The visible name state of tile `idx`: its stable identity label, the
+    // mutable display-name overlay (null when none), and whether the identity
+    // is hidden behind the overlay.
+    function tileNames(idx) {
+        var el = tileEl(idx);
+        if (!el) { return null; }
+        var identity = el.querySelector(".nbx-rd-label");
+        var display = el.querySelector(".nbx-rd-name-display");
+        return {
+            identity: identity ? identity.textContent : null,
+            identityHidden: identity ? identity.classList.contains("nbx-rd-label-hidden") : null,
+            display: display ? display.textContent : null,
+        };
+    }
+
     // Every move_out_ghost body tile (temp or persistent) matching `label`,
     // WITH its stripe state -- the assertion surface for the displacement
     // stripe (spec §3, §4.3): whether it is collapsed (`nbx-rd-displaced`)
@@ -2355,6 +2381,8 @@ window.__rdDisplace = (function () {
         dismissAllOtherModals: dismissAllOtherModals,
         applyRenameDialogs: applyRenameDialogs,
         applyRenameDialogsWithName: applyRenameDialogsWithName,
+        clickRemove: clickRemove,
+        tileNames: tileNames,
         stripeGeometry: stripeGeometry,
         ghostBoxes: ghostBoxes,
     };
@@ -2966,6 +2994,53 @@ class EditorDisplacementTestCase(unittest.TestCase):
         print(f"  labels: {labels}")
         print(f"  card text: {card['text']}")
         print(f"  link: {link}")
+
+    # =====================================================================
+    # Cancelling a move (× on the move_in tile) must revert the NAME too,
+    # not just the position (user bug 2026-07-14: a renamed move reverted its
+    # slot but the tile kept showing "<design>-<name>" instead of the real
+    # device name).
+    # =====================================================================
+    def test_cancel_move_reverts_assigned_name(self):
+        self._load_editor()
+        idx_b, w_b = self.widx(kind="existing", face="front", device_id=self._dev_b_id)
+
+        # Move dev_b and rename it -> the tile shows the assigned name overlay.
+        self.page.evaluate(
+            f"() => window.__rdDisplace.moveTile('{idx_b}', {self._free_gsy})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate(
+            f"() => window.__rdDisplace.applyRenameDialogsWithName("
+            f"{json.dumps('renamed-cancel-9')})")
+        self.page.wait_for_function(
+            "() => !document.querySelector('.nbx-rd-move-modal')", timeout=5000)
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        before = self.page.evaluate(f"() => window.__rdDisplace.tileNames('{idx_b}')")
+        self.assertEqual(before["display"], "renamed-cancel-9", before)
+        self.assertTrue(before["identityHidden"], before)
+
+        # × on the move_in tile -> cancelMove: position AND name revert.
+        self.assertTrue(
+            self.page.evaluate(f"() => window.__rdDisplace.clickRemove('{idx_b}')"),
+            "could not click × on the move_in tile")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        after = self.page.evaluate(f"() => window.__rdDisplace.tileNames('{idx_b}')")
+        self.assertIsNone(
+            after["display"],
+            f"the assigned-name overlay must be gone after cancel: {after}")
+        self.assertEqual(
+            after["identity"], self._dev_b_label,
+            f"the identity label must be the real device name: {after}")
+        self.assertFalse(
+            after["identityHidden"],
+            f"the identity label must be visible again after cancel: {after}")
+        info = self.page.evaluate(f"() => window.__rdDisplace.tileInfo('{idx_b}')")
+        self.assertIn("nbx-rd-state-existing", info["classes"], info)
+        self.assertEqual(
+            info["y"], self._dev_b_orig_gsy,
+            f"the device must be back at its origin row: {info}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     def test_palette_add_shows_assigned_name(self):
         """A palette ADD's tile shows the ASSIGNED name once one exists

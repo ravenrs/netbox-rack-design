@@ -1,50 +1,97 @@
 /*
- * Power heatmap toggle (docs/power-projection-spec.md §3).
+ * Power projection UI (docs/power-projection-spec.md §3) — LIVE.
  *
- * When the toolbar's "Power heatmap" checkbox is on, every device tile is
- * colored on a green->red gradient by its share of its rack's TOTAL projected
- * draw, and the normal state tints are neutralized (via the .nbx-rd-heatmap
- * class + !important rules in editor.css). Devices with no power data get a
- * neutral hatch instead of green.
+ * Reads each tile's own `data-draw-w` / `data-draw-known` (stamped by the
+ * server and carried on the element, so they travel with a tile as it is moved
+ * between racks), so the per-rack power bar and the heatmap recompute in the
+ * browser as devices are shuffled -- no round-trip. A MutationObserver on each
+ * rack block drives the live update (tiles added/removed/reparented, or flagged
+ * for removal).
  *
- * Design note: the heat color is written as the CSS custom property
- * `--nbx-rd-heat` on each tile's content, and the heatmap CSS paints
- * `background-color: var(--nbx-rd-heat) !important` ONLY while the rack block
- * carries .nbx-rd-heatmap. Toggling the class off therefore restores the
- * server-rendered styling automatically -- we never overwrite (or need to
- * restore) the tiles' own inline background.
+ * Two views:
+ *   - Always on: the per-rack power bar (draw / capacity / util%, ok/warn/
+ *     critical), recomputed live.
+ *   - Toggle "Power heatmap": per-device consumption "health bar" filled
+ *     left->right to the device's share of the rack's BIGGEST consumer
+ *     (biggest = 100% red, others proportionally toward green). Off restores
+ *     the normal styling exactly.
  *
- * Read-only: this is a pure view layer. It changes no widget state, sets no
- * dirty flag, and saves nothing.
+ * Read-only: pure view layer -- no widget state, no dirty flag, nothing saved.
+ * (A freshly-dropped palette add has no client-side draw yet, so it counts as
+ * 0 W live until the design is saved and reloaded; moves/removes of real
+ * devices update fully live.)
  */
 (function () {
     "use strict";
 
-    // widget-index -> {draw, known} from the per-rack embedded payload.
-    function drawMap(block) {
-        var rid = block.getAttribute("data-rack-id");
-        var el = document.getElementById("rd-editor-data-" + rid);
-        var map = {};
-        if (!el) { return map; }
-        try {
-            JSON.parse(el.textContent || "[]").forEach(function (w, i) {
-                map[i] = {
-                    draw: (w && typeof w.draw_w === "number") ? w.draw_w : 0,
-                    known: !!(w && w.draw_known),
-                };
-            });
-        } catch (e) { /* malformed payload -> empty map */ }
-        return map;
+    // ---- draw model (read straight off the live tiles) ---------------------
+
+    // Tiles that CONSUME power for the rack total: exclude the opposite-face
+    // hatch, derived/temp ghosts, move-out ghosts, remove-flagged tiles and
+    // palette clones. (PDUs already carry data-draw-w="0" from the server.)
+    function countingTiles(block) {
+        return Array.prototype.slice.call(
+            block.querySelectorAll(".grid-stack-item")
+        ).filter(function (t) {
+            if (t.classList.contains("nbx-rd-palette-item")) { return false; }
+            if (t.classList.contains("nbx-rd-opposite")) { return false; }
+            if (t.getAttribute("data-rd-derived-opp")) { return false; }
+            if (t.classList.contains("nbx-rd-state-move_out_ghost")) { return false; }
+            if (t.getAttribute("data-rd-temp-ghost")) { return false; }
+            if (t.classList.contains("nbx-rd-state-remove")) { return false; }
+            return true;
+        });
+    }
+
+    function tileDraw(tile) {
+        var c = tile.querySelector(".grid-stack-item-content");
+        var v = c ? parseFloat(c.getAttribute("data-draw-w")) : 0;
+        return isNaN(v) ? 0 : v;
+    }
+
+    function tileKnown(tile) {
+        var c = tile.querySelector(".grid-stack-item-content");
+        return !c || c.getAttribute("data-draw-known") !== "0";
     }
 
     // share in [0,1] -> green(120deg) .. red(0deg).
     function heatColor(share) {
         var s = Math.max(0, Math.min(1, share));
-        var hue = Math.round(120 * (1 - s));
-        return "hsl(" + hue + ", 70%, 45%)";
+        return "hsl(" + Math.round(120 * (1 - s)) + ", 70%, 45%)";
     }
 
-    function applyBlock(block, on) {
+    // ---- per-rack bar (live) -----------------------------------------------
+
+    function updateBar(block) {
+        var bar = block.querySelector(".nbx-rd-power-bar");
+        if (!bar) { return; }
+        var cap = parseFloat(bar.getAttribute("data-rd-power-capacity")) || 0;
+        var warn = parseFloat(bar.getAttribute("data-rd-power-warn")) || 80;
+        var crit = parseFloat(bar.getAttribute("data-rd-power-critical")) || 100;
+        var draw = 0;
+        countingTiles(block).forEach(function (t) { draw += tileDraw(t); });
+        var util = cap > 0 ? draw / cap * 100 : 0;
+        var rd = Math.round(draw);
+        var ru = Math.round(util);
+        bar.setAttribute("data-rd-power-draw", rd);
+        bar.setAttribute("data-rd-power-util", ru);
+        var fill = bar.querySelector(".nbx-rd-power-fill");
+        if (fill) { fill.style.width = ru + "%"; }
+        var unconn = bar.getAttribute("data-rd-power-unconnected");
+        var label = bar.querySelector(".nbx-rd-power-label");
+        if (label) {
+            label.textContent = rd + " / " + Math.round(cap) + " W · " + ru + "%"
+                + (unconn ? " ⚠ " + unconn.split("|").length : "");
+        }
+        var state = util >= crit ? "critical" : util >= warn ? "warn" : "ok";
+        bar.classList.remove("nbx-rd-power-ok", "nbx-rd-power-warn",
+            "nbx-rd-power-critical");
+        bar.classList.add("nbx-rd-power-" + state);
+    }
+
+    // ---- heatmap fill bars (live) ------------------------------------------
+
+    function applyHeat(block, on) {
         block.classList.toggle("nbx-rd-heatmap", on);
         if (!on) {
             block.querySelectorAll(".grid-stack-item").forEach(function (tile) {
@@ -52,47 +99,82 @@
             });
             return;
         }
-        var map = drawMap(block);
-        // Scale each device's fill bar to the RACK's biggest consumer: the
-        // largest device fills 100% (red), the rest proportionally shorter and
-        // greener -- so you can actually pick out the hogs. (Normalizing to the
-        // rack total instead makes every bar tiny/green when load is spread.)
+        var tiles = countingTiles(block);
         var maxDraw = 0;
-        Object.keys(map).forEach(function (k) {
-            if (map[k].draw > maxDraw) { maxDraw = map[k].draw; }
+        tiles.forEach(function (t) {
+            var d = tileDraw(t);
+            if (d > maxDraw) { maxDraw = d; }
         });
-        block.querySelectorAll(".grid-stack-item").forEach(function (tile) {
+        tiles.forEach(function (tile) {
             var content = tile.querySelector(".grid-stack-item-content");
             if (!content) { return; }
-            var idx = parseInt(tile.getAttribute("data-widget-index"), 10);
-            var info = (!isNaN(idx) && map[idx]) ? map[idx] : { draw: 0, known: false };
-            // Powered device with no draw data -> neutral hatch, never a bar.
-            if (!info.known && info.draw === 0) {
+            var draw = tileDraw(tile);
+            if (draw === 0 && !tileKnown(tile)) {
                 tile.classList.add("nbx-rd-heat-unknown");
                 content.style.removeProperty("--nbx-rd-heat-pct");
                 return;
             }
             tile.classList.remove("nbx-rd-heat-unknown");
-            var share = maxDraw > 0 ? info.draw / maxDraw : 0;
+            var share = maxDraw > 0 ? draw / maxDraw : 0;
             content.style.setProperty("--nbx-rd-heat-pct", (share * 100).toFixed(1) + "%");
             content.style.setProperty("--nbx-rd-heat-col", heatColor(share));
         });
     }
 
-    function apply(on) {
-        document.body.classList.toggle("nbx-rd-heatmap-active", on);
-        document.querySelectorAll(".nbx-rd-rack-block").forEach(function (block) {
-            applyBlock(block, on);
+    function heatmapOn() {
+        return document.body.classList.contains("nbx-rd-heatmap-active");
+    }
+
+    // ---- live recompute driven by DOM mutations ----------------------------
+
+    var blocks = [];
+    var observers = [];
+    var OBS_OPTS = {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ["class", "data-draw-w", "gs-y"],
+    };
+    var pending = null;
+
+    function recomputeAll() {
+        // Detach while we write (our own attribute/class edits would otherwise
+        // re-trigger the observers), then reattach.
+        observers.forEach(function (o) { o.disconnect(); });
+        var on = heatmapOn();
+        blocks.forEach(function (block) {
+            updateBar(block);
+            if (on) { applyHeat(block, true); }
+        });
+        observers.forEach(function (o, i) { o.observe(blocks[i], OBS_OPTS); });
+    }
+
+    function scheduleRecompute() {
+        if (pending) { window.clearTimeout(pending); }
+        pending = window.setTimeout(function () {
+            pending = null;
+            recomputeAll();
+        }, 80);
+    }
+
+    function initObservers() {
+        blocks = Array.prototype.slice.call(
+            document.querySelectorAll(".nbx-rd-rack-block"));
+        blocks.forEach(function (block) {
+            var obs = new MutationObserver(scheduleRecompute);
+            obs.observe(block, OBS_OPTS);
+            observers.push(obs);
         });
     }
 
-    // ---- Power-bar hover popover -------------------------------------------
-    // A readable, immediate popover for the per-rack power bar (native `title`
-    // is slow and a long device list is unreadable in it). Shows draw/capacity
-    // and, when present, the scrollable list of devices whose power ports are
-    // not connected.
-    var popEl = null;
+    // ---- heatmap toggle ----------------------------------------------------
 
+    function applyHeatAll(on) {
+        document.body.classList.toggle("nbx-rd-heatmap-active", on);
+        blocks.forEach(function (block) { applyHeat(block, on); });
+    }
+
+    // ---- power-bar hover: compact popover + pull out the unconnected tiles --
+
+    var popEl = null;
     function ensurePop() {
         if (!popEl) {
             popEl = document.createElement("div");
@@ -101,40 +183,27 @@
         }
         return popEl;
     }
-
-    function hidePop() {
-        if (popEl) { popEl.style.display = "none"; }
-    }
-
+    function hidePop() { if (popEl) { popEl.style.display = "none"; } }
     function showPop(bar, x, y) {
         var draw = bar.getAttribute("data-rd-power-draw");
         var cap = bar.getAttribute("data-rd-power-capacity");
         var util = bar.getAttribute("data-rd-power-util");
         var unconn = bar.getAttribute("data-rd-power-unconnected");
         var pop = ensurePop();
-        // Compact header only -- the unconnected devices are shown by
-        // highlighting their tiles in the rack (a long list is unreadable).
         var html = '<div class="nbx-rd-power-pop-head">' + draw + " / " + cap
             + " W · " + util + "%</div>";
         if (unconn) {
-            var count = unconn.split("|").length;
-            html += '<div class="nbx-rd-power-pop-sub">⚠ ' + count
-                + " device(s) with power ports not connected"
-                + " — highlighted in the rack</div>";
+            html += '<div class="nbx-rd-power-pop-sub">⚠ ' + unconn.split("|").length
+                + " device(s) with power ports not connected — highlighted in the rack</div>";
         }
         pop.innerHTML = html;
         pop.style.display = "block";
         var pad = 12;
-        var w = pop.offsetWidth;
-        var h = pop.offsetHeight;
-        var left = Math.min(x + pad, window.innerWidth - w - pad);
-        var top = Math.min(y + pad, window.innerHeight - h - pad);
+        var left = Math.min(x + pad, window.innerWidth - pop.offsetWidth - pad);
+        var top = Math.min(y + pad, window.innerHeight - pop.offsetHeight - pad);
         pop.style.left = Math.max(pad, left) + "px";
         pop.style.top = Math.max(pad, top) + "px";
     }
-
-    // The tiles in this bar's rack whose device is in the unconnected list,
-    // matched by the STABLE identity label (never the assigned-name overlay).
     function flaggedTiles(bar) {
         var unconn = bar.getAttribute("data-rd-power-unconnected");
         if (!unconn) { return []; }
@@ -149,24 +218,19 @@
             return lab && names[lab.textContent];
         });
     }
-
     function setFlagged(bar, on) {
         flaggedTiles(bar).forEach(function (tile) {
             tile.classList.toggle("nbx-rd-power-flagged", on);
         });
     }
-
-    function initPop() {
+    function initHover() {
         document.querySelectorAll(".nbx-rd-power-bar").forEach(function (bar) {
-            // Suppress the native tooltip in favor of the popover + highlight.
             bar.removeAttribute("title");
             bar.addEventListener("mouseenter", function (e) {
                 showPop(bar, e.clientX, e.clientY);
                 setFlagged(bar, true);
             });
-            bar.addEventListener("mousemove", function (e) {
-                showPop(bar, e.clientX, e.clientY);
-            });
+            bar.addEventListener("mousemove", function (e) { showPop(bar, e.clientX, e.clientY); });
             bar.addEventListener("mouseleave", function () {
                 hidePop();
                 setFlagged(bar, false);
@@ -174,14 +238,16 @@
         });
     }
 
+    // ---- init --------------------------------------------------------------
+
     function init() {
-        initPop();
+        initObservers();
+        initHover();
         var toggle = document.querySelector("[data-rd-power-heatmap]");
-        if (!toggle) { return; }
-        toggle.addEventListener("change", function () {
-            apply(toggle.checked);
-        });
-        if (toggle.checked) { apply(true); }
+        if (toggle) {
+            toggle.addEventListener("change", function () { applyHeatAll(toggle.checked); });
+            if (toggle.checked) { applyHeatAll(true); }
+        }
     }
 
     if (document.readyState === "loading") {

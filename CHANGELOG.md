@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-14
+
+### Release Summary
+**Power that moves with your plan** — a patch release that makes the power projection live and fixes a name-revert bug.
+
+The per-rack power bar and the heatmap now recompute **in the browser as you shuffle hardware** — moving a device between racks drops the source rack's projected draw and raises the destination's instantly (and re-colors ok/warn/critical), flagging a device for removal drops it, all with no save/reload. Draw travels with each tile, so cross-rack moves are reflected on both racks at once. (A freshly-dropped catalog add still shows its draw after save/reload — the palette has no client-side power data yet.)
+
+### Fixed
+- Cancelling a move (× on a `move_in` tile) now reverts the tile's **name** as well as its position — previously the device snapped back but kept showing the move's `"<design>-<name>"` proposed name instead of its real name.
+- "Power heatmap" toolbar toggle: restored the spacing between its checkbox and label (it sits outside the state legend and missed the legend's gap).
+
+### Changed
+- Power projection is now recomputed live client-side (per-rack bar + heatmap) on every in-editor add / move / removal, driven by per-tile `data-draw-w` and a MutationObserver — no server round-trip. Still strictly read-only.
+
 ## [0.11.0] - 2026-07-13
 
 ### Release Summary

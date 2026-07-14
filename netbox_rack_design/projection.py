@@ -530,6 +530,10 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
         "unconnected_count": len(unconnected_devices),
         "unconnected_devices": unconnected_devices,
         "basis": basis,
+        # Thresholds echoed so the editor can recolor the bar LIVE (client-side)
+        # as devices are shuffled, matching the server's ok/warn/critical.
+        "warn_pct": warn_pct,
+        "critical_pct": critical_pct,
     }
 
 
