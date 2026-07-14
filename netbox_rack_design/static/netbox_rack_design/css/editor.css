@@ -204,6 +204,22 @@
     gap: 0.5rem;
 }
 
+/* The "Power heatmap" toggle is a toolbar-level filter OUTSIDE the legend, so
+   it misses the legend's flex/gap -- space its checkbox from its label here. */
+.nbx-rd-toolbar > .nbx-rd-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    font-weight: normal;
+    cursor: pointer;
+    user-select: none;
+}
+.nbx-rd-toolbar > .nbx-rd-filter input {
+    margin: 0;
+    cursor: pointer;
+}
+
 /* Cap the enhanced TomSelect (and the bare <select> before init) so each
    control stays compact instead of stretching the flex row full-width. */
 .nbx-rd-toolbar .nbx-rd-toolbar-field .ts-wrapper,

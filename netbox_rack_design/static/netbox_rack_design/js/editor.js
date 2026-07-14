@@ -2837,6 +2837,22 @@
             // was displacing -- OLD's ghost/remove rendering comes back.
             restoreDisplaced(idx);
             var w = st.widget;
+            // A revert also drops the move's PROPOSED NAME: the device is back to
+            // unchanged, so its tile must show its real identity again, not the
+            // "<design>-<name>" the move assigned (user bug 2026-07-14 --
+            // reverting restored the position but left the renamed overlay).
+            // Cleared here at the top so every branch below (incl. the cross-rack
+            // early returns that hand the tile to another rack) reverts the name.
+            var content0 = itemEl.querySelector(".grid-stack-item-content");
+            if (content0) { setTileDisplayName(content0, ""); }
+            w.proposed_name = "";
+            w.nameUserSet = false;
+            // A revert also drops the move's PROPOSED NAME: the device is back to
+            // unchanged, so its tile must show its real identity again, not the
+            // "<design>-<name>" the move assigned (user bug 2026-07-14 --
+            // reverting restored the position but left the renamed overlay).
+            // Cleared here at the top so every branch below (incl. the cross-rack
+            // early returns that hand the tile to another rack) reverts the name.
             var gsH = Math.round((w.u_height || 1) * 2);
 
             // (a) A LIVE (unsaved) cross-rack move adopted this session: snap the

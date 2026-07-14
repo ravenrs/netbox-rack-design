@@ -282,6 +282,36 @@ class EditorPowerTestCase(unittest.TestCase):
         self.assertEqual(res["off"], 0, "pull-out not cleared on mouse-leave")
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
+    # ---- live recompute (shuffle hardware) -------------------------------
+
+    def test_power_bar_recomputes_live_on_removal(self):
+        # Flagging a powered device for removal must drop the rack's projected
+        # draw in the browser, with no save/reload (MutationObserver-driven).
+        res = self.page.evaluate("""() => {
+            const bar = document.querySelector('.nbx-rd-power-bar');
+            const before = parseFloat(bar.getAttribute('data-rd-power-draw'));
+            const tile = [...document.querySelectorAll('.grid-stack-item')].find(t => {
+                const c = t.querySelector('.grid-stack-item-content');
+                return c && parseFloat(c.getAttribute('data-draw-w')) > 0
+                    && !t.classList.contains('nbx-rd-opposite');
+            });
+            if (!tile) return {err: 'no powered tile'};
+            const dw = parseFloat(tile.querySelector('.grid-stack-item-content')
+                .getAttribute('data-draw-w'));
+            tile.classList.add('nbx-rd-state-remove');
+            return {before, dw, promise: true};
+        }""")
+        self.assertNotIn("err", res, res)
+        # wait for the debounced observer recompute
+        self.page.wait_for_timeout(400)
+        after = self.page.evaluate(
+            "() => parseFloat(document.querySelector('.nbx-rd-power-bar')"
+            ".getAttribute('data-rd-power-draw'))")
+        self.assertAlmostEqual(
+            after, res["before"] - res["dw"], delta=1,
+            msg=f"bar did not drop by the removed device's draw: {res}, after={after}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
     # ---- PSU rows on the hover card --------------------------------------
 
     def test_hovercard_shows_psu_and_allocated(self):
