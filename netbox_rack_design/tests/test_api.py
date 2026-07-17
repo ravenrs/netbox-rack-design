@@ -1685,3 +1685,100 @@ class FavoriteDeviceTypeTest(APITestCase):
             ).count(),
             0,
         )
+
+
+class DeviceTypePowerTest(APITestCase):
+    """
+    Tests for the device-type-power endpoint (palette-add-live): the catalog
+    palette fetches per-type projected draw here so a freshly dropped catalog
+    add shows the SAME draw the projection will compute after Save + reload.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import DeviceType, Manufacturer, PowerPortTemplate
+
+        mfr = Manufacturer.objects.create(name="DTP Mfr", slug="dtp-mfr")
+
+        # Type WITH power data (200 W allocated on one PSU template).
+        cls.dt_known = DeviceType.objects.create(
+            manufacturer=mfr, model="DTP-Known", slug="dtp-known",
+            u_height=1, is_full_depth=False)
+        PowerPortTemplate.objects.create(
+            device_type=cls.dt_known, name="PSU1",
+            allocated_draw=200, maximum_draw=250)
+
+        # Type WITH power ports defined but NO draw values -> unknown.
+        cls.dt_unknown = DeviceType.objects.create(
+            manufacturer=mfr, model="DTP-Unknown", slug="dtp-unknown",
+            u_height=1, is_full_depth=False)
+        PowerPortTemplate.objects.create(
+            device_type=cls.dt_unknown, name="PSU1")
+
+        # Type with NO power ports at all -> passive (known 0).
+        cls.dt_passive = DeviceType.objects.create(
+            manufacturer=mfr, model="DTP-Passive", slug="dtp-passive",
+            u_height=1, is_full_depth=False)
+
+    def _url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:devicetypepower-list"
+        )
+
+    def test_known_type_returns_draw_and_ports(self):
+        """A type with a drawn PSU template reports draw_w, draw_known, ports."""
+        response = self.client.get(
+            self._url() + f"?id={self.dt_known.pk}", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        info = response.data["results"][str(self.dt_known.pk)]
+        self.assertEqual(info["draw_w"], 200.0)
+        self.assertTrue(info["draw_known"])
+        self.assertEqual(len(info["power_ports"]), 1)
+        self.assertEqual(info["power_ports"][0]["name"], "PSU1")
+        self.assertEqual(info["power_ports"][0]["draw"], 200)
+        # A bare type template has no cabling -> connected is None.
+        self.assertIsNone(info["power_ports"][0]["connected"])
+
+    def test_unknown_type_reports_not_known(self):
+        """Power ports with no draw value -> draw_known False (a powered gap)."""
+        response = self.client.get(
+            self._url() + f"?id={self.dt_unknown.pk}", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        info = response.data["results"][str(self.dt_unknown.pk)]
+        self.assertEqual(info["draw_w"], 0.0)
+        self.assertFalse(info["draw_known"])
+
+    def test_passive_type_is_known_zero(self):
+        """No power ports at all -> passive: 0 W, known (not the unknown hatch)."""
+        response = self.client.get(
+            self._url() + f"?id={self.dt_passive.pk}", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        info = response.data["results"][str(self.dt_passive.pk)]
+        self.assertEqual(info["draw_w"], 0.0)
+        self.assertTrue(info["draw_known"])
+        self.assertEqual(info["power_ports"], [])
+
+    def test_batch_ids_and_unknown_id_omitted(self):
+        """Multiple ids resolve together; a non-existent id is simply absent."""
+        url = (self._url()
+               + f"?id={self.dt_known.pk}&id={self.dt_passive.pk}&id=9999999")
+        response = self.client.get(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertIn(str(self.dt_known.pk), results)
+        self.assertIn(str(self.dt_passive.pk), results)
+        self.assertNotIn("9999999", results)
+
+    def test_no_ids_returns_empty(self):
+        """No id params -> empty result map, still 200 (never errors)."""
+        response = self.client.get(self._url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["results"], {})
+
+    def test_requires_authentication(self):
+        """The endpoint is authenticated-only (no anonymous reads)."""
+        response = self.client.get(self._url() + f"?id={self.dt_known.pk}")
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
+        )

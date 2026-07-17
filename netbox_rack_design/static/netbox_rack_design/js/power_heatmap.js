@@ -17,12 +17,32 @@
  *     the normal styling exactly.
  *
  * Read-only: pure view layer -- no widget state, no dirty flag, nothing saved.
- * (A freshly-dropped palette add has no client-side draw yet, so it counts as
- * 0 W live until the design is saved and reloaded; moves/removes of real
- * devices update fully live.)
+ * (A freshly-dropped palette add also counts live: the catalog palette fetches
+ * each type's projected draw from the device-type-power endpoint and stamps it
+ * on the row, so the drop carries the same `data-draw-w` a real device does.)
  */
 (function () {
     "use strict";
+
+    // Dev-only tracer, shared with editor.js (window.__rdTrace, gated on a dev
+    // build + the __rdDragTrace toggle; inert otherwise). Lets the heatmap's
+    // per-tile render be watched alongside the drag lifecycle.
+    function rdT(ev, data) {
+        if (window.__rdTrace) { window.__rdTrace("heat." + ev, data || {}); }
+    }
+
+    // The visible name a tile currently shows: the rename overlay if present,
+    // else the identity label unless it's hidden. "" means the tile renders
+    // BLANK (the just-placed-on-a-removed-slot bug -- user 2026-07-16).
+    function visibleName(content) {
+        var disp = content.querySelector(".nbx-rd-name-display");
+        if (disp && disp.textContent.trim()) { return disp.textContent.trim(); }
+        var lab = content.querySelector(".nbx-rd-label");
+        if (lab && !lab.classList.contains("nbx-rd-label-hidden")) {
+            return (lab.textContent || "").trim();
+        }
+        return "";
+    }
 
     // ---- draw model (read straight off the live tiles) ---------------------
 
@@ -89,14 +109,30 @@
         bar.classList.add("nbx-rd-power-" + state);
     }
 
+    // Wipe any heat styling off a tile (used when a tile must show NO fill).
+    function clearHeat(tile) {
+        tile.classList.remove("nbx-rd-heat-unknown");
+        var content = tile.querySelector(".grid-stack-item-content");
+        if (content) {
+            content.style.removeProperty("--nbx-rd-heat-pct");
+            content.style.removeProperty("--nbx-rd-heat-col");
+        }
+    }
+
     // ---- heatmap fill bars (live) ------------------------------------------
 
-    function applyHeat(block, on) {
+    // `trace` is passed only from the explicit toggle (applyHeatAll); the
+    // mutation-driven recompute path leaves it falsy so heat.apply doesn't
+    // flood the log on every DOM tick. The per-tile heat.blankName probe in
+    // fill() still runs every time, so the bug is caught whenever it renders.
+    function applyHeat(block, on, trace) {
+        var rackId = block.getAttribute("data-rack-id") || block.id;
         block.classList.toggle("nbx-rd-heatmap", on);
         if (!on) {
             block.querySelectorAll(".grid-stack-item").forEach(function (tile) {
                 tile.classList.remove("nbx-rd-heat-unknown");
             });
+            if (trace) { rdT("apply", { rackId: rackId, on: false }); }
             return;
         }
         var tiles = countingTiles(block);
@@ -105,9 +141,48 @@
             var d = tileDraw(t);
             if (d > maxDraw) { maxDraw = d; }
         });
-        tiles.forEach(function (tile) {
+        if (trace) {
+            rdT("apply", { rackId: rackId, on: true, countingTiles: tiles.length, maxDraw: maxDraw });
+        }
+        function fill(tile) {
             var content = tile.querySelector(".grid-stack-item-content");
             if (!content) { return; }
+            // A device flagged for REMOVAL or DISPLACED (being replaced) is
+            // leaving this slot -- it must NOT paint a heat color. Its own label
+            // is hidden (the displacement stripe carries the name), so a fill
+            // reads as a colored NAMELESS tile, and its draw shouldn't count as
+            // a live consumer (user bug 2026-07-16: "лейбла нет, хитмап не
+            // верный"). Clear any prior fill and skip.
+            if (tile.classList.contains("nbx-rd-state-remove")
+                    || tile.classList.contains("nbx-rd-displaced")) {
+                clearHeat(tile);
+                return;
+            }
+            // Diagnostic (user bug 2026-07-16): a heatmap tile that gets a fill
+            // but shows NO name -- the "colored nameless tile". The name may be
+            // absent from the DOM OR just CSS-hidden (a displaced tile's label
+            // is visibility:hidden, its name moved to an external stripe), so
+            // check the COMPUTED rendering, not just the -hidden class. Report
+            // the unit/label, its heat %, and WHY it's not shown.
+            var lab = content.querySelector(".nbx-rd-label");
+            var nameEl = content.querySelector(".nbx-rd-name-display") || lab;
+            var shownOnTile = false;
+            if (nameEl && (nameEl.textContent || "").trim()) {
+                var ncs = window.getComputedStyle(nameEl);
+                shownOnTile = ncs.display !== "none" && ncs.visibility !== "hidden"
+                    && parseFloat(ncs.opacity || "1") > 0.01;
+            }
+            if (!shownOnTile) {
+                rdT("namelessFill", {
+                    label: lab ? (lab.textContent || "").trim() : null,
+                    unitY: tile.gridstackNode ? tile.gridstackNode.y : null,
+                    heatPct: content.style.getPropertyValue("--nbx-rd-heat-pct") || null,
+                    state: (tile.className.match(/nbx-rd-state-[\w]+/) || [])[0],
+                    displaced: tile.classList.contains("nbx-rd-displaced"),
+                    labelVisibility: lab ? window.getComputedStyle(lab).visibility : null,
+                    idx: tile.getAttribute("data-widget-index"),
+                });
+            }
             var draw = tileDraw(tile);
             if (draw === 0 && !tileKnown(tile)) {
                 tile.classList.add("nbx-rd-heat-unknown");
@@ -118,7 +193,26 @@
             var share = maxDraw > 0 ? draw / maxDraw : 0;
             content.style.setProperty("--nbx-rd-heat-pct", (share * 100).toFixed(1) + "%");
             content.style.setProperty("--nbx-rd-heat-col", heatColor(share));
-        });
+        }
+        tiles.forEach(fill);
+        // Opposite-face hatches are the SAME physical device on the other face;
+        // they are excluded from countingTiles (so they never affect maxDraw or
+        // the rack total), but they carry their owner's data-draw-w (stamped by
+        // the editor's syncDeviceShadow) -- fill them too so a full-depth
+        // device's consumption is visible on BOTH faces, not blank on the
+        // mounted-away side (user bug 2026-07-15).
+        Array.prototype.slice.call(
+            block.querySelectorAll(".grid-stack-item.nbx-rd-opposite," +
+                " .grid-stack-item[data-rd-derived-opp]")
+        ).forEach(fill);
+        // A removed/displaced BODY is excluded from countingTiles, so fill()
+        // never re-touches it and its last fill would go STALE (keep a color
+        // after the device was flagged to leave). Wipe heat off every
+        // remove/displaced tile so none keeps a fill.
+        Array.prototype.slice.call(
+            block.querySelectorAll(".grid-stack-item.nbx-rd-state-remove," +
+                " .grid-stack-item.nbx-rd-displaced")
+        ).forEach(clearHeat);
     }
 
     function heatmapOn() {
@@ -168,8 +262,9 @@
     // ---- heatmap toggle ----------------------------------------------------
 
     function applyHeatAll(on) {
+        rdT("toggle", { on: !!on, blocks: blocks.length });
         document.body.classList.toggle("nbx-rd-heatmap-active", on);
-        blocks.forEach(function (block) { applyHeat(block, on); });
+        blocks.forEach(function (block) { applyHeat(block, on, true); });
     }
 
     // ---- power-bar hover: compact popover + pull out the unconnected tiles --

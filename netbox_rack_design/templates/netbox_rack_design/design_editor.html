@@ -305,6 +305,13 @@
 
 {% block javascript %}
   {{ block.super }}
+  {% if rd_debug %}
+  {# Developer builds only (DEBUG on, or Django Debug Toolbar installed): let #}
+  {# editor.js expose its opt-in drag-lifecycle tracer. This inline (non-defer) #}
+  {# script runs at parse time, so the flag is set before the deferred editor.js #}
+  {# below reads it. Never rendered on a production deployment. #}
+  <script>window.__rdDebugAvailable = true;</script>
+  {% endif %}
   <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
   <script src="{% static 'netbox_rack_design/js/editor.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/editor_panels.js' %}?v={{ asset_version }}" defer></script>

@@ -94,6 +94,7 @@ __all__ = (
     "ProjectedSlotState",
     "ProjectedElevation",
     "project_rack",
+    "device_type_power_summary",
 )
 
 PLUGIN_NAME = "netbox_rack_design"
@@ -534,6 +535,31 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
         # as devices are shuffled, matching the server's ok/warn/critical.
         "warn_pct": warn_pct,
         "critical_pct": critical_pct,
+    }
+
+
+def device_type_power_summary(device_type, basis=None):
+    """Projected power for a bare device TYPE (no real device yet) -- the draw a
+    freshly dropped catalog add carries BEFORE it is saved. Mirrors exactly what
+    ``_project_power`` computes for the resulting 'add' slot (same basis, same
+    PowerPortTemplate resolution), so a palette add shows the same draw live as
+    it will after Save + reload.
+
+    Returns ``{"draw_w": float, "draw_known": bool, "power_ports": [...]}`` where
+    each ``power_ports`` entry is ``{"name", "draw", "connected": None}`` (a
+    template has no cabling). ``draw_known`` is False only when the type defines
+    power-port templates that carry no draw value (a powered type we can't
+    account for); a type with no templates at all is passive -> known 0.
+
+    ``basis`` defaults to the configured ``power_draw_basis``.
+    """
+    if basis is None:
+        basis = _power_config()["basis"]
+    watts, status = _device_draw_w(None, device_type, basis)
+    return {
+        "draw_w": watts,
+        "draw_known": status != "unknown",
+        "power_ports": _device_power_ports(None, device_type, basis),
     }
 
 

@@ -6,6 +6,7 @@ from .views import (
     DesignGroupViewSet,
     DesignPlacementViewSet,
     DesignViewSet,
+    DeviceTypePowerViewSet,
     FavoriteDeviceTypeViewSet,
     HiddenDesignRackViewSet,
 )
@@ -25,6 +26,11 @@ router.register(
     "hidden-design-racks",
     HiddenDesignRackViewSet,
     basename="hiddendesignrack",
+)
+router.register(
+    "device-type-power",
+    DeviceTypePowerViewSet,
+    basename="devicetypepower",
 )
 
 urlpatterns = router.urls

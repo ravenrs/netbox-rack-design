@@ -26,6 +26,62 @@
         return;
     }
 
+    // ---- Dev-only drag-lifecycle tracer ------------------------------------
+    // Structured console logging of the whole grab->drop pipeline, so the exact
+    // branch that fires on any gesture can be watched live. Gated TWICE so it
+    // can never surface on a production deployment:
+    //   1. window.__rdDebugAvailable -- set by the editor template ONLY on a
+    //      developer build (Django DEBUG on, or the Debug Toolbar installed;
+    //      see DesignEditorView / design_editor.html). Absent in production, so
+    //      the tracer is a hard no-op there regardless of the runtime toggle.
+    //   2. the runtime toggle window.__rdDragTrace (persisted in localStorage
+    //      so it survives reloads) -- flip it from the console to start/stop.
+    // Every entry is also pushed to window.__rdDragLog with a per-gesture id so
+    // one grab->drop can be dumped together (rdTraceDump()).
+    var rdGestureId = 0;
+    function rdTraceEnabled() {
+        if (!window.__rdDebugAvailable) { return false; }
+        if (window.__rdDragTrace != null) { return !!window.__rdDragTrace; }
+        try { return window.localStorage.getItem("rdDragTrace") === "1"; }
+        catch (e) { return false; }
+    }
+    function rdTrace(ev, data) {
+        if (!rdTraceEnabled()) { return; }
+        var entry = { g: rdGestureId, ev: ev, data: data || {} };
+        try { (window.__rdDragLog = window.__rdDragLog || []).push(entry); } catch (e) { /* noop */ }
+        try {
+            // eslint-disable-next-line no-console
+            console.log("[rd-drag]#" + rdGestureId + " " + ev, data || {});
+        } catch (e) { /* noop */ }
+    }
+    if (window.__rdDebugAvailable) {
+        // Shared tracer for the OTHER editor scripts (power_heatmap.js,
+        // editor_panels.js, ...): same __rdDragTrace toggle + __rdDragLog
+        // buffer, so one flip covers every script. They call
+        // window.__rdTrace("<script>.<event>", data) -- inert in production
+        // (this whole block only runs on a dev build).
+        window.__rdTrace = rdTrace;
+        // Console conveniences so the toggle is discoverable without reading src.
+        window.__rdDragTraceOn = function () {
+            window.__rdDragTrace = true;
+            try { window.localStorage.setItem("rdDragTrace", "1"); } catch (e) { /* noop */ }
+            return "rd-drag tracer ON";
+        };
+        window.__rdDragTraceOff = function () {
+            window.__rdDragTrace = false;
+            try { window.localStorage.setItem("rdDragTrace", "0"); } catch (e) { /* noop */ }
+            return "rd-drag tracer OFF";
+        };
+        window.rdTraceDump = function () { return window.__rdDragLog || []; };
+        try {
+            // eslint-disable-next-line no-console
+            console.log(
+                "[rd-drag] tracer available -- __rdDragTraceOn() / "
+                + "__rdDragTraceOff() (or set window.__rdDragTrace); "
+                + "rdTraceDump() for the buffer");
+        } catch (e) { /* noop */ }
+    }
+
     // Phase 0 (spec §5, §7) used to wrap the shared engine prototype's
     // _fixCollisions with a per-engine recursion-depth cap here, as a vendor-
     // level backstop against a densely-packed float:true rack sending
@@ -1242,6 +1298,11 @@
 
         function homeInto(target, itemEl, gsY, gsH) {
             if (!target || !target.grid) { return false; }
+            rdTrace("homeInto.write", {
+                intoRackId: rackId, face: (target.host && target.host.getAttribute("data-face")) || null,
+                gsY: gsY, gsH: gsH, widgetIdx: itemEl.getAttribute("data-widget-index"),
+                refreshing: refreshing,
+            });
             if (target.host && itemEl.parentNode !== target.host) {
                 target.host.appendChild(itemEl);
             }
@@ -1392,6 +1453,7 @@
         // Scoped to THIS rack block so racks never affect each other.
         function refreshGhosts() {
             if (refreshing) { return; }
+            rdTrace("refresh", { rackId: rackId, tiles: block.querySelectorAll(".grid-stack-item").length });
             refreshing = true;
             // Phase 2: the WHOLE grid-mutation phase of the refresh cycle
             // (temp-ghost add/remove + the recomputeOpposites hatch teardown/
@@ -1711,8 +1773,25 @@
             // name. Force-clear any overlay a prior sync applied so every rear
             // hatch reads uniformly.
             if (st.shadowEl) {
-                setTileDisplayName(
-                    st.shadowEl.querySelector(".grid-stack-item-content"), "");
+                var shadowContent = st.shadowEl.querySelector(".grid-stack-item-content");
+                setTileDisplayName(shadowContent, "");
+                // Mirror the OWNER's identity + power data onto the hatch content
+                // so a client-created opposite hatch renders exactly like the
+                // SERVER-rendered one (inc/rack_block.html): the hover card can
+                // show the device type, and power_heatmap.js can fill + label the
+                // hatch (user bug 2026-07-15: a full-depth device moved onto a
+                // freed slot showed a BLANK hatch on the other face -- no type,
+                // and no heat fill on the heatmap -- because these were never
+                // stamped client-side).
+                var ownerContent = itemEl.querySelector(".grid-stack-item-content");
+                if (shadowContent && ownerContent) {
+                    ["data-device-type-name", "data-draw-w", "data-draw-known",
+                     "data-power"].forEach(function (attr) {
+                        var v = ownerContent.getAttribute(attr);
+                        if (v != null) { shadowContent.setAttribute(attr, v); }
+                        else { shadowContent.removeAttribute(attr); }
+                    });
+                }
             }
         }
 
@@ -1779,6 +1858,28 @@
                     if (isNaN(gidx) || seenGhostIdx[gidx]) { return; }
                     seenGhostIdx[gidx] = true;
                     syncGhostShadow(gidx);
+                });
+                // Duplicate/orphan owned-hatch sweep (user bug 2026-07-15): a
+                // full-depth device that changed face during a move (notably
+                // onto a slot freed by a removal) could leave a SECOND derived
+                // opposite hatch behind -- syncDeviceShadow tracks only ONE
+                // (st.shadowEl), so a stale hatch was never reclaimed, producing
+                // an I1 "shadow overlaps shadow". Every hatch is created through
+                // placeOrMoveShadow and recorded as either a state's shadowEl or
+                // a ghostShadows[idx]; anything derived-opp NOT in that canonical
+                // set is by definition unowned -> remove it.
+                var canonicalHatches = [];
+                state.forEach(function (s) {
+                    if (s && s.shadowEl) { canonicalHatches.push(s.shadowEl); }
+                });
+                Object.keys(ghostShadows).forEach(function (k) {
+                    if (ghostShadows[k]) { canonicalHatches.push(ghostShadows[k]); }
+                });
+                block.querySelectorAll(".grid-stack-item[data-rd-derived-opp]").forEach(function (hel) {
+                    if (canonicalHatches.indexOf(hel) !== -1) { return; }
+                    var g = (hel.gridstackNode && hel.gridstackNode.grid) || null;
+                    if (g) { g.removeWidget(hel, true); }
+                    else if (hel.parentNode) { hel.parentNode.removeChild(hel); }
                 });
             } finally {
                 suppressDirty = prevSuppress;
@@ -1951,6 +2052,10 @@
         // this displacement record (`d.stripeEls`) -- created here,
         // destroyed only by undisplaceOne, never re-derived by a scan.
         function displaceOne(d, collapseMirror) {
+            rdTrace("displaceOne", {
+                rackId: rackId, displaced: d.label, displacedIdx: d.widgetIndex,
+                kind: d.kind, collapseMirror: !!collapseMirror,
+            });
             d.stripeEls = d.stripeEls || [];
             function collapse(el) {
                 if (!el) { return; }
@@ -2066,6 +2171,35 @@
             }
             if (w.kind !== "existing" && w.kind !== "move_in") { return; }
 
+            // TEMP diagnostic (window.__rdMoveDebug): capture the drop decision
+            // inputs -- what the cursor targets and what rdCanPlaceAt thinks --
+            // so a "shows red but still commits" report can be pinned to the
+            // exact gap (validator says illegal but reject didn't fire, vs
+            // validator wrongly says ok).
+            if (window.__rdMoveDebug) {
+                var _dn = itemEl.gridstackNode;
+                var _dgsH = Math.round((w.u_height || 1) * 2);
+                var _dcand = (typeof rdCursorCandidate === "function") ? rdCursorCandidate() : null;
+                var _dv, _dvc;
+                try {
+                    _dv = rdCanPlaceAt(itemEl, rackId, faceOfItem(itemEl),
+                        _dn ? _dn.y : null, _dgsH, isFullDepthWidget(w));
+                } catch (e) { _dv = { err: String(e) }; }
+                if (_dcand) {
+                    try {
+                        _dvc = rdCanPlaceAt(itemEl, _dcand.rackId, _dcand.face,
+                            _dcand.top, _dgsH, isFullDepthWidget(w));
+                    } catch (e) { _dvc = { err: String(e) }; }
+                }
+                (window.__rdMoveLog = window.__rdMoveLog || []).push({
+                    label: w.label, kind: w.kind, crossRack: !!st.crossRack,
+                    nodeY: _dn ? _dn.y : null, curFace: faceOfItem(itemEl),
+                    cursor: _dcand ? { rackId: _dcand.rackId, face: _dcand.face, top: _dcand.top } : null,
+                    canPlaceAtNode: _dv ? { ok: _dv.ok, blockers: (_dv.blockers || []).map(function (b) { return b.device && b.device.label; }) } : null,
+                    canPlaceAtCursor: _dvc ? { ok: _dvc.ok, blockers: (_dvc.blockers || []).map(function (b) { return b.device && b.device.label; }) } : null,
+                });
+            }
+
             // Spec §4.1 cursor-governed placement (ruling 2026-07-08): the
             // pointer's rows at release override wherever the engine parked
             // the tile -- BEFORE validation, so validation always judges the
@@ -2074,7 +2208,10 @@
                     itemEl, Math.round((w.u_height || 1) * 2),
                     isFullDepthWidget(w), function () {
                         st.moveDialogShown = false;
-                        cancelMove(itemEl, idx, st);
+                        rdTrace("maybePromptMove.reject", {
+                            label: w.label, reason: "cursor placement illegal",
+                        });
+                        rejectDrop(itemEl, idx, st);
                     })) {
                 return;
             }
@@ -2085,7 +2222,13 @@
             // during the drag, so it never moved.
             if (tileOverlapsOther(itemEl)) {
                 st.moveDialogShown = false;
-                cancelMove(itemEl, idx, st);
+                rdTrace("maybePromptMove.reject", {
+                    label: w.label, reason: "overlaps another tile",
+                    face: faceOfItem(itemEl),
+                    y: (itemEl.gridstackNode && itemEl.gridstackNode.y != null)
+                        ? itemEl.gridstackNode.y : null,
+                });
+                rejectDrop(itemEl, idx, st);
                 return;
             }
 
@@ -2111,6 +2254,7 @@
 
             if (atOrigin) {
                 st.moveDialogShown = false;
+                rdTrace("maybePromptMove.atOrigin", { label: w.label, face: curFace, y: curGsY });
                 // Silent self-return onto this device's OWN origin ghost (spec
                 // §4.4/§8.3): no dialog. Nothing about THIS device could still
                 // be displacing anything at its own origin either.
@@ -2275,6 +2419,14 @@
         function onDragStart(event, el) {
             if (!el) { return; }
             var idx = parseInt(el.getAttribute("data-widget-index"), 10);
+            rdGestureId += 1;
+            rdTrace("dragstart", {
+                rackId: rackId, idx: idx,
+                label: (state[idx] && state[idx].widget && state[idx].widget.label) || null,
+                kind: (state[idx] && state[idx].widget && state[idx].widget.kind) || null,
+                crossRack: !!(state[idx] && state[idx].crossRack),
+                face: faceOfItem(el),
+            });
             // Live mid-drag shadow tracking (spec §2.2, Phase 3): remember which
             // device is being dragged so every `change` tick during the gesture
             // (see the listener below) can move its OWN shadow in real time,
@@ -2282,7 +2434,17 @@
             curDragIdx = (!isNaN(idx) && state[idx]) ? idx : null;
             curDragEl = curDragIdx != null ? el : null;
             // Re-arm the §4a prompt: a fresh drag of this tile may produce a move.
-            if (state[idx]) { state[idx].moveDialogShown = false; }
+            // Capture the tile's PRE-DRAG slot so an ILLEGAL drop can snap it back
+            // to where THIS drag began -- for an already-moved (move_in) tile that
+            // is its LAST valid slot, not the device's original origin (user bug
+            // 2026-07-15: re-dragging a move_in onto an occupied slot reverted the
+            // whole move instead of just rejecting the drag).
+            if (state[idx]) {
+                state[idx].moveDialogShown = false;
+                var pdNode = el.gridstackNode;
+                state[idx].preDragGsY = (pdNode && pdNode.y != null) ? pdNode.y : null;
+                state[idx].preDragFace = faceOfItem(el);
+            }
             // Phase 4 (spec §4.3.5): this tile is about to move away from
             // wherever it currently sits -- release anything it was displacing
             // there now. If it lands back on the same displaced slot, drop-time
@@ -2301,11 +2463,35 @@
                 && (st.widget.kind === "existing" || st.widget.kind === "move_in")) {
                 var w = st.widget;
                 // The TRUE origin (home rack + real slot) the device should snap
-                // back to on cancel. If this tile is itself a live cross-rack move
-                // (crossRack), chain to ITS origin so a multi-hop A->B->C move still
-                // remembers A; otherwise THIS rack/slot is the origin.
-                var originRackId = st.crossRack ? st.originRackId : rackId;
-                var originWidgetIndex = st.crossRack ? st.originWidgetIndex : idx;
+                // back to on cancel.
+                //   * a LIVE cross-rack move (crossRack): chain to ITS origin so a
+                //     multi-hop A->B->C move still remembers A;
+                //   * a RELOADED move_in: its in-session crossRack chain is gone
+                //     (state[] was rehydrated from server JSON), so its true home
+                //     is the rack that renders its PERSISTENT move-out ghost -- NOT
+                //     the rack it currently sits in. Recording the current rack
+                //     here made a rejected cross-rack re-drag treat this rack as
+                //     the origin, so rejectDrop's multi-hop reclaim (srcRackId !==
+                //     originRackId) never fired and cancelMove restoreTile()d the
+                //     tile back as a plain `existing` device -- silently dropping
+                //     the planned move (user bug 2026-07-16, sg2-sl-b15 321->318);
+                //   * otherwise (a first-time move of an existing device, or a
+                //     move_in whose ghost isn't on screen): THIS rack/slot is it.
+                var reloadedHome = (!st.crossRack && w.kind === "move_in"
+                    && w.placement_id != null)
+                    ? findGhostAcrossBlocks(w.placement_id) : null;
+                var originRackId, originWidgetIndex;
+                if (st.crossRack) {
+                    originRackId = st.originRackId;
+                    originWidgetIndex = st.originWidgetIndex;
+                } else if (reloadedHome) {
+                    originRackId = reloadedHome.controller.rackId;
+                    originWidgetIndex = parseInt(
+                        reloadedHome.ghostEl.getAttribute("data-widget-index"), 10);
+                } else {
+                    originRackId = rackId;
+                    originWidgetIndex = idx;
+                }
                 tileInFlight = {
                     sourceRackId: rackId,
                     widgetIndex: idx,
@@ -2320,11 +2506,24 @@
                     origFace: st.origFace,
                     originRackId: originRackId,
                     originWidgetIndex: originWidgetIndex,
+                    // Where THIS drag began (source rack + slot) -- the device's
+                    // "last position". A rejected cross-rack drop restores HERE,
+                    // which for a multi-hop move is NOT the true origin.
+                    preDragGsY: st.preDragGsY,
+                    preDragFace: st.preDragFace,
                 };
                 // Hint the rack face grids as drop targets while a tile is dragged.
                 root.classList.add("nbx-rd-dragging-tile");
+                rdTrace("dragstart.origin", {
+                    label: w.label, kind: w.kind, crossRack: !!st.crossRack,
+                    sourceRackId: rackId, originRackId: originRackId,
+                    originWidgetIndex: originWidgetIndex,
+                    reloadedHome: !!reloadedHome,
+                    preDragGsY: st.preDragGsY, preDragFace: st.preDragFace,
+                });
             } else {
                 tileInFlight = null;
+                rdTrace("dragstart.nonEligible", { idx: idx });
             }
             // Spec §4.1 cursor-governed placement: arm the pointer tracker
             // for this gesture (inert when no real pointer is on the tile,
@@ -2368,6 +2567,19 @@
             grid.on("added", function (event, items) {
                 // Ignore our own derived opposite-face hatch additions.
                 if (recomputing) { return; }
+                // Ignore our OWN programmatic re-home (restoreTile /
+                // restoreFromGhost / homecoming settle all call homeInto ->
+                // GridStack makeWidget, which fires `added` synchronously). Such
+                // an addition is a revert, NOT a fresh user cross-rack drop --
+                // treating it as an adoption re-enters maybePromptMove -> cancelMove
+                // -> restoreFromGhost -> homeInto during the revert, promoting a
+                // neighboring reloaded move_in's origin ghost into a 2nd LIVE body
+                // (user bug 2026-07-15: reverting one move made an unrelated
+                // cross-rack move "jump by itself"; I4 "device has 2 live entities"
+                // fired 8x from the re-entrant cascade). `refreshing` is set around
+                // every homeInto (see restoreTile/restoreFromGhost), so this is the
+                // precise gate for "this addition is ours, not the user's".
+                if (refreshing) { return; }
                 // A foreign real-device tile just landed here = a cross-rack move.
                 if (!tileInFlight || tileInFlight.sourceRackId === rackId
                     || tileInFlight.device_id == null) { return; }
@@ -2378,6 +2590,17 @@
                     if (el.getAttribute("data-rd-temp-ghost")) { return; }
                     if (el.getAttribute("data-rd-derived-opp")) { return; }
                     if (el.classList.contains("nbx-rd-opposite")) { return; }
+                    rdTrace("added", {
+                        destRackId: rackId, sourceRackId: tileInFlight.sourceRackId,
+                        label: tileInFlight.label,
+                        // node.y HERE is the placeholder slot -- GridStack has not
+                        // yet written the tile's FINAL drop position (see the
+                        // `dropped`/onPaletteDrop re-run). Contrast with the
+                        // `dropped` trace's y to see the timing gap.
+                        addedTimeY: (el.gridstackNode && el.gridstackNode.y != null)
+                            ? el.gridstackNode.y : null,
+                        curFace: faceOfItem(el),
+                    });
                     // Homecoming (spec §4.6) takes priority over an ordinary
                     // adoption -- see homecomingAdopt's header comment.
                     if (homecomingAdopt(el, tileInFlight)) {
@@ -2563,11 +2786,22 @@
                 // source rack — so cancelling a multi-hop move returns it home.
                 originRackId: d.originRackId,
                 originWidgetIndex: d.originWidgetIndex,
+                // The rack + slot this drag STARTED from (the device's "last
+                // position"). Differs from the true origin only for a MULTI-HOP
+                // move; a rejected drop of such a tile returns here, not to the
+                // (possibly occupied) true origin.
+                srcRackId: d.sourceRackId,
+                srcPreDragGsY: d.preDragGsY,
+                srcPreDragFace: d.preDragFace,
             });
             el.setAttribute("data-widget-index", newIdx);
             el.classList.remove("nbx-rd-state-existing", "nbx-rd-state-move_out_ghost");
             el.classList.add("nbx-rd-state-move_in", "nbx-rd-dirty");
             markDirty();
+            rdTrace("adopt", {
+                label: d.label, newIdx: newIdx, destRackId: rackId, face: face,
+                srcRackId: d.sourceRackId, originRackId: d.originRackId,
+            });
         }
 
         // Find the widget-index of THIS rack's own move-out ghost for
@@ -2641,6 +2875,31 @@
             var node = el.gridstackNode;
             if (face !== "" && (!node || node.y == null)) { return false; }
 
+            // A homecoming REVIVES the origin entry at the DROP position and
+            // relies on maybePromptMove to settle it (silent restore if dropped
+            // exactly on the ghost, else a normal move of the revived entry). So
+            // the slot that must be legal is where the tile ACTUALLY LANDED --
+            // NOT the origin slot. Validating the origin slot (which is free --
+            // the device left it) let an occupied DROP slip through and commit
+            // an overlap: homecoming never repositions the tile, so it stayed on
+            // top of whatever occupied the drop rows (tasks #33/#34 -- e.g.
+            // "sg2-sl-a36(body) overlaps sg2-sl-b15(body)"). If the DROP slot is
+            // occupied, DECLINE (return false): the caller falls through to
+            // adoptForeignTile -> maybePromptMove -> rejectDrop, which returns
+            // the device to its last position instead of overlapping. A tray
+            // target (face "") is an unordered list -- nothing to validate.
+            if (face === "front" || face === "rear") {
+                var dGsH = Math.round((ost.widget.u_height || 1) * 2);
+                var dFull = !!(d.device_id != null && fullDepthDeviceIds[d.device_id]);
+                if (!rdCanPlaceAt(el, rackId, face, node.y, dGsH, dFull).ok) {
+                    rdTrace("homecoming.decline", {
+                        label: d.label, rackId: rackId, face: face,
+                        dropY: node.y, reason: "drop slot occupied",
+                    });
+                    return false;
+                }
+            }
+
             // Clear whatever was marking origIdx's slot vacated -- a temp
             // ghost from this session, and/or a persistent (server-reloaded)
             // ghost -- plus its owned mirror hatch either way.
@@ -2667,7 +2926,46 @@
             el.classList.remove("nbx-rd-state-move_in", "nbx-rd-state-move_out_ghost", "nbx-rd-dirty");
             el.classList.add("nbx-rd-state-existing");
             applyExistingColor(el);
+            // A homecoming fully reverts the move, so the tile must show the
+            // device's REAL identity again -- not the "<design>-<name>" the
+            // move stamped (user bug 2026-07-16: a device dragged back to its
+            // own origin kept its planned name). Same reset cancelMove already
+            // does on its revert path (2026-07-14). If this turns out to be a
+            // near-miss homecoming (dropped elsewhere in the origin rack, not
+            // silently onto the ghost), maybePromptMove re-prompts and re-stamps
+            // a fresh name; clearing here first keeps a silent restore clean.
+            var hcContent = el.querySelector(".grid-stack-item-content");
+            if (hcContent) {
+                setTileDisplayName(hcContent, "");
+                hcContent.removeAttribute("data-old-name");
+                if (ost.widget && ost.widget.label != null) {
+                    hcContent.setAttribute("data-name", ost.widget.label);
+                    hcContent.setAttribute("title", ost.widget.label);
+                }
+            }
+            if (ost.widget) {
+                ost.widget.proposed_name = "";
+                ost.widget.nameUserSet = false;
+                // FULLY revive the entry as an existing device -- not just its
+                // DOM classes. A reloaded/persistent move-out ghost entry has
+                // widget.kind === "move_out_ghost"; leaving it stale made the
+                // tile a DOM/state contradiction (class `existing`, kind
+                // `move_out_ghost`), so a subsequent cross-rack drag was
+                // accepted-by-class but NOT adopted-by-kind (onDragStart's
+                // eligibility gate reads widget.kind), and the unadopted tile
+                // mis-indexed the destination rack's state[] by its foreign
+                // widget-index -- corrupting an unrelated device (user bug
+                // 2026-07-16: b15 homecoming then re-drag duplicated
+                // sg2-a5545-fire-1). The move placement is cancelled by the
+                // homecoming, so its placement_id is dropped too.
+                ost.widget.kind = "existing";
+                ost.widget.placement_id = null;
+            }
             markDirty();
+            rdTrace("homecoming.accept", {
+                label: d.label, rackId: rackId, face: face,
+                originIdx: originIdx, dropY: (face === "") ? null : node.y,
+            });
             return true;
         }
 
@@ -2738,6 +3036,11 @@
         // the element at its original U/face, restamp it to its original index, and
         // reset that state entry to a plain existing tile.
         function restoreTile(itemEl, face, uPosition, originIdx, srcWidget) {
+            rdTrace("restoreTile", {
+                label: srcWidget && srcWidget.label, intoRackId: rackId,
+                face: face, uPosition: uPosition, originIdx: originIdx,
+                becomes: "existing",
+            });
             var target = targetFor(face) || faceGrids.front || faceGrids.rear;
             if (!target || !target.grid) { return; }
             // A tray origin (spec §9.2) is a fixed-height list row, appended
@@ -2788,6 +3091,10 @@
             var gidx = parseInt(ghostEl.getAttribute("data-widget-index"), 10);
             var gst = state[gidx];
             if (!gst) { return; }
+            rdTrace("restoreFromGhost", {
+                label: gst.widget && gst.widget.label, intoRackId: rackId,
+                ghostIdx: gidx, becomes: "existing",
+            });
             var gw = gst.widget;
             var face = gw.face || "";
             var gsH = (face === "") ? 2 : Math.round((gw.u_height || 1) * 2);
@@ -2832,6 +3139,210 @@
             scheduleRefresh();
         }
 
+        // Re-home a tile REJECTED at another rack back into THIS (source) rack
+        // as a cross-rack move_in at (face, gsY) -- its pre-drag slot. Used by
+        // rejectDrop so an illegal MULTI-HOP cross-rack drop returns the device
+        // to where it was dragged FROM, never its (possibly occupied) true
+        // origin (task #33). Retires any STALE entry in this rack for the same
+        // device first, so its orphaned owned shadow can't duplicate the
+        // reclaimed one (I1 "shadow overlaps shadow"). Runs the homeInto under
+        // `refreshing` so the synchronous `added` event is treated as our own
+        // re-home, not a fresh user adoption.
+        function reclaimFromReject(itemEl, face, gsY, info) {
+            rdTrace("reclaimFromReject", {
+                label: info.label, intoRackId: rackId, face: face, gsY: gsY,
+            });
+            var gsH = Math.round((info.u_height || 1) * 2);
+            if (info.device_id != null) {
+                state.forEach(function (s, i) {
+                    if (s && s.widget && !s.widget.opposite_face
+                            && s.widget.device_id === info.device_id) {
+                        rdTrace("state.retire", {
+                            reason: "reclaimFromReject stale same-device", idx: i,
+                            label: s.widget.label, kind: s.widget.kind,
+                            crossRack: !!s.crossRack,
+                        });
+                        destroyShadowEl(i);
+                        removeTempGhost(i);
+                        state[i] = null;
+                    }
+                });
+            }
+            refreshing = true;
+            rdBeginPushSuppression();
+            try {
+                homeInto(targetFor(face) || faceGrids.front || faceGrids.rear,
+                    itemEl, gsY, gsH);
+            } finally {
+                rdEndPushSuppression();
+                refreshing = false;
+            }
+            var newIdx = state.length;
+            state.push({
+                widget: {
+                    kind: "move_in", device_id: info.device_id,
+                    device_type_id: (info.device_type_id != null) ? info.device_type_id : null,
+                    placement_id: (info.placement_id != null) ? info.placement_id : null,
+                    u_height: info.u_height, label: info.label,
+                    proposed_name: info.proposed_name || "", face: face,
+                },
+                origUPosition: info.origUPosition, origFace: info.origFace,
+                removed: false, shadowEl: null, crossRack: true, needsRename: false,
+                originRackId: info.originRackId, originWidgetIndex: info.originWidgetIndex,
+                preDragGsY: gsY, preDragFace: face,
+                srcRackId: null, srcPreDragGsY: null, srcPreDragFace: null,
+            });
+            itemEl.setAttribute("data-widget-index", newIdx);
+            itemEl.classList.remove("nbx-rd-state-existing", "nbx-rd-state-move_out_ghost");
+            itemEl.classList.add("nbx-rd-state-move_in", "nbx-rd-dirty");
+            markDirty();
+            rdTrace("state.write", {
+                op: "reclaimFromReject new entry", newIdx: newIdx,
+                label: info.label, rackId: rackId, kind: "move_in",
+                crossRack: true, originRackId: info.originRackId,
+                // NOTE: srcRackId is set null here -- so a SUBSEQUENT reject of
+                // this reclaimed entry can't take the multiHopReclaim branch
+                // (which needs srcRackId) and, being crossRack:true, can't take
+                // havePreSnapBack either -> it falls to cancelMove branch (a),
+                // re-homing the tile into its origin rack. That is the "moved
+                // within a rack, flew to another rack" chain (gesture #3).
+                srcRackId: null,
+            });
+            scheduleRefresh();
+        }
+
+        // An ILLEGAL drop (cursor over an illegal target, or a drop onto an
+        // occupied slot). A tile that is ALREADY a committed move (move_in) must
+        // snap back to its LAST valid slot -- where THIS drag began -- keeping
+        // the move; it must NOT undo the whole move back to the device's origin
+        // (user bug 2026-07-15: "moved a device onto an occupied slot and
+        // everything went to hell"). For any OTHER tile (an existing device
+        // dragged for the first time), the pre-drag slot IS the origin, so a
+        // full cancelMove is correct (it also clears the fresh move_in styling /
+        // temp ghost that the aborted drag may have started to grow). The
+        // cross-face reject edge (pre-drag on the other face) also falls through
+        // to cancelMove for safety.
+        function rejectDrop(itemEl, idx, st) {
+            var w = st.widget;
+            var gsH = Math.round((w.u_height || 1) * 2);
+            rdTrace("rejectDrop", {
+                label: w.label, kind: w.kind, crossRack: !!st.crossRack,
+                rackId: rackId, srcRackId: st.srcRackId, originRackId: st.originRackId,
+                preDragGsY: st.preDragGsY, preDragFace: st.preDragFace,
+            });
+            // MULTI-HOP cross-rack reject: the device was dragged here from a
+            // rack that is NOT its true origin (srcRackId !== originRackId), so
+            // its "last position" is that SOURCE rack -- return it there, not to
+            // the true origin (which cancelMove targets and which may be
+            // occupied -> the task #33 overlap). A FRESH cross-rack move
+            // (srcRackId === originRackId) keeps the existing cancelMove path,
+            // so the cross-rack sweep / foreign-drop-onto-shadow tests are
+            // unaffected.
+            if (st.crossRack && st.srcRackId != null && st.originRackId != null
+                    && st.srcRackId !== st.originRackId && st.srcRackId !== rackId
+                    && st.srcPreDragGsY != null
+                    && (st.srcPreDragFace === "front" || st.srcPreDragFace === "rear")
+                    && controllersByRackId[st.srcRackId]) {
+                var info = {
+                    device_id: w.device_id, device_type_id: w.device_type_id,
+                    placement_id: w.placement_id, u_height: w.u_height,
+                    label: w.label, proposed_name: w.proposed_name || "",
+                    origUPosition: st.origUPosition, origFace: st.origFace,
+                    originRackId: st.originRackId, originWidgetIndex: st.originWidgetIndex,
+                };
+                rdTrace("rejectDrop.branch", {
+                    branch: "multiHopReclaim", label: w.label,
+                    toRackId: st.srcRackId, toFace: st.srcPreDragFace,
+                    toGsY: st.srcPreDragGsY,
+                });
+                restoreDisplaced(idx);
+                var g0 = gridForItem(itemEl);
+                if (g0) { g0.removeWidget(itemEl, false); }
+                destroyShadowEl(idx);
+                state[idx] = null;
+                controllersByRackId[st.srcRackId].reclaimFromReject(
+                    itemEl, st.srcPreDragFace, st.srcPreDragGsY, info);
+                markDirty();
+                scheduleRefresh();
+                return;
+            }
+            // Snap the tile back to WHERE THIS DRAG BEGAN (its pre-drag slot) --
+            // its last valid position -- for an existing device AND a committed/
+            // reloaded move_in alike. This is deliberately NOT gated on the
+            // device's ORIGIN: for a move_in, st.origUPosition == the move
+            // TARGET (state init sets origUPosition = w.u_position), so any
+            // origin comparison reads "still at origin" and would fall through
+            // to cancelMove -- which reverts a move_in all the way to its
+            // GHOST / real origin. That is the user bug (2026-07-15): "the device
+            // returned to its old ghost place instead of the last slot of its
+            // move_in". After snap-back, scheduleRefresh reconciles state: an
+            // existing tile back at its origin reverts to plain existing; a
+            // move_in stays a move_in at its last slot.
+            //
+            // The pre-drag slot can be on EITHER face -- a rejected CROSS-FACE
+            // re-drag (e.g. a front move_in dragged onto an occupied REAR slot)
+            // must still return to the face it was dragged FROM, not fall to
+            // cancelMove -> ghost (user bug 2026-07-15, cross-face variant:
+            // preDragFace "front" / curFace "rear" reverted to the real origin).
+            //
+            // This is keyed on preDragGsY PRESENCE, not on !crossRack, and that
+            // distinction is load-bearing. A tile ADOPTED into this rack THIS
+            // gesture (adoptForeignTile) is a live cross-rack move that must
+            // return to its SOURCE rack (multiHopReclaim above, or cancelMove's
+            // crossRack branch) -- and it structurally has NO preDragGsY
+            // (adoptForeignTile never sets one; only onDragStart, on the source
+            // entry, and reclaimFromReject do), so it never reaches here. What
+            // DOES carry a this-rack preDragGsY is a SETTLED entry re-dragged
+            // within its own rack -- including a tile RECLAIMED here after an
+            // earlier rejected cross-rack hop, which is crossRack:true but is no
+            // longer in flight. Gating on !crossRack wrongly sent such a tile to
+            // cancelMove -> restoreTile, flying it to its home rack on a WITHIN-
+            // rack illegal move (user bug 2026-07-16, sg2-sl-b15 gesture #4).
+            var havePre = st.preDragGsY != null
+                && (st.preDragFace === "front" || st.preDragFace === "rear");
+            if (havePre) {
+                rdTrace("rejectDrop.branch", {
+                    branch: "havePreSnapBack", label: w.label,
+                    toFace: st.preDragFace, toGsY: st.preDragGsY,
+                });
+                restoreDisplaced(idx);
+                var curFace = faceOfItem(itemEl);
+                rdBeginPushSuppression();
+                try {
+                    if (curFace === st.preDragFace) {
+                        var grid = gridForItem(itemEl);
+                        if (grid) {
+                            grid.update(itemEl, { x: 0, y: st.preDragGsY, w: 1, h: gsH });
+                            syncNodeOrig(itemEl);
+                        }
+                    } else {
+                        // Cross-face: re-home the tile onto the face it was
+                        // dragged FROM, at its pre-drag rows. Mirror
+                        // restoreFromGhost's homeInto re-home under `refreshing`
+                        // so the synchronous `added` event it fires is treated as
+                        // our own re-home, not a fresh user adoption.
+                        refreshing = true;
+                        try {
+                            var curGrid = gridForItem(itemEl);
+                            if (curGrid) { curGrid.removeWidget(itemEl, false); }
+                            homeInto(
+                                targetFor(st.preDragFace) || faceGrids.front
+                                    || faceGrids.rear,
+                                itemEl, st.preDragGsY, gsH);
+                        } finally {
+                            refreshing = false;
+                        }
+                    }
+                } finally {
+                    rdEndPushSuppression();
+                }
+                scheduleRefresh();
+                return;
+            }
+            rdTrace("rejectDrop.branch", { branch: "cancelMove", label: w.label });
+            cancelMove(itemEl, idx, st);
+        }
+
         function cancelMove(itemEl, idx, st) {
             // Phase 4 (spec §4.3.5): a full revert releases whatever this tile
             // was displacing -- OLD's ghost/remove rendering comes back.
@@ -2858,6 +3369,11 @@
             // (a) A LIVE (unsaved) cross-rack move adopted this session: snap the
             // tile back into its ORIGIN rack via that rack's controller.
             if (st.crossRack) {
+                rdTrace("cancelMove.branch", {
+                    branch: "a:liveCrossRack->restoreTile", label: w.label,
+                    toRackId: st.originRackId, toFace: st.origFace,
+                    toUPosition: st.origUPosition,
+                });
                 var srcCtrl = controllersByRackId[st.originRackId];
                 if (!srcCtrl) {
                     // Source rack not on screen (shouldn't happen for a same-design
@@ -2890,6 +3406,10 @@
             if (w.kind === "move_in") {
                 var hit = findGhostAcrossBlocks(w.placement_id);
                 if (hit && hit.controller.rackId !== rackId) {
+                    rdTrace("cancelMove.branch", {
+                        branch: "b:reloadedMoveIn->restoreFromGhost", label: w.label,
+                        fromRackId: rackId, toRackId: hit.controller.rackId,
+                    });
                     var curGridG = gridForItem(itemEl);
                     if (curGridG) { curGridG.removeWidget(itemEl, false); }
                     destroyShadowEl(idx);
@@ -2903,6 +3423,9 @@
                 }
             }
 
+            rdTrace("cancelMove.branch", {
+                branch: "c:genericOriginRestore", label: w.label, kind: w.kind,
+            });
             var origFace, origGsY;
             if (w.kind === "move_in") {
                 var ghost = staticGhostFor(w.placement_id);
@@ -2972,6 +3495,10 @@
 
         function flagRemove(itemEl, idx, st) {
             st.removed = !st.removed;
+            rdTrace("flagRemove", {
+                rackId: rackId, idx: idx,
+                label: st.widget && st.widget.label, removed: st.removed,
+            });
             itemEl.classList.toggle("nbx-rd-state-remove", st.removed);
             itemEl.classList.toggle("nbx-rd-dirty", st.removed);
             if (!st.removed) {
@@ -3236,6 +3763,15 @@
                 // check at maybePromptMove's top for a tile the added-pass
                 // already snapped home) make this second pass idempotent on
                 // the dialog side.
+                rdTrace("dropped", {
+                    rackId: rackId,
+                    // node.y HERE is the FINAL drop position (contrast with the
+                    // `added` trace's addedTimeY placeholder).
+                    finalY: (el.gridstackNode && el.gridstackNode.y != null)
+                        ? el.gridstackNode.y : null,
+                    curFace: faceOfItem(el),
+                    widgetIdx: el.getAttribute("data-widget-index"),
+                });
                 maybePromptMove(el);
                 window.setTimeout(thawAllTiles, 0);
                 scheduleRefresh();
@@ -3371,6 +3907,13 @@
                     widget: widget, origUPosition: uPosition, origFace: face, removed: false, shadowEl: null,
                     displaces: displacedList || [],
                 });
+                rdTrace("finishAdd", {
+                    rackId: rackId, newIdx: newIdx, label: label, face: face,
+                    uPosition: uPosition, isFullDepth: isFullDepth,
+                    displaces: (displacedList || []).map(function (d) {
+                        return d && d.widget ? d.widget.label : null;
+                    }),
+                });
 
                 el.setAttribute("data-widget-index", newIdx);
                 el.removeAttribute("data-device-type-id");
@@ -3398,6 +3941,20 @@
                 if (model) { content.setAttribute("data-device-type-name", model); }
                 if (roleName) { content.setAttribute("data-role-name", roleName); }
                 if (tenantName) { content.setAttribute("data-tenant-name", tenantName); }
+                // Carry the palette row's projected draw onto the tile so the
+                // power bar + heatmap count this add LIVE (stampDraw put it on the
+                // <li>; the drag-in clone inherited it). Absent -> 0 W, known
+                // (the fetch had not resolved when this row was dragged); the
+                // heatmap MutationObserver picks up the data-draw-w write.
+                var drawW = el.getAttribute("data-draw-w");
+                var drawKnown = el.getAttribute("data-draw-known");
+                var powerData = el.getAttribute("data-power");
+                content.setAttribute("data-draw-w", drawW != null ? drawW : "0");
+                content.setAttribute("data-draw-known", drawKnown != null ? drawKnown : "1");
+                if (powerData) { content.setAttribute("data-power", powerData); }
+                el.removeAttribute("data-draw-w");
+                el.removeAttribute("data-draw-known");
+                el.removeAttribute("data-power");
                 var btn = document.createElement("button");
                 btn.type = "button";
                 btn.className = "nbx-rd-remove-btn";
@@ -3649,6 +4206,7 @@
             removeOriginGhost: removeOriginGhost,
             restoreTile: restoreTile,
             restoreFromGhost: restoreFromGhost,
+            reclaimFromReject: reclaimFromReject,
         };
         controllersByRackId[rackId] = controller;
         return controller;
@@ -3847,6 +4405,45 @@
             GridStack.setupDragIn(".nbx-rd-palette-item", { appendTo: "body", helper: "clone" });
         }
 
+        // Stamp each just-rendered palette row with its device type's projected
+        // power draw (docs/power-projection-spec.md) so a freshly dropped catalog
+        // add shows the SAME draw LIVE as it will after Save + reload -- the core
+        // /api/dcim/device-types/ feed carries no computed draw, so a small
+        // companion endpoint resolves it (same logic as the projection). The
+        // attributes ride the palette <li>, so the drag-in CLONE inherits them;
+        // onPaletteDrop copies them onto the tile content (which the heatmap
+        // reads). Best-effort: a drop before this resolves just falls back to 0.
+        var powerUrl = "/api/plugins/rack-design/device-type-power/";
+        function stampDraw(container) {
+            if (!container) { return; }
+            var rows = Array.prototype.slice.call(
+                container.querySelectorAll(".nbx-rd-palette-item[data-device-type-id]"));
+            if (!rows.length) { return; }
+            var url = powerUrl + "?" + rows.map(function (r) {
+                return "id=" + encodeURIComponent(r.getAttribute("data-device-type-id"));
+            }).join("&");
+            fetch(url, {
+                credentials: "same-origin",
+                headers: { "Accept": "application/json" },
+            }).then(function (resp) {
+                return resp.ok ? resp.json() : null;
+            }).then(function (data) {
+                if (!data || !data.results) { return; }
+                rows.forEach(function (r) {
+                    var info = data.results[r.getAttribute("data-device-type-id")];
+                    if (!info) { return; }
+                    r.setAttribute("data-draw-w", String(Math.round(info.draw_w || 0)));
+                    r.setAttribute("data-draw-known", info.draw_known ? "1" : "0");
+                    // "name:draw:conn|..." — a type template has no cabling, so the
+                    // conn field is left blank (matches the server template's add row).
+                    var pp = (info.power_ports || []).map(function (p) {
+                        return p.name + ":" + Math.round(p.draw || 0) + ":";
+                    }).join("|");
+                    if (pp) { r.setAttribute("data-power", pp); }
+                });
+            }).catch(function () { /* best-effort; tile falls back to 0 W */ });
+        }
+
         function renderResults(results) {
             listEl.innerHTML = "";
             var shown = results || [];
@@ -3857,6 +4454,7 @@
             setStatus("");
             shown.forEach(function (dt) { listEl.appendChild(buildPaletteRow(dt)); });
             refreshDragIn();
+            stampDraw(listEl);
         }
 
         function renderQuickAccess() {
@@ -3889,6 +4487,7 @@
                 }
                 results.forEach(function (dt) { quickListEl.appendChild(buildPaletteRow(dt)); });
                 refreshDragIn();
+                stampDraw(quickListEl);
             }).catch(function () {
                 quickListEl.innerHTML =
                     '<div class="list-group-item text-muted small nbx-rd-quick-empty">'
@@ -4361,6 +4960,23 @@
     // Extract the "existing"/"add"/"move_in"/"move_out_ghost"/"remove" token off
     // a tile's `nbx-rd-state-*` class (the same vocabulary the CSS/legend use).
     function rdStateFromClassList(el) {
+        // A tile can legitimately carry MORE THAN ONE nbx-rd-state-* class: the
+        // base `existing` plus an additive overlay. flagRemove() only toggles
+        // `nbx-rd-state-remove` ON, leaving `nbx-rd-state-existing` in place, so
+        // a removed existing device is `[existing, remove]`. A naive
+        // first-match regex returned `existing` -> the read-model saw the device
+        // as a LIVE body, so canPlaceAt kept BLOCKING its own being-vacated slot
+        // and any tile dropped there snapped back (user bug 2026-07-15: could not
+        // move a device onto the space freed by a removal -- worst for full-depth
+        // gear, whose opposite face is validated too). Resolve by PRECEDENCE: an
+        // overlay state wins over the base `existing`. Order: remove >
+        // move_out_ghost > move_in > add > existing.
+        var cl = el.classList;
+        if (cl.contains("nbx-rd-state-remove")) { return "remove"; }
+        if (cl.contains("nbx-rd-state-move_out_ghost")) { return "move_out_ghost"; }
+        if (cl.contains("nbx-rd-state-move_in")) { return "move_in"; }
+        if (cl.contains("nbx-rd-state-add")) { return "add"; }
+        if (cl.contains("nbx-rd-state-existing")) { return "existing"; }
         var m = /(?:^|\s)nbx-rd-state-([a-z_]+)(?:\s|$)/.exec(el.className || "");
         return m ? m[1] : "unknown";
     }

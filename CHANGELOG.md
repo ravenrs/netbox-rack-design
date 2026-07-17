@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.12.0] - 2026-07-17
+
+### Release Summary
+**Live power for new gear, and a hardened editor** — a minor, fully backward-compatible release. A freshly dropped catalog device now shows its projected draw **immediately** (per-rack bar + heatmap, no save/reload), via a new read-only power endpoint the palette reads. Alongside it, a batch of editor placement fixes found through real-mouse testing: cross-rack homecoming and reject paths no longer corrupt device identity or fling tiles to the wrong rack, a device dropped onto a just-removed slot now correctly shows **its** name and heat, and the power heatmap no longer colors a device that is leaving. No schema changes, no migrations.
+
+### Added
+- **Palette-add-live power**: a freshly dragged catalog device now shows its projected draw **immediately** in the per-rack power bar and heatmap — no save/reload needed. The catalog palette (search results *and* the favorites/quick-access list) fetches each device type's projected draw from a new read-only endpoint, `GET /api/plugins/rack-design/device-type-power/?id=…`, and stamps it on the row, so the drop carries the same `data-draw-w` / `data-power` a real device tile does. Draw is resolved by the same logic the projection uses for a planned add (`device_type_power_summary`), so the live figure matches what Save + reload produces. Endpoint is authenticated, read-only, and performs no writes.
+
+### Fixed
+- **Cross-rack homecoming no longer corrupts a device**: dragging a moved device back toward its home rack used to leave it half-reverted (existing in the DOM but still a "ghost" in state), so the next cross-rack drag mis-indexed another rack's state array and duplicated/corrupted an unrelated device. A homecoming now fully revives the device as a proper existing entry (kind + placement), so re-drags are adopted cleanly.
+- **Illegal drops return to the last valid position**: a rejected cross-rack drop returns the device to the rack/slot it was dragged **from**, not its true origin; a re-dragged reloaded move keeps its move identity instead of reverting the whole move; and a within-rack illegal move of a just-reclaimed tile stays in that rack instead of flying to its home rack.
+- **Homecoming onto an occupied slot is rejected** (validated against the actual drop rows, not the free origin slot), so it can no longer commit an overlap.
+- **Name restored on homecoming**: returning a device to its own origin shows its real name again instead of keeping the move's `"<design>-<name>"` overlay.
+- **Heatmap on a leaving device**: a tile flagged for removal or displaced (being replaced) no longer keeps a stale heatmap fill — a device that is leaving is not colored.
+- **Drop onto a removed slot**: the device that takes a removed/displaced device's slot now renders above it, so **its** heat fill and name are shown (previously the collapsed tile stacked on top and blanked the new occupant's name).
+
+### Changed
+- Added a dev-only, opt-in editor drag-lifecycle tracer (`window.__rdDragTrace`), gated behind `DEBUG` / Django Debug Toolbar so it is never reachable on a production build.
+
 ## [0.11.1] - 2026-07-14
 
 ### Release Summary
