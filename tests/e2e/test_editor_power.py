@@ -86,14 +86,17 @@ class EditorPowerTestCase(unittest.TestCase):
             "status": "active"})
         # Powered type: a PowerPortTemplate with a draw; the device's
         # instantiated port stays uncabled -> a connection gap.
+        cls._powered_model = f"E2E-PWR-Srv-{suffix}"
+        cls._passive_model = f"E2E-PWR-PP-{suffix}"
         dt_pwr = cls._api("POST", "/api/dcim/device-types/", {
-            "manufacturer": mfr["id"], "model": f"E2E-PWR-Srv-{suffix}",
+            "manufacturer": mfr["id"], "model": cls._powered_model,
             "slug": f"e2e-pwr-srv-{suffix}", "u_height": 1, "is_full_depth": False})
+        cls._powered_dt_id = dt_pwr["id"]
         cls._api("POST", "/api/dcim/power-port-templates/", {
             "device_type": dt_pwr["id"], "name": "psu1", "allocated_draw": 400})
         # Passive type: no power ports at all (patch-panel analogue).
         dt_passive = cls._api("POST", "/api/dcim/device-types/", {
-            "manufacturer": mfr["id"], "model": f"E2E-PWR-PP-{suffix}",
+            "manufacturer": mfr["id"], "model": cls._passive_model,
             "slug": f"e2e-pwr-pp-{suffix}", "u_height": 1, "is_full_depth": False})
         rack = cls._api("POST", "/api/dcim/racks/", {
             "name": f"E2E PWR Rack {suffix}", "site": site["id"],
@@ -263,6 +266,47 @@ class EditorPowerTestCase(unittest.TestCase):
         self.assertFalse(res["blockOff"], "rack block kept heatmap class after off")
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
+    def test_removed_tile_shows_no_heat_fill(self):
+        # A device flagged for removal is leaving -- on the heatmap it must NOT
+        # keep a colored fill (user bug 2026-07-16: a removed/displaced device
+        # showed a heat color with no name -> "лейбла нет, хитмап не верный").
+        # A removed body is excluded from countingTiles, so fill() never
+        # re-touches it and its heat fill goes STALE unless explicitly cleared.
+        res = self.page.evaluate("""() => {
+            const t = document.querySelector('[data-rd-power-heatmap]');
+            t.checked = true; t.dispatchEvent(new Event('change', {bubbles:true}));
+            const tile = [...document.querySelectorAll('.grid-stack-item')].find(x => {
+                const c = x.querySelector('.grid-stack-item-content');
+                return c && parseFloat(c.getAttribute('data-draw-w')) > 0
+                    && !x.classList.contains('nbx-rd-opposite')
+                    && !x.getAttribute('data-rd-derived-opp')
+                    && !x.classList.contains('nbx-rd-state-remove');
+            });
+            if (!tile) return {err: 'no powered tile'};
+            const c = tile.querySelector('.grid-stack-item-content');
+            const before = c.style.getPropertyValue('--nbx-rd-heat-pct');
+            tile.setAttribute('data-rd-test-mark', '1');
+            tile.classList.add('nbx-rd-state-remove');
+            return {before};
+        }""")
+        self.assertNotIn("err", res, res)
+        self.assertNotEqual(
+            res["before"], "",
+            "precondition: the powered tile should have a heat fill before removal")
+        self.page.wait_for_timeout(400)  # debounced observer recompute
+        after = self.page.evaluate("""() => {
+            const tile = document.querySelector('[data-rd-test-mark="1"]');
+            const c = tile.querySelector('.grid-stack-item-content');
+            return {
+                pct: c.style.getPropertyValue('--nbx-rd-heat-pct'),
+                unknown: tile.classList.contains('nbx-rd-heat-unknown'),
+            };
+        }""")
+        self.assertEqual(
+            after["pct"], "",
+            f"a device flagged for removal must not keep a heatmap fill: {after}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
     # ---- unconnected pull-out highlight ----------------------------------
 
     def test_bar_hover_pulls_out_unconnected(self):
@@ -310,6 +354,130 @@ class EditorPowerTestCase(unittest.TestCase):
         self.assertAlmostEqual(
             after, res["before"] - res["dw"], delta=1,
             msg=f"bar did not drop by the removed device's draw: {res}, after={after}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    # ---- palette-add-live: draw travels with a catalog add ---------------
+
+    def test_palette_row_stamped_with_projected_draw(self):
+        # The catalog palette fetches each type's projected draw (new
+        # device-type-power endpoint) so a freshly dropped add can count LIVE.
+        # The powered type's row must carry data-draw-w / data-power; the
+        # passive type's row must read known-0.
+        # Open the device-catalog drawer (the palette + its search live in a
+        # drawer that is closed until its section toggle is clicked).
+        self.page.click('[data-rd-section-toggle="device"]')
+        self.page.wait_for_selector("#nbx-rd-palette-search", state="visible", timeout=8000)
+        # Filter the palette to our throwaway types so they are guaranteed to
+        # render (the default top-50 may not include them on a busy instance).
+        self.page.fill("#nbx-rd-palette-search", "E2E-PWR-")
+        # Wait for OUR powered row specifically to be rendered AND stamped by the
+        # device-type-power fetch (a pre-existing favorites row could otherwise
+        # satisfy a generic [data-draw-w] wait before the search results land).
+        self.page.wait_for_function(
+            """(model) => {
+                const li = [...document.querySelectorAll('.nbx-rd-palette-item')]
+                    .find(x => (x.getAttribute('data-model') || '') === model);
+                return li && li.getAttribute('data-draw-w') !== null;
+            }""",
+            arg=self._powered_model, timeout=15000)
+        res = self.page.evaluate("""(names) => {
+            function row(model) {
+                return [...document.querySelectorAll('.nbx-rd-palette-item')]
+                    .find(li => (li.getAttribute('data-model') || '') === model);
+            }
+            const pwr = row(names.powered);
+            const pas = row(names.passive);
+            return {
+                pwrDraw: pwr && pwr.getAttribute('data-draw-w'),
+                pwrKnown: pwr && pwr.getAttribute('data-draw-known'),
+                pwrPower: pwr && pwr.getAttribute('data-power'),
+                pasDraw: pas && pas.getAttribute('data-draw-w'),
+                pasKnown: pas && pas.getAttribute('data-draw-known'),
+            };
+        }""", {"powered": self._powered_model, "passive": self._passive_model})
+        self.assertEqual(res["pwrDraw"], "400", res)
+        self.assertEqual(res["pwrKnown"], "1", res)
+        self.assertIn("psu1:400:", res["pwrPower"] or "", res)
+        # Passive type: no power ports -> known 0 (not the unknown hatch).
+        self.assertEqual(res["pasDraw"], "0", res)
+        self.assertEqual(res["pasKnown"], "1", res)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    def test_favorite_quick_row_stamped_with_projected_draw(self):
+        # The favorites (quick-access) palette is populated by a SEPARATE render
+        # path (renderQuickAccess) from the search results, so it must stamp the
+        # projected draw too: a starred powered type's quick row carries the draw.
+        # Star the powered type for this user, reload, then read the quick row.
+        try:
+            self._api("POST",
+                      "/api/plugins/rack-design/favorite-device-types/toggle/",
+                      {"device_type_id": self._powered_dt_id})
+            self.page.reload(wait_until="networkidle")
+            self.page.wait_for_selector(".nbx-rd-power-bar", timeout=15000)
+            # force: the Django Debug Toolbar handle can overlap this toggle.
+            self.page.click('[data-rd-section-toggle="favorites"]', force=True)
+            self.page.wait_for_function(
+                """(model) => {
+                    const li = [...document.querySelectorAll(
+                        '#nbx-rd-quick-list .nbx-rd-palette-item')]
+                        .find(x => (x.getAttribute('data-model') || '') === model);
+                    return li && li.getAttribute('data-draw-w') !== null;
+                }""",
+                arg=self._powered_model, timeout=15000)
+            res = self.page.evaluate("""(model) => {
+                const li = [...document.querySelectorAll(
+                    '#nbx-rd-quick-list .nbx-rd-palette-item')]
+                    .find(x => (x.getAttribute('data-model') || '') === model);
+                return {
+                    draw: li && li.getAttribute('data-draw-w'),
+                    power: li && li.getAttribute('data-power'),
+                };
+            }""", self._powered_model)
+            self.assertEqual(res["draw"], "400", res)
+            self.assertIn("psu1:400:", res["power"] or "", res)
+            self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+        finally:
+            # Unstar so the shared test user's favorites stay clean.
+            try:
+                self._api(
+                    "POST",
+                    "/api/plugins/rack-design/favorite-device-types/toggle/",
+                    {"device_type_id": self._powered_dt_id})
+            except Exception:
+                pass
+
+    def test_new_counting_tile_raises_bar_live(self):
+        # A freshly added tile that carries a draw (exactly what onPaletteDrop
+        # stamps onto the content from the palette row) must be picked up by the
+        # MutationObserver and raise the rack's projected draw with no reload.
+        before = self.page.evaluate(
+            "() => parseFloat(document.querySelector('.nbx-rd-power-bar')"
+            ".getAttribute('data-rd-power-draw'))")
+        ok = self.page.evaluate("""() => {
+            const grid = document.querySelector('.nbx-rd-rack-block .grid-stack');
+            if (!grid) return false;
+            const item = document.createElement('div');
+            item.className = 'grid-stack-item nbx-rd-state-add';
+            const c = document.createElement('div');
+            c.className = 'grid-stack-item-content';
+            c.setAttribute('data-draw-w', '250');
+            c.setAttribute('data-draw-known', '1');
+            const lab = document.createElement('span');
+            lab.className = 'nbx-rd-label';
+            lab.textContent = 'live-add-probe';
+            c.appendChild(lab);
+            item.appendChild(c);
+            grid.appendChild(item);
+            return true;
+        }""")
+        self.assertTrue(ok, "no grid to append the probe tile")
+        self.page.wait_for_timeout(400)  # debounced observer recompute
+        after = self.page.evaluate(
+            "() => parseFloat(document.querySelector('.nbx-rd-power-bar')"
+            ".getAttribute('data-rd-power-draw'))")
+        self.assertAlmostEqual(
+            after, before + 250, delta=1,
+            msg=f"bar did not rise by the new tile's draw: before={before}, after={after}")
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     # ---- PSU rows on the hover card --------------------------------------

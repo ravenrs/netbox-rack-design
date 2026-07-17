@@ -541,7 +541,12 @@
    the live occupant. The stripe itself (user ruling 2026-07-09) is a bar
    OUTSIDE the rack frame -- see .nbx-rd-stripe below. */
 .grid-stack-item.nbx-rd-displaced {
-    z-index: 4;
+    /* Must sit BELOW the live device that took this slot, so THAT device's
+       fill + name read as the occupant (user ruling 2026-07-16: "оверхитинг
+       должен быть от девайса который встал на место девайса, лейбл тоже").
+       It was z-index:4, which stacked the collapsed (and possibly dirty/
+       remove-hatched) tile OVER the incoming occupant, blanking its name. */
+    z-index: 0;
     pointer-events: none;
 }
 
@@ -550,6 +555,10 @@
     background-image: none !important;
     border: none !important;
     box-shadow: none !important;
+    /* Suppress the dirty/remove amber dashed outline too -- the collapsed tile
+       is a placeholder for the external stripe, and its outline would frame an
+       empty box over the real occupant beneath. */
+    outline: none !important;
     pointer-events: none;
 }
 

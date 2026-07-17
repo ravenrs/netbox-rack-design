@@ -919,10 +919,16 @@ class EditorSweepTestCase(unittest.TestCase):
             steps += 1
 
         # Explicit rejected-drop assertion (guards Bug B): dropping onto the
-        # occupied front obstacle's row must snap back to the device's
-        # ORIGINAL (page-load) position, AND the live shadow must follow it
-        # there -- not be left stranded at the rejected slot.
+        # occupied front obstacle's row must snap back to the device's LAST
+        # VALID slot (where this drag began -- here the sweep's final row), AND
+        # the live shadow must follow it there, not be left stranded at the
+        # rejected slot. (User ruling 2026-07-15: a rejected re-drag of an
+        # already-moved device returns to its last valid slot, NOT all the way
+        # to the device's origin -- see rejectDrop in editor.js.)
         if getattr(self, "_front_obstacle_reject_row", None) is not None:
+            pre_reject = self.page.evaluate(
+                f"() => window.__rdSweep.snapshot('{idx}', {json.dumps(label)})")
+            last_valid_y = pre_reject["y"]
             self.page.evaluate(
                 f"() => window.__rdSweep.moveTile("
                 f"'{idx}', {self._front_obstacle_reject_row})")
@@ -930,13 +936,13 @@ class EditorSweepTestCase(unittest.TestCase):
             snap = self._check(
                 idx, label, True, "front", self._front_obstacle_reject_row,
                 "explicit_reject", violations)
-            if snap["y"] != self._swept_orig_gsy:
+            if snap["y"] != last_valid_y:
                 violations.append(dict(
                     phase="explicit_reject", face="front",
                     row=self._front_obstacle_reject_row, kind="reject_snapback",
                     detail=f"drop onto occupied row "
                            f"{self._front_obstacle_reject_row} should have "
-                           f"snapped back to origin y={self._swept_orig_gsy}, "
+                           f"snapped back to its LAST valid slot y={last_valid_y}, "
                            f"got y={snap['y']}"))
             steps += 1
 
@@ -974,6 +980,200 @@ class EditorSweepTestCase(unittest.TestCase):
         print(f"  total steps: {steps}")
         print(f"  total violations: {len(violations)}")
         self._assert_clean(violations)
+
+    # =====================================================================
+    # Regression (user bug 2026-07-15): a device that has ALREADY been moved
+    # this session (a move_in at slot A) and is then dragged onto an OCCUPIED
+    # slot must snap back to A -- its LAST valid position -- not to its
+    # original saved slot O, and nothing else may drift. The user hit "moved a
+    # device onto an occupied slot and everything went to hell": the two-step
+    # revert target was wrong (reverting a re-dragged move_in undid the earlier
+    # accepted move instead of just rejecting the second drag).
+    # =====================================================================
+    def _mover_pos(self, idx):
+        return self.page.evaluate(
+            """(idx) => {
+                const el = document.querySelector(
+                    `.grid-stack-item[data-widget-index="${idx}"]:not([data-rd-derived-opp])`);
+                if (!el) { return null; }
+                const n = el.gridstackNode;
+                const face = el.closest('[data-rd-face]') &&
+                    el.closest('[data-rd-face]').getAttribute('data-rd-face');
+                return {
+                    face: face, y: n && n.y, h: n && n.h,
+                    state: [...el.classList].filter(c => c.startsWith('nbx-rd-state')),
+                };
+            }""", idx)
+
+    def test_moved_device_rejected_second_drop_returns_to_last_valid_slot(self):
+        self._load_editor()
+        idx, w = self.widx(
+            kind="existing", face="front", device_id=self._swept_device_id)
+        gs_h = self._swept_u_height * 2  # 4U -> 8 rows
+
+        # Step 1: a VALID move O(U6) -> A(U2). The device becomes a move_in at A.
+        slot_a = self._u_to_gsy(self._rack_u_height, 2, gs_h)
+        self.page.evaluate(f"() => window.__rdSweep.moveTile('{idx}', {slot_a})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        at_a = self._mover_pos(idx)
+        self.assertEqual(
+            [at_a["face"], at_a["y"], at_a["h"]], ["front", slot_a, gs_h],
+            f"step-1 valid move should land the device at slot A: {at_a}")
+        self.assertIn("nbx-rd-state-move_in", at_a["state"], at_a)
+        world_at_a = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+
+        # Step 2: an ILLEGAL second drag A -> a row overlapping the occupied
+        # front/rear obstacles. It must be REJECTED and snap back to A.
+        self.page.evaluate(
+            f"() => window.__rdSweep.moveTile('{idx}', {self._front_obstacle_reject_row})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.assertEqual(self.errors, [], f"console errors on rejected 2nd drop: {self.errors}")
+
+        after = self._mover_pos(idx)
+        self.assertEqual(
+            [after["face"], after["y"], after["h"]], ["front", slot_a, gs_h],
+            f"a move_in dropped onto an OCCUPIED slot must return to its LAST "
+            f"valid slot A (y={slot_a}), not elsewhere: got {after}")
+
+        # Nothing may have drifted versus state A (subject included).
+        world_after = self.page.evaluate("() => window.__rdSweep.worldSnapshot()")
+        world_viol = self.page.evaluate(
+            "([p, c]) => window.__rdSweep.diffWorlds(p, c, null)",
+            [world_at_a, world_after])
+        self.assertEqual(
+            world_viol, [],
+            f"rejected 2nd drop must leave the world identical to state A: {world_viol}")
+
+        model_viol = self.page.evaluate("() => window.__rdModel.check()")
+        self.assertEqual(
+            model_viol, [], f"read-model invariants must be clean: {model_viol}")
+
+    # =====================================================================
+    # Regression (user bug 2026-07-15, CROSS-FACE variant): a device moved to a
+    # valid slot A on the FRONT (a move_in) and then dragged onto an OCCUPIED
+    # slot on the REAR must snap back to A on the FRONT -- not fall to cancelMove
+    # -> ghost. The first cut only snapped back when the drop face matched the
+    # pre-drag face; a cross-face reject slipped through. The log that pinned it:
+    # rejectDrop{preDragFace:"front", curFace:"rear"} -> cancelMove.
+    # =====================================================================
+    def test_moved_device_rejected_cross_face_drop_returns_to_last_valid_slot(self):
+        if getattr(self, "_front_obstacle_reject_row", None) is None:
+            self.skipTest("no known obstacle on the fallback fixture")
+        self._load_editor()
+        idx, w = self.widx(
+            kind="existing", face="front", device_id=self._swept_device_id)
+        gs_h = self._swept_u_height * 2
+
+        # Step 1: valid FRONT move O(U6) -> A(U2).
+        slot_a = self._u_to_gsy(self._rack_u_height, 2, gs_h)
+        self.page.evaluate(f"() => window.__rdSweep.moveTile('{idx}', {slot_a})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        at_a = self._mover_pos(idx)
+        self.assertEqual(
+            [at_a["face"], at_a["y"]], ["front", slot_a],
+            f"step-1 move should land on the FRONT at A: {at_a}")
+
+        # Step 2: illegal CROSS-FACE drag to the REAR, onto rows overlapping the
+        # rear obstacle (U16, 2U). Must snap back to A on the FRONT.
+        rear_reject_row = 6  # dev_full is 4U -> rows 6..13 overlap the rear obstacle
+        self.page.evaluate(
+            f"() => window.__rdSweep.moveTileToFace('{idx}', 'rear', {rear_reject_row})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.assertEqual(self.errors, [], f"console errors on cross-face reject: {self.errors}")
+
+        after = self._mover_pos(idx)
+        self.assertEqual(
+            [after["face"], after["y"]], ["front", slot_a],
+            f"a cross-face rejected drop must return the device to its last "
+            f"valid slot A on the FRONT (y={slot_a}), got {after}")
+
+        model_viol = self.page.evaluate("() => window.__rdModel.check()")
+        self.assertEqual(
+            model_viol, [], f"read-model invariants must be clean: {model_viol}")
+
+    # =====================================================================
+    # Regression (user bug 2026-07-15, variant 2): a RELOADED move_in (kind
+    # "move_in", loaded from a saved move -- its st.origUPosition == the move
+    # TARGET, ghost at the real origin) that is re-dragged onto an OCCUPIED
+    # slot must snap back to its move_in slot A, NOT revert to the ghost / real
+    # origin O. The first fix gated snap-back on "pre-drag != origin", which is
+    # always false for a move_in (origin==target), so it fell to cancelMove ->
+    # ghost. Fix: snap to pre-drag unconditionally (rejectDrop). See
+    # docs/editor-known-issues.md.
+    # =====================================================================
+    def test_reloaded_move_in_rejected_drop_returns_to_move_in_slot_not_ghost(self):
+        if getattr(self, "_front_obstacle_reject_row", None) is None:
+            self.skipTest("no known obstacle on the fallback fixture")
+        # Fresh design over the SAME rack, carrying a PRE-SAVED within-rack move
+        # (dev_full U6 -> U2), so on load dev_full is a reloaded move_in at U2
+        # with its move-out ghost at U6.
+        suffix = uuid.uuid4().hex[:8]
+        a_u = 2
+        design = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"reload-movein-{suffix}", "site": self._created["site"],
+            "racks": [self._rack_id]})
+        extra_design_id = design["id"]
+        try:
+            self._api("POST", "/api/plugins/rack-design/placements/", {
+                "design": extra_design_id, "kind": "move",
+                "device": self._swept_device_id, "target_rack": self._rack_id,
+                "target_position": float(a_u), "target_face": "front"})
+            self.editor_url = (
+                f"{BASE}/plugins/rack-design/designs/{extra_design_id}/editor/"
+                f"{self._rack_id}/")
+            self._load_editor()
+
+            gs_h = self._swept_u_height * 2
+            a_gsy = self._u_to_gsy(self._rack_u_height, a_u, gs_h)
+
+            # Find the reloaded move_in body tile by device identity + class
+            # (robust to the widget payload's kind spelling).
+            idx = self.page.evaluate(
+                """(devId) => {
+                    const el = [...document.querySelectorAll(
+                        '.grid-stack-item.nbx-rd-state-move_in')].find(t =>
+                            String(t.getAttribute('data-rd-device-id')) === String(devId)
+                            && !t.getAttribute('data-rd-derived-opp'));
+                    return el ? el.getAttribute('data-widget-index') : null;
+                }""", self._swept_device_id)
+            self.assertIsNotNone(idx, "reloaded move_in tile not found on load")
+
+            def pos():
+                return self.page.evaluate(
+                    """(i) => {
+                        const el = document.querySelector(
+                            `.grid-stack-item[data-widget-index="${i}"]:not([data-rd-derived-opp])`);
+                        const n = el && el.gridstackNode;
+                        return n ? {y: n.y, h: n.h} : null;
+                    }""", idx)
+
+            at_a = pos()
+            self.assertEqual(
+                at_a and at_a["y"], a_gsy,
+                f"reloaded move_in should load at its target slot A: {at_a}")
+
+            # Illegal re-drag onto the occupied obstacle -> must return to A
+            # (its move_in slot), NOT to the ghost/real origin U6.
+            self.page.evaluate(
+                f"() => window.__rdSweep.moveTile('{idx}', {self._front_obstacle_reject_row})")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+            after = pos()
+            self.assertEqual(
+                after and after["y"], a_gsy,
+                f"a RELOADED move_in dropped onto an occupied slot must return to "
+                f"its move_in slot A (y={a_gsy}), not the ghost/origin: got {after}")
+
+            model_viol = self.page.evaluate("() => window.__rdModel.check()")
+            self.assertEqual(
+                model_viol, [], f"read-model invariants must be clean: {model_viol}")
+        finally:
+            try:
+                self._api("DELETE",
+                          f"/api/plugins/rack-design/designs/{extra_design_id}/")
+            except Exception:
+                pass
 
 
 @unittest.skipUnless(_PREREQ_OK, f"editor sweep prerequisites not met: {_PREREQ_REASON}")
@@ -2029,6 +2229,171 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
             f"a device for removal: {world_violations}")
 
     # =====================================================================
+    # Regression (user bug 2026-07-15): a device flagged for removal must
+    # FREE its slot in the plan -- another device can then be moved onto it.
+    # The bug: flagRemove() added `nbx-rd-state-remove` on top of the base
+    # `nbx-rd-state-existing` class, and the read-model's first-match state
+    # derivation returned `existing`, so the removed device still read as a
+    # LIVE body and rdCanPlaceAt kept BLOCKING its own being-vacated slot (the
+    # dropped tile snapped back). Worst for full-depth gear, whose OPPOSITE
+    # face is validated too. Fix = state precedence (remove wins over existing)
+    # in rdStateFromClassList. See docs/editor-known-issues.md.
+    # =====================================================================
+    def test_removed_fulldepth_frees_slot_for_placement(self):
+        self._load_editor()
+        idx, w = self.widx(
+            kind="existing", face="front", device_id=self._clean_device_id)
+
+        clicked = self.page.evaluate(f"() => window.__rdSweep.clickRemove('{idx}')")
+        self.assertTrue(clicked, "clickRemove could not find the × button")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        result = self.page.evaluate(
+            """(label) => {
+                const m = window.__rdModel.build();
+                const mine = m.devices.filter(d => d.label === label);
+                const states = mine.map(d => ({face: d.face, state: d.state}));
+                // The removed full-depth device occupies rows on BOTH faces;
+                // pick its front rows and ask whether a full-depth tile could
+                // now land there. Pass a detached element as the mover so it
+                // never matches (i.e. never self-excludes) the removed device.
+                const front = mine.find(d => d.face === 'front') || mine[0];
+                const probe = document.createElement('div');
+                let verdict = null;
+                if (front && front.y != null) {
+                    const v = window.__rdModel.canPlaceAt(
+                        probe, front.rackId, 'front', front.y, front.rows, true);
+                    verdict = { ok: v.ok, blockers: (v.blockers||[]).map(
+                        b => ({label: b.device && b.device.label, state: b.device && b.device.state})) };
+                }
+                return { states, verdict, violations: window.__rdModel.check() };
+            }""",
+            self._clean_label)
+
+        # 1) The removed device reads as `remove` on EVERY face copy (never a
+        #    lingering live `existing` -- the core of the bug).
+        self.assertTrue(result["states"], "removed device vanished from read-model")
+        for s in result["states"]:
+            self.assertEqual(
+                s["state"], "remove",
+                f"remove-flagged device face {s['face']} must read 'remove', "
+                f"not '{s['state']}': {result['states']}")
+
+        # 2) A full-depth tile can now be placed on the freed rows -- no blocker
+        #    from the being-removed device on either face.
+        self.assertIsNotNone(result["verdict"], "could not resolve freed rows")
+        self.assertTrue(
+            result["verdict"]["ok"],
+            f"a full-depth tile must be placeable on the slot freed by a "
+            f"removal, but canPlaceAt rejected it: {result['verdict']}")
+        # This world has a PERMANENT conflict fixture (a deliberate I1), so the
+        # invariant check is never globally empty -- just assert the removal did
+        # not create a NEW violation naming the removed device (e.g. a spurious
+        # duplicate-live-body I4).
+        offending = [v for v in result["violations"] if self._clean_label in v]
+        self.assertEqual(
+            offending, [],
+            f"flagging {self._clean_label!r} for removal must not create a "
+            f"violation naming it: {offending}")
+
+    # =====================================================================
+    # Regression (user bug 2026-07-15, task #31): after a full-depth device is
+    # MOVED, its client-created opposite-face hatch must (a) be UNIQUE -- no
+    # duplicate/orphan hatch (the I1 "shadow overlaps shadow" the user hit) --
+    # and (b) carry the OWNER's identity + power data so it renders like the
+    # SERVER hatch: shows the device type on the normal view and FILLS on the
+    # heatmap. The bug: makeOppositeElement only set the name span, so the hatch
+    # was blank (no data-device-type-name / data-draw-w -> heatmap couldn't fill
+    # or label it), and a face-changing move could leave a second orphan hatch.
+    # See docs/editor-known-issues.md.
+    # =====================================================================
+    def test_moved_fulldepth_shadow_is_unique_and_carries_identity(self):
+        self._load_editor()
+        idx, w = self.widx(
+            kind="existing", face="front", device_id=self._clean_device_id)
+
+        # Move the 3U full-depth device from U6 to the free U10 slot (front),
+        # clear of the conflict fixture at U14-16.
+        target_gsy = self._u_to_gsy(self._rack_u_height, 10, 6)
+        moved = self.page.evaluate(
+            f"() => window.__rdSweep.moveTile('{idx}', {target_gsy})")
+        self.assertTrue(moved, "moveTile could not move the full-depth device")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        result = self.page.evaluate(
+            """(idx) => {
+                const block = document.querySelector('.nbx-rd-rack-block');
+                const owner = [...block.querySelectorAll('.grid-stack-item')].find(t =>
+                    String(t.getAttribute('data-widget-index')) === String(idx)
+                    && !t.getAttribute('data-rd-derived-opp'));
+                const oc = owner && owner.querySelector('.grid-stack-item-content');
+                // The device's LIVE opposite shadow (its move_in/existing body's
+                // hatch). A full-depth MOVE also leaves the move-out GHOST's own
+                // mirror hatch at the old rows (nbx-rd-state-move_out_ghost,
+                // owned as ghostShadows[idx]) -- that is a SEPARATE, expected
+                // element, so exclude it here; we assert on the body's shadow.
+                const hatches = [...block.querySelectorAll(
+                    '.grid-stack-item[data-rd-derived-opp]')].filter(h =>
+                        String(h.getAttribute('data-rd-owner-widx')) === String(idx)
+                        && !h.classList.contains('nbx-rd-state-move_out_ghost'));
+                return {
+                    ownerState: owner ? [...owner.classList].filter(
+                        c => c.startsWith('nbx-rd-state')) : null,
+                    ownerDtName: oc && oc.getAttribute('data-device-type-name'),
+                    ownerDrawW: oc && oc.getAttribute('data-draw-w'),
+                    hatchCount: hatches.length,
+                    ownerY: owner && owner.gridstackNode && owner.gridstackNode.y,
+                    allDerivedOpp: [...block.querySelectorAll(
+                        '.grid-stack-item[data-rd-derived-opp]')].map(h => ({
+                            ownerWidx: h.getAttribute('data-rd-owner-widx'),
+                            y: h.gridstackNode && h.gridstackNode.y,
+                            inEngine: !!(h.gridstackNode && h.gridstackNode.grid),
+                            cls: [...h.classList].filter(c => c.startsWith('nbx-rd-state')
+                                || c === 'nbx-rd-opposite').join(' '),
+                        })),
+                    hatches: hatches.map(h => {
+                        const c = h.querySelector('.grid-stack-item-content');
+                        return {
+                            dtName: c && c.getAttribute('data-device-type-name'),
+                            drawW: c && c.getAttribute('data-draw-w'),
+                            y: h.gridstackNode && h.gridstackNode.y,
+                            inEngine: !!(h.gridstackNode && h.gridstackNode.grid),
+                            face: h.closest('[data-rd-face]') &&
+                                h.closest('[data-rd-face]').getAttribute('data-rd-face'),
+                        };
+                    }),
+                    violations: window.__rdModel.check(),
+                };
+            }""", idx)
+
+        self.assertIn(
+            "nbx-rd-state-move_in", result["ownerState"] or [],
+            f"the device should be a move_in after the move: {result['ownerState']}")
+        # (a) exactly ONE opposite hatch for this owner -- no duplicate/orphan.
+        self.assertEqual(
+            result["hatchCount"], 1,
+            f"a moved full-depth device must have exactly ONE opposite hatch, "
+            f"got {result['hatchCount']}: hatches={result['hatches']} "
+            f"ownerY={result['ownerY']} allDerivedOpp={result['allDerivedOpp']}")
+        # (b) the hatch mirrors the owner's identity + draw (renders the type,
+        #     fills on the heatmap) -- was blank before the fix.
+        self.assertTrue(
+            result["ownerDtName"], "owner tile should carry a device-type-name")
+        h = result["hatches"][0]
+        self.assertEqual(
+            h["dtName"], result["ownerDtName"],
+            f"opposite hatch must carry the owner's device type: {h}")
+        self.assertEqual(
+            h["drawW"], result["ownerDrawW"],
+            f"opposite hatch must carry the owner's draw: {h}")
+        # No shadow-overlap (I1) violation naming the moved device.
+        offending = [v for v in result["violations"]
+                     if self._clean_label in v and "shadow" in v.lower()]
+        self.assertEqual(
+            offending, [],
+            f"no shadow-overlap (I1) violation may name the moved device: {offending}")
+
+    # =====================================================================
     # Conflict shadow (spec §7 Phase 3 bug 4c): a full-depth device's
     # mirrored rows are ALREADY occupied by a real opposite-face body in a
     # server-loaded layout (unreachable via the editor's own drag/drop/
@@ -2886,6 +3251,55 @@ class EditorDisplacementTestCase(unittest.TestCase):
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
         print("\n=== STRIPE-BAR SUMMARY (outside-the-frame geometry) ===")
         print(f"  bars: {bars}")
+
+    # =====================================================================
+    # The device that TOOK a displaced slot must render ABOVE the collapsed
+    # displaced tile, so its OWN fill + name read as the occupant (user
+    # ruling 2026-07-16: "оверхитинг должен быть от девайса который встал на
+    # место девайса, лейбл тоже"). The displaced tile used to be z-index:4
+    # with a dirty/remove dashed outline -- it stacked OVER the incoming
+    # occupant and blanked its name (a colored, nameless box). It must sit
+    # at/below the occupant and draw no outline (the external stripe marks it).
+    # =====================================================================
+    def test_displaced_tile_sits_below_occupant(self):
+        self._load_editor()
+        self._create_ghost_for_dev_a()
+        idx_b, _ = self.widx(kind="existing", face="front", device_id=self._dev_b_id)
+        self.page.evaluate(
+            f"() => window.__rdDisplace.moveTile('{idx_b}', {self._dev_a_orig_gsy})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdDisplace.confirmDisplaceDialog()")
+        self.page.wait_for_timeout(300)
+        self.page.evaluate("() => window.__rdDisplace.applyRenameDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+
+        z = self.page.evaluate("""() => {
+            const disp = document.querySelector('.grid-stack-item.nbx-rd-displaced');
+            if (!disp) return {err: 'no displaced tile'};
+            const dn = disp.gridstackNode;
+            const occ = [...disp.closest('.grid-stack').querySelectorAll('.grid-stack-item')]
+                .find(t => t !== disp
+                    && !t.classList.contains('nbx-rd-displaced')
+                    && !t.classList.contains('nbx-rd-opposite')
+                    && t.gridstackNode && t.gridstackNode.y === (dn && dn.y));
+            const zi = el => { const v = getComputedStyle(el).zIndex; return v === 'auto' ? 0 : parseInt(v, 10); };
+            const dc = disp.querySelector('.grid-stack-item-content');
+            return {
+                dispZ: zi(disp), occZ: occ ? zi(occ) : null, hasOcc: !!occ,
+                dispOutline: dc ? getComputedStyle(dc).outlineStyle : null,
+            };
+        }""")
+        self.assertNotIn("err", z, z)
+        self.assertTrue(z["hasOcc"], f"no occupant tile at the displaced slot: {z}")
+        self.assertLessEqual(
+            z["dispZ"], z["occZ"],
+            f"a displaced tile must sit at/below the occupant that took its "
+            f"slot, never above it (was z-index:4, blanking the occupant): {z}")
+        self.assertEqual(
+            z["dispOutline"], "none",
+            f"the displaced placeholder must draw no outline over the "
+            f"occupant (the external stripe marks it): {z}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     # =====================================================================
     # Tile label = ASSIGNED name + identity hover card + ghost<->body hover
@@ -4025,6 +4439,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         cls._bfull_label = dev_b_full["name"]
         # dev_b_full: 3U at U8 -> gsH 6 -> gs rows [12, 18) on BOTH faces.
         cls._bfull_gsy = cls._u_to_gsy(8, 6)
+        cls._bfront_label = dev_b_front["name"]   # 1U at rack B U2 front
         cls._bghost_label = dev_b_ghost["name"]
         cls._bghost_orig_gsy = cls._u_to_gsy(5, 2)     # rows 22-23 front
         cls._bghost_target_gsy = cls._u_to_gsy(12, 2)  # rows 8-9 front, free
@@ -4563,6 +4978,498 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
             f"bystander entities changed across the 3-hop chain: {world_violations}")
 
     # =====================================================================
+    # Regression (user bug 2026-07-15): a device moved out to another rack,
+    # then dragged BACK to its origin rack whose old slot is now OCCUPIED by
+    # another device, must NOT overlap. homecomingAdopt committed the device to
+    # its origin slot with no legality check -> I1 "a75(body) overlaps
+    # b15(body)". The gate: decline the homecoming when the origin slot is
+    # taken, and the rejected cross-rack drop returns the device to where it
+    # came from -- never an overlap.
+    # =====================================================================
+    def test_homecoming_into_occupied_origin_never_overlaps(self):
+        self._load_editor()
+        subj = self._subject_label
+
+        # 1. Move the subject A -> B (top rows 0-3 are the known-free zone).
+        r1 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, {self._rack_b}, 'front', 0)")
+        self.assertTrue(r1.get("ok"), f"step-1 A->B move failed: {r1}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # 2. Move a rack-B device INTO the subject's now-vacated origin slot in
+        #    rack A, so the subject can no longer come home to it.
+        r2 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._bfront_label)}, "
+            f"{self._rack_a}, 'front', {self._subject_orig_gsy})")
+        self.assertTrue(r2.get("ok"), f"step-2 occupy-origin move failed: {r2}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # 3. Homecoming attempt: drag the subject B -> A onto its (now occupied)
+        #    origin slot. Must be REJECTED with NO overlap.
+        r3 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+            f"{self._rack_a}, 'front', {self._subject_orig_gsy})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        self.assertEqual(self.errors, [], f"console errors on homecoming reject: {self.errors}")
+        violations = self.page.evaluate("() => window.__rdModel.check()")
+        overlap = [v for v in violations if "overlaps" in v]
+        self.assertEqual(
+            overlap, [],
+            f"a homecoming onto an OCCUPIED origin must never commit an overlap: {overlap}")
+
+    # =====================================================================
+    # Regression (user bug 2026-07-16, task #34): a device moved out to another
+    # rack, then dragged back to its ORIGIN rack onto an OCCUPIED NON-origin
+    # slot, must NOT overlap. homecomingAdopt revives the origin entry at the
+    # DROP position but never repositions the tile; it validated the (free)
+    # ORIGIN slot rather than the DROP slot, so an occupied drop elsewhere in
+    # the origin rack slipped through and committed an overlap
+    # (I1 "a36(body) overlaps b15(body)"). The gate must validate WHERE THE TILE
+    # LANDED: an occupied drop declines the homecoming and routes through the
+    # reject path (returns the device to its last position).
+    #
+    # CAVEAT (harness fidelity): __rdX.moveTo drives a cross-rack move by BOTH
+    # makeWidget (-> `added` -> homecomingAdopt) AND fireDropped (-> `dropped`
+    # -> maybePromptMove). So maybePromptMove ALWAYS runs here as a backstop and
+    # reverts an occupied drop regardless of the homecomingAdopt decision --
+    # i.e. this test does NOT fail on the pre-fix (origin-slot) validation; it
+    # asserts the END-TO-END no-overlap invariant through the full harness
+    # pipeline, not the homecomingAdopt gate in isolation. The live bug is a
+    # REAL mouse drag (only `added` fires) where maybePromptMove did not run;
+    # faithfully reproducing that needs an added-only harness path or a real
+    # drag. See docs/editor-known-issues.md #34.
+    # =====================================================================
+    def test_move_back_to_origin_rack_onto_occupied_nonorigin_slot_never_overlaps(self):
+        self._load_editor()
+        subj = self._subject_label
+
+        # 1. Move the subject A -> B (top rows 0-3 are the known-free zone). Its
+        #    true origin (U6) in rack A is now free.
+        r1 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, {self._rack_b}, 'front', 0)")
+        self.assertTrue(r1.get("ok"), f"step-1 A->B move failed: {r1}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # 2. Occupy a NON-origin slot in rack A (U10, clear of the subject's U6
+        #    origin) with a rack-B device (1U).
+        occ_gsy = self._u_to_gsy(10, 2)
+        r2 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._bfront_label)}, "
+            f"{self._rack_a}, 'front', {occ_gsy})")
+        self.assertTrue(r2.get("ok"), f"step-2 occupy-nonorigin move failed: {r2}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # 3. Drag the subject B -> A onto that OCCUPIED non-origin slot (U10; the
+        #    subject is 2U so it overlaps the 1U occupant). Its origin U6 is FREE,
+        #    so the old origin-slot check let this commit an overlap. Must REJECT.
+        subj_gsy = self._u_to_gsy(10, 4)
+        self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+            f"{self._rack_a}, 'front', {subj_gsy})")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        self.assertEqual(self.errors, [], f"console errors on reject: {self.errors}")
+        violations = self.page.evaluate("() => window.__rdModel.check()")
+        overlap = [v for v in violations if "overlaps" in v]
+        self.assertEqual(
+            overlap, [],
+            f"a drop onto an OCCUPIED non-origin slot in the origin rack must "
+            f"never commit an overlap: {overlap}")
+
+    # =====================================================================
+    # A device whose HOME is rack A, moved to B and SAVED, then RELOADED (so
+    # it is a PERSISTENT move_in in B with a real move-out ghost in A -- the
+    # in-session crossRack/originRackId bookkeeping is gone). Dragging it back
+    # toward its home A onto an OCCUPIED non-origin slot must be REJECTED and
+    # the device returned to its LAST POSITION (rack B) STILL AS A move_in.
+    #
+    # The bug (user repro 2026-07-16, design 581 sg2-sl-b15 rack 321->318):
+    # onDragStart records the CURRENT rack (B) as the device's origin for a
+    # reloaded move_in (`originRackId = st.crossRack ? st.originRackId :
+    # rackId`, with crossRack false after reload), so rejectDrop's multi-hop
+    # reclaim (srcRackId !== originRackId) never fires and cancelMove's
+    # branch (a) restoreTile()s the tile back into B as a PLAIN `existing`
+    # device -- silently rewriting the plan: on save B would gain a native
+    # device and A's planned move would vanish. Must stay a move_in.
+    #
+    # Unlike the overlap in the sibling test above, the tile's KIND after the
+    # reject is deterministic through the harness pipeline (it does NOT depend
+    # on which of `added`/`dropped` ran), so this DOES fail test-first on the
+    # buggy origin computation. See docs/editor-known-issues.md.
+    # =====================================================================
+    def test_reloaded_move_in_rejected_homecoming_stays_move_in_not_existing(self):
+        suffix = uuid.uuid4().hex[:8]
+        design = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"xrack-reload-rej-{suffix}", "site": self._site_id,
+            "racks": [self._rack_a, self._rack_b]})
+        reload_design_id = design["id"]
+        reload_editor_url = (
+            f"{BASE}/plugins/rack-design/designs/{reload_design_id}/editor/"
+            f"{self._rack_a}/")
+        try:
+            self._load_editor(reload_editor_url)
+
+            # 1. Move subject A -> B (front rows 0-3 are the known-free zone).
+            r1 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+                f"{self._rack_b}, 'front', 0)")
+            self.assertTrue(r1.get("ok"), f"A->B move failed: {r1}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            # 2. Save (writes the 'move' DesignPlacement + a persistent move-out
+            #    ghost in A) and let editor.js's doSave() reload the page. Same
+            #    navigation dance as test_homecoming_after_save_and_reload.
+            with self.page.expect_navigation(wait_until="networkidle", timeout=20000):
+                self.page.evaluate(
+                    "() => document.getElementById('rd-editor-save').click()")
+            self.page.wait_for_selector("#rd-editor", timeout=15000)
+            self.page.wait_for_timeout(500)
+            self.page.add_script_tag(content=self.HARNESS_JS)
+
+            reloaded = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+            self.assertIsNotNone(reloaded, "subject missing after save+reload")
+            self.assertEqual(reloaded["rackId"], self._rack_b, reloaded)
+            self.assertIn("nbx-rd-state-move_in", reloaded["classes"], reloaded)
+
+            # 3. Occupy a NON-origin slot in rack A (U10; the subject's origin
+            #    is U6) with a rack-B 1U device, so the homecoming DROP target
+            #    is taken.
+            occ_gsy = self._u_to_gsy(10, 2)
+            r2 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(self._bfront_label)}, "
+                f"{self._rack_a}, 'front', {occ_gsy})")
+            self.assertTrue(r2.get("ok"), f"occupy-nonorigin move failed: {r2}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            # 4. Drag the RELOADED move_in subject B -> A onto that OCCUPIED
+            #    slot (2U at U10 overlaps the 1U occupant). Must be rejected.
+            subj_gsy = self._u_to_gsy(10, 4)
+            self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+                f"{self._rack_a}, 'front', {subj_gsy})")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            self.assertEqual(
+                self.errors, [], f"console errors on reject: {self.errors}")
+            # The user's live repro showed BOTH an I1 overlap AND an I2 "full-
+            # depth but has no shadow" (the existing-conversion desynced shadow
+            # ownership) -- so assert the model is FULLY clean, not merely
+            # overlap-free.
+            violations = self.page.evaluate("() => window.__rdModel.check()")
+            self.assertEqual(
+                violations, [],
+                f"rejected homecoming left the model with violations: {violations}")
+
+            info = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+            self.assertIsNotNone(info, "subject lost after rejected homecoming")
+            # LAST POSITION: back in the source rack B ...
+            self.assertEqual(
+                info["rackId"], self._rack_b,
+                f"a rejected homecoming must return the device to its last "
+                f"position (rack B), not elsewhere: {info}")
+            # ... and STILL a planned move (move_in), NOT rewritten to existing.
+            self.assertIn(
+                "nbx-rd-state-move_in", info["classes"],
+                f"a rejected cross-rack re-drag of a reloaded move_in must keep "
+                f"its move_in identity, not be converted to a native existing "
+                f"device of the source rack: {info}")
+            self.assertNotIn("nbx-rd-state-existing", info["classes"], info)
+        finally:
+            if getattr(self, "ctx", None):
+                self.ctx.close()
+                self.ctx = None
+            try:
+                self._api(
+                    "DELETE",
+                    f"/api/plugins/rack-design/designs/{reload_design_id}/")
+            except Exception:
+                pass
+
+    # =====================================================================
+    # A tile RECLAIMED to its source rack after a rejected cross-rack drop,
+    # then re-dragged WITHIN that rack onto an illegal slot, must snap back
+    # locally -- NOT fly to its home rack. (User repro 2026-07-16, design 581
+    # sg2-sl-b15: after two rejected 321->318 hops that each reclaimed b15
+    # into 321, a THIRD within-321 illegal move sent b15 to rack 318.)
+    #
+    # Root cause: reclaimFromReject recreates the tile as crossRack:true with
+    # srcRackId:null. A subsequent WITHIN-rack reject then takes neither
+    # rejectDrop.multiHopReclaim (needs srcRackId) nor havePreSnapBack (its
+    # guard was !crossRack) -> it falls to cancelMove branch (a), which
+    # re-homes the "live cross-rack" tile into its origin rack. A within-rack
+    # reject must return the tile to its pre-drag slot in the SAME rack.
+    # =====================================================================
+    def test_reclaimed_tile_within_rack_reject_stays_local_not_flies_home(self):
+        self._load_editor()
+        subj = self._subject_label
+
+        # 1. Move subject A -> B (front rows 0-3 free): a cross-rack move_in
+        #    living in B, with subject's move-out ghost left at its A origin.
+        r1 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, {self._rack_b}, 'front', 0)")
+        self.assertTrue(r1.get("ok"), f"step-1 A->B move failed: {r1}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # 2. Occupy a NON-origin slot in rack A (U10; clear of subject's U6
+        #    origin) so the B->A homecoming target is taken.
+        occ_gsy = self._u_to_gsy(10, 2)
+        r2 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(self._bfront_label)}, "
+            f"{self._rack_a}, 'front', {occ_gsy})")
+        self.assertTrue(r2.get("ok"), f"step-2 occupy-nonorigin move failed: {r2}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        # 3. Drag subject B -> A onto that OCCUPIED slot -> rejected -> the tile
+        #    is RECLAIMED back into rack B (crossRack:true, srcRackId:null).
+        r3 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+            f"{self._rack_a}, 'front', {self._u_to_gsy(10, 4)})")
+        self.assertTrue(r3.get("ok"), f"step-3 rejected B->A move failed: {r3}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        after_reclaim = self.page.evaluate(
+            f"() => window.__rdX.subjectInfo({json.dumps(subj)})")
+        self.assertIsNotNone(after_reclaim, "subject lost after reclaim")
+        self.assertEqual(
+            after_reclaim["rackId"], self._rack_b,
+            f"after a rejected B->A drop the subject must be reclaimed into "
+            f"rack B: {after_reclaim}")
+
+        # 4. Now a WITHIN-B illegal move: drop the reclaimed subject onto rack
+        #    B's full-depth device (U8, rows 12-17) -- occupied -> must reject.
+        r4 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+            f"{self._rack_b}, 'front', {self._u_to_gsy(8, 4)})")
+        self.assertTrue(r4.get("ok"), f"step-4 within-B move failed: {r4}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        self.assertEqual(
+            self.errors, [], f"console errors on within-rack reject: {self.errors}")
+        info = self.page.evaluate(
+            f"() => window.__rdX.subjectInfo({json.dumps(subj)})")
+        self.assertIsNotNone(info, "subject lost after within-rack reject")
+        # THE BUG: a within-rack reject must NOT fly the tile to its home rack.
+        self.assertEqual(
+            info["rackId"], self._rack_b,
+            f"a WITHIN-rack illegal move of a reclaimed tile must snap back in "
+            f"the SAME rack (B), never fly to its home rack: {info}")
+        violations = self.page.evaluate("() => window.__rdModel.check()")
+        self.assertEqual(
+            violations, [],
+            f"within-rack reject of a reclaimed tile left violations: {violations}")
+
+    # =====================================================================
+    # Homecoming to the true origin must CLEAR the move's project-prefixed
+    # name (user bug 2026-07-16): a committed move stamps a "<design>-<name>"
+    # display overlay on the tile; dragging the device back onto its own
+    # origin fully reverts the move, so the tile must show the device's REAL
+    # identity again -- not the planned name. cancelMove already clears this
+    # (2026-07-14 fix), but homecomingAdopt re-tagged the tile `existing`
+    # without resetting the overlay, so the prefix stuck.
+    #
+    # The proposed name lives in a `.nbx-rd-name-display` span that hides the
+    # real `.nbx-rd-label`; setTileDisplayName("") removes it. The test
+    # asserts that overlay is present after the named move and GONE after the
+    # homecoming.
+    # =====================================================================
+    def _subject_name_overlay(self, label):
+        # The visible "<design>-<name>" overlay text on the subject's BODY
+        # tile (not its opposite-face hatch), or None if the real identity is
+        # showing.
+        return self.page.evaluate(
+            """(label) => {
+                const els = Array.from(document.querySelectorAll('.grid-stack-item'));
+                for (const el of els) {
+                    if (el.classList.contains('nbx-rd-opposite')) continue;
+                    if (el.getAttribute('data-rd-derived-opp')) continue;
+                    if (el.getAttribute('data-rd-temp-ghost')) continue;
+                    if (el.classList.contains('nbx-rd-state-move_out_ghost')) continue;
+                    const lab = el.querySelector('.nbx-rd-label');
+                    if (!lab || lab.textContent !== label) continue;
+                    const disp = el.querySelector('.nbx-rd-name-display');
+                    return disp ? disp.textContent : null;
+                }
+                return undefined;
+            }""",
+            label)
+
+    def test_homecoming_to_origin_clears_move_proposed_name(self):
+        self._load_editor()
+        subj = self._subject_label
+
+        # 1. Move subject A -> B and APPLY the rename dialog -> the tile now
+        #    carries the "<design>-<name>" proposed-name overlay.
+        r1 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, {self._rack_b}, 'front', 0)")
+        self.assertTrue(r1.get("ok"), f"A->B move failed: {r1}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        overlay_moved = self._subject_name_overlay(subj)
+        self.assertIsNotNone(
+            overlay_moved,
+            "precondition: a committed move should show a project-prefixed "
+            "name overlay")
+
+        # 2. Drag subject B -> A back onto its OWN origin slot (free) ->
+        #    homecoming -> full revert.
+        r2 = self.page.evaluate(
+            f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+            f"{self._rack_a}, 'front', {self._subject_orig_gsy})")
+        self.assertTrue(r2.get("ok"), f"homecoming move failed: {r2}")
+        self.page.wait_for_timeout(STEP_SETTLE_MS)
+        self.page.evaluate("() => window.__rdX.answerDialogs()")
+        self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+        info = self.page.evaluate(
+            f"() => window.__rdX.subjectInfo({json.dumps(subj)})")
+        self.assertIsNotNone(info, "subject lost after homecoming")
+        self.assertEqual(info["rackId"], self._rack_a, info)
+        self.assertIn("nbx-rd-state-existing", info["classes"], info)
+
+        # 3. The move's project-prefixed name overlay must be GONE.
+        overlay_home = self._subject_name_overlay(subj)
+        self.assertIsNone(
+            overlay_home,
+            f"homecoming to the origin must clear the move's project-prefixed "
+            f"name; tile still shows overlay {overlay_home!r}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    # =====================================================================
+    # After a homecoming, the revived tile must be a PROPER existing device so
+    # that re-dragging it cross-rack again is adopted cleanly. (User repro
+    # 2026-07-16, design 581 sg2-sl-b15 -> sg2-a5545-fire-1 corruption.)
+    #
+    # The bug: homecomingAdopt re-tagged the tile's DOM to `existing` but left
+    # state[idx].widget.kind == 'move_out_ghost'. That DOM/state contradiction
+    # made the NEXT cross-rack drag accepted-by-class (makeAccept sees the
+    # `existing` DOM class) yet not-adopted-by-kind (onDragStart's eligibility
+    # checks widget.kind -> tileInFlight stays null). The unadopted tile still
+    # fired `dropped` in the destination, whose onPaletteDrop read the tile's
+    # data-widget-index -- a value in the SOURCE rack's namespace -- as an
+    # index into the DESTINATION rack's state[], mutating whatever unrelated
+    # device sat at that index (I4 "device has 2 live entities", I1 overlap).
+    # =====================================================================
+    def test_homecomed_tile_redragged_cross_rack_is_adopted_not_corrupting(self):
+        # Needs a PERSISTENT (saved+reloaded) move-out ghost, whose entry has
+        # widget.kind == 'move_out_ghost' -- an in-session temp ghost keeps
+        # kind 'existing', so it never exhibits the stale-kind contradiction.
+        suffix = uuid.uuid4().hex[:8]
+        design = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"xrack-homecome-redrag-{suffix}", "site": self._site_id,
+            "racks": [self._rack_a, self._rack_b]})
+        reload_design_id = design["id"]
+        reload_editor_url = (
+            f"{BASE}/plugins/rack-design/designs/{reload_design_id}/editor/"
+            f"{self._rack_a}/")
+        subj = self._subject_label
+        try:
+            self._load_editor(reload_editor_url)
+
+            # 1. subject A -> B, SAVE (persistent move + move-out ghost in A),
+            #    reload -> subject is a reloaded move_in in B.
+            r1 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+                f"{self._rack_b}, 'front', 0)")
+            self.assertTrue(r1.get("ok"), f"A->B move failed: {r1}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            with self.page.expect_navigation(wait_until="networkidle", timeout=20000):
+                self.page.evaluate(
+                    "() => document.getElementById('rd-editor-save').click()")
+            self.page.wait_for_selector("#rd-editor", timeout=15000)
+            self.page.wait_for_timeout(500)
+            self.page.add_script_tag(content=self.HARNESS_JS)
+
+            reloaded = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(subj)})")
+            self.assertIsNotNone(reloaded, "subject missing after save+reload")
+            self.assertEqual(reloaded["rackId"], self._rack_b, reloaded)
+
+            # 2. subject B -> A back onto its OWN origin (free) -> homecoming
+            #    (revives the PERSISTENT move-out ghost entry).
+            r2 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+                f"{self._rack_a}, 'front', {self._subject_orig_gsy})")
+            self.assertTrue(r2.get("ok"), f"homecoming move failed: {r2}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            home = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(subj)})")
+            self.assertEqual(home["rackId"], self._rack_a, home)
+            self.assertIn("nbx-rd-state-existing", home["classes"], home)
+
+            # 3. Re-drag the homecomed subject A -> B again. With the stale
+            #    widget.kind it is not adopted and mis-indexes rack B's state[];
+            #    a proper revive adopts it as a clean move_in.
+            r3 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(subj)}, "
+                f"{self._rack_b}, 'front', 0)")
+            self.assertTrue(r3.get("ok"), f"re-drag A->B move failed: {r3}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+            violations = self.page.evaluate("() => window.__rdModel.check()")
+            self.assertEqual(
+                violations, [],
+                f"re-dragging a homecomed tile cross-rack corrupted the model: "
+                f"{violations}")
+            info = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(subj)})")
+            self.assertIsNotNone(info, "subject lost after re-drag")
+            self.assertEqual(info["rackId"], self._rack_b, info)
+            self.assertIn(
+                "nbx-rd-state-move_in", info["classes"],
+                f"a homecomed tile re-dragged cross-rack must be adopted as a "
+                f"move_in, not left unadopted with a stale ghost kind: {info}")
+        finally:
+            if getattr(self, "ctx", None):
+                self.ctx.close()
+                self.ctx = None
+            try:
+                self._api(
+                    "DELETE",
+                    f"/api/plugins/rack-design/designs/{reload_design_id}/")
+            except Exception:
+                pass
+
+    # =====================================================================
     # Persistent ghost after a page reload (spec §4.6): the confirmed live
     # bug's in-session bookkeeping (tileInFlight.originRackId/crossRack) does
     # NOT survive a reload -- state[] is rehydrated from the server's JSON
@@ -4603,11 +5510,19 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
             # 200 response. Dispatched via JS (not Playwright's .click()) --
             # the Django Debug Toolbar's floating panel intercepts pointer
             # events on this dev instance and blocks a real synthetic click.
-            self.page.evaluate(
-                "() => document.getElementById('rd-editor-save').click()")
-            self.page.wait_for_load_state("networkidle")
+            # editor.js's doSave() RELOADS the page on a 200. That reload is a
+            # real navigation that lands asynchronously AFTER the save POST
+            # settles -- so a bare wait_for_load_state("networkidle") returns on
+            # the PRE-reload page, and the reload then destroys the execution
+            # context under a later add_script_tag / evaluate ("Execution
+            # context was destroyed ... navigation"). Wait for the reload
+            # navigation ITSELF to commit + settle before touching the page
+            # again, so every subsequent evaluate runs on the stable fresh page.
+            with self.page.expect_navigation(wait_until="networkidle", timeout=20000):
+                self.page.evaluate(
+                    "() => document.getElementById('rd-editor-save').click()")
             self.page.wait_for_selector("#rd-editor", timeout=15000)
-            self.page.wait_for_timeout(1000)
+            self.page.wait_for_timeout(500)
             self.page.add_script_tag(content=self.HARNESS_JS)
 
             reloaded = self.page.evaluate(

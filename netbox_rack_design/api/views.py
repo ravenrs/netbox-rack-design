@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
-from .. import filtersets, naming
+from .. import filtersets, naming, projection
 from ..choices import DesignPlacementKindChoices
 from ..models import (
     Design,
@@ -39,6 +39,7 @@ __all__ = (
     "DesignPlacementViewSet",
     "FavoriteDeviceTypeViewSet",
     "HiddenDesignRackViewSet",
+    "DeviceTypePowerViewSet",
 )
 
 
@@ -868,6 +869,43 @@ class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
         # Already starred → toggle off.
         favorite.delete()
         return Response({"device_type_id": device_type_id, "favorite": False})
+
+
+class DeviceTypePowerViewSet(viewsets.ViewSet):
+    """
+    Projected power draw for bare device TYPES -- feeds the catalog palette so a
+    freshly dropped catalog device shows its draw LIVE (before Save + reload),
+    matching the projection's per-slot draw exactly.
+
+    The palette itself is populated from NetBox's core ``/api/dcim/device-types/``
+    endpoint, which carries no computed power figure, so this small companion
+    endpoint resolves the draw for a batch of type ids using the SAME logic the
+    projection applies to a planned add (``device_type_power_summary``). It is
+    read-only and performs no writes; unknown ids are simply omitted.
+
+    Endpoint:
+      GET /api/plugins/rack-design/device-type-power/?id=1&id=2...
+        -> {"results": {"1": {"draw_w", "draw_known", "power_ports": [...]}, ...}}
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        """Return per-id power summaries for the requested device-type ids."""
+        ids = []
+        for raw in request.query_params.getlist("id"):
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        results = {}
+        if ids:
+            types = DeviceType.objects.filter(pk__in=ids).prefetch_related(
+                "powerporttemplates"
+            )
+            for dt in types:
+                results[str(dt.pk)] = projection.device_type_power_summary(dt)
+        return Response({"results": results})
 
 
 class HiddenDesignRackViewSet(viewsets.ViewSet):

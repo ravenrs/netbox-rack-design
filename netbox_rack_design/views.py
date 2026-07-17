@@ -3,6 +3,7 @@
 import os
 
 from dcim.models import Rack, Site
+from django.conf import settings
 from django.contrib.staticfiles import finders
 from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
@@ -330,6 +331,14 @@ def _design_editor_context(request, design):
         # User-scoped favorite device types (the catalog palette's stars).
         "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
         "asset_version": _asset_version(),
+        # Developer-mode flag: gates the editor JS's opt-in drag-lifecycle
+        # tracer (window.__rdDragTrace). True only on a dev build -- DEBUG on,
+        # or the Django Debug Toolbar installed -- so the tracer is never even
+        # reachable on a production deployment.
+        "rd_debug": bool(
+            getattr(settings, "DEBUG", False)
+            or "debug_toolbar" in getattr(settings, "INSTALLED_APPS", [])
+        ),
         # Drives the left-rail manufacturer/role/tenant selectors as NetBox
         # API-backed searchable selects (see forms.DesignEditorPaletteForm).
         "palette_form": forms.DesignEditorPaletteForm(),
