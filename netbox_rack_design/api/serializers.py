@@ -1,12 +1,13 @@
 """REST API serializers for NetBox Rack Design."""
 
 from dcim.api.serializers import RackSerializer
+from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import Rack
 from netbox.api.fields import SerializedPKRelatedField
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
-from ..models import Design, DesignGroup, DesignPlacement
+from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 
 __all__ = (
     "DesignGroupSerializer",
@@ -18,6 +19,9 @@ __all__ = (
     "DesignRackScopeSerializer",
     "HiddenRackToggleSerializer",
     "HiddenRackShowAllSerializer",
+    "RackPowerSerializer",
+    "PlannedFeedSerializer",
+    "PlannedFeedUpsertSerializer",
 )
 
 
@@ -110,6 +114,22 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     # When true on an 'add' item, the user flagged the planned addition for
     # cancellation via the editor's × — the add placement is DELETED on save.
     cancel = serializers.BooleanField(required=False, default=False)
+    # The PDU power dialog's stashed config (docs/pdu-distribution-spec.md), sent
+    # only for a PDU add. WITHOUT a default so an item that omits it (any other
+    # role, or an untouched reposition) leaves the placement's existing
+    # power_config field alone.
+    power_config = serializers.JSONField(required=False, allow_null=True)
+    # The feed this PDU add binds to (docs/pdu-distribution-spec.md §6.2/§8) --
+    # a real dcim.PowerFeed OR a planned DesignPowerFeed, never both. WITHOUT a
+    # default so an item that omits both (any other role, or an untouched
+    # reposition) leaves the placement's existing binding alone.
+    real_power_feed_id = serializers.IntegerField(required=False, allow_null=True)
+    planned_power_feed_id = serializers.IntegerField(required=False, allow_null=True)
+    # The real PDU device this planned PDU inherits its custom fields from
+    # (docs/pdu-distribution-spec.md §6) -- cf are then read LIVE off that device,
+    # an alternative to a manual ``power_config``. WITHOUT a default so an item
+    # that omits it leaves the placement's existing source device alone.
+    power_source_device_id = serializers.IntegerField(required=False, allow_null=True)
 
     def validate(self, data):
         kind = data["kind"]
@@ -228,3 +248,45 @@ class HiddenRackShowAllSerializer(serializers.Serializer):
     """Body for POST .../hidden-design-racks/show-all/ (per-user view state)."""
 
     design_id = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
+# Rack power request serializer (Phase B)
+#
+# Validates only the shape of the POST body for .../designs/<pk>/rack-power/.
+# The viewset upserts the DesignRackPower row; this never writes to dcim.
+# ---------------------------------------------------------------------------
+
+
+class RackPowerSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/rack-power/."""
+
+    rack_id = serializers.IntegerField()
+    power_config = serializers.JSONField(required=False, allow_null=True)
+
+
+# ---------------------------------------------------------------------------
+# Planned power feed serializers (Phase C, docs/pdu-distribution-spec.md §6/§8)
+#
+# DesignPowerFeed is plain planning scratch data (not a NetBoxModel), so a
+# plain ModelSerializer is enough -- no url/display/tags/custom_fields.
+# ---------------------------------------------------------------------------
+
+
+class PlannedFeedSerializer(serializers.ModelSerializer):
+    """Read shape for one DesignPowerFeed (the planned-feed action's response)."""
+
+    class Meta:
+        model = DesignPowerFeed
+        fields = ("id", "name", "voltage", "amperage", "phase", "supply")
+
+
+class PlannedFeedUpsertSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/planned-feed/ (upsert by rack+name)."""
+
+    rack_id = serializers.IntegerField()
+    name = serializers.CharField(max_length=100)
+    voltage = serializers.IntegerField(required=False)
+    amperage = serializers.IntegerField(required=False)
+    phase = serializers.ChoiceField(choices=PowerFeedPhaseChoices, required=False)
+    supply = serializers.ChoiceField(choices=PowerFeedSupplyChoices, required=False)

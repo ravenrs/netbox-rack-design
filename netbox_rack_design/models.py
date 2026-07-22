@@ -10,6 +10,7 @@ grouped into a larger (hierarchical) effort via DesignGroup.
 All terminology is generic — no organization-specific concepts are hardcoded.
 """
 
+from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -22,6 +23,8 @@ __all__ = (
     "DesignGroup",
     "Design",
     "DesignPlacement",
+    "DesignPowerFeed",
+    "DesignRackPower",
     "FavoriteDeviceType",
     "HiddenDesignRack",
 )
@@ -276,6 +279,52 @@ class DesignPlacement(NetBoxModel):
     )
     target_face = models.CharField(max_length=10, blank=True)
 
+    # MANUAL custom-field bridge for a PLANNED PDU add (docs/pdu-distribution-spec
+    # §6): the site-specific CUSTOM fields (declared via the ``planning_fields``
+    # config) the distribution script wants but which a planned PDU (no real
+    # device) has nowhere to read from -- used only when the cf are typed in by
+    # hand. When the planned PDU instead REFERENCES a real PDU (power_source_device
+    # below), cf are read live from that device and this stays null. NATIVE
+    # electricals never live here -- a PDU's breaker comes from the bound feed
+    # (real_power_feed / planned_power_feed). Shape: {"custom_fields": {...}}.
+    # Null for every non-PDU placement. Never written to dcim.
+    power_config = models.JSONField(blank=True, null=True)
+
+    # A planned PDU may INHERIT its custom fields from a real PDU device rather
+    # than typing them (docs/pdu-distribution-spec §6): this FK is that source
+    # device, and the distribution script reads ``power_source_device.cf`` LIVE
+    # (never snapshotted -- editing the source device updates the plan). The FK is
+    # also the copy provenance, so the dialog reopens by following it. Mutually
+    # exclusive with a manual ``power_config`` (at most one supplies the cf). Null
+    # for a manual/absent cf and every non-PDU placement.
+    power_source_device = models.ForeignKey(
+        to="dcim.Device",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+
+    # The feed this planned PDU draws its breaker from (docs/pdu-distribution-spec
+    # §6.2). Exactly one may be set: a real dcim.PowerFeed (provisioned rack) OR a
+    # plugin-side DesignPowerFeed (greenfield planning). ``bound_feed`` returns
+    # whichever, exposing a uniform electricals shape so the distribution engine
+    # never branches on real-vs-planned. Both null => unbound (degrades cleanly).
+    real_power_feed = models.ForeignKey(
+        to="dcim.PowerFeed",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+    planned_power_feed = models.ForeignKey(
+        to="netbox_rack_design.DesignPowerFeed",
+        on_delete=models.SET_NULL,
+        related_name="bound_placements",
+        blank=True,
+        null=True,
+    )
+
     class Meta:
         ordering = ("design", "target_position", "pk")
         verbose_name = "design placement"
@@ -291,9 +340,36 @@ class DesignPlacement(NetBoxModel):
     def get_kind_color(self):
         return DesignPlacementKindChoices.colors.get(self.kind)
 
+    @property
+    def bound_feed(self):
+        """The feed this planned PDU draws from, or None if unbound.
+
+        Returns whichever of ``real_power_feed`` / ``planned_power_feed`` is set,
+        as a uniform object exposing ``voltage``/``amperage``/``phase``/``supply``
+        /``name`` -- a real ``dcim.PowerFeed`` and a ``DesignPowerFeed`` both carry
+        those attributes, so the distribution engine reads either without a
+        real-vs-planned branch (docs/pdu-distribution-spec §6.2).
+        """
+        return self.real_power_feed or self.planned_power_feed
+
     def clean(self):
         super().clean()
         kind = self.kind
+
+        # A planned PDU binds to at most ONE feed (real xor planned).
+        if self.real_power_feed_id and self.planned_power_feed_id:
+            raise ValidationError(
+                "A placement cannot bind to both a real and a planned power feed."
+            )
+
+        # A planned PDU's custom fields come from at most ONE source: a referenced
+        # real device (cf read live) OR manual power_config -- never both (docs/
+        # pdu-distribution-spec §6.5).
+        if self.power_source_device_id and (self.power_config or {}).get("custom_fields"):
+            raise ValidationError(
+                "A placement cannot both reference a source device and carry "
+                "manual power_config custom fields."
+            )
 
         if kind == DesignPlacementKindChoices.KIND_ADD:
             if not self.device_type:
@@ -472,3 +548,101 @@ class HiddenDesignRack(models.Model):
 
     def __str__(self):
         return f"{self.user}: {self.design} hides {self.rack}"
+
+
+class DesignPowerFeed(models.Model):
+    """
+    A PLANNED power feed for one rack in one design
+    (docs/pdu-distribution-spec.md §6.1). A real PDU sizes its breaker from the
+    ``dcim.PowerFeed`` its power port is cabled to; a planned PDU in a greenfield
+    rack (no real feeds yet) binds to one of these instead. Field names and value
+    domains deliberately MIRROR ``dcim.PowerFeed`` (``voltage``/``amperage``/
+    ``phase``/``supply``) so ``DesignPlacement.bound_feed`` reads a real feed and a
+    planned feed through the same attributes -- the distribution engine never
+    branches on real-vs-planned.
+
+    Plain ``models.Model`` (like DesignRackPower): planning scratch data, not a
+    change-logged/searchable object. Read-only w.r.t. dcim; nothing is written to
+    a real ``PowerFeed``.
+    """
+
+    design = models.ForeignKey(
+        to="netbox_rack_design.Design",
+        on_delete=models.CASCADE,
+        related_name="planned_feeds",
+    )
+    rack = models.ForeignKey(
+        to="dcim.Rack",
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    # The feed's identity/leg, e.g. "Feed A" -- the bank/leg the bound PDUs sit on.
+    name = models.CharField(max_length=100)
+    voltage = models.PositiveIntegerField(default=230)
+    amperage = models.PositiveIntegerField(default=16)
+    phase = models.CharField(
+        max_length=20,
+        choices=PowerFeedPhaseChoices,
+        default=PowerFeedPhaseChoices.PHASE_SINGLE,
+    )
+    supply = models.CharField(
+        max_length=20,
+        choices=PowerFeedSupplyChoices,
+        default=PowerFeedSupplyChoices.SUPPLY_AC,
+    )
+
+    class Meta:
+        ordering = ("design", "rack", "name")
+        verbose_name = "design power feed"
+        verbose_name_plural = "design power feeds"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("design", "rack", "name"),
+                name="%(app_label)s_%(class)s_unique_design_rack_name",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.design}: {self.name} ({self.rack})"
+
+
+class DesignRackPower(models.Model):
+    """
+    Per-design power custom-field OVERRIDE for one rack
+    (docs/pdu-distribution-spec.md). The distribution script reads rack power
+    fields (``power_limitation``, ``pdu_location``) from ``rack.cf``; when a
+    design plans a rack whose real cf is unset (or needs a different planned
+    value), this holds the effective values -- merged over ``rack.cf`` for the
+    distribution, never written back to dcim.
+
+    Plain ``models.Model`` (like HiddenDesignRack): this is planning scratch
+    data, not a change-logged/searchable object with its own cf/tags.
+    """
+
+    design = models.ForeignKey(
+        to="netbox_rack_design.Design",
+        on_delete=models.CASCADE,
+        related_name="rack_power",
+    )
+    rack = models.ForeignKey(
+        to="dcim.Rack",
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    # Same JSON shape as DesignPlacement.power_config, minus "feed" (a rack has
+    # no feed of its own): {"source", "copied_from", "custom_fields": {...}}.
+    power_config = models.JSONField(blank=True, null=True)
+
+    class Meta:
+        ordering = ("design", "rack")
+        verbose_name = "design rack power"
+        verbose_name_plural = "design rack power"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("design", "rack"),
+                name="%(app_label)s_%(class)s_unique_design_rack",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.design}: power for {self.rack}"

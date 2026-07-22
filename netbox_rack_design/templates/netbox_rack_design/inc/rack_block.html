@@ -47,6 +47,19 @@
       <button type="button" class="btn btn-outline-primary active"
               aria-pressed="true" data-rd-show-rear>{% trans "Rear" %}</button>
     </div>
+    {# Per-rack power planning input (docs/pdu-distribution-spec.md §6.3): the #}
+    {# greenfield planned-power flow (define planned feeds + power_limitation/ #}
+    {# pdu_location override, models.DesignRackPower) -- GATED to racks with   #}
+    {# NO real PowerFeeds yet. A provisioned rack's PDUs bind straight to its  #}
+    {# real feeds via the per-PDU bind-to-feed dialog instead. Editor only.    #}
+    {% if editable and not b.has_real_feeds %}
+    <button type="button" class="btn btn-outline-warning btn-sm ms-2"
+            data-rd-rack-power-btn
+            title="{% trans 'Rack power (planning input)' %}"
+            aria-label="{% trans 'Rack power' %}">
+      <i class="mdi mdi-flash" aria-hidden="true"></i> {% trans "Power" %}
+    </button>
+    {% endif %}
   </div>
 
   {# ---- Per-rack power bar (docs/power-projection-spec.md): projected draw #}
@@ -67,6 +80,11 @@
     </span>
   </div>
   {% endif %}
+
+  {# ---- Per-bank power distribution (docs/pdu-distribution-spec.md): present #}
+  {# only in distribution_mode="script". power_heatmap.js reads it to color    #}
+  {# PDU banks and tint tiles by feed/bank when the heatmap is on.             #}
+  {% if b.power.distribution %}{% with did="rd-distribution-"|add:rid %}{{ b.power.distribution|json_script:did }}{% endwith %}{% endif %}
 
   {# ---- Rack faces: Front + Rear side by side (independent toggles). ---- #}
   <div class="nbx-rd-faces">
@@ -241,5 +259,10 @@
   {# Per-rack editor payload (editor only): one widget per projected slot, #}
   {# keyed by the rack pk so editor.js can hydrate each block independently. #}
   {% if editable %}{% with eid="rd-editor-data-"|add:rid %}{{ b.widgets|json_script:eid }}{% endwith %}{% endif %}
+
+  {# Saved per-(design, rack) power planning override (docs/pdu-distribution- #}
+  {# spec.md): lets the rack-power button (editor.js) pre-fill without an     #}
+  {# extra fetch. null when nothing has been saved for this rack yet.        #}
+  {% if editable %}{% with rpid="rd-rackpower-"|add:rid %}{{ b.rack_power|json_script:rpid }}{% endwith %}{% endif %}
 </div>{# /.nbx-rd-rack-block #}
 {% endwith %}{% endwith %}{% endwith %}

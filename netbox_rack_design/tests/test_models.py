@@ -6,12 +6,19 @@ These cover behaviour that the generic suites do NOT exercise: the custom
 The CRUD/permissions/changelog matrix lives in test_api.py and test_views.py.
 """
 
-from dcim.models import Rack, Site
+from dcim.models import PowerFeed, PowerPanel, Rack, Site
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignGroup, DesignPlacement
+from ..models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    DesignRackPower,
+)
 from .utils import create_dcim_environment
 
 
@@ -284,3 +291,172 @@ class DesignPlacementTestCase(TestCase):
         with self.assertRaises(ValidationError) as ctx:
             move.full_clean()
         self.assertIn("target_rack", ctx.exception.message_dict)
+
+    def test_power_config_defaults_to_none(self):
+        placement = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+        )
+        self.assertIsNone(placement.power_config)
+
+    def test_power_config_round_trips_custom_fields_only(self):
+        # power_config is now the CUSTOM-FIELD bridge only -- no inline "feed"
+        # (a PDU's electricals come from the bound feed, not this JSON).
+        config = {
+            "source": "copy_rack",
+            "copied_from": {
+                "rack_id": self.racks[0].pk,
+                "rack_name": self.racks[0].name,
+                "device_id": self.devices[0].pk,
+                "device_name": self.devices[0].name,
+            },
+            "custom_fields": {"pdu_scheme": "2x1PH2Banks"},
+        }
+        placement = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+            power_config=config,
+        )
+        placement.refresh_from_db()
+        self.assertEqual(placement.power_config, config)
+
+    def _pdu_add(self, **kwargs):
+        return DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+            **kwargs,
+        )
+
+    def test_bound_feed_none_when_unbound(self):
+        self.assertIsNone(self._pdu_add().bound_feed)
+
+    def test_bound_feed_resolves_real_feed(self):
+        panel = PowerPanel.objects.create(site=self.site, name="Panel 1")
+        feed = PowerFeed.objects.create(power_panel=panel, name="Feed A", amperage=32)
+        placement = self._pdu_add(real_power_feed=feed)
+        self.assertEqual(placement.bound_feed, feed)
+
+    def test_bound_feed_resolves_planned_feed(self):
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.racks[1], name="Feed A"
+        )
+        placement = self._pdu_add(planned_power_feed=feed)
+        self.assertEqual(placement.bound_feed, feed)
+
+    def test_power_source_device_fk_round_trips_and_defaults_null(self):
+        # A planned PDU may inherit cf live from a real source device via FK.
+        self.assertIsNone(self._pdu_add().power_source_device)
+        placement = self._pdu_add(power_source_device=self.devices[0])
+        placement.refresh_from_db()
+        self.assertEqual(placement.power_source_device, self.devices[0])
+        # cf is read live off the source device (no snapshot).
+        self.assertEqual(
+            dict(placement.power_source_device.cf), dict(self.devices[0].cf)
+        )
+
+    def test_cannot_reference_source_device_and_carry_manual_cf(self):
+        # cf come from a referenced device OR manual power_config, never both.
+        placement = self._pdu_add(
+            power_source_device=self.devices[0],
+            power_config={"custom_fields": {"warranty_type": "gold"}},
+        )
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
+    def test_source_device_alone_is_valid(self):
+        placement = self._pdu_add(power_source_device=self.devices[0])
+        placement.full_clean()  # no manual cf -> fine
+
+    def test_cannot_bind_both_real_and_planned_feed(self):
+        panel = PowerPanel.objects.create(site=self.site, name="Panel 1")
+        real = PowerFeed.objects.create(power_panel=panel, name="Feed A", amperage=32)
+        planned = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.racks[1], name="Feed A"
+        )
+        placement = self._pdu_add()
+        placement.real_power_feed = real
+        placement.planned_power_feed = planned
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
+
+class DesignPowerFeedTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Plan", site=cls.site)
+
+    def test_defaults_mirror_dcim_powerfeed(self):
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.racks[0], name="Feed A"
+        )
+        # Field names + value domains mirror dcim.PowerFeed so bound_feed is uniform.
+        self.assertEqual(feed.voltage, 230)
+        self.assertEqual(feed.amperage, 16)
+        self.assertEqual(feed.phase, "single-phase")
+        self.assertEqual(feed.supply, "ac")
+
+    def test_round_trips(self):
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.racks[0], name="Feed B",
+            voltage=400, amperage=32, phase="three-phase", supply="ac",
+        )
+        feed.refresh_from_db()
+        self.assertEqual((feed.voltage, feed.amperage, feed.phase), (400, 32, "three-phase"))
+
+    def test_unique_design_rack_name(self):
+        DesignPowerFeed.objects.create(design=self.design, rack=self.racks[0], name="Feed A")
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DesignPowerFeed.objects.create(design=self.design, rack=self.racks[0], name="Feed A")
+
+    def test_same_name_different_rack_allowed(self):
+        DesignPowerFeed.objects.create(design=self.design, rack=self.racks[0], name="Feed A")
+        DesignPowerFeed.objects.create(design=self.design, rack=self.racks[1], name="Feed A")
+        self.assertEqual(DesignPowerFeed.objects.filter(name="Feed A").count(), 2)
+
+    def test_cascade_on_design_delete(self):
+        DesignPowerFeed.objects.create(design=self.design, rack=self.racks[0], name="Feed A")
+        self.design.delete()
+        self.assertEqual(DesignPowerFeed.objects.count(), 0)
+
+
+class DesignRackPowerTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Plan", site=cls.site)
+
+    def test_power_config_defaults_to_none(self):
+        rack_power = DesignRackPower.objects.create(design=self.design, rack=self.racks[0])
+        self.assertIsNone(rack_power.power_config)
+
+    def test_power_config_round_trips(self):
+        config = {
+            "source": "manual",
+            "custom_fields": {"power_limitation": 8000, "pdu_location": "top"},
+        }
+        rack_power = DesignRackPower.objects.create(
+            design=self.design, rack=self.racks[0], power_config=config
+        )
+        rack_power.refresh_from_db()
+        self.assertEqual(rack_power.power_config, config)
+
+    def test_unique_design_rack_constraint(self):
+        DesignRackPower.objects.create(design=self.design, rack=self.racks[0])
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DesignRackPower.objects.create(design=self.design, rack=self.racks[0])
