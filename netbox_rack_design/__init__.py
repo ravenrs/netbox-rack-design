@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 
 from netbox.plugins import PluginConfig
@@ -49,6 +49,31 @@ class RackdesignConfig(PluginConfig):
         "naming_template": "{design.name}-{n}",
         # Dotted path to a callable used when naming_mode == "script".
         "naming_script": "",
+        # --- Power distribution engine (see distribution.py, docs/pdu-           -
+        # distribution-spec.md) ---------------------------------------------------
+        # How per-PDU/bank load is distributed for the power heatmap.
+        #   "none"    -> per-rack total only, per-device gradient (default)
+        #   "builtin" -> native distribution from the two universal conventions
+        #                (bank = outlet port name segment, feed-leg = the bound
+        #                feed) -- no config, no script.
+        #   "script"  -> a dotted path to fn(rack, devices) -> Distribution dict
+        "distribution_mode": "none",
+        # Dotted path to a callable used when distribution_mode == "script".
+        "distribution_script": "",
+        # Custom-field bridge for the planning dialogs (Tier 2, §5). Maps site
+        # custom fields into the rack/PDU planning inputs -- NATIVE fields
+        # (voltage/amperage/phase/supply, the feed binding) are never listed
+        # here. Empty by default: the base "builtin" feature needs none, and the
+        # rack-power dialog then shows only the copy-from-rack row. Example:
+        #   "planning_fields": {
+        #     "rack": [
+        #       {"key": "power_limitation", "label": "Power limitation (W)",
+        #        "type": "number", "source": "cf.power_limitation"},
+        #       {"key": "pdu_location", "label": "PDU location", "type": "choice",
+        #        "choices": ["top", "bottom"], "source": "cf.pdu_location"},
+        #     ],
+        #   }
+        "planning_fields": {},
     }
 
 

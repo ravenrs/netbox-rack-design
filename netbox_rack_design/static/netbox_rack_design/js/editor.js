@@ -624,6 +624,727 @@
         }
     }
 
+    // ---- Planned-PDU / rack power dialogs (docs/pdu-distribution-spec.md) --
+    // A planned PDU add has no real device/PowerFeed yet -- the distribution
+    // script needs a stored power_config (custom-fields snapshot + feed
+    // electricals) to size it, same as a rack needs a stored power_config for
+    // its power_limitation/pdu_location override (models.DesignPlacement /
+    // DesignRackPower, Phase A). Both dialogs mirror showMoveNameDialog's
+    // proven Bootstrap-modal shape above (fresh overlay per open, `decided`
+    // guard, transition-safe hide, blur-before-hide).
+
+    var API_BASE = "/api/plugins/rack-design/designs/"
+        + (root.getAttribute("data-design-id") || "") + "/";
+
+    function apiRackPowerUrl() { return API_BASE + "rack-power/"; }
+    function apiFeedsUrl() { return API_BASE + "feeds/"; }
+    function apiPlannedFeedUrl() { return API_BASE + "planned-feed/"; }
+
+    // The custom-field bridge schema (docs/pdu-distribution-spec.md §5): read
+    // once from the editor-data json_script global. `{}` (no key for a role)
+    // means the rack-power dialog shows only the copy-from-rack row -- no
+    // hardcoded cf inputs anywhere in this file.
+    var PLANNING_FIELDS = (function () {
+        var el = document.getElementById("rd-planning-fields");
+        if (!el) { return {}; }
+        try { return JSON.parse(el.textContent || "{}") || {}; } catch (e) { return {}; }
+    })();
+
+    // The rack's real PowerFeeds + this design's planned DesignPowerFeeds, for
+    // the bind-to-feed picker (real first, then planned). Never writes.
+    function fetchFeeds(rackId) {
+        rdTrace("feed.fetch", { rackId: rackId });
+        return fetch(apiFeedsUrl() + "?rack_id=" + encodeURIComponent(rackId), {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" },
+        }).then(function (resp) { return resp.ok ? resp.json() : null; })
+            .then(function (data) { return data || { real: [], planned: [] }; })
+            .catch(function () { return { real: [], planned: [] }; });
+    }
+
+    // Upsert a planned DesignPowerFeed (docs/pdu-distribution-spec.md §6.1) --
+    // the "define planned feed" fallback, always available in the bind dialog.
+    function postPlannedFeed(rackId, feed) {
+        var body = {
+            rack_id: parseInt(rackId, 10),
+            name: feed.name, voltage: feed.voltage, amperage: feed.amperage,
+            phase: feed.phase, supply: feed.supply,
+        };
+        return fetch(apiPlannedFeedUrl(), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+            body: JSON.stringify(body),
+        }).then(function (resp) {
+            if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+            return resp.json();
+        });
+    }
+
+    // A rack's real PDU devices, for the "reference a PDU" custom-fields source
+    // (docs/pdu-distribution-spec.md §6): a planned PDU can inherit its cf live
+    // from one of these via power_source_device. Read-only against core dcim.
+    function fetchRackPdus(rackId) {
+        var url = "/api/dcim/devices/?rack_id=" + encodeURIComponent(rackId)
+            + "&role=pdu&role=unmanageable-pdu&brief=1&limit=200";
+        rdTrace("pdu.cf.fetchpdus", { rackId: rackId });
+        return fetch(url, {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" },
+        }).then(function (resp) { return resp.ok ? resp.json() : null; })
+            .then(function (data) { return (data && data.results) || []; })
+            .catch(function () { return []; });
+    }
+
+    function fetchPowerSource(rackId, kind, feed) {
+        var qs = "rack_id=" + encodeURIComponent(rackId) + "&kind=" + encodeURIComponent(kind);
+        if (feed) { qs += "&feed=" + encodeURIComponent(feed); }
+        rdTrace("dist.powersource.fetch", { rackId: rackId, kind: kind, feed: feed || null });
+        return fetch(API_BASE + "power-source/?" + qs, {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" },
+        }).then(function (resp) { return resp.ok ? resp.json() : null; })
+            .catch(function () { return null; });
+    }
+
+    function postRackPower(rackId, powerConfig) {
+        rdTrace("dist.rackpower.save", {
+            rackId: rackId, source: powerConfig ? powerConfig.source : null,
+        });
+        return fetch(apiRackPowerUrl(), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+            body: JSON.stringify({ rack_id: parseInt(rackId, 10), power_config: powerConfig }),
+        }).then(function (resp) {
+            if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+            return resp.json();
+        });
+    }
+
+    function getRackPower(rackId) {
+        return fetch(apiRackPowerUrl() + "?rack_id=" + encodeURIComponent(rackId), {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" },
+        }).then(function (resp) { return resp.ok ? resp.json() : null; })
+            .catch(function () { return null; });
+    }
+
+    // PDU detection. The backend's authoritative signal is the device role's
+    // SLUG (distribution_example.PDU_ROLE_SLUGS = "pdu"/"unmanageable-pdu"),
+    // mirrored here verbatim. A RELOADED add carries the real `role_slug` from
+    // the server (views.py _slot_to_widget -> projection._slot_role_slug), so
+    // that check is exact. A brand-new drag-in has no placement yet -- only
+    // the palette role SELECT's display name and id are available client-side
+    // (NetBox's DynamicModelChoiceField/TomSelect keeps no slug, only
+    // id/display -- confirmed against project-static/src/select/classes/
+    // dynamicTomSelect.ts), so the role's name is slugified the same way
+    // Django's slugify would (lowercase, non-alnum runs -> '-') and matched
+    // against the same set; the proposed name / device-type label containing
+    // "pdu" is a last-resort fallback (the backend already relies on the same
+    // "...-pdu-...-<letter><number>" naming convention to parse a PDU's feed).
+    var PDU_ROLE_SLUGS = ["pdu", "unmanageable-pdu"];
+    function slugifyLike(name) {
+        return (name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    }
+    function looksLikePdu(roleSlug, roleName, proposedName, typeLabel) {
+        if (roleSlug && PDU_ROLE_SLUGS.indexOf(roleSlug.toLowerCase()) !== -1) { return true; }
+        if (roleName && PDU_ROLE_SLUGS.indexOf(slugifyLike(roleName)) !== -1) { return true; }
+        if (proposedName && /pdu/i.test(proposedName)) { return true; }
+        if (typeLabel && /pdu/i.test(typeLabel)) { return true; }
+        return false;
+    }
+
+    // The feed leg (e.g. "a1") from a PDU's name suffix -- same convention
+    // distribution_example._feed_of parses server-side -- used only to SEED
+    // the copy-from-rack feed input; the user can always override it.
+    function guessFeedFromName(name) {
+        var m = /([a-zA-Z])(\d+)\s*$/.exec((name || "").trim());
+        return m ? (m[1].toLowerCase() + m[2]) : "";
+    }
+
+    // Every rack currently rendered in the editor, for the "copy from rack"
+    // selector: {id, name} pairs read straight off the live DOM (no fetch).
+    function racksInDom() {
+        return Array.prototype.slice.call(document.querySelectorAll(".nbx-rd-rack-block"))
+            .map(function (b) {
+                var titleEl = b.querySelector(".nbx-rd-rack-block-title a");
+                return {
+                    id: b.getAttribute("data-rack-id"),
+                    name: titleEl ? titleEl.textContent.trim() : ("rack " + b.getAttribute("data-rack-id")),
+                };
+            });
+    }
+
+    function rackOptionsHtml(racks, selectedId) {
+        return racks.map(function (r) {
+            var safe = String(r.name).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            var sel = (selectedId != null && String(r.id) === String(selectedId)) ? " selected" : "";
+            return '<option value="' + r.id + '"' + sel + ">" + safe + "</option>";
+        }).join("");
+    }
+
+    // Shared transition-safe show/hide wiring (identical to showMoveNameDialog
+    // above): returns {modal, requestHide} once `overlay` is in the DOM. `decided`
+    // guards against a hidden.bs.modal firing after Confirm already ran.
+    function wireModal(overlay, decidedRef) {
+        var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
+        var modal = ctor ? new ctor(overlay) : null;
+        var shownDone = false, hidePending = false;
+        overlay.addEventListener("shown.bs.modal", function () {
+            shownDone = true;
+            if (hidePending && modal) { modal.hide(); }
+        });
+        overlay.addEventListener("hide.bs.modal", function () {
+            if (overlay.contains(document.activeElement)) { document.activeElement.blur(); }
+        });
+        overlay.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                decidedRef.cancelled = true;
+                if (modal) {
+                    if (shownDone) { modal.hide(); } else { hidePending = true; }
+                } else { overlay.remove(); }
+            });
+        });
+        overlay.addEventListener("hidden.bs.modal", function () { overlay.remove(); });
+        return {
+            show: function () {
+                if (modal) { modal.show(); } else { overlay.remove(); }
+            },
+            requestHide: function () {
+                if (!modal) { overlay.remove(); return; }
+                if (shownDone) { modal.hide(); } else { hidePending = true; }
+            },
+        };
+    }
+
+    // Render one feed's picker label: "name — V/A/phase". `phase` is the
+    // native string ("single-phase"/"three-phase") the feeds/ endpoint returns.
+    function feedRowLabel(f) {
+        var phaseLabel = f.phase === "three-phase" ? "3φ" : "1φ";
+        var bits = [];
+        if (f.voltage != null) { bits.push(f.voltage + "V"); }
+        if (f.amperage != null) { bits.push(f.amperage + "A"); }
+        bits.push(phaseLabel);
+        return (f.name || "(unnamed)") + " — " + bits.join("/");
+    }
+
+    // The bind-to-feed dialog (docs/pdu-distribution-spec.md §6.2/§6.3): a
+    // newly-named (or reopened) PDU add binds to one of the rack's real
+    // PowerFeeds or this design's planned DesignPowerFeeds, replacing the old
+    // manual V/A/phase entry. `widget` is the live widget object stashed in
+    // editor state (setting widget.real_power_feed_id / .planned_power_feed_id
+    // here is what buildSavePayload later reads); `content` is the tile's
+    // .grid-stack-item-content (for the has-config button cue); `ctx` =
+    // {rackId}. widget.power_config is left untouched -- it is cf-bridge only
+    // now (§6.2); the feed binding rides its own two fields.
+    function showPduPowerDialog(widget, content, ctx) {
+        var rackId = ctx.rackId;
+        var currentReal = widget.real_power_feed_id != null ? widget.real_power_feed_id : null;
+        var currentPlanned = widget.planned_power_feed_id != null ? widget.planned_power_feed_id : null;
+        // Custom-field capture (docs/pdu-distribution-spec.md §6): a planned PDU's
+        // cf come EITHER from referencing a real PDU (power_source_device, cf read
+        // live) OR from manual entry (power_config.custom_fields). The manual
+        // sub-form is driven by PLANNING_FIELDS.pdu -- empty => reference-only.
+        var pduFields = (PLANNING_FIELDS && PLANNING_FIELDS.pdu) || [];
+        var currentSourceDev = widget.power_source_device_id != null ? widget.power_source_device_id : null;
+        var currentManualCf = (widget.power_config && widget.power_config.custom_fields) || null;
+        var showCfSection = pduFields.length > 0 || currentSourceDev != null;
+        rdTrace("feed.bind.open", {
+            rackId: rackId, label: widget.label,
+            currentReal: currentReal, currentPlanned: currentPlanned,
+            currentSourceDev: currentSourceDev,
+        });
+
+        var cfSectionHtml = "";
+        if (showCfSection) {
+            var pduRacks = racksInDom();
+            var manualFieldsHtml = pduFields.map(function (f) {
+                var safeLabel = String(f.label || f.key).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+                return '<div class="col"><label class="form-label small mb-0">' + safeLabel + "</label>"
+                    + planningFieldInputHtml(f) + "</div>";
+            }).join("");
+            cfSectionHtml =
+                '<hr class="my-2"><div class="text-muted small text-uppercase">Custom fields</div>'
+                + '<div class="form-check">'
+                + '<input class="form-check-input" type="radio" name="nbx-rd-pducf-mode" id="nbx-rd-pducf-ref" value="reference"'
+                + (currentManualCf ? "" : " checked") + ">"
+                + '<label class="form-check-label" for="nbx-rd-pducf-ref">Reference a PDU</label>'
+                + "</div>"
+                + '<div class="nbx-rd-pducf-ref-fields ms-4 mb-2">'
+                + '<div class="row g-2 align-items-center">'
+                + '<div class="col-auto"><select class="form-select form-select-sm nbx-rd-pducf-rack">'
+                + rackOptionsHtml(pduRacks, rackId) + "</select></div>"
+                + '<div class="col"><select class="form-select form-select-sm nbx-rd-pducf-pdu">'
+                + '<option value="">— select a PDU —</option></select></div>'
+                + "</div>"
+                + '<div class="form-text nbx-rd-pducf-ref-status"></div>'
+                + "</div>"
+                + (pduFields.length
+                    ? ('<div class="form-check mt-1">'
+                        + '<input class="form-check-input" type="radio" name="nbx-rd-pducf-mode" id="nbx-rd-pducf-manual" value="manual"'
+                        + (currentManualCf ? " checked" : "") + ">"
+                        + '<label class="form-check-label" for="nbx-rd-pducf-manual">Enter manually</label>'
+                        + "</div>"
+                        + '<div class="nbx-rd-pducf-manual-fields ms-4"><div class="row g-2 align-items-end">'
+                        + manualFieldsHtml + "</div></div>")
+                    : "");
+        }
+
+        var overlay = document.createElement("div");
+        overlay.className = "modal fade nbx-rd-power-modal";
+        overlay.setAttribute("tabindex", "-1");
+        overlay.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h5 class="modal-title">' + "Bind PDU to a power feed" + "</h5>"
+            + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+            + "</div>"
+            + '<div class="modal-body">'
+            + '<div class="nbx-rd-feed-list"><div class="text-muted small">Loading feeds…</div></div>'
+            + '<div class="mt-2">'
+            + '<button type="button" class="btn btn-sm btn-outline-secondary nbx-rd-feed-new-toggle">'
+            + '<i class="mdi mdi-plus" aria-hidden="true"></i> Define planned feed</button>'
+            + "</div>"
+            + '<div class="nbx-rd-feed-new-form mt-2" style="display:none;">'
+            + '<div class="row g-2 align-items-center">'
+            + '<div class="col"><input type="text" class="form-control form-control-sm nbx-rd-feed-new-name" placeholder="Name, e.g. Feed A"></div>'
+            + '<div class="col"><input type="number" class="form-control form-control-sm nbx-rd-feed-new-voltage" placeholder="V" value="230"></div>'
+            + '<div class="col"><input type="number" class="form-control form-control-sm nbx-rd-feed-new-amperage" placeholder="A" value="16"></div>'
+            + '<div class="col"><select class="form-select form-select-sm nbx-rd-feed-new-phase">'
+            + '<option value="single-phase">Single-phase</option><option value="three-phase">Three-phase</option>'
+            + "</select></div>"
+            + '<div class="col"><select class="form-select form-select-sm nbx-rd-feed-new-supply">'
+            + '<option value="ac">AC</option><option value="dc">DC</option></select></div>'
+            + '<div class="col-auto"><button type="button" class="btn btn-sm btn-outline-primary nbx-rd-feed-new-create">Create</button></div>'
+            + "</div>"
+            + '<div class="form-text nbx-rd-feed-new-status"></div>'
+            + "</div>"
+            + cfSectionHtml
+            + "</div>"
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
+            + '<button type="button" class="btn btn-sm btn-primary" data-rd-pdu-confirm disabled>Bind</button>'
+            + "</div>"
+            + "</div></div>";
+        document.body.appendChild(overlay);
+
+        var listEl = overlay.querySelector(".nbx-rd-feed-list");
+        var newToggle = overlay.querySelector(".nbx-rd-feed-new-toggle");
+        var newForm = overlay.querySelector(".nbx-rd-feed-new-form");
+        var newName = overlay.querySelector(".nbx-rd-feed-new-name");
+        var newVoltage = overlay.querySelector(".nbx-rd-feed-new-voltage");
+        var newAmperage = overlay.querySelector(".nbx-rd-feed-new-amperage");
+        var newPhase = overlay.querySelector(".nbx-rd-feed-new-phase");
+        var newSupply = overlay.querySelector(".nbx-rd-feed-new-supply");
+        var newCreate = overlay.querySelector(".nbx-rd-feed-new-create");
+        var newStatus = overlay.querySelector(".nbx-rd-feed-new-status");
+        var confirmBtn = overlay.querySelector("[data-rd-pdu-confirm]");
+
+        var selected = null;  // {source: "real"|"planned", id, name, voltage, amperage, phase, supply}
+
+        // Confirm is enabled by ANY of: a feed picked, a PDU referenced, or a
+        // manual cf field filled -- a user may set only cf, only a feed, or
+        // both (docs/pdu-distribution-spec.md §6).
+        function anyManualFilled() {
+            var filled = false;
+            cfManualInputs.forEach(function (inp) {
+                if (String(inp.value || "").trim() !== "") { filled = true; }
+            });
+            return filled;
+        }
+        function refreshConfirmEnabled() {
+            var cfOk = showCfSection && (
+                (cfPduSel && cfPduSel.value) || anyManualFilled()
+            );
+            confirmBtn.disabled = !(selected || cfOk);
+        }
+
+        function selectFeed(source, feed) {
+            selected = {
+                source: source, id: feed.id, name: feed.name,
+                voltage: feed.voltage, amperage: feed.amperage,
+                phase: feed.phase, supply: feed.supply,
+            };
+            refreshConfirmEnabled();
+            listEl.querySelectorAll("input[name=nbx-rd-feed-pick]").forEach(function (r) {
+                r.checked = (r.getAttribute("data-source") === source
+                    && String(r.getAttribute("data-id")) === String(feed.id));
+            });
+        }
+
+        function renderList(data) {
+            var real = (data && data.real) || [];
+            var planned = (data && data.planned) || [];
+            if (!real.length && !planned.length) {
+                listEl.innerHTML = '<div class="text-muted small">No feeds yet on this rack — define a planned feed below.</div>';
+                return;
+            }
+            var html = "";
+            function section(title, feeds, source) {
+                if (!feeds.length) { return ""; }
+                var rows = feeds.map(function (f) {
+                    var checked = (source === "real" && currentReal === f.id)
+                        || (source === "planned" && currentPlanned === f.id);
+                    return '<label class="form-check">'
+                        + '<input class="form-check-input" type="radio" name="nbx-rd-feed-pick" '
+                        + 'data-source="' + source + '" data-id="' + f.id + '"'
+                        + (checked ? " checked" : "") + ">"
+                        + '<span class="form-check-label">' + feedRowLabel(f) + "</span>"
+                        + "</label>";
+                }).join("");
+                return '<div class="nbx-rd-feed-section"><div class="text-muted small text-uppercase">'
+                    + title + "</div>" + rows + "</div>";
+            }
+            html += section("Real feeds", real, "real");
+            html += section("Planned feeds", planned, "planned");
+            listEl.innerHTML = html;
+            listEl.querySelectorAll("input[name=nbx-rd-feed-pick]").forEach(function (r) {
+                r.addEventListener("change", function () {
+                    var source = r.getAttribute("data-source");
+                    var id = parseInt(r.getAttribute("data-id"), 10);
+                    var pool = source === "real" ? real : planned;
+                    var feed = pool.filter(function (f) { return f.id === id; })[0];
+                    if (feed) { selectFeed(source, feed); }
+                });
+            });
+            // Preselect the widget's current binding on reopen.
+            var preselected = listEl.querySelector("input[name=nbx-rd-feed-pick]:checked");
+            if (preselected) { preselected.dispatchEvent(new Event("change")); }
+        }
+
+        fetchFeeds(rackId).then(function (data) {
+            rdTrace("feed.bind.list", {
+                rackId: rackId,
+                realCount: (data.real || []).length, plannedCount: (data.planned || []).length,
+            });
+            renderList(data);
+        });
+
+        newToggle.addEventListener("click", function () {
+            var showing = newForm.style.display !== "none";
+            newForm.style.display = showing ? "none" : "";
+        });
+
+        newCreate.addEventListener("click", function () {
+            var name = (newName.value || "").trim();
+            if (!name) { newStatus.textContent = "Name is required."; return; }
+            var feed = {
+                name: name,
+                voltage: newVoltage.value !== "" ? parseInt(newVoltage.value, 10) : 230,
+                amperage: newAmperage.value !== "" ? parseInt(newAmperage.value, 10) : 16,
+                phase: newPhase.value, supply: newSupply.value,
+            };
+            newStatus.textContent = "Saving…";
+            postPlannedFeed(rackId, feed).then(function (saved) {
+                rdTrace("feed.planned.create", { rackId: rackId, feed: saved });
+                newStatus.textContent = "Created " + saved.name + ".";
+                newForm.style.display = "none";
+                currentPlanned = saved.id;
+                fetchFeeds(rackId).then(renderList);
+            }).catch(function (err) {
+                newStatus.textContent = "Could not create feed: " + String(err);
+            });
+        });
+
+        // --- custom-fields section wiring (reference a PDU / manual entry) ----
+        var cfRackSel = overlay.querySelector(".nbx-rd-pducf-rack");
+        var cfPduSel = overlay.querySelector(".nbx-rd-pducf-pdu");
+        var cfRefStatus = overlay.querySelector(".nbx-rd-pducf-ref-status");
+        var cfManualInputs = overlay.querySelectorAll(".nbx-rd-pducf-manual-fields .nbx-rd-rackpower-field");
+
+        function pduCfMode() {
+            var checked = overlay.querySelector("input[name=nbx-rd-pducf-mode]:checked");
+            return checked ? checked.value : null;
+        }
+
+        function loadPdusInto(sel, forRackId, preselectId) {
+            if (!sel) { return; }
+            sel.innerHTML = '<option value="">— loading… —</option>';
+            fetchRackPdus(forRackId).then(function (pdus) {
+                var opts = '<option value="">— select a PDU —</option>' + pdus.map(function (d) {
+                    var nm = String(d.display || d.name || ("device " + d.id))
+                        .replace(/&/g, "&amp;").replace(/</g, "&lt;");
+                    var sel2 = (preselectId != null && String(d.id) === String(preselectId)) ? " selected" : "";
+                    return '<option value="' + d.id + '"' + sel2 + ">" + nm + "</option>";
+                }).join("");
+                sel.innerHTML = opts;
+                if (cfRefStatus) { cfRefStatus.textContent = pdus.length ? "" : "No PDUs in this rack."; }
+                refreshConfirmEnabled();
+            });
+        }
+
+        if (showCfSection && cfRackSel) {
+            // Initial PDU list for the current rack; preselect the referenced PDU
+            // if the widget already has one (reopen).
+            loadPdusInto(cfPduSel, cfRackSel.value || rackId, currentSourceDev);
+            cfRackSel.addEventListener("change", function () {
+                loadPdusInto(cfPduSel, cfRackSel.value, null);
+            });
+            // Fill manual inputs from the widget's existing manual cf (reopen).
+            if (currentManualCf) {
+                cfManualInputs.forEach(function (inp) {
+                    var k = inp.getAttribute("data-field-key");
+                    if (k in currentManualCf && currentManualCf[k] != null) {
+                        inp.value = currentManualCf[k];
+                    }
+                });
+            }
+            if (cfPduSel) { cfPduSel.addEventListener("change", refreshConfirmEnabled); }
+            cfManualInputs.forEach(function (inp) {
+                inp.addEventListener("input", refreshConfirmEnabled);
+            });
+            overlay.querySelectorAll("input[name=nbx-rd-pducf-mode]").forEach(function (r) {
+                r.addEventListener("change", refreshConfirmEnabled);
+            });
+            refreshConfirmEnabled();
+        }
+
+        var decidedRef = { cancelled: false };
+        var wired = wireModal(overlay, decidedRef);
+
+        overlay.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                rdTrace("feed.bind.cancel", { rackId: rackId, label: widget.label });
+            });
+        });
+
+        confirmBtn.addEventListener("click", function () {
+            if (selected) {
+                if (selected.source === "real") {
+                    widget.real_power_feed_id = selected.id;
+                    widget.planned_power_feed_id = null;
+                } else {
+                    widget.planned_power_feed_id = selected.id;
+                    widget.real_power_feed_id = null;
+                }
+                rdTrace("feed.bind.confirm", {
+                    rackId: rackId, pduName: widget.label,
+                    feedId: selected.id, feedName: selected.name, feedSource: selected.source,
+                    voltage: selected.voltage, amperage: selected.amperage, phase: selected.phase,
+                });
+            }
+            // Custom-field capture (docs/pdu-distribution-spec.md §6): reference
+            // a real PDU (live cf) XOR manual entry -- each mode clears the other.
+            if (showCfSection) {
+                var mode = pduCfMode();
+                if (mode === "reference") {
+                    widget.power_source_device_id = (cfPduSel && cfPduSel.value)
+                        ? parseInt(cfPduSel.value, 10) : null;
+                    widget.power_config = null;
+                } else if (mode === "manual") {
+                    var cf = {};
+                    cfManualInputs.forEach(function (inp) {
+                        var k = inp.getAttribute("data-field-key");
+                        var v = inp.value;
+                        if (v !== "" && v != null) { cf[k] = v; }
+                    });
+                    widget.power_config = Object.keys(cf).length
+                        ? { source: "manual", custom_fields: cf } : null;
+                    widget.power_source_device_id = null;
+                }
+                rdTrace("pdu.cf.confirm", {
+                    rackId: rackId, mode: mode,
+                    sourceDev: widget.power_source_device_id,
+                    manualCf: (widget.power_config && widget.power_config.custom_fields) || null,
+                });
+            }
+            if (content) {
+                var btn = content.querySelector(".nbx-rd-power-btn");
+                if (btn) { btn.classList.add("has-config"); }
+            }
+            markDirty();
+            wired.requestHide();
+        });
+
+        wired.show();
+    }
+
+    // One <input>/<select> for a planning_fields schema entry (docs/pdu-
+    // distribution-spec.md §5): `type` in {number, text, choice}. Never a
+    // hardcoded cf name -- `f.key` drives both the DOM lookup and the
+    // custom_fields dict key written on confirm.
+    function planningFieldInputHtml(f) {
+        if (f.type === "choice") {
+            var opts = '<option value="">—</option>' + (f.choices || []).map(function (c) {
+                var safe = String(c).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+                return '<option value="' + safe + '">' + safe + "</option>";
+            }).join("");
+            return '<select class="form-select form-select-sm nbx-rd-rackpower-field" data-field-key="'
+                + f.key + '">' + opts + "</select>";
+        }
+        var type = f.type === "number" ? "number" : "text";
+        return '<input type="' + type + '" class="form-control form-control-sm nbx-rd-rackpower-field" data-field-key="'
+            + f.key + '">';
+    }
+
+    // The per-rack power dialog: copy-from-rack is always available; the
+    // manual-entry fields are rendered from the `planning_fields.rack` schema
+    // (docs/pdu-distribution-spec.md §5) -- an empty schema shows NO manual cf
+    // inputs at all, only the copy-from-rack row. Saved immediately via POST
+    // rack-power/ (the rack is persistent design data -- it does not wait for
+    // the layout Save, per the plan).
+    function buildRackPowerDialog(rackId, rackName, existing) {
+        var overlay = document.createElement("div");
+        overlay.className = "modal fade nbx-rd-power-modal";
+        overlay.setAttribute("tabindex", "-1");
+        var racks = racksInDom().filter(function (r) { return String(r.id) !== String(rackId); });
+        var fields = (PLANNING_FIELDS && PLANNING_FIELDS.rack) || [];
+        var fieldsHtml = fields.map(function (f) {
+            var safeLabel = String(f.label || f.key).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            return '<div class="col"><label class="form-label small mb-0">' + safeLabel + "</label>"
+                + planningFieldInputHtml(f) + "</div>";
+        }).join("");
+        overlay.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h5 class="modal-title">' + "Rack power (planning input)"
+            + (rackName ? " — " + rackName.replace(/</g, "&lt;") : "") + "</h5>"
+            + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+            + "</div>"
+            + '<div class="modal-body">'
+            + '<div class="form-check">'
+            + '<input class="form-check-input" type="radio" name="nbx-rd-rackpower-mode" id="nbx-rd-rackpower-copy" value="copy_rack"'
+            + (fields.length ? "" : " checked") + ">"
+            + '<label class="form-check-label" for="nbx-rd-rackpower-copy">Copy from rack</label>'
+            + "</div>"
+            + '<div class="nbx-rd-rackpower-copy-fields ms-4 mb-2">'
+            + '<div class="row g-2 align-items-center">'
+            + '<div class="col"><select class="form-select form-select-sm nbx-rd-rackpower-rack">'
+            + rackOptionsHtml(racks) + "</select></div>"
+            + '<div class="col-auto"><button type="button" class="btn btn-sm btn-outline-secondary nbx-rd-rackpower-load">Load</button></div>'
+            + "</div>"
+            + '<div class="form-text nbx-rd-rackpower-copy-status"></div>'
+            + "</div>"
+            + (fields.length
+                ? ('<div class="form-check mt-2">'
+                    + '<input class="form-check-input" type="radio" name="nbx-rd-rackpower-mode" id="nbx-rd-rackpower-manual" value="manual" checked>'
+                    + '<label class="form-check-label" for="nbx-rd-rackpower-manual">Manual entry</label>'
+                    + "</div>"
+                    + '<div class="row g-2 ms-1 mt-1">' + fieldsHtml + "</div>")
+                : "")
+            + "</div>"
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
+            + '<button type="button" class="btn btn-sm btn-primary" data-rd-rackpower-confirm>Save</button>'
+            + "</div>"
+            + "</div></div>";
+        document.body.appendChild(overlay);
+
+        var copyRadio = overlay.querySelector("#nbx-rd-rackpower-copy");
+        var manualRadio = overlay.querySelector("#nbx-rd-rackpower-manual");
+        var rackSelect = overlay.querySelector(".nbx-rd-rackpower-rack");
+        var loadBtn = overlay.querySelector(".nbx-rd-rackpower-load");
+        var statusEl = overlay.querySelector(".nbx-rd-rackpower-copy-status");
+
+        var loadedCf = (existing && existing.custom_fields) || {};
+        var copiedFrom = (existing && existing.copied_from) || null;
+
+        function setFieldValues(cf) {
+            fields.forEach(function (f) {
+                var el = overlay.querySelector('.nbx-rd-rackpower-field[data-field-key="' + f.key + '"]');
+                if (el && cf && cf[f.key] != null) { el.value = cf[f.key]; }
+            });
+        }
+
+        if (existing) {
+            if (existing.source === "copy_rack" || !manualRadio) { copyRadio.checked = true; }
+            else { manualRadio.checked = true; }
+            setFieldValues(existing.custom_fields || {});
+            if (copiedFrom && copiedFrom.rack_id != null && rackSelect) {
+                rackSelect.value = String(copiedFrom.rack_id);
+            }
+        }
+
+        function syncMode() {
+            overlay.querySelector(".nbx-rd-rackpower-copy-fields").style.opacity = copyRadio.checked ? "1" : ".5";
+        }
+        copyRadio.addEventListener("change", syncMode);
+        if (manualRadio) { manualRadio.addEventListener("change", syncMode); }
+        syncMode();
+
+        loadBtn.addEventListener("click", function () {
+            var srcRackId = rackSelect.value;
+            if (!srcRackId) { statusEl.textContent = "Pick a rack first."; return; }
+            copyRadio.checked = true;
+            syncMode();
+            statusEl.textContent = "Loading…";
+            fetchPowerSource(srcRackId, "rack").then(function (data) {
+                if (!data || !data.custom_fields) {
+                    statusEl.textContent = "Could not load that rack's power fields.";
+                    return;
+                }
+                loadedCf = data.custom_fields || {};
+                setFieldValues(loadedCf);
+                var srcRackName = (rackSelect.selectedOptions[0] || {}).textContent || "";
+                copiedFrom = { rack_id: parseInt(srcRackId, 10), rack_name: srcRackName };
+                statusEl.textContent = "Loaded from " + srcRackName + ".";
+            });
+        });
+
+        var decidedRef = { cancelled: false };
+        var wired = wireModal(overlay, decidedRef);
+
+        overlay.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                rdTrace("dist.dialog.cancel", { rackId: rackId, kind: "rack" });
+            });
+        });
+
+        overlay.querySelector("[data-rd-rackpower-confirm]").addEventListener("click", function () {
+            var mode = copyRadio.checked ? "copy_rack" : "manual";
+            var cf;
+            if (mode === "copy_rack") {
+                cf = loadedCf;
+            } else {
+                cf = {};
+                fields.forEach(function (f) {
+                    var el = overlay.querySelector('.nbx-rd-rackpower-field[data-field-key="' + f.key + '"]');
+                    if (!el) { return; }
+                    var v = el.value;
+                    cf[f.key] = (f.type === "number") ? (v !== "" ? parseFloat(v) : null) : (v || "");
+                });
+            }
+            var cfg = {
+                source: mode,
+                copied_from: mode === "copy_rack" ? copiedFrom : null,
+                custom_fields: cf,
+            };
+            rdTrace("dist.dialog.confirm", { rackId: rackId, kind: "rack", source: mode, fields: cf });
+            postRackPower(rackId, cfg).then(function () {
+                createToast("success", "Saved", "Rack power settings saved.");
+                var btn = document.querySelector(
+                    '.nbx-rd-rack-block[data-rack-id="' + rackId + '"] [data-rd-rack-power-btn]');
+                if (btn) { btn.classList.add("has-config"); }
+            }).catch(function (err) {
+                createToast("danger", "Error", "Could not save rack power: " + String(err));
+            });
+            wired.requestHide();
+        });
+
+        wired.show();
+    }
+
+    // Reads the design context first (rack_block.html's rd-rackpower-<id>
+    // json_script -- views.py's _project_rack_bundle) so opening the dialog on
+    // a freshly-loaded page needs no round trip; only a rack with no embedded
+    // element at all (shouldn't happen in the editor) falls back to the GET.
+    function showRackPowerDialog(rackId, rackName) {
+        rdTrace("dist.dialog.open", { rackId: rackId, kind: "rack" });
+        var embedded = document.getElementById("rd-rackpower-" + rackId);
+        if (embedded) {
+            var existing = null;
+            try { existing = JSON.parse(embedded.textContent || "null"); } catch (e) { existing = null; }
+            buildRackPowerDialog(rackId, rackName, existing);
+            return;
+        }
+        getRackPower(rackId).then(function (data) {
+            buildRackPowerDialog(rackId, rackName, data ? data.power_config : null);
+        });
+    }
+
     // ---- Shared rack-height sync -------------------------------------------
     // The fixed left rail (catalog) + quick-access columns track the height of a
     // VISIBLE rack elevation so they read as rack-tall. With several racks we
@@ -1076,6 +1797,53 @@
                 el.setAttribute("data-rd-device-id", w.device_id);
             }
         });
+
+        // Planned-PDU reopen affordance (docs/pdu-distribution-spec.md): a
+        // reloaded PDU add gets its bind-to-feed button, pre-filled from the
+        // server-delivered widget.real_power_feed_id / .planned_power_feed_id
+        // (views.py _slot_to_widget). Clicking reopens the SAME dialog a fresh
+        // add shows right after being placed (see finishAdd's palette-drop
+        // wiring below).
+        widgets.forEach(function (w, idx) {
+            if (!w || w.kind !== "add" || w.opposite_face) { return; }
+            if (!looksLikePdu(w.role_slug, "", w.proposed_name, "")) { return; }
+            var el = block.querySelector('.grid-stack-item[data-widget-index="' + idx + '"]');
+            var content = el && el.querySelector(".grid-stack-item-content");
+            if (!content || content.querySelector(".nbx-rd-power-btn")) { return; }
+            var btn = document.createElement("button");
+            btn.type = "button";
+            var bound = w.real_power_feed_id != null || w.planned_power_feed_id != null;
+            btn.className = "nbx-rd-power-btn" + (bound ? " has-config" : "");
+            btn.title = "PDU power (planning input)";
+            btn.setAttribute("aria-label", "PDU power");
+            btn.innerHTML = '<i class="mdi mdi-flash" aria-hidden="true"></i>';
+            content.appendChild(btn);
+            btn.addEventListener("click", function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                showPduPowerDialog(w, content, { rackId: rackId });
+            });
+        });
+
+        // Per-rack power button (rack_block.html header): opens the
+        // power_limitation/pdu_location dialog. Pre-filled from the embedded
+        // rd-rackpower-<id> context (views.py _project_rack_bundle).
+        var rackPowerBtn = block.querySelector("[data-rd-rack-power-btn]");
+        if (rackPowerBtn) {
+            var rpEl = document.getElementById("rd-rackpower-" + rackId);
+            if (rpEl) {
+                try {
+                    if (JSON.parse(rpEl.textContent || "null")) {
+                        rackPowerBtn.classList.add("has-config");
+                    }
+                } catch (e) { /* malformed/absent -- leave unmarked */ }
+            }
+            rackPowerBtn.addEventListener("click", function (e) {
+                e.preventDefault();
+                var titleEl = block.querySelector(".nbx-rd-rack-block-title a");
+                showRackPowerDialog(rackId, titleEl ? titleEl.textContent.trim() : "");
+            });
+        }
 
         // ---- gs-y <-> u_position (inverse of templatetags/rack_design.slot_gs_y)
         function gsYToUPosition(gsY, gsH) {
@@ -3613,6 +4381,32 @@
                     // An add always carries its (auto-filled or user-edited) name,
                     // even when blank, so save_layout persists the editor's choice.
                     item.proposed_name = (w.proposed_name != null) ? w.proposed_name : "";
+                    // Planned-PDU power inputs (docs/pdu-distribution-spec.md):
+                    // stashed on the widget by showPduPowerDialog's confirm
+                    // handler above; rides this add's save item so
+                    // SaveLayoutItemSerializer persists it onto the placement.
+                    if (w.power_config) { item.power_config = w.power_config; }
+                    // Reference a real PDU for live cf (§6, mutually exclusive with
+                    // power_config -- showPduPowerDialog's confirm handler clears
+                    // whichever mode isn't active).
+                    if (w.power_source_device_id != null) {
+                        item.power_source_device_id = w.power_source_device_id;
+                    }
+                    // Feed binding (§6.2/§8): send only whichever one is set --
+                    // at most one, cleared on the other side by showPduPowerDialog's
+                    // confirm handler (widget.real_power_feed_id / .planned_power_feed_id).
+                    if (w.real_power_feed_id != null) {
+                        item.real_power_feed_id = w.real_power_feed_id;
+                    } else if (w.planned_power_feed_id != null) {
+                        item.planned_power_feed_id = w.planned_power_feed_id;
+                    }
+                    if (w.real_power_feed_id != null || w.planned_power_feed_id != null) {
+                        rdTrace("save.item.binding", {
+                            rackId: rackId, label: w.label,
+                            real_power_feed_id: w.real_power_feed_id || null,
+                            planned_power_feed_id: w.planned_power_feed_id || null,
+                        });
+                    }
                 } else if (w.proposed_name) {
                     // A move that went through the §4a dialog carries its chosen
                     // name. Omitted (no name) => the view leaves the placement's
@@ -4004,6 +4798,31 @@
                     setTileDisplayName(content, nameInput.value);
                     markDirty();
                 });
+
+                // Planned-PDU power dialog (docs/pdu-distribution-spec.md): a PDU
+                // add has no real device/PowerFeed yet, so its breaker/phase (and,
+                // for copy-from-rack, a cf snapshot) must be captured here and
+                // stashed on the widget for the design Save to carry (see
+                // buildRackPayload's power_config item field below). Detected from
+                // the signals available at drop time -- see looksLikePdu above.
+                if (looksLikePdu(null, roleName, "", model)) {
+                    var pduBtn = document.createElement("button");
+                    pduBtn.type = "button";
+                    pduBtn.className = "nbx-rd-power-btn";
+                    pduBtn.title = "PDU power (planning input)";
+                    pduBtn.setAttribute("aria-label", "PDU power");
+                    pduBtn.innerHTML = '<i class="mdi mdi-flash" aria-hidden="true"></i>';
+                    content.appendChild(pduBtn);
+                    pduBtn.addEventListener("click", function (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showPduPowerDialog(widget, content, { rackId: rackId });
+                    });
+                    // Open once, right after placement, so the breaker is
+                    // captured before the user moves on. Non-blocking: a Cancel
+                    // just leaves power_config unset, same as never opening it.
+                    showPduPowerDialog(widget, content, { rackId: rackId });
+                }
 
                 // Auto-fill the prospective name (best-effort; never blocks the add).
                 previewName({
@@ -4795,6 +5614,14 @@
     window.NbxRdEditor = {
         getCsrfToken: getCsrfToken,
         createToast: createToast,
+        // Test/debug surface for the PDU + rack power dialogs (docs/pdu-
+        // distribution-spec.md): lets an e2e test drive the dialog logic and
+        // read back the per-rack save payload without simulating a full
+        // GridStack drag.
+        rackControllers: rackControllers,
+        looksLikePdu: looksLikePdu,
+        showPduPowerDialog: showPduPowerDialog,
+        showRackPowerDialog: showRackPowerDialog,
     };
 
     // ==========================================================================

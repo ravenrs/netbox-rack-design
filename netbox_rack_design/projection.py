@@ -749,4 +749,10 @@ def project_rack(design, rack):
     # Power projection (docs/power-projection-spec.md): fills per-slot draw and
     # the rack-level summary over the planned world just built above.
     elevation.power = _project_power(elevation, **_power_config())
+    # Per-PDU/bank distribution (docs/pdu-distribution-spec.md): computed in
+    # "builtin" (native, zero-config) or "script" mode (else None -> the
+    # frontend keeps the per-device heatmap). A broken builtin/script degrades
+    # to None, never erroring the projection.
+    from .distribution import generate_distribution
+    elevation.power["distribution"] = generate_distribution(elevation)
     return elevation

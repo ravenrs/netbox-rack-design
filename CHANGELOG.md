@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-22
+
+### Release Summary
+
+Feature release adding **universal PDU power distribution** — a per-PDU / per-bank
+power heatmap that works out of the box, plus a full planning model for
+greenfield racks. Distribution now has three tiers: a zero-config **`builtin`**
+mode driven by two universal naming conventions, a **custom-field bridge** for
+sites that keep power limits in custom fields, and a **script** mode for bespoke
+logic. A planned PDU binds to a real or planned **power feed** (mirroring
+NetBox's native power model) so its breaker is sized the same way whether the
+rack is provisioned or greenfield. Fully backward-compatible and read-only over
+`dcim`.
+
+### Added
+- **Universal PDU power distribution + per-bank heatmap** (see
+  `docs/pdu-distribution-spec.md`). The `distribution_mode` config key now
+  accepts `builtin` alongside `none` (default) and `script`:
+  - **`builtin`** computes a real per-PDU/bank distribution with **no script**,
+    from two documented conventions — the bank is the first segment of the outlet
+    port name (`1/1` → bank 1), and a PDU's feed-leg comes from the feed it is
+    **bound** to (below), not from name parsing.
+  - The editor's power heatmap colors each PDU bank as a filled health bar
+    (load-vs-breaker, overload = hard red), feed-leg-colors the per-PDU column
+    headers (A/B), and gives each consumer tile an A/B feed edge for the leg(s) it
+    lands on.
+  - The shipped reference `netbox_rack_design.distribution_example.build` runs the
+    same algorithm as a copyable script. A missing / unimportable / non-callable /
+    raising script falls back to the per-device heatmap and never errors the page.
+- **Power feed model + binding for planned PDUs.** A PDU sizes its breaker from
+  the feed it draws from — a real cabled `dcim.PowerFeed`, or a new plugin-side
+  **`DesignPowerFeed`** (name, V/A/phase/supply, scoped per design + rack) for
+  greenfield racks. A planned PDU binds to one via two nullable FKs on
+  `DesignPlacement` (`real_power_feed` / `planned_power_feed`, mutually
+  exclusive), so the read path is uniform (real or planned → "read the bound
+  feed"). The bind-to-feed dialog opens on PDU add — real feeds first, with a
+  "define planned feed" fallback — and a per-rack **Power** button (shown when a
+  rack has no real feeds) manages planned feeds and rack overrides.
+- **Custom-field bridge (`planning_fields`).** A config schema maps a site's
+  **custom fields only** (e.g. `power_limitation`, `pdu_location`) into the
+  planning dialogs and the script's view of the rack — native fields are always
+  read directly, never configured. A planned PDU can also **reference a real PDU
+  device** (`power_source_device` FK) to inherit its custom fields live, or carry
+  them manually in `power_config`. Rack custom-field overrides persist per design
+  in `DesignRackPower`.
+- New read-only API actions back the dialogs: `GET feeds/`,
+  `GET/POST planned-feed/`, `GET/POST rack-power/`, and `GET power-source/`
+  (rack copy-from). Save-layout items carry the feed binding and cf-source.
+  Migration `0007` adds `DesignPowerFeed`, `DesignRackPower`, the binding /
+  cf-source FKs, and `DesignPlacement.power_config`.
+- Debug logging across the whole path (PDU + feed resolution, unit→bank map,
+  per-device charge, overrides, every graceful fallback), plus a dev-only
+  frontend tracer for the dialogs and heatmap.
+
+### Notes
+- Backward-compatible: `distribution_mode` defaults to `none` (today's per-device
+  heatmap); no `dcim` writes, no design dirty flag. All planning data is stored
+  by the plugin alongside the design and never written back to real records.
+
 ## [0.12.0] - 2026-07-17
 
 ### Release Summary

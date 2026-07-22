@@ -1,6 +1,8 @@
 """REST API viewsets for NetBox Rack Design."""
 
-from dcim.models import Device, DeviceRole, DeviceType, Rack
+import logging
+
+from dcim.models import Device, DeviceRole, DeviceType, PowerFeed, Rack
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from netbox.api.authentication import TokenPermissions
@@ -18,6 +20,8 @@ from ..models import (
     Design,
     DesignGroup,
     DesignPlacement,
+    DesignPowerFeed,
+    DesignRackPower,
     FavoriteDeviceType,
     HiddenDesignRack,
 )
@@ -29,9 +33,14 @@ from .serializers import (
     FavoriteToggleSerializer,
     HiddenRackShowAllSerializer,
     HiddenRackToggleSerializer,
+    PlannedFeedSerializer,
+    PlannedFeedUpsertSerializer,
     PreviewNameSerializer,
+    RackPowerSerializer,
     SaveLayoutSerializer,
 )
+
+logger = logging.getLogger("netbox_rack_design.api")
 
 __all__ = (
     "DesignGroupViewSet",
@@ -52,6 +61,27 @@ class DesignGroupViewSet(NetBoxModelViewSet):
 def _norm_pos(value):
     """Normalise a U position to a float for comparison, or None."""
     return None if value is None else float(value)
+
+
+def _feed_dict(feed, source):
+    """
+    The uniform feed contract shared by the bind-to-feed picker
+    (docs/pdu-distribution-spec.md §6/§8): a real ``dcim.PowerFeed`` and a
+    planned ``DesignPowerFeed`` carry the same field names
+    (name/voltage/amperage/phase/supply), so this reads either without a
+    real-vs-planned branch. ``phase``/``supply`` are plain CharFields with
+    choices (values already "single-phase"/"three-phase", "ac"/"dc"), but the
+    getattr guards against a wrapped enum-like value just in case.
+    """
+    return {
+        "id": feed.pk,
+        "name": feed.name,
+        "voltage": feed.voltage,
+        "amperage": feed.amperage,
+        "phase": getattr(feed.phase, "value", feed.phase),
+        "supply": getattr(feed.supply, "value", feed.supply),
+        "source": source,
+    }
 
 
 class ChangeDesignPermissions(TokenPermissions):
@@ -92,9 +122,9 @@ class DesignViewSet(NetBoxModelViewSet):
 
     def get_permissions(self):
         action = getattr(self, "action", None)
-        if action in ("save_layout", "add_rack", "remove_rack"):
+        if action in ("save_layout", "add_rack", "remove_rack", "rack_power", "planned_feed"):
             return [ChangeDesignPermissions()]
-        if action == "preview_name":
+        if action in ("preview_name", "power_source", "feeds"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -295,6 +325,227 @@ class DesignViewSet(NetBoxModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=True, methods=["get", "post"], url_path="rack-power")
+    def rack_power(self, request, pk=None):
+        """
+        Upsert/read this design's per-rack power custom-field override
+        (``DesignRackPower`` -- docs/pdu-distribution-spec.md). The rack is
+        persistent design data, so POST saves it immediately (it does not wait
+        for the layout Save). Never writes to dcim.
+
+        GET  .../designs/<pk>/rack-power/?rack_id=<id>
+             -> {"power_config": {...} | null}
+        POST .../designs/<pk>/rack-power/  body {"rack_id", "power_config"}
+             -> {"power_config": {...} | null}
+
+        URL name: plugins-api:netbox_rack_design-api:design-rack-power
+        Path:     /api/plugins/rack-design/designs/<pk>/rack-power/
+        """
+        if request.user.is_authenticated:
+            perm = "change" if request.method == "POST" else "view"
+            self.queryset = Design.objects.restrict(request.user, perm)
+        design = self.get_object()
+
+        if request.method == "POST":
+            body = RackPowerSerializer(data=request.data)
+            body.is_valid(raise_exception=True)
+            rack_id = body.validated_data["rack_id"]
+            power_config = body.validated_data.get("power_config")
+
+            rack = Rack.objects.filter(pk=rack_id).first()
+            if rack is None:
+                return Response(
+                    {"rack_id": ["Rack does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            rack_power, _created = DesignRackPower.objects.get_or_create(
+                design=design, rack=rack
+            )
+            rack_power.power_config = power_config
+            rack_power.save()
+            logger.debug(
+                "api.rack_power: design=%s rack_id=%s %s",
+                design.pk, rack_id, "created" if _created else "updated",
+            )
+            return Response(
+                {"power_config": rack_power.power_config}, status=status.HTTP_200_OK
+            )
+
+        # GET: reopen the rack-power dialog pre-filled with the stored config.
+        rack_id = request.query_params.get("rack_id")
+        if not rack_id:
+            return Response(
+                {"rack_id": ["This query parameter is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        rack_power = DesignRackPower.objects.filter(
+            design=design, rack_id=rack_id
+        ).first()
+        return Response(
+            {"power_config": rack_power.power_config if rack_power else None},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"], url_path="power-source")
+    def power_source(self, request, pk=None):
+        """
+        Read-only lookup for the "copy from rack" mode of the rack power dialog:
+        a source rack's custom fields (``kind=rack``). Performs NO writes.
+
+        In the universal feed-binding design a planned PDU **binds to a feed**
+        (see the ``feeds``/``planned-feed`` actions) rather than copying another
+        PDU's electricals, so there is no ``kind=pdu`` here -- the rack copy path
+        is the only remaining copy-from-rack flow.
+
+        GET .../designs/<pk>/power-source/?rack_id=<id>&kind=rack
+          kind=rack -> {"custom_fields": {...}}
+
+        URL name: plugins-api:netbox_rack_design-api:design-power-source
+        Path:     /api/plugins/rack-design/designs/<pk>/power-source/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        # Enforces design-level view permission/object scoping for this lookup.
+        self.get_object()
+
+        kind = request.query_params.get("kind")
+        if kind != "rack":
+            return Response(
+                {"kind": ["kind must be 'rack'."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rack_id = request.query_params.get("rack_id")
+        rack = Rack.objects.filter(pk=rack_id).first() if rack_id else None
+        if rack is None:
+            return Response(
+                {"rack_id": ["Rack does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        logger.debug("api.power_source: kind=rack rack_id=%s", rack_id)
+        return Response({"custom_fields": dict(rack.cf)}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="feeds")
+    def feeds(self, request, pk=None):
+        """
+        Read-only lookup for the bind-to-feed picker (docs/pdu-distribution-
+        spec.md §6.3/§8): this rack's real ``dcim.PowerFeed``s plus this
+        design's planned ``DesignPowerFeed``s, each in the uniform feed shape
+        (``_feed_dict``) so the picker can list real feeds first, then
+        planned. Performs NO writes.
+
+        GET .../designs/<pk>/feeds/?rack_id=<id>
+          -> {"real": [{"id","name","voltage","amperage","phase","supply",
+                        "source":"real"}, ...],
+              "planned": [{..., "source":"planned"}, ...]}
+
+        URL name: plugins-api:netbox_rack_design-api:design-feeds
+        Path:     /api/plugins/rack-design/designs/<pk>/feeds/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        rack_id = request.query_params.get("rack_id")
+        if not rack_id:
+            return Response(
+                {"rack_id": ["This query parameter is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        logger.debug("api.feeds: design=%s rack_id=%s", design.pk, rack_id)
+
+        real_feeds = [
+            _feed_dict(f, "real") for f in PowerFeed.objects.filter(rack_id=rack_id)
+        ]
+        planned_feeds = [
+            _feed_dict(f, "planned")
+            for f in DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
+        ]
+        logger.debug(
+            "api.feeds: design=%s rack_id=%s real=%d planned=%d",
+            design.pk, rack_id, len(real_feeds), len(planned_feeds),
+        )
+        return Response(
+            {"real": real_feeds, "planned": planned_feeds}, status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=["get", "post"], url_path="planned-feed")
+    def planned_feed(self, request, pk=None):
+        """
+        Upsert/list this design's planned power feeds (``DesignPowerFeed`` --
+        docs/pdu-distribution-spec.md §6.1/§8), for the greenfield "define
+        planned feed" dialog flow. Rack-scoped and design-scoped; upserts by
+        the ``(design, rack, name)`` unique_together so re-submitting the same
+        name UPDATES the electricals rather than duplicating the row. Never
+        writes to dcim.
+
+        GET  .../designs/<pk>/planned-feed/?rack_id=<id>
+             -> [{"id","name","voltage","amperage","phase","supply"}, ...]
+        POST .../designs/<pk>/planned-feed/ body {"rack_id","name","voltage",
+             "amperage","phase","supply"} -> upsert, returns the one feed.
+
+        URL name: plugins-api:netbox_rack_design-api:design-planned-feed
+        Path:     /api/plugins/rack-design/designs/<pk>/planned-feed/
+        """
+        if request.user.is_authenticated:
+            perm = "change" if request.method == "POST" else "view"
+            self.queryset = Design.objects.restrict(request.user, perm)
+        design = self.get_object()
+
+        if request.method == "POST":
+            body = PlannedFeedUpsertSerializer(data=request.data)
+            body.is_valid(raise_exception=True)
+            data = body.validated_data
+            rack_id = data["rack_id"]
+
+            rack = Rack.objects.filter(pk=rack_id).first()
+            if rack is None:
+                return Response(
+                    {"rack_id": ["Rack does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Same-site rule, mirroring add-rack/rack_power: a planned feed can
+            # only be defined for a rack in the design's own site.
+            if rack.site_id != design.site_id:
+                return Response(
+                    {"rack_id": ["This rack is not in the design's site."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            electricals = {
+                k: data[k] for k in ("voltage", "amperage", "phase", "supply") if k in data
+            }
+            feed, created = DesignPowerFeed.objects.get_or_create(
+                design=design, rack=rack, name=data["name"], defaults=electricals
+            )
+            if not created and electricals:
+                for field_name, value in electricals.items():
+                    setattr(feed, field_name, value)
+                feed.save()
+            logger.debug(
+                "api.planned_feed: design=%s rack_id=%s name=%s %s",
+                design.pk, rack_id, data["name"], "created" if created else "updated",
+            )
+            return Response(PlannedFeedSerializer(feed).data, status=status.HTTP_200_OK)
+
+        # GET: list this rack's planned feeds.
+        rack_id = request.query_params.get("rack_id")
+        if not rack_id:
+            return Response(
+                {"rack_id": ["This query parameter is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        feeds_qs = DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
+        logger.debug(
+            "api.planned_feed: design=%s rack_id=%s list count=%d",
+            design.pk, rack_id, feeds_qs.count(),
+        )
+        return Response(
+            PlannedFeedSerializer(feeds_qs, many=True).data, status=status.HTTP_200_OK
+        )
+
     @action(detail=True, methods=["post"], url_path="save-layout")
     def save_layout(self, request, pk=None):
         """
@@ -456,6 +707,10 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.device_role_id,
             placement.tenant_id,
             placement.proposed_name or "",
+            placement.power_config,
+            placement.real_power_feed_id,
+            placement.planned_power_feed_id,
+            placement.power_source_device_id,
         )
 
     @staticmethod
@@ -558,6 +813,69 @@ class DesignViewSet(NetBoxModelViewSet):
             return False, None, None
         return True, device_role_id, tenant_id
 
+    @staticmethod
+    def _resolve_feed_binding(item, rack, u_position, errors):
+        """
+        Resolve the optional ``real_power_feed_id`` / ``planned_power_feed_id``
+        on a PDU add item (docs/pdu-distribution-spec.md §6.2/§8) into the pair
+        to assign onto the placement.
+
+        Exclusivity is enforced HERE, before ``full_clean()``, so a bad item
+        reports through the same per-item ``errors`` list as the rest of add
+        validation (``DesignPlacement.clean()`` also guards this as a second
+        line of defense): both ids set on one item -> append an error and bind
+        NEITHER. An id that does not resolve to a real row is skipped
+        gracefully (logged), not a hard error -- a stale/removed feed must
+        never crash Save.
+
+        Returns (ok, real_feed_id, planned_feed_id). Absent keys resolve to
+        None (no binding requested by this item).
+        """
+        real_id = item.get("real_power_feed_id")
+        planned_id = item.get("planned_power_feed_id")
+
+        if real_id and planned_id:
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": _norm_pos(u_position),
+                "device_id": None,
+                "detail": "An item cannot bind to both a real and a planned power feed.",
+            })
+            return False, None, None
+
+        if real_id and not PowerFeed.objects.filter(pk=real_id).exists():
+            logger.debug(
+                "api._reconcile_item: real_power_feed_id=%s does not exist, skipping binding",
+                real_id,
+            )
+            real_id = None
+        if planned_id and not DesignPowerFeed.objects.filter(pk=planned_id).exists():
+            logger.debug(
+                "api._reconcile_item: planned_power_feed_id=%s does not exist, skipping binding",
+                planned_id,
+            )
+            planned_id = None
+
+        return True, real_id, planned_id
+
+    @staticmethod
+    def _resolve_power_source_device(item):
+        """
+        Resolve the optional ``power_source_device_id`` on a PDU add item
+        (docs/pdu-distribution-spec.md §6): the real PDU device this planned PDU
+        inherits its custom fields from (read live off ``device.cf``). An id that
+        does not resolve to a real device is skipped gracefully (logged), never a
+        hard error. Returns the id to assign, or None. Absent key -> None.
+        """
+        source_id = item.get("power_source_device_id")
+        if source_id and not Device.objects.filter(pk=source_id).exists():
+            logger.debug(
+                "api._reconcile_item: power_source_device_id=%s does not exist, skipping",
+                source_id,
+            )
+            return None
+        return source_id
+
     def _reconcile_item(self, design, rack, face_key, item, errors, desired_placement_ids):
         """
         Map one desired item to its DesignPlacement (or no placement), upserting
@@ -605,6 +923,11 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
                 if not ok:
                     return None
+                ok, real_feed_id, planned_feed_id = self._resolve_feed_binding(
+                    item, rack, u_position, errors
+                )
+                if not ok:
+                    return None
                 new_add = DesignPlacement(
                     design=design,
                     kind=DesignPlacementKindChoices.KIND_ADD,
@@ -617,6 +940,17 @@ class DesignViewSet(NetBoxModelViewSet):
                     # Editor-chosen name (auto-filled from the naming engine and/or
                     # user-edited). Absent => "" (the model field is blank=True).
                     proposed_name=(item.get("proposed_name") or ""),
+                    # The PDU power dialog's stashed config (docs/pdu-distribution-
+                    # spec.md); only meaningful for a PDU add, but persisted as-is
+                    # for whatever role sent it. Absent => None.
+                    power_config=item.get("power_config"),
+                    # The feed this PDU binds to (docs/pdu-distribution-spec.md
+                    # §6.2); at most one of the pair is set (enforced above and
+                    # again by DesignPlacement.clean()).
+                    real_power_feed_id=real_feed_id,
+                    planned_power_feed_id=planned_feed_id,
+                    # The real PDU whose cf this planned PDU inherits live (§6).
+                    power_source_device_id=self._resolve_power_source_device(item),
                 )
                 new_add._projected_vacated_device_ids = getattr(
                     self, "_batch_vacated_device_ids", None
@@ -637,6 +971,17 @@ class DesignViewSet(NetBoxModelViewSet):
                         "detail": detail,
                     })
                     return None
+                if new_add.power_config:
+                    logger.debug(
+                        "api._reconcile_item: placement=%s (%s) got power_config",
+                        new_add.pk, new_add.proposed_name or new_add,
+                    )
+                if new_add.real_power_feed_id or new_add.planned_power_feed_id:
+                    logger.debug(
+                        "api._reconcile_item: placement=%s (%s) bound to feed real=%s planned=%s",
+                        new_add.pk, new_add.proposed_name or new_add,
+                        new_add.real_power_feed_id, new_add.planned_power_feed_id,
+                    )
                 desired_placement_ids.add(new_add.pk)
                 return new_add
             if not placement_id:
@@ -661,6 +1006,13 @@ class DesignViewSet(NetBoxModelViewSet):
             )
             if not ok:
                 return None
+            rebinding = "real_power_feed_id" in item or "planned_power_feed_id" in item
+            if rebinding:
+                ok, real_feed_id, planned_feed_id = self._resolve_feed_binding(
+                    item, rack, u_position, errors
+                )
+                if not ok:
+                    return None
             before = self._snapshot(add)
             add.target_rack = rack
             add.target_position = u_position
@@ -674,6 +1026,16 @@ class DesignViewSet(NetBoxModelViewSet):
                 add.tenant_id = tenant_id
             if "proposed_name" in item:
                 add.proposed_name = item.get("proposed_name") or ""
+            if "power_config" in item:
+                add.power_config = item.get("power_config")
+            if "power_source_device_id" in item:
+                add.power_source_device_id = self._resolve_power_source_device(item)
+            # Only overwrite the binding when the editor actually sent one of the
+            # two keys, so a plain reposition that omits both preserves the
+            # existing binding (and stays idempotent).
+            if rebinding:
+                add.real_power_feed_id = real_feed_id
+                add.planned_power_feed_id = planned_feed_id
             # Idempotent: an unmoved add round-trips without a write.
             if self._snapshot(add) == before:
                 desired_placement_ids.add(add.pk)
@@ -697,6 +1059,17 @@ class DesignViewSet(NetBoxModelViewSet):
                     "detail": detail,
                 })
                 return None
+            if "power_config" in item and add.power_config:
+                logger.debug(
+                    "api._reconcile_item: placement=%s (%s) got power_config",
+                    add.pk, add.proposed_name or add,
+                )
+            if rebinding and (add.real_power_feed_id or add.planned_power_feed_id):
+                logger.debug(
+                    "api._reconcile_item: placement=%s (%s) bound to feed real=%s planned=%s",
+                    add.pk, add.proposed_name or add,
+                    add.real_power_feed_id, add.planned_power_feed_id,
+                )
             desired_placement_ids.add(add.pk)
             return add
 

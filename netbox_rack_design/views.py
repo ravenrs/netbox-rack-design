@@ -2,7 +2,7 @@
 
 import os
 
-from dcim.models import Rack, Site
+from dcim.models import PowerFeed, Rack, Site
 from django.conf import settings
 from django.contrib.staticfiles import finders
 from django.db.models import Q
@@ -10,12 +10,15 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.generic import View
 from django_tables2 import RequestConfig
+from netbox.plugins import get_plugin_config
 from netbox.views import generic
 from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
 from . import filtersets, forms, models, projection, tables
 from .choices import DesignStatusChoices
+
+PLUGIN_NAME = "netbox_rack_design"
 
 __all__ = (
     "DesignGroupView", "DesignGroupListView", "DesignGroupEditView", "DesignGroupDeleteView",
@@ -246,6 +249,26 @@ def _slot_to_widget(slot):
         # the per-rack power bar and the heatmap gradient in the editor.
         "draw_w": float(slot.get("draw_w") or 0.0),
         "draw_known": bool(slot.get("draw_known")),
+        # Role slug (docs/pdu-distribution-spec.md): the SAME signal
+        # distribution_example.PDU_ROLE_SLUGS matches on server-side, reused here
+        # so the editor JS can detect a planned PDU add exactly, not just guess
+        # from the role's display name (reloaded add only -- a brand-new drag-in
+        # has no placement yet, so the JS falls back to the palette's role name).
+        "role_slug": projection._slot_role_slug(slot),
+        # Planned-PDU power inputs (Phase A/D, models.DesignPlacement.power_config):
+        # only ever set on a `kind=add` placement whose role is a PDU. Lets the
+        # PDU power dialog reopen pre-filled after a reload.
+        "power_config": placement.power_config if placement is not None else None,
+        # Feed binding (docs/pdu-distribution-spec.md §6.2): whichever of these is
+        # set on the placement rides back to the editor JS so the bind-to-feed
+        # dialog can preselect the PDU's current binding on reopen. At most one is
+        # ever non-null (DesignPlacement.clean() enforces it).
+        "real_power_feed_id": placement.real_power_feed_id if placement is not None else None,
+        "planned_power_feed_id": placement.planned_power_feed_id if placement is not None else None,
+        # Referenced source PDU (docs/pdu-distribution-spec.md §6): the real PDU
+        # device this planned PDU inherits cf from, delivered so the dialog can
+        # preselect it on reopen. None for manual/absent cf.
+        "power_source_device_id": placement.power_source_device_id if placement is not None else None,
     }
 
 
@@ -262,6 +285,11 @@ def _project_rack_bundle(design, rack):
         _slot_to_widget(slot)
         for slot in (*result.front, *result.rear, *result.non_racked)
     ]
+    # Saved per-(design, rack) power planning override (docs/pdu-distribution-
+    # spec.md, models.DesignRackPower): delivered into the editor context so the
+    # rack-power button can pre-fill without an extra fetch (see api/views.py's
+    # rack-power GET action, which this mirrors).
+    rack_power_row = models.DesignRackPower.objects.filter(design=design, rack=rack).first()
     return {
         "rack": rack,
         "front": result.front,
@@ -276,6 +304,12 @@ def _project_rack_bundle(design, rack):
         # Power projection summary (docs/power-projection-spec.md): drives the
         # per-rack power bar shown in normal mode and the heatmap legend.
         "power": result.power,
+        "rack_power": rack_power_row.power_config if rack_power_row else None,
+        # Feed-model gating (docs/pdu-distribution-spec.md §6.3): the per-rack
+        # "Power" button (greenfield planned-power flow) is only useful when the
+        # rack has NO real PowerFeeds yet -- a provisioned rack's PDUs bind
+        # straight to its real feeds via the bind-to-feed dialog instead.
+        "has_real_feeds": PowerFeed.objects.filter(rack=rack).exists(),
     }
 
 
@@ -345,6 +379,10 @@ def _design_editor_context(request, design):
         # Drives the "Add rack" panel's Location + Rack choosers, scoped to this
         # design's site (see forms.DesignEditorAddRackForm).
         "add_rack_form": forms.DesignEditorAddRackForm(site_id=design.site_id),
+        # Custom-field bridge schema (docs/pdu-distribution-spec.md §5): drives
+        # the rack-power dialog's dynamically-rendered fields. `{}` (default) ->
+        # the dialog shows only the copy-from-rack row, no hardcoded cf inputs.
+        "planning_fields": get_plugin_config(PLUGIN_NAME, "planning_fields", {}),
     }
 
 

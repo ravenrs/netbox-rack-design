@@ -61,6 +61,50 @@
     pointer-events: none;
 }
 
+/* ---- Planned-PDU power button (docs/pdu-distribution-spec.md) ------------ */
+/* A PDU add's tile carries a small flash-icon button (top-left, opposite the
+   remove x) that (re)opens its power_config dialog. Always visible -- unlike
+   the hover-only remove button -- so an unconfigured planned PDU is
+   discoverable at a glance. */
+.nbx-rd-power-btn {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 2px 0 4px 0;
+    background-color: rgba(var(--tblr-warning-rgb), 0.9);
+    color: #000;
+    font-size: 11px;
+    cursor: pointer;
+    z-index: 2;
+}
+
+.nbx-rd-power-btn .mdi {
+    font-size: 11px;
+    line-height: 16px;
+    vertical-align: middle;
+}
+
+/* Filled once a power_config has been stashed on this add, so a glance across
+   the rack shows which planned PDUs still need their breaker entered. */
+.nbx-rd-power-btn.has-config {
+    background-color: rgba(var(--tblr-success-rgb), 0.9);
+    color: #fff;
+}
+
+/* ---- Per-rack power button (rack_block.html header) ----------------------- */
+/* Same "has-config" cue as the per-tile button above, applied by editor.js once
+   a DesignRackPower row exists (server context or a successful save). */
+[data-rd-rack-power-btn].has-config {
+    color: #fff;
+    background-color: var(--tblr-warning);
+    border-color: var(--tblr-warning);
+}
+
 /* ---- Add-tile editable proposed name + collision warning (Phase 3) ------- */
 /* An add tile stacks its device-type label above a compact, editable name input
    so the auto-filled (and user-overridable) proposed name is visible and typeable
@@ -960,6 +1004,101 @@
     border-radius: 3px;
     background: linear-gradient(to right,
         #2fb344 0%, #f59f00 55%, #d63939 100%);
+}
+
+/* ---- Per-bank distribution (docs/pdu-distribution-spec.md, script mode) ---- */
+/* A/B feed accent: A leg = blue edge on the LEFT, B leg = orange edge on the
+   RIGHT. A redundant (2-PSU) device lands on both, so it shows BOTH edges -- the
+   A/B split is visible at a glance while the heatmap is on. */
+.nbx-rd-heatmap .grid-stack-item.nbx-rd-feed-a > .grid-stack-item-content {
+    box-shadow: inset 4px 0 0 0 #4263eb;                     /* A — blue, left */
+}
+.nbx-rd-heatmap .grid-stack-item.nbx-rd-feed-b > .grid-stack-item-content {
+    box-shadow: inset -4px 0 0 0 #f76707;                    /* B — orange, right */
+}
+.nbx-rd-heatmap .grid-stack-item.nbx-rd-feed-a.nbx-rd-feed-b > .grid-stack-item-content {
+    box-shadow: inset 4px 0 0 0 #4263eb, inset -4px 0 0 0 #f76707;  /* both legs */
+}
+
+/* Per-bank breaker legend: chips under the power bar, one per PDU bank, colored
+   by state. Shown only while the heatmap toggle is active. */
+.nbx-rd-dist-legend {
+    display: none;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.3rem 0.6rem;
+    margin: 0.25rem 0 0.4rem;
+    font-size: 0.72rem;
+    line-height: 1.2;
+}
+.nbx-rd-heatmap-active .nbx-rd-dist-legend { display: flex; }
+/* One column per PDU: its banks stack under each other. */
+.nbx-rd-dist-pdu {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+.nbx-rd-dist-pdu-head {
+    font-weight: 700;
+    padding: 0 0.2rem;
+}
+/* Header carries the feed color = the A/B key. */
+.nbx-rd-feedhead-a { color: #4263eb; }      /* A feed — blue */
+.nbx-rd-feedhead-b { color: #f76707; }      /* B feed — orange */
+/* Each bank chip is a mini progress bar (health bar): the fill spans the
+   load/breaker ratio, colored by state -- mirrors the rack power bar. */
+.nbx-rd-dist-chip {
+    position: relative;
+    overflow: hidden;
+    min-width: 8.5rem;                      /* uniform width so fills compare */
+    border-radius: 3px;
+    background: var(--tblr-border-color, #e0e0e0);
+    white-space: nowrap;
+}
+.nbx-rd-dist-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    max-width: 100%;                        /* clamp when util exceeds 100% */
+    background: var(--tblr-green, #2fb344);
+    transition: width 0.2s ease;
+}
+.nbx-rd-dist-warn .nbx-rd-dist-fill { background: var(--tblr-yellow, #f59f00); }
+.nbx-rd-dist-critical .nbx-rd-dist-fill { background: var(--tblr-red, #d63939); }
+.nbx-rd-dist-overload .nbx-rd-dist-fill { background: #b01919; }
+.nbx-rd-dist-label {
+    position: relative;
+    z-index: 1;
+    padding: 0.1rem 0.4rem;
+    color: #111;
+    font-variant-numeric: tabular-nums;
+}
+.nbx-rd-dist-critical .nbx-rd-dist-label,
+.nbx-rd-dist-overload .nbx-rd-dist-label { color: #fff; }
+.nbx-rd-dist-alarm {
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    background: #b01919;
+    color: #fff;
+    cursor: help;
+}
+
+/* Instant hover tooltip (no native-title delay) for the alarm chip. */
+.nbx-rd-dist-tip {
+    position: fixed;
+    z-index: 1090;
+    display: none;
+    max-width: 340px;
+    padding: 0.4rem 0.6rem;
+    border-radius: 5px;
+    background: var(--tblr-dark, #1d273b);
+    color: #fff;
+    font-size: 0.75rem;
+    line-height: 1.35;
+    white-space: pre-line;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
 }
 
 /* Power-bar hover popover: draw/capacity + the scrollable list of devices with

@@ -1,6 +1,6 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
-from dcim.models import Device, Rack, Site
+from dcim.models import Device, PowerFeed, PowerPanel, Rack, Site
 from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
@@ -17,6 +17,8 @@ from ..models import (
     Design,
     DesignGroup,
     DesignPlacement,
+    DesignPowerFeed,
+    DesignRackPower,
     FavoriteDeviceType,
     HiddenDesignRack,
 )
@@ -869,6 +871,82 @@ class SaveLayoutTest(APITestCase):
         self.assertTrue(
             DesignPlacement.objects.filter(pk=existing_add.pk).exists()
         )
+
+    # --- Phase B: PDU power_config rides the item payload -------------------
+
+    def test_brand_new_add_persists_power_config(self):
+        """A brand-new add carrying power_config persists it onto the placement
+        (the frontend only sends it for a PDU add, but the reconcile does not
+        gate on role -- it just stores whatever the item carries)."""
+        self._grant_all()
+        rack = self.racks[0]
+        power_config = {
+            "source": "manual",
+            "custom_fields": {"pdu_scheme": "2x1PH2Banks"},
+            "feed": {"voltage": 230, "amperage": 32, "phase": 1, "supply": "ac"},
+        }
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "power_config": power_config},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.power_config, power_config)
+
+    def test_reposition_existing_add_sets_power_config(self):
+        """Repositioning an existing add can also set power_config when sent."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        power_config = {"source": "manual", "custom_fields": {}, "feed": {
+            "voltage": 230, "amperage": 16, "phase": 1, "supply": "ac",
+        }}
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front",
+                     "power_config": power_config},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(existing_add.power_config, power_config)
+
+    def test_add_without_power_config_leaves_it_null(self):
+        """An 'add' item that omits power_config persists it as NULL (default)."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.power_config)
 
     # --- slice 2d: multi-rack save round-trip (the conservative-guard contract)
 
@@ -1782,3 +1860,616 @@ class DeviceTypePowerTest(APITestCase):
             response.status_code,
             (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
         )
+
+
+class RackPowerTest(APITestCase):
+    """
+    Tests for the DesignViewSet rack-power action (Phase B): upsert/read the
+    per-design rack power custom-field override (DesignRackPower). The rack
+    is persistent design data, so POST saves immediately (no layout Save).
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Power design", site=cls.site)
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-rack-power",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def test_post_then_get_round_trips(self):
+        """POST upserts the rack's power_config; a later GET returns it."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        rack = self.racks[0]
+        power_config = {
+            "source": "manual",
+            "custom_fields": {"power_limitation": 5000, "pdu_location": "top"},
+        }
+        response = self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "power_config": power_config},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["power_config"], power_config)
+        self.assertEqual(
+            DesignRackPower.objects.filter(design=self.design, rack=rack).count(), 1
+        )
+
+        get_response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}", **self.header
+        )
+        self.assertHttpStatus(get_response, status.HTTP_200_OK)
+        self.assertEqual(get_response.data["power_config"], power_config)
+
+    def test_post_upserts_not_duplicates(self):
+        """A second POST for the same (design, rack) updates the same row."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        rack = self.racks[0]
+        self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "power_config": {"custom_fields": {"a": 1}}},
+            format="json",
+            **self.header,
+        )
+        response = self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "power_config": {"custom_fields": {"a": 2}}},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            DesignRackPower.objects.filter(design=self.design, rack=rack).count(), 1
+        )
+        rack_power = DesignRackPower.objects.get(design=self.design, rack=rack)
+        self.assertEqual(rack_power.power_config, {"custom_fields": {"a": 2}})
+
+    def test_get_with_no_stored_config_returns_null(self):
+        """GET for a rack with no stored DesignRackPower returns power_config=null."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[1]
+        response = self.client.get(self._url() + f"?rack_id={rack.pk}", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertIsNone(response.data["power_config"])
+
+    def test_get_missing_rack_id_returns_400(self):
+        """GET without ?rack_id= -> 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_post_nonexistent_rack_returns_400(self):
+        """POST with a non-existent rack_id -> 400, nothing persisted."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        response = self.client.post(
+            self._url(),
+            {"rack_id": 9999999, "power_config": {}},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(DesignRackPower.objects.count(), 0)
+
+    def test_post_without_change_permission_denied(self):
+        """A user lacking change_design -> 403 on POST, nothing persisted."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        response = self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "power_config": {"custom_fields": {}}},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(DesignRackPower.objects.count(), 0)
+
+
+class PowerSourceTest(APITestCase):
+    """
+    Tests for the DesignViewSet power-source action: a read-only lookup for the
+    "copy from rack" mode of the rack power dialog (kind=rack only -- planned
+    PDUs bind to feeds rather than copying another PDU's electricals). Performs
+    no writes.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Source design", site=cls.site)
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-power-source",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def test_kind_rack_returns_rack_custom_fields(self):
+        """kind=rack returns the source rack's custom fields dict."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}&kind=rack", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["custom_fields"], dict(rack.cf))
+
+    def test_kind_pdu_now_rejected(self):
+        """kind=pdu was removed with the feed-binding redesign -> 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}&kind=pdu&feed=a1", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_kind_returns_400(self):
+        """An unrecognised kind -> 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}&kind=bogus", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_rack_returns_400(self):
+        """A non-existent rack_id -> 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(
+            self._url() + "?rack_id=9999999&kind=rack", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_without_view_permission_denied(self):
+        """A user lacking view_design -> 403."""
+        rack = self.racks[0]
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}&kind=rack", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# Phase C: the feed model + binding (docs/pdu-distribution-spec.md §6/§8)
+# ---------------------------------------------------------------------------
+
+
+class FeedsActionTest(APITestCase):
+    """
+    Tests for the DesignViewSet feeds action: the rack's real PowerFeeds plus
+    this design's planned DesignPowerFeeds, in the uniform feed shape, for the
+    bind-to-feed picker. Read-only.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Feeds design", site=cls.site)
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-feeds",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def test_returns_real_and_planned_feeds_in_uniform_shape(self):
+        """Both a real PowerFeed and a DesignPowerFeed come back with the same
+        {id, name, voltage, amperage, phase, supply, source} shape."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+
+        power_panel = PowerPanel.objects.create(site=self.site, name="Panel 1")
+        real_feed = PowerFeed.objects.create(
+            power_panel=power_panel, rack=rack, name="Real Feed A",
+            voltage=230, amperage=32, phase="single-phase", supply="ac",
+        )
+        planned_feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=rack, name="Feed B",
+            voltage=400, amperage=63, phase="three-phase", supply="ac",
+        )
+
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["real"]), 1)
+        self.assertEqual(len(response.data["planned"]), 1)
+        self.assertEqual(
+            response.data["real"][0],
+            {
+                "id": real_feed.pk, "name": "Real Feed A", "voltage": 230,
+                "amperage": 32, "phase": "single-phase", "supply": "ac",
+                "source": "real",
+            },
+        )
+        self.assertEqual(
+            response.data["planned"][0],
+            {
+                "id": planned_feed.pk, "name": "Feed B", "voltage": 400,
+                "amperage": 63, "phase": "three-phase", "supply": "ac",
+                "source": "planned",
+            },
+        )
+
+    def test_planned_feeds_scoped_to_this_design(self):
+        """A DesignPowerFeed belonging to another design is not returned."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        other_design = Design.objects.create(title="Other design", site=self.site)
+        DesignPowerFeed.objects.create(
+            design=other_design, rack=rack, name="Feed X",
+        )
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["planned"], [])
+
+    def test_missing_rack_id_returns_400(self):
+        """GET without ?rack_id= -> 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_without_view_permission_denied(self):
+        """A user lacking view_design -> 403."""
+        rack = self.racks[0]
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+
+class PlannedFeedActionTest(APITestCase):
+    """
+    Tests for the DesignViewSet planned-feed action: upsert/list this design's
+    DesignPowerFeed rows (the greenfield "define planned feed" dialog).
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Planned feed design", site=cls.site)
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-planned-feed",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def test_post_creates_a_planned_feed(self):
+        """POST creates a new DesignPowerFeed and returns its serialized shape."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        rack = self.racks[0]
+        response = self.client.post(
+            self._url(),
+            {
+                "rack_id": rack.pk, "name": "Feed A",
+                "voltage": 230, "amperage": 16,
+                "phase": "single-phase", "supply": "ac",
+            },
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        feed = DesignPowerFeed.objects.get(design=self.design, rack=rack, name="Feed A")
+        self.assertEqual(response.data["id"], feed.pk)
+        self.assertEqual(feed.voltage, 230)
+        self.assertEqual(feed.amperage, 16)
+        self.assertEqual(feed.phase, "single-phase")
+
+    def test_second_post_same_rack_and_name_updates_not_duplicates(self):
+        """A second POST for the same (rack, name) updates the same row."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        rack = self.racks[0]
+        self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "name": "Feed A", "voltage": 230, "amperage": 16},
+            format="json", **self.header,
+        )
+        response = self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "name": "Feed A", "voltage": 400, "amperage": 32},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            DesignPowerFeed.objects.filter(
+                design=self.design, rack=rack, name="Feed A"
+            ).count(),
+            1,
+        )
+        feed = DesignPowerFeed.objects.get(design=self.design, rack=rack, name="Feed A")
+        self.assertEqual(feed.voltage, 400)
+        self.assertEqual(feed.amperage, 32)
+
+    def test_get_lists_this_racks_planned_feeds(self):
+        """GET ?rack_id= lists only that rack's planned feeds for this design."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack, other_rack = self.racks[0], self.racks[1]
+        DesignPowerFeed.objects.create(design=self.design, rack=rack, name="Feed A")
+        DesignPowerFeed.objects.create(design=self.design, rack=rack, name="Feed B")
+        DesignPowerFeed.objects.create(design=self.design, rack=other_rack, name="Feed C")
+
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        names = {row["name"] for row in response.data}
+        self.assertEqual(names, {"Feed A", "Feed B"})
+
+    def test_post_cross_site_rack_rejected(self):
+        """A rack outside the design's site -> 400, nothing persisted."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        other_site = Site.objects.create(name="Other site", slug="other-site")
+        other_rack = Rack.objects.create(name="Other rack", site=other_site)
+        response = self.client.post(
+            self._url(),
+            {"rack_id": other_rack.pk, "name": "Feed A"},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(DesignPowerFeed.objects.filter(rack=other_rack).exists())
+
+    def test_post_nonexistent_rack_returns_400(self):
+        """POST with a non-existent rack_id -> 400."""
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+        response = self.client.post(
+            self._url(),
+            {"rack_id": 9999999, "name": "Feed A"},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_post_without_change_permission_denied(self):
+        """A user lacking change_design -> 403, nothing persisted."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        response = self.client.post(
+            self._url(),
+            {"rack_id": rack.pk, "name": "Feed A"},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(DesignPowerFeed.objects.filter(design=self.design).exists())
+
+
+class SaveLayoutFeedBindingTest(APITestCase):
+    """
+    Tests for save-layout persisting a PDU add's power-feed binding
+    (docs/pdu-distribution-spec.md §6.2/§8): real_power_feed_id /
+    planned_power_feed_id ride the item payload onto the placement.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+        cls.design = Design.objects.create(title="Feed binding design", site=cls.site)
+
+        power_panel = PowerPanel.objects.create(site=cls.site, name="Panel 1")
+        cls.real_feed = PowerFeed.objects.create(
+            power_panel=power_panel, rack=cls.racks[0], name="Real Feed A",
+        )
+        cls.planned_feed = DesignPowerFeed.objects.create(
+            design=cls.design, rack=cls.racks[0], name="Planned Feed B",
+        )
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-save-layout",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def _grant_all(self):
+        self.add_permissions(
+            "netbox_rack_design.change_design",
+            "netbox_rack_design.add_designplacement",
+            "netbox_rack_design.change_designplacement",
+            "netbox_rack_design.delete_designplacement",
+        )
+
+    def _payload(self, racks):
+        return {"design_id": self.design.pk, "racks": racks}
+
+    def test_add_persists_real_power_feed_binding(self):
+        """A PDU add carrying real_power_feed_id persists it onto the placement."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "real_power_feed_id": self.real_feed.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.real_power_feed_id, self.real_feed.pk)
+        self.assertIsNone(placement.planned_power_feed_id)
+
+    def test_add_persists_power_source_device(self):
+        """A PDU add carrying power_source_device_id persists the cf-source FK."""
+        self._grant_all()
+        source_pdu = create_test_device(
+            "src-pdu-a1", site=self.site, rack=self.racks[1], position=None, face="",
+        )
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "power_source_device_id": source_pdu.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.power_source_device_id, source_pdu.pk)
+
+    def test_add_with_nonexistent_source_device_skipped_gracefully(self):
+        """A stale power_source_device_id is skipped, not a hard error."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "power_source_device_id": 9999999},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.power_source_device_id)
+
+    def test_add_persists_planned_power_feed_binding(self):
+        """A PDU add carrying planned_power_feed_id persists it onto the placement."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "planned_power_feed_id": self.planned_feed.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.real_power_feed_id)
+        self.assertEqual(placement.planned_power_feed_id, self.planned_feed.pk)
+
+    def test_add_with_both_feed_ids_rejected_and_persists_neither(self):
+        """An item carrying BOTH ids is rejected: 400, no placement persisted."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "real_power_feed_id": self.real_feed.pk,
+                     "planned_power_feed_id": self.planned_feed.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_reposition_existing_add_updates_binding(self):
+        """Repositioning an existing add can also (re)bind it to a feed."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front",
+                     "real_power_feed_id": self.real_feed.pk},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(existing_add.real_power_feed_id, self.real_feed.pk)
+
+    def test_add_without_feed_ids_leaves_binding_null(self):
+        """An 'add' item that omits both feed keys persists no binding (default)."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.real_power_feed_id)
+        self.assertIsNone(placement.planned_power_feed_id)
+
+    def test_nonexistent_real_feed_id_skipped_gracefully(self):
+        """A stale/non-existent real_power_feed_id is skipped, not a hard error."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "real_power_feed_id": 9999999},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.real_power_feed_id)

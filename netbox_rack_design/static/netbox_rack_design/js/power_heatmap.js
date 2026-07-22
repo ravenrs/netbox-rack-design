@@ -80,6 +80,65 @@
         return "hsl(" + Math.round(120 * (1 - s)) + ", 70%, 45%)";
     }
 
+    // A bank over its breaker paints a distinct hard red (Bender's "!!!"),
+    // darker than the gradient's top so an overload reads as more than "100%".
+    var OVERLOAD_COL = "#b01919";
+
+    // ---- distribution model (docs/pdu-distribution-spec.md, script mode) -----
+
+    // Parse the per-rack Distribution JSON the server emits in script mode
+    // (`#rd-distribution-<rackId>`), or null when absent (none mode) / invalid.
+    function readDistribution(block) {
+        var rackId = block.getAttribute("data-rack-id") || "";
+        var el = document.getElementById("rd-distribution-" + rackId);
+        if (!el) { return null; }
+        try {
+            var d = JSON.parse(el.textContent);
+            return (d && d.pdus) ? d : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Index a Distribution into { byName: {deviceName: {feeds, hottest}}, banks }.
+    // A device charged to BOTH legs records BOTH feeds (so the tile shows the A
+    // and B accent), and keeps the hottest bank for its fill color.
+    function indexBanks(dist) {
+        var byName = {};
+        var banks = [];
+        Object.keys(dist.pdus).forEach(function (pduName) {
+            var pdu = dist.pdus[pduName];
+            Object.keys(pdu.banks).forEach(function (bankId) {
+                var bank = pdu.banks[bankId];
+                var load = (bank.allocated_power || 0) + (bank.planned_power || 0);
+                var info = {
+                    pdu: pduName, feed: pdu.feed_name, feedLetter: pdu.feed_letter,
+                    phase: pdu.phase || 1,
+                    bank: bankId, util: bank.util_pct || 0, state: bank.state || "ok",
+                    load: load, max: bank.max_power || 0,
+                };
+                banks.push(info);
+                (bank.devices || []).forEach(function (d) {
+                    var e = byName[d.name] || (byName[d.name] = { feeds: {}, hottest: null });
+                    e.feeds[info.feedLetter] = true;
+                    if (!e.hottest || info.util > e.hottest.util) { e.hottest = info; }
+                });
+            });
+        });
+        banks.sort(function (a, b) {
+            return a.feedLetter === b.feedLetter
+                ? (a.bank - b.bank) : (a.feedLetter < b.feedLetter ? -1 : 1);
+        });
+        return { byName: byName, banks: banks };
+    }
+
+    // Tag a tile with EVERY feed leg it lands on (blue A edge / orange B edge,
+    // both when redundant) so CSS can show the A/B split. Falsy `feeds` clears.
+    function setFeedClasses(tile, feeds) {
+        tile.classList.toggle("nbx-rd-feed-a", !!(feeds && feeds.a));
+        tile.classList.toggle("nbx-rd-feed-b", !!(feeds && feeds.b));
+    }
+
     // ---- per-rack bar (live) -----------------------------------------------
 
     function updateBar(block) {
@@ -111,11 +170,93 @@
 
     // Wipe any heat styling off a tile (used when a tile must show NO fill).
     function clearHeat(tile) {
-        tile.classList.remove("nbx-rd-heat-unknown");
+        tile.classList.remove("nbx-rd-heat-unknown", "nbx-rd-feed-a", "nbx-rd-feed-b");
         var content = tile.querySelector(".grid-stack-item-content");
         if (content) {
             content.style.removeProperty("--nbx-rd-heat-pct");
             content.style.removeProperty("--nbx-rd-heat-col");
+        }
+    }
+
+    // Instant hover tooltip (no native-title delay): a shared fixed element shown
+    // immediately on mouseenter, so the alarm warnings appear at once instead of
+    // after the browser's ~1s title delay (user 2026-07-17).
+    var tipEl = null;
+    function ensureTip() {
+        if (!tipEl) {
+            tipEl = document.createElement("div");
+            tipEl.className = "nbx-rd-dist-tip";
+            document.body.appendChild(tipEl);
+        }
+        return tipEl;
+    }
+    function showTip(text, x, y) {
+        var t = ensureTip();
+        t.textContent = text;
+        t.style.display = "block";
+        var pad = 12;
+        t.style.left = Math.max(pad, Math.min(x + pad, window.innerWidth - t.offsetWidth - pad)) + "px";
+        t.style.top = Math.max(pad, Math.min(y + pad, window.innerHeight - t.offsetHeight - pad)) + "px";
+    }
+    function hideTip() { if (tipEl) { tipEl.style.display = "none"; } }
+    function attachInstantTip(el, text) {
+        el.addEventListener("mouseenter", function (e) { showTip(text, e.clientX, e.clientY); });
+        el.addEventListener("mousemove", function (e) { showTip(text, e.clientX, e.clientY); });
+        el.addEventListener("mouseleave", hideTip);
+    }
+
+    // Per-bank breaker legend (script mode): a compact strip of chips under the
+    // power bar -- a feed A/B color key (explaining the blue/orange tile edges),
+    // one chip per PDU bank colored by state (used/breaker W), plus an instant
+    // ⚠ tooltip listing rack overload/limit warnings. Falsy `dist` removes it.
+    function renderDistLegend(block, dist) {
+        var existing = block.querySelector(".nbx-rd-dist-legend");
+        if (!dist) { if (existing) { existing.remove(); } return; }
+        var idx = indexBanks(dist);
+        var legend = existing || document.createElement("div");
+        legend.className = "nbx-rd-dist-legend";
+        // The PDU header itself carries the feed color (A blue / B orange), which
+        // matches each tile's accent edge -- so no separate key row is needed.
+        // Group the bank chips by PDU so one PDU's banks stack under each other
+        // (one column per PDU), rather than one long flat row.
+        var order = [];
+        var byPdu = {};
+        idx.banks.forEach(function (b) {
+            if (!byPdu[b.pdu]) { byPdu[b.pdu] = []; order.push(b.pdu); }
+            byPdu[b.pdu].push(b);
+        });
+        var cols = order.map(function (pduName) {
+            var first = byPdu[pduName][0];
+            // Header carries the feed color (A blue / B orange) + a 3φ flag for
+            // three-phase PDUs; it matches the tiles' accent edge = the key.
+            var head = first.feed + (first.phase === 3 ? " 3φ" : "");
+            var chips = byPdu[pduName].map(function (b) {
+                // A mini "health bar" per bank: the fill is the load/breaker
+                // ratio, colored by state -- same idea as the rack power bar.
+                var w = Math.max(0, Math.min(100, b.util || 0));
+                return '<span class="nbx-rd-dist-chip nbx-rd-dist-' + b.state + '">'
+                    + '<span class="nbx-rd-dist-fill" style="width:' + w.toFixed(1) + '%"></span>'
+                    + '<span class="nbx-rd-dist-label">B' + b.bank + ": "
+                    + Math.round(b.load) + "/" + Math.round(b.max) + " W</span>"
+                    + "</span>";
+            }).join("");
+            return '<div class="nbx-rd-dist-pdu">'
+                + '<span class="nbx-rd-dist-pdu-head nbx-rd-feedhead-' + first.feedLetter
+                + '">' + head + "</span>" + chips + "</div>";
+        }).join("");
+        legend.innerHTML = cols;
+        var rack = dist.rack || {};
+        if (rack.alarm && (rack.warnings || []).length) {
+            var alarm = document.createElement("span");
+            alarm.className = "nbx-rd-dist-alarm";
+            alarm.textContent = "⚠ " + rack.warnings.length;
+            attachInstantTip(alarm, rack.warnings.join("\n"));
+            legend.appendChild(alarm);
+        }
+        if (!existing) {
+            var bar = block.querySelector(".nbx-rd-power-bar");
+            if (bar && bar.parentNode) { bar.parentNode.insertBefore(legend, bar.nextSibling); }
+            else { block.insertBefore(legend, block.firstChild); }
         }
     }
 
@@ -130,8 +271,10 @@
         block.classList.toggle("nbx-rd-heatmap", on);
         if (!on) {
             block.querySelectorAll(".grid-stack-item").forEach(function (tile) {
-                tile.classList.remove("nbx-rd-heat-unknown");
+                tile.classList.remove("nbx-rd-heat-unknown",
+                    "nbx-rd-feed-a", "nbx-rd-feed-b");
             });
+            renderDistLegend(block, null);
             if (trace) { rdT("apply", { rackId: rackId, on: false }); }
             return;
         }
@@ -141,8 +284,19 @@
             var d = tileDraw(t);
             if (d > maxDraw) { maxDraw = d; }
         });
+        // Per-bank distribution (script mode): when the server emitted a
+        // Distribution for this rack, the heat SUBJECT becomes the PDU/bank --
+        // each consumer tile is tinted by the load-vs-breaker of the bank it
+        // lands on (not its own rack share). Absent -> the per-device path.
+        var dist = readDistribution(block);
+        var banksIdx = dist ? indexBanks(dist) : null;
+        renderDistLegend(block, dist);
         if (trace) {
-            rdT("apply", { rackId: rackId, on: true, countingTiles: tiles.length, maxDraw: maxDraw });
+            rdT("apply", {
+                rackId: rackId, on: true, countingTiles: tiles.length,
+                maxDraw: maxDraw, distribution: !!dist,
+                banks: banksIdx ? banksIdx.banks.length : 0,
+            });
         }
         function fill(tile) {
             var content = tile.querySelector(".grid-stack-item-content");
@@ -190,6 +344,24 @@
                 return;
             }
             tile.classList.remove("nbx-rd-heat-unknown");
+            // Distribution mode: tint by the tile's BANK load/breaker (its A/B
+            // leg accented), so you can see how draw lands per bank. A consumer
+            // the Distribution didn't attribute to a bank falls back to the
+            // per-device rack-share tint so nothing goes uncolored.
+            if (banksIdx) {
+                var entry = banksIdx.byName[visibleName(content)];
+                if (entry && entry.hottest) {
+                    var info = entry.hottest;
+                    var over = info.state === "overload";
+                    var pct = over ? 100 : Math.max(0, Math.min(100, info.util));
+                    content.style.setProperty("--nbx-rd-heat-pct", pct.toFixed(1) + "%");
+                    content.style.setProperty("--nbx-rd-heat-col",
+                        over ? OVERLOAD_COL : heatColor(pct / 100));
+                    setFeedClasses(tile, entry.feeds);
+                    return;
+                }
+                setFeedClasses(tile, null);
+            }
             var share = maxDraw > 0 ? draw / maxDraw : 0;
             content.style.setProperty("--nbx-rd-heat-pct", (share * 100).toFixed(1) + "%");
             content.style.setProperty("--nbx-rd-heat-col", heatColor(share));
