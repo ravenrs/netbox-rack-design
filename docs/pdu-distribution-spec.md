@@ -2,11 +2,9 @@
 
 Status: **active** — universalization in progress (started 2026-07-17; reworked to
 the feed-model design 2026-07-22). Fleshes out **Tier 2/3** of
-`docs/power-projection-spec.md` with the *concrete* distribution algorithm. The
-algorithm is ported from the internal Bender power tooling
-(`fry/utilites/power_calc_work.py` = `nb_power_calc`, and the per-PSU→PDU scheme
-from `sdd generate phy`), so what the editor previews matches what the production
-power report and the SDD physical sheet already produce.
+`docs/power-projection-spec.md` with the *concrete* distribution algorithm: how a
+planned device's draw is split across a rack's PDUs, feeds, and banks, and how the
+editor previews the resulting per-bank load.
 
 Definition of done = the conformance checklist (§10) covered by backend tests
 (mirrors `naming.py`'s test-first rule) and the heatmap items verified live.
@@ -60,9 +58,9 @@ total — it must never break the editor.
 
 ## 1. Vocabulary (from the NetBox power model)
 
-- **PDU** — a device with role slug in `{pdu, unmanageable-pdu}`, name containing
-  `pdu`, status `active`/`planned`. It *distributes* power; it is **not** a
-  consumer (excluded from the draw sum via `power_exclude_roles`).
+- **PDU** — a device with role slug in `{pdu, unmanageable-pdu}`, status
+  `active`/`planned`. It *distributes* power; it is **not** a consumer
+  (excluded from the draw sum via `power_exclude_roles`).
 - **Feed** — the power source a PDU draws from. Two kinds, one shape:
   - **Real** — a native `dcim.PowerFeed` the PDU's power port is cabled to
     (provisioned racks). Carries `voltage`, `amperage`, `phase`, `supply`.
@@ -87,8 +85,8 @@ total — it must never break the editor.
 The base builder (`distribution.build_native`) and the shipped reference script
 (`distribution_example.py`, cf. `naming_example.py`) run the **same** algorithm
 over the **same** helpers — the script only exists so a site can override the
-*behaviour* pieces (direction, ceilings, PSU scheme). Ported from
-`power_calc_work.py`. Two independent questions, resolved per rack.
+*behaviour* pieces (direction, ceilings, PSU scheme). Two independent questions,
+resolved per rack.
 
 ### 2.1 Which bank owns each rack unit — `unit → (pdu, bank)` map
 
@@ -131,10 +129,10 @@ Per planned device (`check_power_consumption()`):
    to each feed-leg it participates in** (on an A/B failure the surviving leg
    carries the whole load). A single-PSU device sits entirely on one leg.
 
-### 2.3 Per-PSU → leg wiring (from `sdd generate phy`)
+### 2.3 Per-PSU → leg wiring
 
-For a planned/uncabled device, which PSU lands on which leg is the
-`pdu_scheme_name_to_yaml` table (`pdu-1` = leg `a`, `pdu-2` = leg `b`): `p2` →
+For a planned/uncabled device, which PSU lands on which leg is a small
+scheme table (`pdu-1` = leg `a`, `pdu-2` = leg `b`): `p2` →
 ps1→a, ps2→b; `p4` → ps1,2→a, ps3,4→b; `p6` → ps1-3→a, ps4-6→b; single PSU → the
 leg with more free ports. Redundancy sanity checks warn, don't block. **This is
 a behaviour piece — script-only; the built-in uses a simple A/B split.**
@@ -506,7 +504,7 @@ planned), bank/leg, breaker, override applied, and every graceful fallback.
       works under the builtin conventions with no site code.
 - [ ] Empty/unimportable/non-callable/raising `distribution_script` →
       `generate_distribution` returns `None`, page falls back to `none`.
-- [ ] Nothing G-Core-specific ships in the public wheel.
+- [ ] Nothing site-specific ships in the public wheel.
 
 **Frontend & instrumentation:**
 - [ ] Heatmap (builtin/script): banks are filled health bars, PDU headers
@@ -520,7 +518,7 @@ planned), bank/leg, breaker, override applied, and every graceful fallback.
 
 - Live mid-drag distribution recompute.
 - Breaker-trip / inrush / power-factor modeling beyond NetBox's fields.
-- Auto-cabling planned devices in `dcim` (preview-only; `sdd generate phy`
-  remains the thing that writes connections).
+- Auto-cabling planned devices in `dcim` (this feature is preview-only and never
+  writes cable connections).
 - Writing planning inputs back to native `dcim` fields (the plugin only ever
   stores its own planning copy).

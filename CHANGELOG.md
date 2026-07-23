@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-07-23
+
+### Release Summary
+
+Consistency release: two small power-model fixes plus a documentation refresh.
+The per-bank power heatmap now honors the same `power_warn_pct` /
+`power_critical_pct` thresholds as the rack-level bar, and the power projection
+now reports which powered devices lack draw data. The README, roadmap, and site
+navigation are brought up to date with what has actually shipped.
+
+### Fixed
+- **Per-bank heatmap thresholds are now configurable.** The `builtin`
+  distribution mode previously hard-coded its warn/critical bank-state thresholds
+  at 80% / 100%; it now reads `power_warn_pct` / `power_critical_pct` from
+  `PLUGINS_CONFIG` (same defaults, same keys as the rack-level power bar), so both
+  surfaces color consistently.
+- **Power projection reports unknown-draw devices.** `_project_power` now returns
+  `unknown_draw_count` / `unknown_devices` — powered devices that carry no draw
+  value (counted as 0 W but flagged), distinct from the existing
+  `unconnected_*` cabling-gap flag — matching the documented output contract.
+
+### Changed
+- **Documentation refreshed to the shipped state.** The README feature list and
+  roadmap now reflect the delivered naming engine, power projection, and PDU power
+  distribution (previously listed as planned); the compatibility and configuration
+  tables are current. The docs site navigation exposes the power/distribution
+  guides and specs.
+
 ## [0.13.1] - 2026-07-23
 
 ### Release Summary
