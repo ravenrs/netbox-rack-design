@@ -1,8 +1,9 @@
 # Editor Behavior Specification — Device-as-Object Model
 
-Status: **draft for review** (2026-07-07). This document defines the *intended* behavior
-of the rack-design editor. It is the single source of truth from which the OOP refactor
-and the test suite are derived. Code that disagrees with this document is wrong.
+Status: **shipped** — the OOP migration described in §7 (Phases 1–4) is complete. This
+document defines the *intended* behavior of the rack-design editor and remains the single
+source of truth against which the implementation and test suite are checked. Code that
+disagrees with this document is wrong.
 
 ---
 
@@ -307,9 +308,11 @@ Expected outcome:
   being the source of truth for position. `acceptWidgets`/collision hooks are
   configured so GridStack always defers to the model's verdict.
 
-The `_fixCollisions` recursion guard added on 2026-07-07 stays **temporarily** as a
-vendor-level backstop (it is inert unless the cascade fires) and is deleted in the
-phase that disables GridStack pushing entirely.
+The `_fixCollisions` recursion guard added on 2026-07-07 is retained as the
+push-suppression mechanism (`rdPushSuppressDepth`, a depth counter, not a bool):
+it is the load-bearing way the editor tells GridStack to defer to the model's
+verdict instead of auto-pushing neighbors, and has been kept and extended rather
+than deleted.
 
 ---
 

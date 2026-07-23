@@ -28,6 +28,7 @@ from utilities.testing import create_test_device
 from ..choices import DesignPlacementKindChoices
 from ..distribution import (
     DEFAULT_DISTRIBUTION_MODE,
+    _finalize_native,
     apply_rack_power_override,
     build_native,
     devices_from_elevation,
@@ -501,6 +502,39 @@ class BuildNativeTestCase(TestCase):
         # Must not raise; the only PDU is unresolvable -> no distribution.
         dist = build_native(self.racks[0], devices_from_elevation(elevation))
         self.assertIsNone(dist)
+
+    # --- config-driven warn/critical thresholds (parity with the rack bar) ----
+
+    @staticmethod
+    def _one_bank(load_w, breaker_w):
+        """A synthetic single-PDU/single-bank ``pdus`` dict at a known load, for
+        exercising ``_finalize_native``'s threshold logic directly."""
+        return {
+            "pdu-1": {"banks": {"1": {
+                "allocated_power": load_w, "planned_power": 0.0,
+                "max_power": breaker_w, "util_pct": 0.0, "state": "ok",
+                "units": [], "devices": [],
+            }}},
+        }
+
+    def _bank_state(self, load_w, breaker_w):
+        pdus = self._one_bank(load_w, breaker_w)
+        _finalize_native(pdus, None)
+        return pdus["pdu-1"]["banks"]["1"]["state"]
+
+    def test_default_thresholds_warn_at_80_pct(self):
+        # 85% of breaker with no config override -> warn (default warn_pct=80).
+        self.assertEqual(self._bank_state(850, 1000), "warn")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(power_warn_pct=90))
+    def test_configured_warn_pct_raises_the_warn_threshold(self):
+        # Same 85% load, but warn now only at 90% -> stays ok.
+        self.assertEqual(self._bank_state(850, 1000), "ok")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(power_critical_pct=85))
+    def test_configured_critical_pct_lowers_the_critical_threshold(self):
+        # 85% load with critical lowered to 85% -> critical.
+        self.assertEqual(self._bank_state(850, 1000), "critical")
 
     def test_unbound_planned_pdu_omitted_alongside_a_resolvable_one(self):
         self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)

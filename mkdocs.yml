@@ -5,7 +5,13 @@ repo_name: ravenrs/netbox-rack-design
 #strict: true
 nav:
   - Home: index.md
-  - Device naming: device-naming.md
+  - Guides:
+      - Device naming: device-naming.md
+      - Power distribution: power-distribution.md
+  - Reference:
+      - Power projection spec: power-projection-spec.md
+      - PDU distribution spec: pdu-distribution-spec.md
+      - Editor behavior spec: editor-behavior-spec.md
   - Contributing: contributing.md
   - Changelog: changelog.md
 theme:

@@ -118,6 +118,29 @@ class PowerProjectionTier1TestCase(TestCase):
         self.assertGreaterEqual(elev.power["unconnected_count"], 1)
 
     @override_settings(PLUGINS_CONFIG=_cfg())
+    def test_powered_device_without_draw_is_unknown_and_named(self):
+        # A device that HAS a power port but no draw value (spec §1.3): counted
+        # as 0 W but FLAGGED in the unknown-draw tally -- distinct from the
+        # unconnected (cabling-gap) flag, so the UI can say WHICH powered devices
+        # lack draw data rather than silently under-reporting.
+        mfr = Manufacturer.objects.get(slug="pwr-mfr")
+        dt = DeviceType.objects.create(
+            manufacturer=mfr, model="PWR-Ports-No-Draw",
+            slug="pwr-ports-no-draw", u_height=1, is_full_depth=False)
+        PowerPortTemplate.objects.create(device_type=dt, name="PSU1")  # no draw
+        Device.objects.create(
+            name="pwr-nodraw", device_type=dt, site=self.site, rack=self.rack,
+            position=20, face="front", status="active", role=self.role)
+        elev = self._elev()
+        slots = [s for s in elev.front if s["label"] == "pwr-nodraw"]
+        self.assertEqual(slots[0]["draw_w"], 0.0)
+        self.assertFalse(slots[0]["draw_known"])
+        self.assertIn("pwr-nodraw", elev.power["unknown_devices"])
+        self.assertGreaterEqual(elev.power["unknown_draw_count"], 1)
+        # Passive gear (no power ports) is a known 0 and stays OUT of the tally.
+        self.assertNotIn("pwr-unknown", elev.power["unknown_devices"])
+
+    @override_settings(PLUGINS_CONFIG=_cfg())
     def test_add_is_not_flagged_unconnected(self):
         # A planned add has no real device/cabling, so it is never flagged as
         # "not connected" even though it carries a draw.

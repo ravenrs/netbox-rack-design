@@ -88,9 +88,12 @@ SKIP_ROLE_SLUGS = frozenset((
     "rack-mount-boxes", "rack-mount-kit",
 ))
 
-# Utilization thresholds for a bank's state (percent of its breaker).
-WARN_PCT = 80
-CRITICAL_PCT = 100
+# Default utilization thresholds for a bank's state (percent of its breaker).
+# Overridable via the ``power_warn_pct`` / ``power_critical_pct`` plugin config
+# keys -- the SAME keys the rack-level power bar reads (projection.py), so a site
+# tunes both the bar and the per-bank heatmap from one place.
+DEFAULT_WARN_PCT = 80
+DEFAULT_CRITICAL_PCT = 100
 
 # Bank/port on an outlet name: "<bank>/<port>", e.g. "1/1" -> bank 1 (§0.3.1).
 _BANK_RE = re.compile(r"^(?P<bank>\d+)/\d+")
@@ -627,7 +630,13 @@ def _power_limitation_w(rack):
 def _finalize_native(pdus, power_limitation_w):
     """Compute per-bank util/state, roll up the rack total, and collect
     warnings. Returns the ``rack`` summary block (docs/pdu-distribution-
-    spec.md §3): ``{power_limitation_w, power_consumption_w, alarm, warnings}``."""
+    spec.md §3): ``{power_limitation_w, power_consumption_w, alarm, warnings}``.
+
+    The warn/critical thresholds come from the ``power_warn_pct`` /
+    ``power_critical_pct`` plugin config keys (defaults 80 / 100) -- the same
+    keys the rack-level power bar uses, so both surfaces color consistently."""
+    warn_pct = get_plugin_config(PLUGIN_NAME, "power_warn_pct", DEFAULT_WARN_PCT)
+    critical_pct = get_plugin_config(PLUGIN_NAME, "power_critical_pct", DEFAULT_CRITICAL_PCT)
     warnings = []
     alarm = False
     rack_total = 0.0
@@ -645,9 +654,9 @@ def _finalize_native(pdus, power_limitation_w):
                     f"exceeds breaker {breaker}W")
                 warnings.append(msg)
                 logger.debug("distribution.build_native: overload %s", msg)
-            elif bank["util_pct"] >= CRITICAL_PCT:
+            elif bank["util_pct"] >= critical_pct:
                 bank["state"] = "critical"
-            elif bank["util_pct"] >= WARN_PCT:
+            elif bank["util_pct"] >= warn_pct:
                 bank["state"] = "warn"
             else:
                 bank["state"] = "ok"

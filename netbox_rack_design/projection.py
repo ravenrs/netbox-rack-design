@@ -136,7 +136,8 @@ class ProjectedElevation:
     # docs/power-projection-spec.md. Rack-level summary populated by
     # _project_power() at the end of project_rack(); each counting slot also
     # gets per-slot ``draw_w``/``draw_known`` for the heatmap. Keys:
-    # draw_w, capacity_w, util_pct, state, unknown_draw_count, basis.
+    # draw_w, capacity_w, util_pct, state, unconnected_count, unconnected_devices,
+    # unknown_draw_count, unknown_devices, basis, warn_pct, critical_pct.
     power: dict = field(default_factory=dict)
 
 
@@ -475,6 +476,7 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
     seen = set()
     draw_total = 0.0
     unconnected_devices = []
+    unknown_devices = []
     for face_slots in (elevation.front, elevation.rear, elevation.non_racked):
         for slot in face_slots:
             if slot["state"] not in _DRAW_COUNTING_STATES:
@@ -506,6 +508,13 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
                 continue
             seen.add(key)
             draw_total += watts
+            # Unknown draw (spec §1.3): a device that HAS power ports (or whose
+            # type defines port templates) but none carry a draw value -- counted
+            # as 0 W but FLAGGED, so the UI can name which powered devices lack
+            # draw data instead of silently under-reporting. Passive gear (no
+            # ports) is a known 0 and never lands here (draw_known stays True).
+            if not slot["draw_known"]:
+                unknown_devices.append(slot.get("label") or "")
             # Connection completeness (user ruling 2026-07-13): flag a REAL
             # device that HAS power ports but at least one is NOT cabled to
             # power -- a planning gap ("device with ports not connected"). Keep
@@ -530,6 +539,8 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
         "state": state,
         "unconnected_count": len(unconnected_devices),
         "unconnected_devices": unconnected_devices,
+        "unknown_draw_count": len(unknown_devices),
+        "unknown_devices": unknown_devices,
         "basis": basis,
         # Thresholds echoed so the editor can recolor the bar LIVE (client-side)
         # as devices are shuffled, matching the server's ok/warn/critical.
