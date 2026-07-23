@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-23
+
+### Release Summary
+
+Documentation and reference release for the power-distribution feature. Adds a
+user-facing how-to guide and a second, richer example distribution script, and
+scrubs a stray site-specific custom-field name from the shipped reference
+example's docstring. No behavior or API changes.
+
+### Added
+- **`docs/power-distribution.md`** — a user-facing how-to for power distribution
+  (modeled on `docs/device-naming.md`): the three `distribution_mode`s
+  (`none` / `builtin` / `script`), the two universal conventions, feed binding and
+  planned PDUs, the `planning_fields` custom-field bridge, writing/adapting a
+  distribution script, and verify-on-instance steps. The design spec
+  (`docs/pdu-distribution-spec.md`) remains the deep reference.
+- **`netbox_rack_design.distribution_advanced_example.build`** — a second,
+  richer reference script alongside the minimal `distribution_example`. It
+  demonstrates the customization surfaces the minimal example leaves out: a
+  computed topology `scheme` label (from the per-PDU bank-count signature), a
+  per-PDU `pdu_scheme` override read via `planning_fields["pdu"]`, and
+  WARN/CRITICAL bank thresholds read from plugin config (`power_warn_pct` /
+  `power_critical_pct`). Reuses the shared distribution helpers; read-only.
+
+### Changed
+- The shipped `distribution_example` docstring no longer references a
+  site-specific custom-field name in its illustrative `planning_fields` mapping
+  (now a generic placeholder).
+
 ## [0.13.0] - 2026-07-22
 
 ### Release Summary

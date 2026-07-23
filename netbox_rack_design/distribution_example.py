@@ -47,7 +47,7 @@ field) are read **generically** via the ``planning_fields`` plugin config
 (spec Sec 5) through :func:`read_planning_fields` / :func:`read_planning_field`
 -- this file never hardcodes a site's actual cf name, only the *key* the
 algorithm below expects (``power_limitation``, ``pdu_location``). A site whose
-rack cf is named e.g. ``power_cap_kw`` maps it via config; a site using the
+rack cf is named e.g. ``rack_power_cap`` maps it via config; a site using the
 generic names needs no ``planning_fields`` config at all (the shipped default,
 ``{}``, falls back cleanly: ``pdu_location`` defaults to ``"bottom"``,
 ``power_limitation`` is absent -- no rack cap).
@@ -125,7 +125,7 @@ def read_planning_fields(role, obj):
     """Read every configured ``planning_fields[role]`` entry off ``obj``,
     returning ``{key: value}``. This is how this script sees a site's custom
     fields WITHOUT hardcoding their names (docs/pdu-distribution-spec.md Sec
-    5) -- e.g. a site whose rack cf is called ``power_cap_kw`` maps it to the
+    5) -- e.g. a site whose rack cf is called ``rack_power_cap`` maps it to the
     ``power_limitation`` key the algorithm below reads. An empty/missing
     schema (the shipped default) returns ``{}`` for every ``role``, so this
     script still runs -- just without any cf-derived override."""
