@@ -33,7 +33,24 @@ Rack Design pairs a structured data model with an interactive visual editor for 
 
 ## Screenshots
 
-_Screenshots coming soon. In the meantime, see the [documentation](https://ravenrs.github.io/netbox-rack-design/) for the editor and elevation views._
+**Power heatmap with per-PDU / per-bank distribution** — each bank shows load vs.
+breaker, overloads in red, feeds color-coded per leg.
+
+![Power heatmap with per-bank distribution](docs/assets/screenshots/03-power-heatmap.png)
+
+**Multi-rack visual editor** — plan adds, moves, and removals across a design's
+racks side by side, on top of your live data.
+
+![Multi-rack editor](docs/assets/screenshots/02-editor-multirack.png)
+
+| | |
+|---|---|
+| ![Designs list](docs/assets/screenshots/01-designs-list.png) | ![Placement states: add, move, ghost, remove](docs/assets/screenshots/10-states-r102.png) |
+| _Designs list — versioned plans, scoped to one or more racks._ | _Placement states: planned add, move-in, move-out ghost, and flagged removal._ |
+| ![Unconnected-device warning](docs/assets/screenshots/06-warning-hover-heatmap.png) | ![Bind PDU to a power feed](docs/assets/screenshots/04-bind-feed-dialog.png) |
+| _Hover the ⚠ to see which powered devices aren't cabled yet._ | _Bind a planned PDU to a real or planned power feed._ |
+
+More in the [documentation](https://ravenrs.github.io/netbox-rack-design/).
 
 ## Compatibility
 

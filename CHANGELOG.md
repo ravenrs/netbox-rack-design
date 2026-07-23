@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-07-23
+
+### Release Summary
+
+Bug-fix release for the multi-rack editor. Fixes a layout-on-reload defect where
+a planned device placed on rows freed by a within-rack move could be pushed down
+the rack after saving and reloading the editor. Also adds project screenshots to
+the README.
+
+### Fixed
+- **Reclaimed rows no longer shift on reload.** When a device was moved within a
+  rack, the rows it vacated (marked by a move-out ghost) could be reclaimed by a
+  planned add or move-in. On reload, GridStack's initial collision pass ran over
+  the still-attached ghost before it was detached and collapsed, pushing the
+  reclaiming device down the rack. The editor now brackets that initial grid
+  hydration in the same push-suppression the live-editing gestures already use,
+  so reloaded placements render exactly where they were saved. Live editing was
+  never affected.
+
+### Changed
+- **README now includes screenshots** of the editor, power heatmap, device
+  palette, and dialogs.
+
 ## [0.13.2] - 2026-07-23
 
 ### Release Summary
