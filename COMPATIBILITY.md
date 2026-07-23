@@ -4,6 +4,7 @@ This document tracks the minimum and maximum supported NetBox versions for each 
 
 | Plugin Version | Minimum NetBox Version | Maximum NetBox Version |
 |----------------|------------------------|------------------------|
+| 0.13.3 | 4.4.0 | 4.4.99 |
 | 0.13.2 | 4.4.0 | 4.4.99 |
 | 0.13.1 | 4.4.0 | 4.4.99 |
 | 0.13.0 | 4.4.0 | 4.4.99 |

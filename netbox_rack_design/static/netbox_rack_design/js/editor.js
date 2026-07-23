@@ -1939,14 +1939,33 @@
             });
         });
 
+        // Bracket GridStack.init()'s own initial float/collision pass in the
+        // SAME push-suppression the live gesture flow uses (spec §4.1/§5). The
+        // moment init() parses each host it resolves any overlap in the
+        // server-rendered markup by relocating a real occupant -- and a SAVED
+        // move_out_ghost is still a live engine node during this parse (it is
+        // engine-detached just below, but only AFTER init has already run). So
+        // a ghost whose vacated rows are reclaimed by a planned add/move_in
+        // would shove that occupant down the rack on every reload (a multi-U
+        // ghost freeing rows for two occupants can name only one in
+        // displaced_by, so at least one is pushed regardless). Suppression makes
+        // init place every node at its authoritative server gs-y and leaves
+        // collapse-to-stripe to the first refreshGhosts settle -- the live
+        // editor never hit this because every gesture is already bracketed.
         var grids = [];
-        var frontGrid = frontEl
-            ? GridStack.init(commonOptions({ acceptWidgets: makeAccept(false) }), frontEl) : null;
-        var rearGrid = rearEl
-            ? GridStack.init(commonOptions({ acceptWidgets: makeAccept(false) }), rearEl) : null;
-        // The tray is unbounded vertically; let dropped items float to the top.
-        var trayGrid = trayEl
-            ? GridStack.init(commonOptions({ float: false, acceptWidgets: makeAccept(true) }), trayEl) : null;
+        var frontGrid = null, rearGrid = null, trayGrid = null;
+        rdBeginPushSuppression();
+        try {
+            frontGrid = frontEl
+                ? GridStack.init(commonOptions({ acceptWidgets: makeAccept(false) }), frontEl) : null;
+            rearGrid = rearEl
+                ? GridStack.init(commonOptions({ acceptWidgets: makeAccept(false) }), rearEl) : null;
+            // The tray is unbounded vertically; let dropped items float to the top.
+            trayGrid = trayEl
+                ? GridStack.init(commonOptions({ float: false, acceptWidgets: makeAccept(true) }), trayEl) : null;
+        } finally {
+            rdEndPushSuppression();
+        }
 
         [frontGrid, rearGrid, trayGrid].forEach(function (g) {
             if (g) { grids.push(g); }

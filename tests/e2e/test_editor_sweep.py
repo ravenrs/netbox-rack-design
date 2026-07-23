@@ -5568,6 +5568,115 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
                 pass
 
     # =====================================================================
+    # Regression: on RELOAD, GridStack.init() runs a collision pass over the
+    # server-rendered tiles BEFORE a move-out ghost is engine-detached / has
+    # collapsed to its stripe. If a live occupant's saved row is one the
+    # ghost still (visually/DOM-wise) occupies at that instant, init's
+    # collision pass pushes the occupant DOWN the rack. This never shows up
+    # during live editing (push is suppressed mid-gesture) -- only a real
+    # save + page reload exposes it.
+    #
+    # Repro: move dev_subject (rack A, 2U full-depth) within rack A to a
+    # distant free row, leaving a 2U move-out ghost at its original rows;
+    # then cross-rack move dev_b_front (rack B) into rack A landing on one
+    # of the JUST-FREED rows. Save (writes both as real placements + a
+    # persisted ghost), reload, and assert the reclaiming occupant's saved
+    # (face, y) survive the reload unchanged -- the bug pushes y larger.
+    # =====================================================================
+    def test_saved_ghost_freed_rows_not_pushed_on_reload(self):
+        suffix = uuid.uuid4().hex[:8]
+        design = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"xrack-ghostpush-{suffix}", "site": self._site_id,
+            "racks": [self._rack_a, self._rack_b]})
+        reload_design_id = design["id"]
+        reload_editor_url = (
+            f"{BASE}/plugins/rack-design/designs/{reload_design_id}/editor/"
+            f"{self._rack_a}/")
+        try:
+            self._load_editor(reload_editor_url)
+
+            # Step 1: move dev_subject (2U full-depth, orig U6 front, rack A)
+            # to a distant free row (U12 front, still rack A) -- leaves a 2U
+            # move-out ghost at its original rows (U6-U7 front).
+            away_gsy = self._u_to_gsy(12, 4)
+            r1 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(self._subject_label)}, "
+                f"{self._rack_a}, 'front', {away_gsy})")
+            self.assertTrue(r1.get("ok"), f"move-out failed: {r1}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            # Step 2: reclaim one of the just-freed rows (U6 front) with a
+            # cross-rack move-in of dev_b_front (rack B -> rack A).
+            reclaim_gsy = self._u_to_gsy(6, 2)
+            r2 = self.page.evaluate(
+                f"() => window.__rdX.moveTo({json.dumps(self._bfront_label)}, "
+                f"{self._rack_a}, 'front', {reclaim_gsy})")
+            self.assertTrue(r2.get("ok"), f"reclaim move-in failed: {r2}")
+            self.page.wait_for_timeout(STEP_SETTLE_MS)
+            self.page.evaluate("() => window.__rdX.answerDialogs()")
+            self.page.wait_for_timeout(STEP_SETTLE_MS * 3)
+
+            # Capture pre-save positions of BOTH live occupants -- these are
+            # the rows that must be saved (and must survive reload).
+            pre_subject = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+            pre_bfront = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(self._bfront_label)})")
+            self.assertIsNotNone(pre_subject, "subject missing before save")
+            self.assertIsNotNone(
+                pre_bfront, "reclaiming occupant missing before save")
+
+            # Save (writes real DesignPlacements + a persisted move-out
+            # ghost in rack A); editor.js's doSave() reloads the page on a
+            # 200. Dispatched via JS (not Playwright's .click()) -- the
+            # Django Debug Toolbar's floating panel can intercept a real
+            # synthetic click on this dev instance. Wait for the reload
+            # NAVIGATION itself (not just networkidle pre-reload) before
+            # touching the page again.
+            with self.page.expect_navigation(wait_until="networkidle", timeout=20000):
+                self.page.evaluate(
+                    "() => document.getElementById('rd-editor-save').click()")
+            self.page.wait_for_selector("#rd-editor", timeout=15000)
+            self.page.wait_for_timeout(500)
+            self.page.add_script_tag(content=self.HARNESS_JS)
+
+            post_subject = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(self._subject_label)})")
+            post_bfront = self.page.evaluate(
+                f"() => window.__rdX.subjectInfo({json.dumps(self._bfront_label)})")
+            self.assertIsNotNone(post_subject, "subject missing after reload")
+            self.assertIsNotNone(
+                post_bfront, "reclaiming occupant missing after reload")
+
+            self.assertEqual(
+                post_bfront["face"], pre_bfront["face"],
+                f"reclaiming occupant's face changed across save+reload: "
+                f"pre={pre_bfront} post={post_bfront}")
+            self.assertEqual(
+                post_bfront["y"], pre_bfront["y"],
+                f"reclaiming occupant PUSHED on reload by the init-time "
+                f"collision pass against the still-attached move-out ghost: "
+                f"pre-save y={pre_bfront['y']!r} post-reload y="
+                f"{post_bfront['y']!r} (subject pre={pre_subject!r} "
+                f"post={post_subject!r})")
+
+            self.assertEqual(
+                self.errors, [],
+                f"page/console errors during save+reload: {self.errors}")
+        finally:
+            if getattr(self, "ctx", None):
+                self.ctx.close()
+                self.ctx = None
+            try:
+                self._api(
+                    "DELETE",
+                    f"/api/plugins/rack-design/designs/{reload_design_id}/")
+            except Exception:
+                pass
+
+    # =====================================================================
     # T1 (spec §4.1 "Cursor-governed placement", user repro 2026-07-08,
     # design 6 dra4-sl-isp29 F11 -> F08 rear): during a cross-rack drag the
     # user hovers FREE rows first (vendor placeholder parks there), then
