@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name =  "netbox-rack-design"
-version = "0.13.0"
+version = "0.13.1"
 authors = [
     {name = "Petr Voronov", email = "ravenrs@gmail.com"},
 ]
