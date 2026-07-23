@@ -1,0 +1,1974 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://ravenrs.github.io/netbox-rack-design/editor-behavior-spec/">
+      
+      
+        <link rel="prev" href="../pdu-distribution-spec/">
+      
+      
+        <link rel="next" href="../contributing/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/icon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Editor behavior spec - NetBox Rack Design</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#Editor-Behavior-Specification--Device-as-Object-Model" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="NetBox Rack Design" class="md-header__button md-logo" aria-label="NetBox Rack Design" data-md-component="logo">
+      
+  <img src="../assets/icon.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Rack Design
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Editor behavior spec
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/ravenrs/netbox-rack-design" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ravenrs/netbox-rack-design
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="NetBox Rack Design" class="md-nav__button md-logo" aria-label="NetBox Rack Design" data-md-component="logo">
+      
+  <img src="../assets/icon.svg" alt="logo">
+
+    </a>
+    NetBox Rack Design
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/ravenrs/netbox-rack-design" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ravenrs/netbox-rack-design
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-naming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Device naming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../power-distribution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Power distribution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../power-projection-spec/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Power projection spec
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pdu-distribution-spec/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    PDU distribution spec
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor behavior spec
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor behavior spec
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#Editor-Behavior-Specification--Device-as-Object-Model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editor Behavior Specification — Device-as-Object Model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Editor Behavior Specification — Device-as-Object Model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-Why-a-new-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Why a new model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-Domain-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Domain objects
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Domain objects">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-Device-the-tile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Device (the tile)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-Shadow-part-of-the-Device-never-independent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Shadow (part of the Device, never independent)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-Unit-slot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 Unit (slot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#24-Ghost-origin-reservation-of-a-moved-device" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.4 Ghost (origin reservation of a moved device)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#25-Rack--Face" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.5 Rack / Face
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-Rendering-table-state--part" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Rendering table (state × part)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-Movement-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Movement rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Movement rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-The-pipeline-validate--confirm--commit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 The pipeline (validate → confirm → commit)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-Blocking-rules-UnitblockingClaimFor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Blocking rules (Unit.blockingClaimFor)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-Placing-onto-a-vacating-slot-ghost-or-remove-flagged--displacement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Placing onto a vacating slot (ghost or remove-flagged) — displacement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-Move-within-one-face" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Move within one face
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#45-Cross-face-move-front--rear-same-rack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.5 Cross-face move (front ↔ rear, same rack)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#46-Cross-rack-move" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.6 Cross-rack move
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#47-Rejected-placement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.7 Rejected placement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#48-Palette-add" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.8 Palette add
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-What-GridStack-is-still-allowed-to-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. What GridStack is still allowed to do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-Test-scenarios-derived-11-from-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Test scenarios (derived 1:1 from §4)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-Migration-plan-incremental-each-phase-shippable--testable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Migration plan (incremental, each phase shippable &amp; testable)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#8-Decisions-confirmed-by-Petr-2026-07-07" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Decisions (confirmed by Petr, 2026-07-07)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#9-Non-racked-tray-planned--090" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Non-racked tray (planned — 0.9.0)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9. Non-racked tray (planned — 0.9.0)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#91-What-the-tray-represents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 What the tray represents
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#92-Model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#93-Moves-all-reuse-the-41-pipeline-validate--dialog--atomic-commit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.3 Moves (all reuse the §4.1 pipeline: validate → dialog → atomic commit)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#94-Rendering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.4 Rendering
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#95-Save-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.5 Save contract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#96-Tests-derive-per-the-conformance-matrix-discipline-test-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.6 Tests (derive per the conformance-matrix discipline, test-first)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#Editor-Behavior-Specification--Device-as-Object-Model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editor Behavior Specification — Device-as-Object Model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Editor Behavior Specification — Device-as-Object Model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-Why-a-new-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Why a new model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-Domain-objects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Domain objects
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. Domain objects">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#21-Device-the-tile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.1 Device (the tile)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#22-Shadow-part-of-the-Device-never-independent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.2 Shadow (part of the Device, never independent)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#23-Unit-slot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.3 Unit (slot)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#24-Ghost-origin-reservation-of-a-moved-device" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.4 Ghost (origin reservation of a moved device)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#25-Rack--Face" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.5 Rack / Face
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-Rendering-table-state--part" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Rendering table (state × part)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-Movement-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Movement rules
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Movement rules">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#41-The-pipeline-validate--confirm--commit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 The pipeline (validate → confirm → commit)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#42-Blocking-rules-UnitblockingClaimFor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 Blocking rules (Unit.blockingClaimFor)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#43-Placing-onto-a-vacating-slot-ghost-or-remove-flagged--displacement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 Placing onto a vacating slot (ghost or remove-flagged) — displacement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#44-Move-within-one-face" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.4 Move within one face
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#45-Cross-face-move-front--rear-same-rack" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.5 Cross-face move (front ↔ rear, same rack)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#46-Cross-rack-move" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.6 Cross-rack move
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#47-Rejected-placement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.7 Rejected placement
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#48-Palette-add" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.8 Palette add
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-What-GridStack-is-still-allowed-to-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. What GridStack is still allowed to do
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-Test-scenarios-derived-11-from-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Test scenarios (derived 1:1 from §4)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-Migration-plan-incremental-each-phase-shippable--testable" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Migration plan (incremental, each phase shippable &amp; testable)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#8-Decisions-confirmed-by-Petr-2026-07-07" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Decisions (confirmed by Petr, 2026-07-07)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#9-Non-racked-tray-planned--090" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. Non-racked tray (planned — 0.9.0)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="9. Non-racked tray (planned — 0.9.0)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#91-What-the-tray-represents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 What the tray represents
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#92-Model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 Model
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#93-Moves-all-reuse-the-41-pipeline-validate--dialog--atomic-commit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.3 Moves (all reuse the §4.1 pipeline: validate → dialog → atomic commit)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#94-Rendering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.4 Rendering
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#95-Save-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.5 Save contract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#96-Tests-derive-per-the-conformance-matrix-discipline-test-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.6 Tests (derive per the conformance-matrix discipline, test-first)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>Editor behavior spec</h1>
+
+<h2 id="Editor-Behavior-Specification--Device-as-Object-Model">Editor Behavior Specification — Device-as-Object Model<a class="headerlink" href="#Editor-Behavior-Specification--Device-as-Object-Model" title="Permanent link">&para;</a></h2>
+<p>Status: <strong>shipped</strong> — the OOP migration described in §7 (Phases 1–4) is complete. This
+document defines the <em>intended</em> behavior of the rack-design editor and remains the single
+source of truth against which the implementation and test suite are checked. Code that
+disagrees with this document is wrong.</p>
+<hr />
+<h3 id="1-Why-a-new-model">1. Why a new model<a class="headerlink" href="#1-Why-a-new-model" title="Permanent link">&para;</a></h3>
+<p>Today GridStack owns the layout and the editor reacts after the fact:
+GridStack mutates the grid → we re-scan everything (<code>recomputeOpposites</code>) → we try to
+detect and undo illegal outcomes (<code>tileOverlapsOther</code>, <code>cancelMove</code>). Every hard bug of
+the last weeks is the same root cause wearing a different mask:</p>
+<table>
+<thead>
+<tr>
+<th>Bug</th>
+<th>Root cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cross-face drag lockup</td>
+<td>reacting to GridStack events that fire differently across grid instances</td>
+</tr>
+<tr>
+<td>Orphaned / wrong-name shadow</td>
+<td>shadow is <em>derived</em> by a global re-scan, not <em>owned</em> by its device</td>
+</tr>
+<tr>
+<td><code>RangeError: Maximum call stack size exceeded</code> on dense rack</td>
+<td>GridStack is allowed to "resolve" an impossible placement by pushing neighbors (<code>_fixCollisions ↔ moveNode</code> infinite recursion — confirmed live, stack is 100% vendor code)</td>
+</tr>
+<tr>
+<td>Tiles "jumping" during drags</td>
+<td>GridStack float-push moves <em>other</em> tiles as a side effect of a drag we never validated</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Inversion this spec mandates:</strong> the editor model decides whether a move is legal
+<em>before</em> anything is committed. GridStack becomes a dumb rendering/drag surface. Its
+collision resolution (push/float cascade) is never used to decide placement — which
+eliminates the stack overflow <em>by construction</em>, not by a recursion cap.</p>
+<hr />
+<h3 id="2-Domain-objects">2. Domain objects<a class="headerlink" href="#2-Domain-objects" title="Permanent link">&para;</a></h3>
+<h4 id="21-Device-the-tile">2.1 <code>Device</code> (the tile)<a class="headerlink" href="#21-Device-the-tile" title="Permanent link">&para;</a></h4>
+<p>A planned placement of one device. <strong>One JS object per device, owning everything that
+renders on its behalf</strong> — including its opposite-face shadow. Nothing about a device is
+ever reconstructed by scanning the DOM.</p>
+<div class="highlight"><pre><span></span><code>Device {
+  // identity
+  deviceId        // NetBox device PK (null for newly added, not-yet-saved)
+  placementId     // plugin Placement PK (null until saved)
+  label           // display name
+  deviceTypeId, heightU, isFullDepth
+
+  // position (authoritative — GridStack mirrors this, never the reverse)
+  rackId, face (&quot;front&quot;|&quot;rear&quot;), uPosition   // 0.5U resolution
+
+  // lifecycle state (matches backend ProjectedSlotState)
+  state           // existing | add | move_in | move_out_ghost | remove
+
+  // owned view parts
+  bodyEl          // the GridStack widget on `face`
+  shadow          // Shadow | null — exists iff isFullDepth
+  originGhost     // Ghost | null — exists iff this device was moved and its
+                  // origin slot is still shown as vacating
+}
+</code></pre></div>
+<p>Methods (the contract, names indicative):</p>
+<ul>
+<li><code>canPlaceAt(rack, face, u)</code> → <code>{ok, reason, displaces}</code> — pure check, <strong>no mutation</strong>.
+  Checks the target units on <code>face</code> AND (if full-depth) the mirrored units on the
+  opposite face. Returns which occupant would be displaced if the target is a
+  vacating slot (see §4.3).</li>
+<li><code>placeAt(rack, face, u)</code> — commits: updates own fields, moves <code>bodyEl</code>, moves
+  <code>shadow</code> atomically, creates/updates <code>originGhost</code>.</li>
+<li><code>revert()</code> — returns to last committed position; body, shadow, ghost all restored
+  in one call (no global re-scan).</li>
+<li><code>renderState()</code> — applies CSS classes for <code>state</code> to body + shadow + ghost.</li>
+<li><code>destroy()</code> — removes body, shadow, ghost together.</li>
+</ul>
+<h4 id="22-Shadow-part-of-the-Device-never-independent">2.2 <code>Shadow</code> (part of the Device, never independent)<a class="headerlink" href="#22-Shadow-part-of-the-Device-never-independent" title="Permanent link">&para;</a></h4>
+<p>The opposite-face projection of a full-depth device. It has <strong>no lifecycle of its
+own</strong>: it is created when its Device is created (if full-depth), moves in the same
+call that moves the body, and is destroyed with the Device. It is never produced by a
+global "recompute" pass.</p>
+<p>Rendering follows the owner's state (see table §3). A Shadow is <strong>non-interactive</strong>
+(not draggable, not a drop target for its own device) but it <strong>participates in
+occupancy</strong>: other devices' <code>canPlaceAt</code> must see it.</p>
+<p><strong>Live mid-drag tracking (confirmed requirement, 2026-07-07):</strong> while the user is
+dragging a full-depth device (grabbed, not yet released), its shadow follows the
+body in real time on the opposite face — sliding U-by-U with the cursor. This is
+both feedback ("the rear half moves with me") and a live legality preview (the
+user sees a rear-side conflict before dropping). The shadow must never lag until
+drop/redraw.</p>
+<h4 id="23-Unit-slot">2.3 <code>Unit</code> (slot)<a class="headerlink" href="#23-Unit-slot" title="Permanent link">&para;</a></h4>
+<p>One 0.5U row on one face of one rack. The unit of occupancy accounting.</p>
+<div class="highlight"><pre><span></span><code>Unit { rackId, face, row }   // row in 0.5U grid coordinates
+</code></pre></div>
+<ul>
+<li><code>claims()</code> → list of <code>{device, kind}</code> where kind ∈ <code>body | shadow | ghost</code>.</li>
+<li><code>blockingClaimFor(device)</code> → the claim that forbids placement, or null.
+  Blocking rules in §4.2.</li>
+</ul>
+<p>Units are how hover-validation works: while dragging, the target units under the
+cursor are asked <em>before</em> any drop is accepted, and the drop indicator shows
+allowed/denied accordingly.</p>
+<h4 id="24-Ghost-origin-reservation-of-a-moved-device">2.4 <code>Ghost</code> (origin reservation of a moved device)<a class="headerlink" href="#24-Ghost-origin-reservation-of-a-moved-device" title="Permanent link">&para;</a></h4>
+<p>When a Device moves away from a slot that still physically contains it (state
+<code>move_out_ghost</code> at origin), the origin slot shows a Ghost. Semantics: <strong>"this space
+is being vacated — you may plan into it, but the hardware is still there today."</strong></p>
+<p>A device is removed from a slot for exactly two reasons, and the Ghost must serve both:</p>
+<ol>
+<li><strong>Free the unit</strong> — someone will later place a different device there.</li>
+<li><strong>Reuse</strong> — the same physical device is being reinstalled elsewhere (the move).</li>
+</ol>
+<p>Therefore a Ghost is <em>plannable-over</em> (it does not block placement) but <em>visible</em>
+(the planner must see the hardware hasn't left yet).</p>
+<h4 id="25-Rack--Face">2.5 <code>Rack</code> / <code>Face</code><a class="headerlink" href="#25-Rack--Face" title="Permanent link">&para;</a></h4>
+<p><code>Rack</code> owns two <code>Face</code>s + tray, its Devices, and its Units. <code>Face</code> wraps one
+GridStack instance purely as a view. All validation questions go through
+<code>Rack</code>/<code>Unit</code>, never through <code>grid.getGridItems()</code> inspection at decision time.</p>
+<hr />
+<h3 id="3-Rendering-table-state--part">3. Rendering table (state × part)<a class="headerlink" href="#3-Rendering-table-state--part" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Device state</th>
+<th>Body (own face)</th>
+<th>Shadow (opposite face)</th>
+<th>Origin slot</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>existing</code></td>
+<td>solid, existing style</td>
+<td>hatched "occupied (full-depth)"</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>add</code></td>
+<td>add style (green)</td>
+<td>hatched, add-tinted</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>move_in</code> (arrived here)</td>
+<td>move style (blue)</td>
+<td>hatched, move-tinted</td>
+<td>see <code>move_out_ghost</code> row at origin</td>
+</tr>
+<tr>
+<td><code>move_out_ghost</code> (origin marker)</td>
+<td><strong>crossed-out / struck-through hatch</strong> — clearly "leaving"</td>
+<td><strong>also crossed-out hatch</strong> — ⚠ today it renders like a normal live device (red), which is wrong</td>
+<td>n/a (this <em>is</em> the origin)</td>
+</tr>
+<tr>
+<td><code>remove</code></td>
+<td>remove style (red, struck)</td>
+<td>crossed-out hatch</td>
+<td>—</td>
+</tr>
+<tr>
+<td><strong><code>displaced</code></strong> (new, see §4.3)</td>
+<td>not rendered as a full tile — replaced by <strong>side reservation stripe</strong></td>
+<td>side stripe on opposite face too (full-depth)</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Side reservation stripe (<code>displaced</code>):</strong> rendered like NetBox core's rack
+reservation marker — a narrow vertical bar spanning exactly the displaced
+units — colored <strong>red</strong>. Geometry (user ruling 2026-07-09): the bar renders
+<strong>OUTSIDE the rack frame</strong>, hanging off the elevation's RIGHT edge (exactly
+how core draws reservations alongside the elevation), never inside the
+occupying tile (the earlier in-tile sliver sat cramped against the tile's ×
+remove button). Front-face displacement bars hang off the front elevation; a
+full-depth OLD's mirror bar hangs off the rear elevation. Hover/tooltip shows
+the displaced device's name ("was: <code>dra4-sl-isp26</code>"). The new device
+occupying the slot renders with its own movement/add style at full width.
+This is the picture Petr provided: NetBox reservation look, red, old name on
+hover.</p>
+<p>The displaced treatment applies to EVERY projection render, not only the
+editor's live session (parity ruling 2026-07-09): the projection layer marks
+a vacating slot whose rows are occupied by a live planned slot as
+<code>displaced</code> (+ <code>displaced_by</code>), the read-only elevation renders it as the
+stripe bar server-side, and the editor applies the same collapse+bar on LOAD
+from that marking — a saved displacement never renders as two composited
+full tiles anywhere.</p>
+<p><strong>Tile label = assigned name (user ruling 2026-07-10):</strong> once a placement
+carries a <code>proposed_name</code> (auto-filled by the naming engine, typed into an
+add's inline field, or chosen in the §4a rename dialog), the tile's VISIBLE
+label shows that name — falling back to the device-type model (adds) or the
+device's real name (moves) only while no name exists. Implementation note:
+the visible name is a separate display span layered over the stable
+<code>.nbx-rd-label</code> identity span, which is never rewritten (it anchors ghost
+pairing, the read-model and the test harnesses); ghost (origin) tiles keep
+showing the physical device's real name.</p>
+<p><strong>Hover card = identity story (user ruling 2026-07-10):</strong> hovering a
+<code>move_in</code> tile (or a renamed add) shows the full picture — the plan's new
+name, the device's real dcim name ("Was"), old tenant, type, role, and the
+target rack/U ("To"). Hovering a ghost shows where the device WENT (new name
++ destination rack/U, resolvable from the paired move placement for saved
+moves). Applies to the editor and the read-only elevation alike (both hover
+cards read the same <code>data-*</code> attributes).</p>
+<p><strong>Ghost ↔ body hover link (user ruling 2026-07-10):</strong> hovering a <code>move_in</code>
+body highlights its origin ghost and vice versa (<code>.nbx-rd-hover-linked</code>
+outline/glow) — same-rack, cross-rack and tray ghosts alike, paired by
+device identity (<code>data-rd-device-id</code>), cleared on mouse-leave.</p>
+<p>Legend filters (<code>Existing / Add / Move in / Move out (ghost) / Remove</code>) apply
+uniformly to bodies, shadows, ghosts and stripes of the corresponding state.</p>
+<hr />
+<h3 id="4-Movement-rules">4. Movement rules<a class="headerlink" href="#4-Movement-rules" title="Permanent link">&para;</a></h3>
+<h4 id="41-The-pipeline-validate--confirm--commit">4.1 The pipeline (validate → confirm → commit)<a class="headerlink" href="#41-The-pipeline-validate--confirm--commit" title="Permanent link">&para;</a></h4>
+<p>Every placement gesture (drag of an existing tile, drop from palette) follows:</p>
+<div class="highlight"><pre><span></span><code>dragover  : target Units asked canPlaceAt → live allow/deny indicator
+drop      : canPlaceAt re-checked (authoritative)
+            ├─ not ok  → revert() — tile snaps back, nothing else moved, no dialog
+            └─ ok      → if user decision needed (name reuse, displacement) → dialog
+                          ├─ cancel → revert()
+                          └─ confirm → placeAt() commits model, then syncs GridStack
+</code></pre></div>
+<p>Hard rules:</p>
+<ul>
+<li><strong>No GridStack push.</strong> During any gesture, no other tile may change position as a
+  side effect. GridStack collision resolution is disabled/neutralized; the model is
+  the only authority. (This is what kills the <code>RangeError</code> and the "things jump
+  around" class of bugs.)</li>
+<li><strong>Cursor-governed placement (Petr's ruling, 2026-07-08).</strong> The drag preview
+  follows the CURSOR's target rows only — there is no "suggested placement":
+  the placeholder must never relocate to a different (last-valid) slot while the
+  cursor hovers an illegal one, and the commit position is always the cursor's
+  rows, never a fallback. Cursor over legal rows → preview renders there (allow
+  style). Cursor over illegal rows → deny indicator at the cursor rows, no
+  placeholder anywhere else, and release = full snap-back home (§4.7). A device
+  must never land on rows the user was not pointing at.</li>
+<li><strong>One occupant per vacated slot.</strong> A ghost/removed slot accepts exactly ONE
+  incoming planned device (§4.3): once NEW occupies it, NEW's live body claim
+  blocks all further placements. No stacking of plans into one vacated unit.</li>
+<li><strong>Dialogs come after validation.</strong> A dialog is only shown for a placement that has
+  already passed <code>canPlaceAt</code>. Never dialog-then-discover-invalid.</li>
+<li><strong>Commit is atomic.</strong> Body + shadow + origin ghost move in one model call. There is
+  no window where the DOM shows a half-moved device.</li>
+</ul>
+<h4 id="42-Blocking-rules-UnitblockingClaimFor">4.2 Blocking rules (<code>Unit.blockingClaimFor</code>)<a class="headerlink" href="#42-Blocking-rules-UnitblockingClaimFor" title="Permanent link">&para;</a></h4>
+<p>For device D targeting a unit range (on D's face, plus mirrored range on the opposite
+face when D is full-depth):</p>
+<table>
+<thead>
+<tr>
+<th>Claim present in target units</th>
+<th>Blocks D?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>body</code> of a live device (<code>existing</code>/<code>add</code>/<code>move_in</code>)</td>
+<td><strong>yes</strong> — reject before any mutation</td>
+</tr>
+<tr>
+<td><code>shadow</code> of a live full-depth device</td>
+<td><strong>yes</strong></td>
+</tr>
+<tr>
+<td><code>ghost</code> (origin of a moved device)</td>
+<td><strong>no</strong> — allowed; triggers displacement flow §4.3</td>
+</tr>
+<tr>
+<td><code>body</code>/<code>shadow</code> of a <code>remove</code>-flagged device</td>
+<td><strong>no</strong> — allowed; triggers displacement flow §4.3</td>
+</tr>
+<tr>
+<td>stripe of an already-<code>displaced</code> device</td>
+<td><strong>no</strong> — the physical occupant is already accounted for; stripe remains</td>
+</tr>
+<tr>
+<td>D's own shadow / own ghost</td>
+<td><strong>no</strong> (moving within your own footprint is legal)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="43-Placing-onto-a-vacating-slot-ghost-or-remove-flagged--displacement">4.3 Placing onto a vacating slot (ghost or remove-flagged) — displacement<a class="headerlink" href="#43-Placing-onto-a-vacating-slot-ghost-or-remove-flagged--displacement" title="Permanent link">&para;</a></h4>
+<p>This is the case Petr has restated many times; spelled out once and for all:</p>
+<p>Given: device OLD occupies units physically; in the plan it is leaving (moved away →
+ghost at origin, or flagged <code>remove</code>). Device NEW is dropped onto those units.</p>
+<p>Expected outcome:</p>
+<ol>
+<li>Placement is <strong>allowed</strong> (passes validation).</li>
+<li><strong>NEW renders normally</strong> in the slot with its own semantic style: <code>move_in</code> if it
+   was moved there, <code>add</code> if it came from the palette. It does NOT inherit any ghost
+   styling.</li>
+<li><strong>OLD collapses to the side reservation stripe</strong> (state <code>displaced</code>): red vertical
+   bar at the right edge of those units, NetBox-reservation look. Hover shows OLD's
+   name. If OLD is full-depth, the mirrored units on the opposite face get the stripe
+   too (replacing OLD's crossed-out shadow there).</li>
+<li><strong>Confirmation dialog on every displacement</strong> — but strictly <em>after</em> validation
+   has passed (never dialog-then-discover-invalid):</li>
+<li>"Units X–Y are occupied by <strong>OLD</strong> (being removed / being moved). Place <strong>NEW</strong>
+     here?"</li>
+<li>When OLD is leaving-to-free-and-reuse-the-name (rename workflow): the same
+     dialog additionally offers name reuse per the naming-convention feature.</li>
+<li>Cancel → full <code>revert()</code>.</li>
+<li>Undoing NEW's placement (moving NEW away again, or cancel) <strong>restores OLD's ghost /
+   remove rendering</strong> — the stripe exists only while something else occupies the slot.</li>
+</ol>
+<h4 id="44-Move-within-one-face">4.4 Move within one face<a class="headerlink" href="#44-Move-within-one-face" title="Permanent link">&para;</a></h4>
+<ul>
+<li>D <code>placeAt</code> new units → origin gets Ghost (crossed-out body-style + crossed-out
+  shadow per §3), destination shows D as <code>move_in</code>.</li>
+<li>Moving D back onto its own origin ghost = plain revert: ghost disappears, D returns
+  to <code>existing</code> (or its prior state). No dialog.</li>
+</ul>
+<h4 id="45-Cross-face-move-front--rear-same-rack">4.5 Cross-face move (front ↔ rear, same rack)<a class="headerlink" href="#45-Cross-face-move-front--rear-same-rack" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Full-depth D: face flip means body and shadow swap faces. Atomic in one commit.</li>
+<li>Origin ghost stays on the <em>original</em> face (+ its crossed shadow on the opposite).</li>
+<li>Non-full-depth D: simple; only origin ghost on the source face.</li>
+</ul>
+<h4 id="46-Cross-rack-move">4.6 Cross-rack move<a class="headerlink" href="#46-Cross-rack-move" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Same as 4.4/4.5 but origin Rack keeps the Ghost, destination Rack gains D.</li>
+<li>Moving D back to its origin rack+units later must fully clear the Ghost and restore
+  the original name/state — no stale "wrong name" shadow (bug #11). This falls out of
+  ownership: the Ghost is D's <code>originGhost</code>, so when D returns, D destroys it. There
+  is nothing to re-derive and therefore nothing to derive <em>wrongly</em>.</li>
+</ul>
+<h4 id="47-Rejected-placement">4.7 Rejected placement<a class="headerlink" href="#47-Rejected-placement" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Target blocked (live body/shadow): tile snaps back to its exact prior position.
+  <strong>Zero other tiles move.</strong> No dialog, no console error, no residue (shadows/ghosts
+  unchanged) — on any rack density. (Regression: isp26 → U2 on the packed 46U rack.)</li>
+</ul>
+<h4 id="48-Palette-add">4.8 Palette add<a class="headerlink" href="#48-Palette-add" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Same pipeline. Drop from palette creates a Device in state <code>add</code> (with Shadow if
+  the device type is full-depth) only after validation passes. Dropping onto a
+  vacating slot follows §4.3 with NEW.state = <code>add</code>.</li>
+</ul>
+<hr />
+<h3 id="5-What-GridStack-is-still-allowed-to-do">5. What GridStack is still allowed to do<a class="headerlink" href="#5-What-GridStack-is-still-allowed-to-do" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Render tiles, provide the drag gesture and pixel↔row math.</li>
+<li>Fire <code>dragstart/dragover/drop</code>-level events that we translate into model calls.</li>
+<li><strong>Not allowed:</strong> float-push of neighbors, cross-grid auto-adoption decisions,
+  being the source of truth for position. <code>acceptWidgets</code>/collision hooks are
+  configured so GridStack always defers to the model's verdict.</li>
+</ul>
+<p>The <code>_fixCollisions</code> recursion guard added on 2026-07-07 is retained as the
+push-suppression mechanism (<code>rdPushSuppressDepth</code>, a depth counter, not a bool):
+it is the load-bearing way the editor tells GridStack to defer to the model's
+verdict instead of auto-pushing neighbors, and has been kept and extended rather
+than deleted.</p>
+<hr />
+<h3 id="6-Test-scenarios-derived-11-from-4">6. Test scenarios (derived 1:1 from §4)<a class="headerlink" href="#6-Test-scenarios-derived-11-from-4" title="Permanent link">&para;</a></h3>
+<p>Unit-model tests (pure JS, no browser — become possible only with the OOP model):</p>
+<ul>
+<li>U1. <code>canPlaceAt</code> truth table of §4.2 (each claim kind × full-depth yes/no).</li>
+<li>U2. Atomicity: <code>placeAt</code> leaves body/shadow/ghost consistent after every call.</li>
+<li>U3. <code>revert()</code> restores the pre-gesture snapshot exactly.</li>
+</ul>
+<p>E2E scenarios (deterministic, self-provisioning, per existing sweep harness):</p>
+<ul>
+<li>E1. Move within face → ghost + crossed shadow at origin; destination <code>move_in</code>. (§4.4)</li>
+<li>E2. Move back onto own ghost → everything restored, no dialog. (§4.4)</li>
+<li>E3. Cross-face full-depth move → body+shadow swap faces atomically; origin ghost
+  on source face; no lockup. (§4.5)</li>
+<li>E4. Cross-rack move and return → no stale ghost, correct name. (§4.6, bug #11)</li>
+<li>E5. Drop NEW onto ghost slot → dialog → confirm → NEW styled <code>move_in</code>/<code>add</code>,
+  OLD = red side stripe, hover shows OLD name; opposite face striped when OLD is
+  full-depth. (§4.3)</li>
+<li>E6. E5 then cancel at the dialog → full revert, ghost rendering restored. (§4.3.5)</li>
+<li>E7. Move NEW away from a displaced slot → OLD's ghost rendering returns. (§4.3.5)</li>
+<li>E8. Drop onto live-occupied units on a <strong>fully packed rack</strong> → snap-back, zero
+  other tiles moved, zero console errors. (§4.7 — the isp26→U2 crash)</li>
+<li>E9. Legend filter toggles hide/show ghosts, shadows and stripes consistently. (§3)</li>
+<li>E10. 0.5U sweep suites (existing <code>test_editor_sweep.py</code>, <code>test_editor_add_sweep.py</code>)
+  re-based on the invariants above, alternating front/rear across both racks.</li>
+<li>E11. Palette add onto vacating slot = §4.3 with <code>add</code> styling. (§4.8)</li>
+</ul>
+<p>Every scenario asserts the same three global invariants after each step:
+<strong>(I1)</strong> no two live claims overlap on any Unit; <strong>(I2)</strong> every full-depth device has
+exactly one shadow, on the opposite face, at its own units; <strong>(I3)</strong> console is free
+of errors.</p>
+<hr />
+<h3 id="7-Migration-plan-incremental-each-phase-shippable--testable">7. Migration plan (incremental, each phase shippable &amp; testable)<a class="headerlink" href="#7-Migration-plan-incremental-each-phase-shippable--testable" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Phase 0 (done):</strong> recursion guard backstop; this spec.</li>
+<li><strong>Phase 1 — model without behavior change:</strong> introduce <code>Device/Shadow/Unit/Rack</code>
+   classes populated from current data; keep existing event flow; add invariant
+   assertions (I1–I3) behind a debug flag. Sweeps must stay green.</li>
+<li><strong>Phase 2 — validate-before-commit:</strong> route all drops/drags through
+   <code>canPlaceAt</code>/<code>placeAt</code>; disable GridStack push (neutralize <code>_fixCollisions</code> path);
+   delete <code>freezeOthers</code> complexity where obsoleted. E8 turns green by construction.</li>
+<li><strong>Phase 3 — owned shadows/ghosts:</strong> shadows and ghosts created/moved/destroyed by
+   their Device; delete <code>recomputeOpposites</code> global scan. E1–E4 green; bug #11 dies here.</li>
+<li><strong>Phase 4 — displacement UX:</strong> <code>displaced</code> state, side stripe rendering + hover,
+   confirmation dialog per §4.3. E5–E7, E11 green. Remove the Phase-0 guard.</li>
+</ol>
+<hr />
+<h3 id="8-Decisions-confirmed-by-Petr-2026-07-07">8. Decisions (confirmed by Petr, 2026-07-07)<a class="headerlink" href="#8-Decisions-confirmed-by-Petr-2026-07-07" title="Permanent link">&para;</a></h3>
+<ol>
+<li>§4.3.4 — dialog on <strong>every</strong> displacement, always after validation passes.</li>
+<li>§3 stripe — <strong>NetBox reservation hatch recolored red</strong> (same diagonal-stripe
+   pattern as core rack reservations).</li>
+<li>§4.4 — moving a device back onto its own ghost restores <strong>silently</strong>, no dialog.</li>
+</ol>
+<hr />
+<h3 id="9-Non-racked-tray-planned--090">9. Non-racked tray (planned — 0.9.0)<a class="headerlink" href="#9-Non-racked-tray-planned--090" title="Permanent link">&para;</a></h3>
+<p>Status: <strong>spec draft 2026-07-09</strong> (user request: real off-rack devices — 0U/vertical
+PDUs, rear-door units, cable managers — must be visible and plannable).</p>
+<h4 id="91-What-the-tray-represents">9.1 What the tray represents<a class="headerlink" href="#91-What-the-tray-represents" title="Permanent link">&para;</a></h4>
+<p>Each rack's tray is the projection of "devices associated with this rack but not
+mounted at a U": in DCIM terms, <code>Device.rack == R and Device.position is None</code>.
+Today only <em>planned</em> position-less placements render there; real position-less
+devices are invisible. 0.9.0 makes the tray show reality plus plan, exactly like
+the faces do.</p>
+<h4 id="92-Model">9.2 Model<a class="headerlink" href="#92-Model" title="Permanent link">&para;</a></h4>
+<ul>
+<li>A tray slot is a <code>Device</code> with <code>face = ""</code>/<code>u = None</code>; it claims <strong>no Units</strong>.
+  Tray claims never collide (a tray is an unordered list, not a grid) and cast
+  <strong>no shadow</strong> (there is no opposite face off-rack).</li>
+<li><code>RDRack.trayDevices</code> (already present in the read-model) becomes fully
+  populated: <code>existing</code> tray devices from DCIM + planned tray placements, each a
+  normal <code>RDDevice</code> with <code>face: "tray"</code>-equivalent semantics.</li>
+<li>Invariants: I1/I2 exclude tray devices (no rows, no shadow); new <strong>I4</strong>: a
+  device appears at most once per design world (body in units XOR tray XOR
+  ghost-origin pair) — the §4.6 one-entity rule extended to the tray.</li>
+</ul>
+<h4 id="93-Moves-all-reuse-the-41-pipeline-validate--dialog--atomic-commit">9.3 Moves (all reuse the §4.1 pipeline: validate → dialog → atomic commit)<a class="headerlink" href="#93-Moves-all-reuse-the-41-pipeline-validate--dialog--atomic-commit" title="Permanent link">&para;</a></h4>
+<table>
+<thead>
+<tr>
+<th>Gesture</th>
+<th>Meaning</th>
+<th>Rules</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>units → tray (same or other rack)</td>
+<td>plan a dismount-to-0U / accessory reassignment</td>
+<td>origin gets a ghost + crossed mirror per §3; tray entry renders <code>move_in</code>; rename dialog per naming feature</td>
+</tr>
+<tr>
+<td>tray → units</td>
+<td>plan a mount at a U</td>
+<td>full §4.2 blocking rules + §4.3 displacement apply at the target; full-depth devices gain their shadow on landing</td>
+</tr>
+<tr>
+<td>tray → tray (cross-rack)</td>
+<td>reassociate with another rack</td>
+<td>origin tray keeps a ghost entry (list-style, no rows); dialog per cross-rack move</td>
+</tr>
+<tr>
+<td>back onto own tray ghost</td>
+<td>homecoming</td>
+<td>silent restore per §4.4/§4.6 — identity-based, any hop count, survives save+reload</td>
+</tr>
+<tr>
+<td>palette → tray</td>
+<td>plan a new off-rack device</td>
+<td><code>add</code> styling; cursor-governed (§4.1): the tray highlights as the legal target under the cursor</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Cursor governance applies: the tray is a legal target only when the cursor is
+  over it; a release elsewhere snaps back / discards per §4.1.</li>
+<li>Displacement (§4.3) does not apply inside the tray (no exclusive slots), so
+  tray drops never displace and never dialog for displacement — only the rename
+  dialog fires where naming requires it.</li>
+</ul>
+<h4 id="94-Rendering">9.4 Rendering<a class="headerlink" href="#94-Rendering" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>existing</code> tray devices: normal tile styling, laid out as a horizontal list.</li>
+<li>Planned states reuse the §3 table (add/move_in/move_out_ghost/remove) minus
+  shadows/stripes (n/a off-rack).</li>
+<li>Legend filters apply to tray tiles the same as to face tiles.</li>
+<li>The tray is a compact list: rows renumber to contiguous after any removal;
+  the §4.1 no-bystander-movement rule constrains rack positions (U), not list
+  reflow (coordinator-approved interpretation, 2026-07-09).</li>
+</ul>
+<h4 id="95-Save-contract">9.5 Save contract<a class="headerlink" href="#95-Save-contract" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Mount (tray → U): placement gains <code>target_position</code>/<code>target_face</code> as usual.</li>
+<li>Dismount (U → tray): placement with <code>target_rack = R</code>, <code>target_position = None</code>.</li>
+<li>Reassociation (tray → tray): move placement with the new rack, no position.</li>
+<li>Server validation mirrors §4.2 for unit targets; tray targets validate only
+  same-site rack membership (no slot availability applies).</li>
+</ul>
+<h4 id="96-Tests-derive-per-the-conformance-matrix-discipline-test-first">9.6 Tests (derive per the conformance-matrix discipline, test-first)<a class="headerlink" href="#96-Tests-derive-per-the-conformance-matrix-discipline-test-first" title="Permanent link">&para;</a></h4>
+<ul>
+<li>T-tray-1: real 0U device renders in the tray as <code>existing</code> on load.</li>
+<li>T-tray-2..5: each row of the §9.3 table, confirm + cancel variants, full-world
+  diff per step, homecoming contract for the return legs.</li>
+<li>T-tray-6: palette add into tray; discard on release outside any legal target.</li>
+<li>T-tray-7: I4 holds across a units→tray→units round-trip (single entity).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/netbox-community/cookiecutter-netbox-plugin" target="_blank" rel="noopener" title="Tweet" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M459.4 151.7c.3 4.5.3 9.1.3 13.6 0 138.7-105.6 298.6-298.6 298.6-59.5 0-114.7-17.2-161.1-47.1 8.4 1 16.6 1.3 25.3 1.3 49.1 0 94.2-16.6 130.3-44.8-46.1-1-84.8-31.2-98.1-72.8 6.5 1 13 1.6 19.8 1.6 9.4 0 18.8-1.3 27.6-3.6-48.1-9.7-84.1-52-84.1-103v-1.3c14 7.8 30.2 12.7 47.4 13.3-28.3-18.8-46.8-51-46.8-87.4 0-19.5 5.2-37.4 14.3-53C87.4 130.8 165 172.4 252.1 176.9c-1.6-7.8-2.6-15.9-2.6-24C249.5 95.1 296.3 48 354.4 48c30.2 0 57.5 12.7 76.7 33.1 23.7-4.5 46.5-13.3 66.6-25.3-7.8 24.4-24.4 44.8-46.1 57.8 21.1-2.3 41.6-8.1 60.4-16.2-14.3 20.8-32.2 39.3-52.6 54.3"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://github.com/netbox-community/cookiecutter-netbox-plugin" target="_blank" rel="noopener" title="Facebook" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M512 256C512 114.6 397.4 0 256 0S0 114.6 0 256c0 120 82.7 220.8 194.2 248.5V334.2h-52.8V256h52.8v-33.7c0-87.1 39.4-127.5 125-127.5 16.2 0 44.2 3.2 55.7 6.4V172c-6-.6-16.5-1-29.6-1-42 0-58.2 15.9-58.2 57.2V256h83.6l-14.4 78.2H287v175.9C413.8 494.8 512 386.9 512 256"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://github.com/ravenrs/netbox-rack-design" target="_blank" rel="noopener" title="Github" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="mailto:ravenrs@gmail.com" target="_blank" rel="noopener" title="" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m20 8-8 5-8-5V6l8 5 8-5m0-2H4c-1.11 0-2 .89-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.indexes", "navigation.instant", "navigation.tabs.sticky"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

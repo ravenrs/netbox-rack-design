@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/changelog/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/contributing/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/device-naming/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/editor-behavior-spec/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/pdu-distribution-spec/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/power-distribution/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+    <url>
+         <loc>https://ravenrs.github.io/netbox-rack-design/power-projection-spec/</loc>
+         <lastmod>2026-07-23</lastmod>
+    </url>
+</urlset>
