@@ -43,6 +43,12 @@ racks side by side, on top of your live data.
 
 ![Multi-rack editor](docs/assets/screenshots/02-editor-multirack.png)
 
+**Device hover card** — hover any tile to see its identity, type, role, and power
+draw; a move-out ghost keeps its provenance (`was: …`) so you always know what
+vacated a slot.
+
+![Device hover card showing a tile's details and a ghost's provenance](docs/assets/screenshots/13-device-hover-card.png)
+
 | | |
 |---|---|
 | ![Designs list](docs/assets/screenshots/01-designs-list.png) | ![Placement states: add, move, ghost, remove](docs/assets/screenshots/10-states-r102.png) |
