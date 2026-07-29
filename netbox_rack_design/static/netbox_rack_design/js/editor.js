@@ -1381,7 +1381,7 @@
             // (×) button, a palette row's favorite (star) button, or an add
             // tile's editable name input — otherwise GridStack captures the
             // pointer and the click/focus never fires.
-            draggable: { cancel: ".nbx-rd-remove-btn, .nbx-rd-fav-btn, .nbx-rd-name-input" },
+            draggable: { cancel: ".nbx-rd-remove-btn, .nbx-rd-fav-btn, .nbx-rd-name-input, .nbx-rd-name-edit-btn" },
         };
         if (extra) {
             Object.keys(extra).forEach(function (k) { opts[k] = extra[k]; });
@@ -4804,6 +4804,47 @@
                 content.appendChild(nameInput);
                 content.appendChild(warn);
 
+                // Compact name + pencil-to-edit (2026-07-29): the tile shows the
+                // assigned name via .nbx-rd-name-display, so the input is hidden
+                // until the user clicks the pencil. On a 1U-tall add the field
+                // would be clipped inline; clicking the pencil pops it out over
+                // the tile (see .nbx-rd-editing in editor.css) so it stays
+                // reachable at any tile height. Enter/Escape/blur closes it. The
+                // pencil sits bottom-right, clear of the × (top-right) and the
+                // PDU flash (top-left) so it never overlaps another control.
+                var editBtn = document.createElement("button");
+                editBtn.type = "button";
+                editBtn.className = "nbx-rd-name-edit-btn";
+                editBtn.title = "Edit name";
+                editBtn.setAttribute("aria-label", "Edit name");
+                editBtn.innerHTML = '<i class="mdi mdi-pencil" aria-hidden="true"></i>';
+                content.appendChild(editBtn);
+
+                var gridItem = content.closest(".grid-stack-item");
+                function openNameEdit() {
+                    content.classList.add("nbx-rd-editing");
+                    if (gridItem) { gridItem.classList.add("nbx-rd-editing-item"); }
+                    nameInput.value = widget.proposed_name || "";
+                    nameInput.focus();
+                    nameInput.select();
+                }
+                function closeNameEdit() {
+                    content.classList.remove("nbx-rd-editing");
+                    if (gridItem) { gridItem.classList.remove("nbx-rd-editing-item"); }
+                }
+                editBtn.addEventListener("click", function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openNameEdit();
+                });
+                nameInput.addEventListener("blur", closeNameEdit);
+                nameInput.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === "Escape") {
+                        e.preventDefault();
+                        nameInput.blur();
+                    }
+                });
+
                 function applyWarn(exists) {
                     warn.style.display = exists ? "" : "none";
                     content.classList.toggle("nbx-rd-name-collision", !!exists);
@@ -5064,7 +5105,7 @@
     // shared listener covers every rack block AND the palette / quick-access.
     ["pointerdown", "mousedown", "touchstart"].forEach(function (evtName) {
         root.addEventListener(evtName, function (event) {
-            if (event.target.closest(".nbx-rd-remove-btn, .nbx-rd-fav-btn, .nbx-rd-name-input")) {
+            if (event.target.closest(".nbx-rd-remove-btn, .nbx-rd-fav-btn, .nbx-rd-name-input, .nbx-rd-name-edit-btn")) {
                 event.stopPropagation();
             }
         }, true);

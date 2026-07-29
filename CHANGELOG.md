@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-07-29
+
+### Release Summary
+
+Bug-fix release for the multi-rack editor. On a planned-add tile that is only a
+single rack unit tall, the inline proposed-name input was clipped away by the
+tile's height, leaving no way to override the auto-generated name. The name is now
+shown compactly on the tile and edited through a small pencil affordance that pops
+the input out over the tile, so renaming works at any tile height.
+
+### Fixed
+- **Editable name on 1U add tiles.** A planned-add tile stacked its device-type
+  label above an always-visible name input; on a 1U-tall tile the input fell
+  outside the clipped tile and could not be seen or focused. The tile now displays
+  its assigned name and exposes a hover-revealed pencil (bottom-left, clear of the
+  remove × and the PDU power control) that opens the name field as a pop-out
+  overlay, keeping it fully usable regardless of tile height.
+
 ## [0.13.4] - 2026-07-29
 
 ### Release Summary
