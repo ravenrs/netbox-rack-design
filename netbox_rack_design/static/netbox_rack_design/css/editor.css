@@ -119,20 +119,70 @@
 }
 
 .nbx-rd-name-input {
-    /* Compact: it has to fit inside even a 1U tile. Height tracks the line so it
-       never forces the tile taller; the field scrolls its own text. */
-    height: 1.1rem;
+    /* Hidden until the pencil is clicked -- the tile shows the assigned name via
+       .nbx-rd-name-display, so the input is only needed while editing. */
+    display: none;
     min-height: 0;
     padding: 0 0.25rem;
     font-size: 0.7rem;
-    line-height: 1.1rem;
     border-radius: 2px;
 }
 
-.nbx-rd-name-input:focus {
-    /* Sit above neighbouring tiles while editing so the field is fully usable. */
-    position: relative;
-    z-index: 3;
+/* Editing state: the pencil pops the input OUT over the tile so it's fully
+   usable even on a 1U-tall add (where an inline field would be clipped). The
+   content's overflow is lifted and the whole item is raised above its
+   neighbours for the duration of the edit. */
+.grid-stack-item-content.nbx-rd-editing {
+    overflow: visible;
+}
+
+.grid-stack-item.nbx-rd-editing-item {
+    z-index: 20;
+}
+
+.grid-stack-item-content.nbx-rd-editing > .nbx-rd-name-input {
+    display: block;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 1.35rem;
+    line-height: 1.35rem;
+    z-index: 20;
+}
+
+/* Pencil affordance: bottom-LEFT corner so it never collides with the × (which
+   sits top-right and, on a 1U tile, would otherwise share the same corner). The
+   PDU flash is top-left, so bottom-left stays clear of it too. Hover-revealed
+   like the × so the tile stays clean. */
+.nbx-rd-name-edit-btn {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 15px;
+    height: 15px;
+    line-height: 15px;
+    padding: 0;
+    border: none;
+    border-radius: 0 4px 0 2px;
+    background-color: rgba(var(--tblr-secondary-rgb, 108, 117, 125), 0.8);
+    color: #fff;
+    font-size: 10px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s ease-in-out;
+    z-index: 2;
+}
+
+.grid-stack-item-content:hover > .nbx-rd-name-edit-btn,
+.grid-stack-item-content.nbx-rd-editing > .nbx-rd-name-edit-btn {
+    opacity: 1;
+}
+
+.nbx-rd-name-edit-btn .mdi {
+    font-size: 10px;
+    line-height: 15px;
+    vertical-align: middle;
 }
 
 /* Non-blocking "name already exists in site" badge, top-left so it never overlaps
