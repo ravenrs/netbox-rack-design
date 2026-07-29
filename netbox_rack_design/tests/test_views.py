@@ -4,6 +4,7 @@ from dcim.models import Rack, Site
 from django.urls import reverse
 from utilities.testing import TestCase, ViewTestCases, create_tags
 
+from .. import views
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..forms import DesignForm
 from ..models import Design, DesignGroup, DesignPlacement, HiddenDesignRack
@@ -90,6 +91,46 @@ class DesignTest(ViewTestCases.PrimaryObjectViewTestCase):
             "status": DesignStatusChoices.STATUS_REJECTED,
             "summary": "Bulk-edited summary",
         }
+
+
+class PlacementCountAnnotationTest(TestCase):
+    """
+    Regression: the Designs and DesignGroups list views must annotate the
+    LinkedCountColumn accessors (``placement_count`` / ``design_count``). Without
+    the annotation the "Placements" / "Designs" columns silently render 0 no
+    matter how many related rows exist (the column reads ``record.placement_count``
+    off the queryset, not a live related-manager count).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        site = env["site"]
+        device_type = env["device_type"]
+        rack = env["racks"][1]
+
+        cls.group = DesignGroup.objects.create(name="Buildout")
+        cls.d1 = Design.objects.create(title="With placements", site=site, group=cls.group)
+        cls.d2 = Design.objects.create(title="Also grouped", site=site, group=cls.group)
+
+        for u in (1, 2, 3):
+            DesignPlacement.objects.create(
+                design=cls.d1,
+                kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=device_type,
+                target_rack=rack,
+                target_position=u,
+                target_face="front",
+            )
+
+    def test_design_list_annotates_placement_count(self):
+        qs = views.DesignListView.queryset
+        self.assertEqual(qs.get(pk=self.d1.pk).placement_count, 3)
+        self.assertEqual(qs.get(pk=self.d2.pk).placement_count, 0)
+
+    def test_group_list_annotates_design_count(self):
+        qs = views.DesignGroupListView.queryset
+        self.assertEqual(qs.get(pk=self.group.pk).design_count, 2)
 
 
 class DesignFormTest(TestCase):

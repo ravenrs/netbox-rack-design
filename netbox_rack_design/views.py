@@ -13,6 +13,7 @@ from django_tables2 import RequestConfig
 from netbox.plugins import get_plugin_config
 from netbox.views import generic
 from utilities.paginator import EnhancedPaginator, get_paginate_count
+from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
 from . import filtersets, forms, models, projection, tables
@@ -44,7 +45,9 @@ class DesignGroupView(generic.ObjectView):
 
 @register_model_view(models.DesignGroup, "list", path="", detail=False)
 class DesignGroupListView(generic.ObjectListView):
-    queryset = models.DesignGroup.objects.all()
+    queryset = models.DesignGroup.objects.annotate(
+        design_count=count_related(models.Design, "group"),
+    )
     table = tables.DesignGroupTable
     filterset = filtersets.DesignGroupFilterSet
     filterset_form = forms.DesignGroupFilterForm
@@ -475,7 +478,9 @@ class DesignEditorDefaultView(generic.ObjectView):
 
 @register_model_view(models.Design, "list", path="", detail=False)
 class DesignListView(generic.ObjectListView):
-    queryset = models.Design.objects.all()
+    queryset = models.Design.objects.annotate(
+        placement_count=count_related(models.DesignPlacement, "design"),
+    )
     table = tables.DesignTable
     filterset = filtersets.DesignFilterSet
     filterset_form = forms.DesignFilterForm
