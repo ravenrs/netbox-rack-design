@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-07-29
+
+### Release Summary
+
+Bug-fix release. The "Placements" column on the Designs list (and the "Designs"
+column on the Design Groups list) always showed 0, regardless of the real number
+of related records. The list views now annotate the counts the tables display.
+
+### Fixed
+- **Designs / Design Groups list counts no longer show 0.** The `DesignListView`
+  and `DesignGroupListView` querysets now annotate `placement_count` /
+  `design_count` (via `count_related`), which the `LinkedCountColumn` reads —
+  previously the columns rendered 0 for every row because the accessor was never
+  annotated. This also fixes the embedded designs table on a Design Group's detail
+  page (rendered through the same design list).
+
 ## [0.13.3] - 2026-07-23
 
 ### Release Summary

@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.13.3"
+__version__ = "0.13.4"
 
 
 from netbox.plugins import PluginConfig
