@@ -34,10 +34,43 @@ Two patterns worth stealing:
 
 import re
 
+from extras.scripts import Script
+
 # ABSOLUTE imports (not ``from .naming``) so this file keeps working verbatim
 # when COPIED out of the package into NetBox's SCRIPTS_ROOT -- a relative import
 # would break there (there is no ``scripts.naming``). See docs/device-naming.md.
 from netbox_rack_design.naming import pending_names
+
+
+class DeviceNamingScript(Script):
+    """First-class NetBox Script so this example is addable/editable from the UI.
+
+    Add it via **Customization -> Scripts -> Add** (or drop this file into
+    ``SCRIPTS_ROOT``) and it registers as a real Script you can open and edit
+    through the **Edit** button -- no wrapper to hand-write. Point the plugin at
+    it with ``"naming_script": "scripts.<module>.build_name"`` and it drives
+    naming live; edits here take effect on the next name preview with no restart.
+
+    ``run()`` is intentionally a no-op: naming isn't *executed* as a batch job --
+    the plugin calls the module-level :func:`build_name` for every palette add or
+    moved device to PREVIEW a name. That call is strictly read-only (it computes
+    a string and never writes to ``dcim``); "read-only" refers to DCIM, not to
+    this script, which stays fully editable.
+    """
+
+    class Meta:
+        name = "Rack Design device naming (example)"
+        description = (
+            "Example naming convention for the rack-design editor. Edit here to "
+            "change how planned devices are named; the plugin calls build_name() "
+            "to preview names and never writes to DCIM."
+        )
+
+    def run(self, data, commit):
+        self.log_info(
+            "Naming convention for the rack-design editor. The plugin calls this "
+            "module's build_name() to preview names; there is nothing to run here."
+        )
 
 
 def _family_names(placement, prefix):

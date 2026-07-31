@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-31
+
+### Release Summary
+
+Feature release for the shipped naming/distribution examples. The example modules
+(`naming_example`, `distribution_example`, `distribution_advanced_example`) now each
+carry a small `extras.scripts.Script` subclass, so they register as first-class
+NetBox Scripts: you can add them straight through **Customization → Scripts → Add**
+(or by dropping the file into `SCRIPTS_ROOT`) and open/edit them via the **Edit**
+button, instead of hand-wrapping the example before it will appear. The naming logic
+is unchanged — the plugin still calls the module-level `build_name` / `build`
+directly, and those remain strictly read-only over DCIM.
+
+### Added
+- **Example scripts are now addable/editable from the UI.** `naming_example.py`,
+  `distribution_example.py`, and `distribution_advanced_example.py` each ship a
+  thin `Script` subclass (`DeviceNamingScript` / `PowerDistributionScript` /
+  `PowerDistributionAdvancedScript`) whose `run()` is a documented no-op — the
+  class exists only so NetBox lists the module under Customization → Scripts, where
+  it can be viewed and edited. Referencing the example (`scripts.<module>.build_name`
+  / `.build`) drives naming/distribution live, with edits picked up on the next
+  preview and no restart. See [docs/device-naming.md](docs/device-naming.md).
+
 ## [0.13.5] - 2026-07-29
 
 ### Release Summary

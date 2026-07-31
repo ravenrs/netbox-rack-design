@@ -69,6 +69,8 @@ per docs/pdu-distribution-spec.md Sec 6.5). Returns the ``Distribution`` dict
 
 import logging
 
+from extras.scripts import Script
+
 # ABSOLUTE imports so this file keeps working verbatim if COPIED out of the
 # package into NetBox's SCRIPTS_ROOT (a relative import would break there).
 from netbox.plugins import get_plugin_config
@@ -91,6 +93,34 @@ from netbox_rack_design.distribution_example import (
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "netbox_rack_design"
+
+
+class PowerDistributionAdvancedScript(Script):
+    """First-class NetBox Script so this advanced example is addable/editable
+    from the UI (Customization -> Scripts -> Add / Edit), same as
+    :class:`netbox_rack_design.distribution_example.PowerDistributionScript`.
+
+    Point the plugin at it with
+    ``"distribution_script": "scripts.<module>.build"``; the plugin calls the
+    module-level :func:`build` while projecting a rack's power. ``run()`` is a
+    no-op (distribution isn't batch-run); ``build`` is strictly read-only over
+    ``dcim`` -- "read-only" refers to DCIM, not to this editable script.
+    """
+
+    class Meta:
+        name = "Rack Design power distribution — advanced (example)"
+        description = (
+            "Advanced example per-PDU/per-bank power-distribution logic (topology "
+            "scheme label, per-PDU override, config-driven thresholds). Edit here; "
+            "the plugin calls build() to project power and never writes to DCIM."
+        )
+
+    def run(self, data, commit):
+        self.log_info(
+            "Advanced power-distribution logic for the rack-design heatmap. The "
+            "plugin calls this module's build() while projecting; nothing to run."
+        )
+
 
 # Default bank utilization thresholds, used only when the site hasn't set the
 # power_warn_pct/power_critical_pct plugin config keys (spec Sec 3, "state"
