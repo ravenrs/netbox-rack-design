@@ -406,8 +406,16 @@ the NetBox UI).
 `projection.project_rack` calls `generate_distribution(elevation)` while building
 the `power` bundle and attaches the `Distribution` (or omits on `None`) as
 `power["distribution"]`, computed **server-side** so editor and read-only
-elevation read identical figures. Recompute cadence = **on load and after Save**;
-no mid-drag live recompute.
+elevation read identical figures.
+
+Recompute cadence in the editor is **live**: the per-bank chip strip refreshes on
+every add/remove/move, like the always-live power bar. Because bank assignment is
+server logic (real cabling / a custom `distribution_script`) the browser must not
+duplicate, the editor re-runs the SAME engine over the unsaved layout via the
+read-only `recompute-distribution` endpoint (§8) — it applies the posted layout
+through the save-layout reconciliation inside a **rolled-back transaction**, so the
+engine sees the live edit but nothing is persisted. First paint (and the read-only
+elevation, which has no editor) uses the static server-rendered figure.
 
 ## 8. API endpoints
 
@@ -423,6 +431,13 @@ All authenticated, read-only w.r.t. `dcim`, with debug logging on entry + result
 - **`GET .../power-source/?kind=rack&rack_id=`** → copy-from-rack prefill: the
   rack's custom fields, read via the `planning_fields["rack"]` `source` paths
   (for rack dialog prefill and copy operations).
+- **`POST .../designs/{id}/recompute-distribution/`** (body = the save-layout
+  payload) → the fresh per-rack `Distribution` for the UNSAVED editor layout,
+  `{"distributions": {"<rack_id>": <Distribution-or-null>}}`. Applies the layout
+  through the save-layout reconciliation inside a **rolled-back transaction** and
+  projects each rack, so it re-runs the real distribution engine live yet persists
+  nothing. Requires only `view` on the design. Drives the editor's live per-bank
+  chip refresh (§7.3).
 - **PDU listing** — the PDU dialog lists a rack's PDUs via the **core dcim API**
   (`GET /api/dcim/devices/?rack_id=<id>&role=pdu&role=unmanageable-pdu`), not a
   plugin endpoint. Enables referencing existing PDU devices for the
@@ -516,7 +531,6 @@ planned), bank/leg, breaker, override applied, and every graceful fallback.
 
 ## 11. Out of scope (v1)
 
-- Live mid-drag distribution recompute.
 - Breaker-trip / inrush / power-factor modeling beyond NetBox's fields.
 - Auto-cabling planned devices in `dcim` (this feature is preview-only and never
   writes cable connections).

@@ -5139,15 +5139,48 @@
         });
     }
 
-    function doSave() {
-        clearAllErrors();
-        // The save URL encodes the Design pk; SaveLayoutSerializer also accepts
-        // it in the body. Build a payload keyed by rack — one slice per rack.
-        var m = saveUrl.match(/designs\/(\d+)\//);
-        var payload = {
+    // The save URL encodes the Design pk; SaveLayoutSerializer also accepts it in
+    // the body. Build a payload keyed by rack — one slice per rack. Shared by the
+    // save flow AND the live per-bank recompute below so both send an identical
+    // payload (no second serializer to drift).
+    function buildLayoutPayload() {
+        var m = saveUrl ? saveUrl.match(/designs\/(\d+)\//) : null;
+        return {
             design_id: m ? parseInt(m[1], 10) : null,
             racks: rackControllers.map(function (c) { return c.buildRackPayload(); }),
         };
+    }
+
+    // POST the CURRENT (unsaved) layout to the read-only recompute-distribution
+    // endpoint, which re-runs the server distribution engine (builtin or a custom
+    // distribution_script) over the live layout and returns the fresh per-rack
+    // Distribution WITHOUT persisting anything. This is what lets the editor's
+    // per-bank chips refresh live on every edit, exactly like the always-live
+    // total power bar, using the very same engine as Save. Resolves to
+    // {"<rackId>": <distribution-or-null>, ...} or null on any failure (the
+    // caller then keeps the last-known distribution rather than blanking).
+    var recomputeDistUrl = saveUrl
+        ? saveUrl.replace(/save-layout\/?$/, "recompute-distribution/") : "";
+    function recomputeDistribution() {
+        if (!recomputeDistUrl) { return Promise.resolve(null); }
+        return fetch(recomputeDistUrl, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCsrfToken(),
+            },
+            body: JSON.stringify(buildLayoutPayload()),
+        }).then(function (response) {
+            return response.ok ? response.json() : null;
+        }).then(function (data) {
+            return (data && data.distributions) ? data.distributions : null;
+        }).catch(function () { return null; });
+    }
+
+    function doSave() {
+        clearAllErrors();
+        var payload = buildLayoutPayload();
 
         if (saveButton) { saveButton.setAttribute("disabled", "disabled"); }
 
@@ -5679,6 +5712,10 @@
         // read back the per-rack save payload without simulating a full
         // GridStack drag.
         rackControllers: rackControllers,
+        // Live per-bank distribution: power_heatmap.js calls this (debounced, on
+        // the same mutation signal that drives the power bar) to re-run the server
+        // distribution engine over the unsaved layout. Read-only, never persists.
+        recomputeDistribution: recomputeDistribution,
         looksLikePdu: looksLikePdu,
         showPduPowerDialog: showPduPowerDialog,
         showRackPowerDialog: showRackPowerDialog,

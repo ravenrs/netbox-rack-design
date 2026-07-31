@@ -124,7 +124,7 @@ class DesignViewSet(NetBoxModelViewSet):
         action = getattr(self, "action", None)
         if action in ("save_layout", "add_rack", "remove_rack", "rack_power", "planned_feed"):
             return [ChangeDesignPermissions()]
-        if action in ("preview_name", "power_source", "feeds"):
+        if action in ("preview_name", "power_source", "feeds", "recompute_distribution"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -201,6 +201,96 @@ class DesignViewSet(NetBoxModelViewSet):
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
         )
+
+    @action(detail=True, methods=["post"], url_path="recompute-distribution")
+    def recompute_distribution(self, request, pk=None):
+        """
+        Recompute per-rack power distribution for a PROSPECTIVE (unsaved) editor
+        layout, WITHOUT persisting anything.
+
+        The per-bank distribution is produced by the server-side distribution
+        engine (builtin or a custom ``distribution_script``) reading the design's
+        placements + real cabling -- the SAME computation that runs on save. To
+        make the editor's per-bank chips refresh LIVE (like the always-live total
+        power bar) rather than only on Save, this action applies the posted live
+        layout through the exact ``save-layout`` reconciliation inside a
+        transaction, projects each submitted rack, and then ROLLS THE TRANSACTION
+        BACK -- so the engine sees the live edits but nothing is written.
+
+        Body: identical to ``save-layout`` (:class:`SaveLayoutSerializer`), so the
+        editor reuses its existing per-rack save payload.
+
+        Returns ``{"distributions": {"<rack_id>": <distribution-json-or-null>}}``.
+        Performs NO writes (read-only preview; requires only ``view`` on the
+        design).
+
+        URL name: plugins-api:netbox_rack_design-api:design-recompute-distribution
+        Path:     /api/plugins/rack-design/designs/<pk>/recompute-distribution/
+        """
+        # Read-only preview: scope to designs this user may view.
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        body = SaveLayoutSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        # State the reconciliation helpers rely on (mirrors save_layout). We never
+        # inspect the resulting ids/flags here -- the whole transaction is rolled
+        # back below -- but _reconcile_item reads _batch_vacated_device_ids so its
+        # collision view matches the projected layout.
+        errors = []
+        desired_placement_ids = set()
+        self._made_db_change = False
+        self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
+
+        distributions = {}
+        with transaction.atomic():
+            for rack_data in data["racks"]:
+                rack_id = rack_data["rack_id"]
+                rack = Rack.objects.filter(pk=rack_id).first()
+                if rack is None:
+                    distributions[str(rack_id)] = None
+                    continue
+                items = []
+                for face_key in ("front", "rear", "other"):
+                    for item in rack_data.get(face_key, []):
+                        items.append((face_key, item))
+                for face_key, item in items:
+                    # A single mid-edit item that fails to reconcile (transient
+                    # collision, etc.) must not poison the whole recompute: apply
+                    # each in a savepoint and skip on failure. Collisions are only
+                    # appended to ``errors`` (never raised) and are ignored here --
+                    # this is a preview, not a save.
+                    try:
+                        with transaction.atomic():
+                            self._reconcile_item(
+                                design, rack, face_key, item, errors,
+                                desired_placement_ids,
+                            )
+                    except Exception:  # noqa: BLE001 - preview must never 500
+                        logger.debug(
+                            "recompute_distribution: item skipped rack=%s item=%r",
+                            rack_id, item, exc_info=True,
+                        )
+
+            # Project each submitted rack against the transient (uncommitted)
+            # layout. project_rack re-queries design.placements, so it sees the
+            # rows just reconciled inside this transaction.
+            for rack_data in data["racks"]:
+                rack_id = rack_data["rack_id"]
+                if str(rack_id) in distributions:
+                    continue  # rack did not exist
+                rack = Rack.objects.get(pk=rack_id)
+                elevation = projection.project_rack(design, rack)
+                distributions[str(rack_id)] = elevation.power.get("distribution")
+
+            # Read-only: discard every transient placement. Must be the LAST DB
+            # action in this atomic block (no ORM use is allowed after it).
+            transaction.set_rollback(True)
+
+        return Response({"distributions": distributions}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="add-rack")
     def add_rack(self, request, pk=None):
