@@ -277,26 +277,16 @@ the next name preview.
 #### Variant 1 — through the UI (Customization → Scripts → Add)
 
 Use this to view and edit the convention from the NetBox UI. NetBox lists a
-module under Scripts only when it contains an `extras.scripts.Script` subclass,
-so wrap the example with a tiny one (the plugin still calls the module-level
-`build_name` directly — the `Script` class is only there for UI presence, and
-`build_name` must stay read-only):
+module under Scripts only when it contains an `extras.scripts.Script` subclass —
+and the shipped `naming_example.py` **already includes one** (`DeviceNamingScript`),
+purely so the module appears under Scripts. The plugin still calls the module-level
+`build_name` directly; the `Script` class's `run()` is a no-op and `build_name`
+stays read-only. So there's nothing to hand-wrap:
 
-```python
-from extras.scripts import Script
-
-class DeviceNamingScript(Script):
-    class Meta:
-        name = "Rack Design device naming"
-    def run(self, data, commit):
-        self.log_info("Naming convention for the rack-design editor; nothing to run.")
-
-# ... paste the helpers and build_name() from naming_example.py below ...
-```
-
-**Customization → Scripts → Add**, name the module `device_naming` (to match the
-config path above), and paste the wrapped script. No restart — reopen a design
-and the new names appear immediately. Edit it later the same way.
+**Customization → Scripts → Add**, name the module to match your `naming_script`
+config path (e.g. `naming_example` for `scripts.naming_example.build_name`), and
+paste the file's contents. No restart — reopen a design and the new names appear
+immediately; edit it later via the **Edit** button the same way.
 
 #### Variant 2 — copy the file into `SCRIPTS_ROOT`
 

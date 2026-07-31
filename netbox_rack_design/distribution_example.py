@@ -55,6 +55,8 @@ generic names needs no ``planning_fields`` config at all (the shipped default,
 
 import logging
 
+from extras.scripts import Script
+
 # ABSOLUTE imports so this file keeps working verbatim if COPIED out of the
 # package into NetBox's SCRIPTS_ROOT (a relative import would break there).
 # ``netbox_rack_design.distribution`` stays importable regardless of where THIS
@@ -71,6 +73,38 @@ from netbox_rack_design.distribution import (
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "netbox_rack_design"
+
+
+class PowerDistributionScript(Script):
+    """First-class NetBox Script so this example is addable/editable from the UI.
+
+    Add it via **Customization -> Scripts -> Add** (or drop this file into
+    ``SCRIPTS_ROOT``) and it registers as a real Script you can open and edit
+    through the **Edit** button. Point the plugin at it with
+    ``"distribution_script": "scripts.<module>.build"`` and it drives the per-PDU
+    /per-bank power distribution live; edits here take effect on the next
+    projection with no restart.
+
+    ``run()`` is intentionally a no-op: distribution isn't *executed* as a batch
+    job -- the plugin calls the module-level :func:`build` while projecting a
+    rack's power. That call is strictly read-only (it computes a Distribution
+    dict and never writes to ``dcim``); "read-only" refers to DCIM, not to this
+    script, which stays fully editable.
+    """
+
+    class Meta:
+        name = "Rack Design power distribution (example)"
+        description = (
+            "Example per-PDU/per-bank power-distribution logic for the "
+            "rack-design heatmap. Edit here to change how load is distributed; "
+            "the plugin calls build() to project power and never writes to DCIM."
+        )
+
+    def run(self, data, commit):
+        self.log_info(
+            "Power-distribution logic for the rack-design heatmap. The plugin "
+            "calls this module's build() while projecting; nothing to run here."
+        )
 
 # Roles that never consume rack-bank power (parity with the internal calc and
 # with distribution.build_native's SKIP_ROLE_SLUGS).
