@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-31
+
+### Release Summary
+
+Feature release making the editor's per-PDU/per-bank power distribution **live**. The
+PDU bank chips (and the bank heat-tint) previously recomputed only when you pressed
+Save, while the total power bar updated in real time — so an edit left the two power
+views disagreeing until a save. Now the bank distribution recomputes on every
+add/remove/move, exactly like the bar. Rather than duplicate the distribution logic
+in the browser (bank assignment depends on real cabling and, in script mode, a custom
+`distribution_script`), the editor re-runs the very same server engine over the
+unsaved layout through a new read-only endpoint that applies the edit inside a
+rolled-back transaction — live figures, nothing persisted. The bank chip strip is now
+always visible (not gated on the heatmap toggle). Read-only over DCIM throughout.
+
+### Added
+- **Live per-bank power distribution in the editor.** The PDU bank chips now refresh
+  on every tile add/remove/move, matching the always-live power bar. A new read-only
+  `POST /api/plugins/rack-design/designs/<id>/recompute-distribution/` action re-runs
+  the distribution engine (builtin or a custom `distribution_script`) over the current
+  unsaved layout — applying it through the save-layout reconciliation inside a
+  rolled-back transaction — and returns the fresh per-rack distribution without
+  persisting anything. The per-bank chip strip is now always-on. See
+  [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md).
+
+### Fixed
+- **The "Power heatmap" toggle now survives a Save.** Saving reloads the editor, which
+  previously reset the heatmap toggle to off, forcing you to re-enable it after every
+  save. The toggle state is now remembered and restored on load.
+
 ## [0.14.0] - 2026-07-31
 
 ### Release Summary

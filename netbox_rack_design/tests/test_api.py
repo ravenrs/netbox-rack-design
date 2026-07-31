@@ -1,6 +1,19 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
-from dcim.models import Device, PowerFeed, PowerPanel, Rack, Site
+from dcim.choices import PowerFeedPhaseChoices
+from dcim.models import (
+    Cable,
+    Device,
+    DeviceRole,
+    DeviceType,
+    Manufacturer,
+    PowerFeed,
+    PowerOutlet,
+    PowerPanel,
+    PowerPort,
+    Rack,
+    Site,
+)
 from django.test import override_settings
 from django.urls import reverse
 from rest_framework import status
@@ -1119,6 +1132,124 @@ def _plugins_config(**overrides):
     }
     cfg.update(overrides)
     return {"netbox_rack_design": cfg}
+
+
+@override_settings(PLUGINS_CONFIG=_plugins_config(distribution_mode="builtin"))
+class RecomputeDistributionTest(APITestCase):
+    """
+    Tests for the DesignViewSet recompute-distribution action.
+
+    The endpoint re-runs the server distribution engine over an UNSAVED editor
+    layout so the editor's per-bank chips can refresh LIVE (like the always-live
+    power bar) instead of only on Save. It is read-only: it applies the posted
+    layout through the save-layout reconciliation inside a rolled-back
+    transaction, so the engine sees the live edit but NOTHING is persisted
+    (docs/pdu-distribution-spec.md).
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = Site.objects.create(name="Dist Site", slug="dist-site")
+        cls.mfr = Manufacturer.objects.create(name="Mfr D", slug="mfr-d")
+        cls.rack = Rack.objects.create(name="Rack D", site=cls.site, u_height=10)
+
+        panel = PowerPanel.objects.create(site=cls.site, name="Panel D")
+        # 230 V x 32 A single-phase -> 7360 W feed; split across 2 banks -> 3680 W.
+        cls.feed = PowerFeed.objects.create(
+            power_panel=panel, name="Feed D", voltage=230, amperage=32,
+            phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+
+        # A real PDU cabled to the feed, with outlets in bank 1 (1/1) and bank 2
+        # (2/1, 2/2). Bank id = the first segment of the outlet port name.
+        pdu_role = DeviceRole.objects.create(name="PDU", slug="pdu")
+        pdu_type = DeviceType.objects.create(
+            manufacturer=cls.mfr, model="PDU D", slug="pdu-d", u_height=0,
+        )
+        cls.pdu = Device.objects.create(
+            name="pdu-d-1", device_type=pdu_type, site=cls.site, rack=cls.rack,
+            role=pdu_role, status="active",
+        )
+        outlets = {
+            nm: PowerOutlet.objects.create(device=cls.pdu, name=nm)
+            for nm in ("1/1", "2/1", "2/2")
+        }
+        pdu_input = PowerPort.objects.create(device=cls.pdu, name="Input")
+        Cable(a_terminations=[pdu_input], b_terminations=[cls.feed]).save()
+
+        # Two single-PSU 1000 W consumers, BOTH cabled to bank 2 (outlets 2/1, 2/2).
+        cons_type = DeviceType.objects.create(
+            manufacturer=cls.mfr, model="Srv D", slug="srv-d", u_height=1,
+            is_full_depth=False,
+        )
+        cons_role = DeviceRole.objects.create(name="Server", slug="server")
+        cls.consumers = {}
+        for name, pos, outlet_name in (("cons-a", 1, "2/1"), ("cons-b", 2, "2/2")):
+            dev = Device.objects.create(
+                name=name, device_type=cons_type, site=cls.site, rack=cls.rack,
+                role=cons_role, status="active", position=pos, face="front",
+            )
+            psu = PowerPort.objects.create(device=dev, name="PSU1", allocated_draw=1000)
+            Cable(a_terminations=[psu], b_terminations=[outlets[outlet_name]]).save()
+            cls.consumers[name] = dev
+
+        cls.design = Design.objects.create(title="Dist design", site=cls.site)
+
+    def _url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-recompute-distribution",
+            kwargs={"pk": self.design.pk},
+        )
+
+    def _bank2_load(self, data):
+        bank = data["distributions"][str(self.rack.pk)]["pdus"]["pdu-d-1"]["banks"]["2"]
+        return bank["allocated_power"] + bank["planned_power"]
+
+    def _existing(self, dev, pos):
+        return {"kind": "existing", "device_id": dev.pk, "u_position": pos, "face": "front"}
+
+    def test_recompute_reflects_removal_without_persisting(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        a, b = self.consumers["cons-a"], self.consumers["cons-b"]
+
+        # Baseline: no edits -> bank 2 carries BOTH consumers (2 x 1000 = 2000 W).
+        base = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk, "racks": [
+                {"rack_id": self.rack.pk, "front": [self._existing(a, 1), self._existing(b, 2)]},
+            ]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(base, status.HTTP_200_OK)
+        self.assertEqual(self._bank2_load(base.data), 2000)
+
+        # Flag cons-b for removal -> bank 2 drops to 1000 W, with no Save.
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk, "racks": [
+                {"rack_id": self.rack.pk, "front": [
+                    self._existing(a, 1),
+                    {"kind": "remove", "device_id": b.pk, "face": "front"},
+                ]},
+            ]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+        self.assertEqual(self._bank2_load(resp.data), 1000)
+
+        # The whole point: NOTHING was persisted -- it is a pure preview.
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_recompute_requires_view_permission(self):
+        # No permission granted -> 403 (POST maps to view_design for this action).
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk, "racks": []},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_403_FORBIDDEN)
 
 
 class PreviewNameTest(APITestCase):

@@ -8,13 +8,24 @@
  * rack block drives the live update (tiles added/removed/reparented, or flagged
  * for removal).
  *
- * Two views:
+ * Three views:
  *   - Always on: the per-rack power bar (draw / capacity / util%, ok/warn/
- *     critical), recomputed live.
+ *     critical), recomputed live from the tiles' own draw.
+ *   - Always on: the per-PDU/bank distribution chip strip (docs/pdu-
+ *     distribution-spec.md). Unlike the bar, WHICH bank a device's draw lands in
+ *     is decided by the server distribution engine (real cabling / a custom
+ *     distribution_script) -- logic the browser must not duplicate. So on the
+ *     SAME mutation signal, the editor re-runs that engine over the unsaved
+ *     layout via the read-only recompute-distribution endpoint (see
+ *     requestLiveDistribution + NbxRdEditor.recomputeDistribution) and this file
+ *     re-renders the chips from the fresh result -- live, but nothing persisted.
+ *     On the read-only elevation (no editor present) the chips show the static
+ *     server-rendered distribution and simply do not live-update.
  *   - Toggle "Power heatmap": per-device consumption "health bar" filled
  *     left->right to the device's share of the rack's BIGGEST consumer
- *     (biggest = 100% red, others proportionally toward green). Off restores
- *     the normal styling exactly.
+ *     (biggest = 100% red, others proportionally toward green), or, in
+ *     distribution mode, tinted by the load-vs-breaker of the device's bank.
+ *     Off restores the normal styling exactly (the chip strip stays).
  *
  * Read-only: pure view layer -- no widget state, no dirty flag, nothing saved.
  * (A freshly-dropped palette add also counts live: the catalog palette fetches
@@ -23,6 +34,10 @@
  */
 (function () {
     "use strict";
+
+    // localStorage key remembering the "Power heatmap" toggle so it survives the
+    // page reload a Save triggers (user 2026-07-31).
+    var HEATMAP_PREF_KEY = "nbxRdPowerHeatmap";
 
     // Dev-only tracer, shared with editor.js (window.__rdTrace, gated on a dev
     // build + the __rdDragTrace toggle; inert otherwise). Lets the heatmap's
@@ -84,12 +99,22 @@
     // darker than the gradient's top so an overload reads as more than "100%".
     var OVERLOAD_COL = "#b01919";
 
-    // ---- distribution model (docs/pdu-distribution-spec.md, script mode) -----
+    // ---- distribution model (docs/pdu-distribution-spec.md) -----------------
 
-    // Parse the per-rack Distribution JSON the server emits in script mode
-    // (`#rd-distribution-<rackId>`), or null when absent (none mode) / invalid.
+    // Live per-rack Distribution cache: {rackId: Distribution|null}, filled by the
+    // debounced server recompute (requestLiveDistribution) so the per-bank chips
+    // refresh as tiles change, exactly like the power bar. Empty until the first
+    // edit -- the initial paint uses the server-rendered static blob below.
+    var liveDist = {};
+
+    // The Distribution for a rack: the live-recomputed one if we have it (any edit
+    // has happened), else the static JSON the server emitted at render time
+    // (`#rd-distribution-<rackId>`). null = no resolvable PDUs (per-device heatmap).
     function readDistribution(block) {
         var rackId = block.getAttribute("data-rack-id") || "";
+        if (Object.prototype.hasOwnProperty.call(liveDist, rackId)) {
+            return liveDist[rackId];
+        }
         var el = document.getElementById("rd-distribution-" + rackId);
         if (!el) { return null; }
         try {
@@ -274,7 +299,8 @@
                 tile.classList.remove("nbx-rd-heat-unknown",
                     "nbx-rd-feed-a", "nbx-rd-feed-b");
             });
-            renderDistLegend(block, null);
+            // The bank chip strip is always-on (rendered by recomputeAll); the
+            // heatmap toggle only controls the per-tile tint, so leave it in place.
             if (trace) { rdT("apply", { rackId: rackId, on: false }); }
             return;
         }
@@ -290,7 +316,6 @@
         // lands on (not its own rack share). Absent -> the per-device path.
         var dist = readDistribution(block);
         var banksIdx = dist ? indexBanks(dist) : null;
-        renderDistLegend(block, dist);
         if (trace) {
             rdT("apply", {
                 rackId: rackId, on: true, countingTiles: tiles.length,
@@ -408,9 +433,43 @@
         var on = heatmapOn();
         blocks.forEach(function (block) {
             updateBar(block);
+            // The per-bank chip strip is always-on (like the power bar), rendered
+            // from readDistribution() which prefers the live-recomputed cache.
+            renderDistLegend(block, readDistribution(block));
             if (on) { applyHeat(block, true); }
         });
         observers.forEach(function (o, i) { o.observe(blocks[i], OBS_OPTS); });
+    }
+
+    // ---- live per-bank distribution (server round-trip, no persist) ---------
+    //
+    // The bar sums each tile's own draw locally, but the per-bank distribution is
+    // produced by the server engine (builtin or a custom distribution_script)
+    // reading real cabling/ports -- logic the browser must not duplicate. So on
+    // the SAME mutation signal that drives the bar, we ask the editor to re-run
+    // that engine over the unsaved layout (recompute-distribution endpoint), cache
+    // the result in liveDist, and re-render. Debounced + sequenced so only the
+    // freshest response wins; a null result keeps the last-known distribution.
+    var liveDistPending = null;
+    var liveDistSeq = 0;
+    function requestLiveDistribution() {
+        var editor = window.NbxRdEditor;
+        if (!editor || typeof editor.recomputeDistribution !== "function") { return; }
+        if (liveDistPending) { window.clearTimeout(liveDistPending); }
+        liveDistPending = window.setTimeout(function () {
+            liveDistPending = null;
+            var seq = ++liveDistSeq;
+            editor.recomputeDistribution().then(function (dists) {
+                // Drop a stale response (a newer edit already fired) or a null one
+                // (the request failed) -- never blank the chips on a hiccup.
+                if (seq !== liveDistSeq || !dists) { return; }
+                Object.keys(dists).forEach(function (rackId) {
+                    var d = dists[rackId];
+                    liveDist[rackId] = (d && d.pdus) ? d : null;
+                });
+                recomputeAll();
+            });
+        }, 200);
     }
 
     function scheduleRecompute() {
@@ -419,6 +478,10 @@
             pending = null;
             recomputeAll();
         }, 80);
+        // Kick the server recompute off the raw mutation (its own longer debounce),
+        // NOT from recomputeAll -- recomputeAll writes DOM with observers detached,
+        // so applying the result never re-triggers this and cannot loop.
+        requestLiveDistribution();
     }
 
     function initObservers() {
@@ -510,9 +573,27 @@
     function init() {
         initObservers();
         initHover();
+        // Paint the always-on power bar + per-bank chip strip once from the
+        // server-rendered static distribution, before any edit (which then swaps
+        // in live-recomputed numbers). Uses no server round-trip.
+        recomputeAll();
         var toggle = document.querySelector("[data-rd-power-heatmap]");
         if (toggle) {
-            toggle.addEventListener("change", function () { applyHeatAll(toggle.checked); });
+            // Remember the on/off choice so a Save -- which reloads the page --
+            // does NOT silently switch the heatmap off, forcing the user to
+            // re-enable it every time (user 2026-07-31).
+            try {
+                if (window.localStorage.getItem(HEATMAP_PREF_KEY) === "1") {
+                    toggle.checked = true;
+                }
+            } catch (e) { /* storage unavailable -- fall back to the default */ }
+            toggle.addEventListener("change", function () {
+                try {
+                    window.localStorage.setItem(
+                        HEATMAP_PREF_KEY, toggle.checked ? "1" : "0");
+                } catch (e) { /* ignore */ }
+                applyHeatAll(toggle.checked);
+            });
             if (toggle.checked) { applyHeatAll(true); }
         }
     }
