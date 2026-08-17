@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-08-17
+
+### Release Summary
+
+Bug-fix release: the in-app documentation ("?") help link on the plugin's object
+detail pages now resolves. NetBox's default `docs_url` points at
+`/static/docs/models/…`, which only exists for NetBox's own core docs — a plugin's
+docs are not built into that path, so the help link 404'd. Following the plugin
+developer guide (Database Models: *"Plugin models can override this to return a
+custom URL … your plugin's documentation"*), the models now override `docs_url` to
+the plugin's hosted docs site.
+
+### Fixed
+- **In-app documentation link.** `Design`, `DesignGroup`, and `DesignPlacement` now
+  override `docs_url` to point at the hosted docs
+  (https://ravenrs.github.io/netbox-rack-design/), so the object detail page's help
+  link opens the documentation instead of returning a 404.
+
 ## [0.15.0] - 2026-07-31
 
 ### Release Summary
