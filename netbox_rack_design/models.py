@@ -29,6 +29,15 @@ __all__ = (
     "HiddenDesignRack",
 )
 
+# The plugin's hosted documentation (MkDocs -> GitHub Pages). NetBoxModel's
+# default ``docs_url`` points at ``/static/docs/models/...``, which only exists
+# for NetBox's OWN core docs -- a plugin's docs are not built into that path. Per
+# the plugin dev guide (Database Models: "Plugin models can override this to
+# return a custom URL ... your plugin's documentation"), each model below
+# overrides ``docs_url`` to this site so the object detail page's help link
+# resolves instead of 404ing. Kept in sync with ``mkdocs.yml`` ``site_url``.
+DOCS_BASE_URL = "https://ravenrs.github.io/netbox-rack-design/"
+
 
 class DesignGroup(NetBoxModel):
     """
@@ -58,6 +67,10 @@ class DesignGroup(NetBoxModel):
 
     def get_absolute_url(self):
         return reverse("plugins:netbox_rack_design:designgroup", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
 
     def clean(self):
         super().clean()
@@ -160,6 +173,10 @@ class Design(PrimaryModel):
 
     def get_absolute_url(self):
         return reverse("plugins:netbox_rack_design:design", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
 
     def get_status_color(self):
         return DesignStatusChoices.colors.get(self.status)
@@ -336,6 +353,10 @@ class DesignPlacement(NetBoxModel):
 
     def get_absolute_url(self):
         return reverse("plugins:netbox_rack_design:designplacement", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
 
     def get_kind_color(self):
         return DesignPlacementKindChoices.colors.get(self.kind)
