@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Deterministic Playwright e2e for the per-bank power-distribution heatmap
 (docs/pdu-distribution-spec.md, script mode): when the server emits a
-Distribution for a rack, toggling "Power heatmap" colors the PDU banks (a legend
-of used/breaker chips + overload/alarm), tints each consumer tile by the bank
-load it lands on, and accents its A/B feed leg -- and toggling off restores the
-plain rendering exactly.
+Distribution for a rack, the always-on chip strip shows the PDU banks (a legend
+of used/breaker chips + overload/alarm), and "Power heatmap" tints each consumer
+tile by its OWN draw and accents its A/B feed leg -- toggling off clears the
+per-tile tint while the bank chips stay put.
 
 The distribution normally comes from a site ``distribution_script``; provisioning
 a full PDU/outlet topology on a throwaway rack (and flipping the dev server into
@@ -254,8 +254,8 @@ class EditorDistributionTestCase(unittest.TestCase):
     def _inject_and_toggle(self, on):
         """Inject the Distribution as #rd-distribution-<rackId> and set the
         heatmap toggle. Returns the rendered state read back from the DOM."""
-        return self.page.evaluate(
-            """([dist, rackId, on, hot, cool]) => {
+        self.page.evaluate(
+            """([dist, rackId, on]) => {
                 const block = document.querySelector(
                     '.nbx-rd-rack-block[data-rack-id="'+rackId+'"]')
                     || document.querySelector('.nbx-rd-rack-block');
@@ -269,6 +269,26 @@ class EditorDistributionTestCase(unittest.TestCase):
                 el.textContent = JSON.stringify(dist);
                 const t = document.querySelector('[data-rd-power-heatmap]');
                 t.checked = on; t.dispatchEvent(new Event('change', {bubbles:true}));
+            }""",
+            [self._distribution(), str(self._rack_id), on],
+        )
+        # The chip strip is always-on and painted by the DEBOUNCED mutation-driven
+        # recompute (0.15.0+), not synchronously by the toggle -- so wait for the
+        # injected distribution to land before reading the DOM back.
+        self.page.wait_for_function(
+            """(rackId) => {
+                const block = document.querySelector(
+                    '.nbx-rd-rack-block[data-rack-id="'+rackId+'"]')
+                    || document.querySelector('.nbx-rd-rack-block');
+                return !!(block && block.querySelector('.nbx-rd-dist-chip'));
+            }""",
+            arg=str(self._rack_id),
+        )
+        return self.page.evaluate(
+            """([rackId, hot, cool]) => {
+                const block = document.querySelector(
+                    '.nbx-rd-rack-block[data-rack-id="'+rackId+'"]')
+                    || document.querySelector('.nbx-rd-rack-block');
 
                 function tileFor(name) {
                     return [...block.querySelectorAll('.grid-stack-item')].find(function (ti) {
@@ -286,6 +306,7 @@ class EditorDistributionTestCase(unittest.TestCase):
                 const hotTile = tileFor(hot);
                 const coolTile = tileFor(cool);
                 const hotContent = hotTile && hotTile.querySelector('.grid-stack-item-content');
+                const coolContent = coolTile && coolTile.querySelector('.grid-stack-item-content');
                 return {
                     bodyActive: document.body.classList.contains('nbx-rd-heatmap-active'),
                     legendPresent: !!legend,
@@ -297,10 +318,13 @@ class EditorDistributionTestCase(unittest.TestCase):
                     hotFeedB: hotTile ? hotTile.classList.contains('nbx-rd-feed-b') : null,
                     coolFeed: coolTile ? (coolTile.className.match(/nbx-rd-feed-[ab]/) || [])[0] : null,
                     hotHeatCol: hotContent ? hotContent.style.getPropertyValue('--nbx-rd-heat-col') : null,
+                    hotHeatPct: hotContent ? hotContent.style.getPropertyValue('--nbx-rd-heat-pct') : null,
+                    coolHeatPct: coolContent ? coolContent.style.getPropertyValue('--nbx-rd-heat-pct') : null,
+                    coolHeatCol: coolContent ? coolContent.style.getPropertyValue('--nbx-rd-heat-col') : null,
                     feedTiles: block.querySelectorAll('.nbx-rd-feed-a, .nbx-rd-feed-b').length,
                 };
             }""",
-            [self._distribution(), str(self._rack_id), on, self._hot_name, self._cool_name],
+            [str(self._rack_id), self._hot_name, self._cool_name],
         )
 
     def test_distribution_heatmap_banks_legend_and_feed_tint(self):
@@ -315,14 +339,28 @@ class EditorDistributionTestCase(unittest.TestCase):
         self.assertTrue(res["hotFeedA"], res)
         self.assertTrue(res["hotFeedB"], res)
         self.assertEqual(res["coolFeed"], "nbx-rd-feed-b", res)
-        # The overloaded device paints the hard-red overload color, not gradient.
-        self.assertEqual(res["hotHeatCol"], "#b01919", res)
+        # A tile is tinted by its OWN draw as a share of the rack's biggest
+        # consumer (0.15.2), NOT by its bank's utilization: the hot device IS
+        # that biggest consumer, so it sits at the red end of the gradient and
+        # fills the tile, while the lighter device stays well below it. Bank
+        # overload is carried by the chips above, not repeated on every tile.
+        # Both devices are the same fixture type (equal draw), so both sit at the
+        # top of the per-device scale and paint IDENTICALLY -- even though the hot
+        # one's bank is overloaded and the cool one's bank is ok. That equality is
+        # the proof the tint follows the device, not the bank.
+        self.assertEqual(res["hotHeatCol"], "hsl(0, 70%, 45%)", res)
+        self.assertEqual(res["coolHeatCol"], res["hotHeatCol"], res)
+        self.assertEqual(res["hotHeatPct"], "100.0%", res)
+        self.assertEqual(res["coolHeatPct"], res["hotHeatPct"], res)
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
     def test_distribution_heatmap_off_restores(self):
         self._inject_and_toggle(True)
         off = self._inject_and_toggle(False)
         self.assertFalse(off["bodyActive"], "heatmap-active not cleared on off")
-        self.assertFalse(off["legendPresent"], "legend not removed on off")
+        # The chip strip is NOT a heatmap opt-in (0.15.2): the toggle governs the
+        # per-tile tint only, so bank health stays on screen when it goes off.
+        self.assertTrue(off["legendPresent"], "bank chip strip must stay visible")
+        self.assertEqual(off["chipCount"], 4, off)
         self.assertEqual(off["feedTiles"], 0, "feed accent classes not cleared on off")
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")

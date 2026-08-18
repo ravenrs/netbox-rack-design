@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-08-18
+
+### Release Summary
+
+Bug-fix release for the editor's power view. Four defects made per-rack and
+per-bank power read wrong in specific topologies: a greenfield rack sized only by
+planned feeds fell back to the flat capacity default and painted itself critical-red
+while its own bank chips read green; the rack chassis kept the colour the page had
+loaded with after a live NetBox theme switch; a cross-rack move dropped the moved
+devices' draw out of both racks' bank chips; and a rack fed only by a B-named feed
+charged single-corded devices nowhere. The per-bank chip strip now also tracks the
+rack block width, so it narrows in step with the Front/Rear face toggles instead of
+sitting as a fixed-width island under the bar.
+
+### Fixed
+- **A greenfield rack's power bar now counts its planned feeds.** `_rack_capacity_w()`
+  only summed real `dcim.PowerFeed` rows, so a rack whose supply exists only as
+  planned `DesignPowerFeed`s fell back to the flat `power_capacity_default_w` — the
+  bar painted the rack critical-red while its own per-bank chips, sized from those
+  same planned feeds, read comfortably green. Planned feeds now contribute at the
+  same derating NetBox applies to a real feed (`POWERFEED_DEFAULT_MAX_UTILIZATION`),
+  so a planned 2 × 230 V × 32 A rack reads 11,776 W just like its provisioned
+  neighbours. The flat default remains the fallback only when a rack has no feeds of
+  either kind.
+- **The rack chassis now follows a live theme switch.** Switching NetBox's colour
+  mode left the rack drawn in the colour the page had LOADED with — a black rack
+  on a white page — until the next reload. NetBox's navbar toggle restyles the
+  page by setting `data-bs-theme` on `<body>` while `<html>` keeps its
+  server-rendered value, so the plugin's palette (declared on `:root` only) never
+  re-resolved. Both palettes are now declared wherever the attribute lands.
+- **A cross-rack move now carries its power into the destination rack's banks.**
+  Dragging devices from one rack to another dropped their draw from the per-bank
+  chips of both racks: a real device keeps its cabling to the SOURCE rack's PDU
+  until the design is implemented, so the destination charged it to a PDU absent
+  from its own topology and skipped it. Cabled attribution is now scoped to PDUs
+  in the rack being computed; cabling that leads elsewhere falls back to
+  U-position attribution, exactly like a planned add. Cabling inside the rack
+  still wins over position.
+- **A rack with no `a` leg no longer swallows single-corded devices.** Leg letters
+  come from the feed names ("Feed B" → `b`), so a rack fed only by a B-named feed
+  had no `a` leg and a single-PSU device was charged nowhere. Such a device now
+  charges the legs the rack actually has.
+
+### Changed
+- **Per-bank chip strip now tracks the rack block width.** The rack power bar
+  already resized with the Front/Rear face toggles while the bank chips stayed a
+  fixed-width island, so the two read as unrelated widgets. The PDU columns now
+  share the block width (growing from a 8.5rem basis), so hiding a face narrows
+  the strip in step with the bar above it and the columns stack instead of
+  leaving empty space.
+
 ## [0.15.2] - 2026-08-18
 
 ### Release Summary

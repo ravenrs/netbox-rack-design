@@ -119,10 +119,15 @@ Per planned device (`check_power_consumption()`):
    unmanageable-pdu, rack-mount-boxes, rack-mount-kit}`; a `blade-server` with no
    bank connection.
 2. **Per power port**, read `allocated_draw`. Then:
-   - **Cabled** (`PowerPort → PowerOutlet` on a PDU): bank from the outlet name
-     `"<bank>/<port>"`, PDU/leg from the binding → charge to that PDU+bank.
-   - **Uncabled** (planned): look up the device's U position in the §2.1 map for
-     each leg → charge there.
+   - **Cabled** (`PowerPort → PowerOutlet` on a PDU **in this rack**): bank from
+     the outlet name `"<bank>/<port>"`, PDU/leg from the binding → charge to that
+     PDU+bank.
+   - **Uncabled** (planned) — and a device whose cabling leads OUT of this rack:
+     look up the device's U position in the §2.1 map for each leg → charge there.
+     A device MOVED here still carries its cabling to the source rack's PDU until
+     the design is implemented, so that cabling names a PDU this topology does not
+     contain; treating it as uncabled is what makes the draw follow the device
+     across racks instead of disappearing from both.
 3. **Active vs planned split** — status `planned` charges `planned_power`; else
    `allocated_power`. Both accumulate per bank (committed vs projected).
 4. **Redundancy is "full", never split** — a device's draw is charged **in full

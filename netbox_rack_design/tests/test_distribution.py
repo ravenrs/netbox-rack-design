@@ -575,6 +575,93 @@ class BuildNativeTestCase(TestCase):
         dist = build_native(self.racks[0], devices_from_elevation(self._elevation()))
         self.assertEqual(set(dist["pdus"]["rack1-pdu-2"]["banks"]), {"1", "2", "5"})
 
+    # --- cross-rack move: the draw follows the device ------------------------
+
+    def test_moved_in_device_charges_the_destination_rack_banks(self):
+        """A device moved INTO this rack must charge its banks.
+
+        A real device keeps its power cabling to the SOURCE rack's PDU until the
+        design is actually implemented, so its cabled refs name PDUs that do not
+        exist here. Charging by that stale cabling silently dropped the draw: it
+        left the source rack (the device is gone from its elevation) and never
+        arrived in the destination. An unresolvable cabling is treated like no
+        cabling -- the device falls back to U-position attribution, exactly like
+        a planned add.
+        """
+        # Source rack PDU the device is really plugged into, destination rack PDU
+        # the planned layout will eventually feed it from.
+        source_pdu = self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
+        # feed_b: a PowerFeed takes only one cable, and feed_a already feeds the
+        # source rack's PDU.
+        self._make_real_pdu("rack2-pdu-1", feed=self.feed_b, rack=self.racks[1])
+
+        mover = create_test_device(
+            "mover", site=self.site, rack=self.racks[0], position=5, face="front")
+        port = PowerPort.objects.create(device=mover, name="psu1", allocated_draw=400)
+        Cable(
+            a_terminations=[port],
+            b_terminations=[source_pdu.poweroutlets.get(name="1/1")],
+        ).save()
+
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=mover,
+            target_rack=self.racks[1],
+            target_position=1,
+            target_face="front",
+        )
+
+        dest = build_native(
+            self.racks[1], devices_from_elevation(self._elevation(self.racks[1])))
+        charged = [
+            d["name"]
+            for bank in dest["pdus"]["rack2-pdu-1"]["banks"].values()
+            for d in bank["devices"]
+        ]
+        self.assertIn("mover", charged)
+        self.assertEqual(
+            sum(b["allocated_power"] for b in dest["pdus"]["rack2-pdu-1"]["banks"].values()),
+            400,
+        )
+
+    def test_cabling_inside_this_rack_still_wins_over_position(self):
+        """The stale-cabling fallback must not weaken the normal cabled path: a
+        device cabled to a PDU IN this rack is charged to that outlet's bank,
+        whatever its U position maps to."""
+        pdu = self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
+        dev = create_test_device(
+            "cabled", site=self.site, rack=self.racks[0], position=5, face="front")
+        port = PowerPort.objects.create(device=dev, name="psu1", allocated_draw=400)
+        # Outlet "2/1" = bank 2, while U5 maps to bank 1 by position.
+        Cable(
+            a_terminations=[port],
+            b_terminations=[pdu.poweroutlets.get(name="2/1")],
+        ).save()
+
+        dist = build_native(self.racks[0], devices_from_elevation(self._elevation()))
+        banks = dist["pdus"]["rack1-pdu-1"]["banks"]
+        self.assertEqual([d["name"] for d in banks["2"]["devices"]], ["cabled"])
+        self.assertNotIn("cabled", [d["name"] for d in banks["1"]["devices"]])
+
+    def test_single_corded_device_charges_a_rack_with_only_a_b_leg(self):
+        """Leg letters come from the feed NAMES, so a rack fed only by "Feed B"
+        has no ``a`` leg -- a single-PSU device must still be charged there
+        instead of silently contributing nothing."""
+        self._make_real_pdu("rack1-pdu-b", feed=self.feed_b)
+        dev = create_test_device(
+            "single-corded", site=self.site, rack=self.racks[0], position=5, face="front")
+        PowerPort.objects.create(device=dev, name="psu1", allocated_draw=250)
+
+        dist = build_native(self.racks[0], devices_from_elevation(self._elevation()))
+        self.assertEqual(dist["pdus"]["rack1-pdu-b"]["feed_letter"], "b")
+        charged = [
+            d["name"]
+            for bank in dist["pdus"]["rack1-pdu-b"]["banks"].values()
+            for d in bank["devices"]
+        ]
+        self.assertIn("single-corded", charged)
+
     # --- apply_rack_power_override wiring -------------------------------------
 
     def test_rack_power_override_takes_effect_in_builtin_mode(self):

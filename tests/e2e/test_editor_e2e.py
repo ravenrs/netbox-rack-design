@@ -634,6 +634,50 @@ class EditorE2ETestCase(unittest.TestCase):
         self.assert_no_console_errors()
 
     # =====================================================================
+    # 1b. The rack chassis follows a LIVE theme switch
+    # =====================================================================
+    def test_01b_rack_chassis_follows_runtime_theme_toggle(self):
+        """User bug 2026-08-18: switching NetBox's colour mode left the rack
+        chassis at the colour the page had LOADED with (a black rack on a white
+        page) until a reload. NetBox's navbar toggle restyles live by setting
+        data-bs-theme on <body> only -- <html> keeps its server-rendered value --
+        so a palette bound to :root alone never re-resolves."""
+        def chassis_bg():
+            return self.page.evaluate(
+                """() => getComputedStyle(
+                    document.querySelector('.nbx-rd-rack')).backgroundColor""")
+
+        before = chassis_bg()
+        before_theme = self.page.evaluate(
+            "() => document.body.getAttribute('data-bs-theme')")
+
+        # NetBox renders the colour-mode control several times (desktop + mobile
+        # navbars, one button per direction). Click the visible ones until the
+        # mode actually flips rather than guessing which instance is live.
+        toggles = self.page.locator("button.color-mode-toggle")
+        switched = False
+        for _ in range(2):
+            for i in range(toggles.count()):
+                btn = toggles.nth(i)
+                if not btn.is_visible():
+                    continue
+                btn.click(force=True)
+                self.page.wait_for_timeout(1200)   # preference round-trip + repaint
+                if self.page.evaluate(
+                        "() => document.body.getAttribute('data-bs-theme')") != before_theme:
+                    switched = True
+                    break
+            if switched:
+                break
+
+        self.assertNotEqual(
+            self.page.evaluate("() => document.body.getAttribute('data-bs-theme')"),
+            before_theme, "NetBox did not switch the colour mode")
+        self.assertNotEqual(
+            chassis_bg(), before,
+            "rack chassis kept its old colour after a live theme switch")
+
+    # =====================================================================
     # 2. Palette search populates results from the core device-type API
     # =====================================================================
     def test_02_palette_search_populates(self):

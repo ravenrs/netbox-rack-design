@@ -7,13 +7,22 @@
  * theme variables so the tints track the active NetBox light/dark theme.
  */
 
-:root {
+/* Both palettes are declared on ANY [data-bs-theme] element, not just :root.
+   NetBox's navbar color-mode toggle restyles the page live by setting
+   data-bs-theme on <body> and leaves the server-rendered value on <html>, so a
+   palette bound to :root alone stays frozen at whatever the page loaded with --
+   a dark chassis on a light page until the next reload. Declaring the variables
+   where the attribute actually lands lets the nearest ancestor win, which is the
+   toggled <body>. */
+:root,
+[data-bs-theme="light"] {
     --nbx-rack-slot-bg: #e9ecef;
     --nbx-rack-slot-border: #adb5bd;
     --nbx-rack-unit-color: #6c757d;
 }
 
-:root[data-bs-theme="dark"] {
+:root[data-bs-theme="dark"],
+[data-bs-theme="dark"] {
     --nbx-rack-slot-bg: #343a40;
     --nbx-rack-slot-border: #495057;
     --nbx-rack-unit-color: #adb5bd;
