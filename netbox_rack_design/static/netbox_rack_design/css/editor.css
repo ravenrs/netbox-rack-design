@@ -1082,9 +1082,14 @@
     font-size: 0.72rem;
     line-height: 1.2;
 }
-/* One column per PDU: its banks stack under each other. */
+/* One column per PDU: its banks stack under each other. The columns SHARE the
+   block width (flex-grow from a 8.5rem basis) so the strip tracks the rack
+   block exactly like the power bar above it -- hiding a face narrows the block,
+   and the chips narrow with it instead of staying a fixed island. */
 .nbx-rd-dist-pdu {
     display: flex;
+    flex: 1 1 8.5rem;
+    min-width: 0;
     flex-direction: column;
     gap: 0.2rem;
 }
@@ -1100,7 +1105,7 @@
 .nbx-rd-dist-chip {
     position: relative;
     overflow: hidden;
-    min-width: 8.5rem;                      /* uniform width so fills compare */
+    min-width: 0;                           /* the PDU column sets the width */
     border-radius: 3px;
     background: var(--tblr-border-color, #e0e0e0);
     white-space: nowrap;
@@ -1127,6 +1132,8 @@
 .nbx-rd-dist-critical .nbx-rd-dist-label,
 .nbx-rd-dist-overload .nbx-rd-dist-label { color: #fff; }
 .nbx-rd-dist-alarm {
+    flex: 0 0 auto;                         /* never stretches with the columns */
+    align-self: flex-start;
     padding: 0.1rem 0.4rem;
     border-radius: 3px;
     background: #b01919;

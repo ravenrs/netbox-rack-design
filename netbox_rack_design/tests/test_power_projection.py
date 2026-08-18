@@ -22,7 +22,7 @@ from dcim.models import (
 from django.test import TestCase, override_settings
 
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignPlacement
+from ..models import Design, DesignPlacement, DesignPowerFeed
 from ..projection import project_rack
 
 
@@ -179,6 +179,53 @@ class PowerProjectionTier1TestCase(TestCase):
             target_position=10, target_face="front", proposed_name="hog")
         # 150 + 200 = 350 of 160 -> >100% -> critical.
         self.assertEqual(self._elev().power["state"], "critical")
+
+    # --- capacity from PLANNED feeds (greenfield rack) ---------------------
+
+    def _planned_feed(self, name, *, voltage=230, amperage=32):
+        return DesignPowerFeed.objects.create(
+            design=self.design, rack=self.rack, name=name,
+            voltage=voltage, amperage=amperage,
+        )
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_planned_feeds_supply_capacity_on_a_greenfield_rack(self):
+        """A rack with no real PowerFeeds but with PLANNED feeds must size its
+        capacity from those, not from the flat fallback.
+
+        The greenfield flow (docs/pdu-distribution-spec.md §6.1) has the user
+        define DesignPowerFeeds and bind planned PDUs to them; leaving the bar on
+        the 1000 W default then painted a planned rack critical-red while its own
+        banks read comfortably green -- the two power views contradicting each
+        other on the same screen.
+        """
+        self._planned_feed("Feed A")
+        self._planned_feed("Feed B")
+        power = self._elev().power
+        # 2 x (230 V x 32 A) x 80% max utilization = 11776 W, mirroring what
+        # dcim.PowerFeed.available_power computes for the same electricals.
+        self.assertEqual(power["capacity_w"], 11776)
+        self.assertEqual(power["draw_w"], 150.0)
+        self.assertEqual(power["state"], "ok")
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_three_phase_planned_feed_uses_the_phase_rate(self):
+        self._planned_feed("Feed A", voltage=400, amperage=16)
+        DesignPowerFeed.objects.filter(design=self.design).update(phase="three-phase")
+        # breaker_watts = round(400 x 16 x 1.732) = 11085 W, derated 80% = 8868 W.
+        self.assertEqual(self._elev().power["capacity_w"], 8868)
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_planned_feed_of_another_design_does_not_count(self):
+        other = Design.objects.create(title="PWR other", site=self.site)
+        DesignPowerFeed.objects.create(
+            design=other, rack=self.rack, name="Feed A", voltage=230, amperage=32)
+        # This design plans no feeds -> still the flat fallback.
+        self.assertEqual(self._elev().power["capacity_w"], 1000)
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_no_feeds_at_all_still_falls_back_to_the_configured_default(self):
+        self.assertEqual(self._elev().power["capacity_w"], 1000)
 
     # --- planned world semantics ------------------------------------------
 

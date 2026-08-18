@@ -396,11 +396,21 @@ def _device_draw_w(device, device_type, basis):
     return 0.0, ("unknown" if has_ports else "passive")
 
 
-def _rack_capacity_w(rack, default_w):
-    """Rack power capacity in watts: the sum of the rack's PowerFeeds'
-    ``available_power`` when any feed is modeled (NetBox's real electrical
-    model), else the configured flat fallback."""
+def _rack_capacity_w(rack, default_w, design=None):
+    """Rack power capacity in watts: every feed that will power this rack.
+
+    Real ``dcim.PowerFeed`` rows contribute their ``available_power`` (NetBox's
+    own electrical model). A greenfield rack has none yet -- the design plans
+    them as ``DesignPowerFeed`` rows instead (docs/pdu-distribution-spec.md
+    §6.1) -- so those count too, at the same derating NetBox applies, and the
+    bar sizes against the power the rack is *planned* to have. Ignoring them
+    left a planned rack pinned to the flat fallback and painted critical-red
+    while its own per-bank chips read green: the two power views contradicting
+    each other about the same rack. The flat ``default_w`` remains the fallback
+    only when neither kind of feed exists."""
     from dcim.models import PowerFeed
+
+    from .distribution import breaker_watts
 
     total = 0.0
     any_feed = False
@@ -409,6 +419,19 @@ def _rack_capacity_w(rack, default_w):
         if available:
             total += float(available)
             any_feed = True
+    if design is not None:
+        # Derate planned feeds by the SAME max-utilization NetBox stamps into a
+        # real feed's available_power. Read the live config parameter (the field
+        # default is a lazy ``ConfigItem``, not a number) so the two stay in step
+        # with whatever the instance is configured to use.
+        from netbox.config import get_config
+
+        max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
+        for planned in design.planned_feeds.filter(rack=rack):
+            watts = breaker_watts(planned)
+            if watts:
+                total += float(round(watts * max_util / 100.0))
+                any_feed = True
     return total if any_feed else float(default_w)
 
 
@@ -524,7 +547,8 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
             if _device_unconnected(device):
                 unconnected_devices.append(slot.get("label") or "")
 
-    capacity = _rack_capacity_w(elevation.rack, capacity_default_w)
+    capacity = _rack_capacity_w(
+        elevation.rack, capacity_default_w, design=getattr(elevation, "design", None))
     util = (draw_total / capacity * 100.0) if capacity else 0.0
     if util >= critical_pct:
         state = "critical"

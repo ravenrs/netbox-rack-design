@@ -1195,6 +1195,22 @@ class RecomputeDistributionTest(APITestCase):
             Cable(a_terminations=[psu], b_terminations=[outlets[outlet_name]]).save()
             cls.consumers[name] = dev
 
+        # A SECOND rack with its own feed + PDU: the destination of a cross-rack
+        # move, whose banks must pick up the moved device's draw.
+        cls.rack2 = Rack.objects.create(name="Rack D2", site=cls.site, u_height=10)
+        cls.feed2 = PowerFeed.objects.create(
+            power_panel=panel, name="Feed D2", voltage=230, amperage=32,
+            phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        cls.pdu2 = Device.objects.create(
+            name="pdu-d-2", device_type=pdu_type, site=cls.site, rack=cls.rack2,
+            role=pdu_role, status="active",
+        )
+        for nm in ("1/1", "2/1"):
+            PowerOutlet.objects.create(device=cls.pdu2, name=nm)
+        pdu2_input = PowerPort.objects.create(device=cls.pdu2, name="Input")
+        Cable(a_terminations=[pdu2_input], b_terminations=[cls.feed2]).save()
+
         cls.design = Design.objects.create(title="Dist design", site=cls.site)
 
     def _url(self):
@@ -1240,6 +1256,44 @@ class RecomputeDistributionTest(APITestCase):
         self.assertEqual(self._bank2_load(resp.data), 1000)
 
         # The whole point: NOTHING was persisted -- it is a pure preview.
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_recompute_follows_a_device_moved_to_another_rack(self):
+        """User bug 2026-08-18: dragging devices from one rack to another made
+        their draw vanish -- it left the source rack's banks and never landed in
+        the destination's. A real device keeps its cabling to the SOURCE rack's
+        PDU until the design is implemented, so the destination charged it to a
+        PDU that is not in its own topology and dropped it. The draw must follow
+        the device across racks, live, with no Save.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        a, b = self.consumers["cons-a"], self.consumers["cons-b"]
+
+        payload = {"design_id": self.design.pk, "racks": [
+            {"rack_id": self.rack.pk, "front": [self._existing(a, 1)]},
+            {"rack_id": self.rack2.pk, "front": [
+                # cons-b lands here; the source rack simply stops listing it.
+                {"kind": "move", "device_id": b.pk, "u_position": 1, "face": "front"},
+            ]},
+        ]}
+
+        resp = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+
+        # Source drops it...
+        self.assertEqual(self._bank2_load(resp.data), 1000)
+        # ...and the DESTINATION rack picks up its full 1000 W.
+        dest = resp.data["distributions"][str(self.rack2.pk)]["pdus"]["pdu-d-2"]
+        moved = [
+            d["name"]
+            for bank in dest["banks"].values()
+            for d in bank["devices"]
+        ]
+        self.assertIn("cons-b", moved)
+        self.assertEqual(
+            sum(bk["allocated_power"] + bk["planned_power"] for bk in dest["banks"].values()),
+            1000,
+        )
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
 
     def test_recompute_requires_view_permission(self):

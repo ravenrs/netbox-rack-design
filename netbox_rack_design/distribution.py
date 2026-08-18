@@ -555,19 +555,28 @@ def _unit_to_bank(rack, pdus):
     return result
 
 
-def _legs_for_native(device, unit_map):
+def _legs_for_native(device, unit_map, pdus):
     """The ``(pdu, bank)`` refs a device charges (docs/pdu-distribution-spec.md
     §2.2/§2.3):
 
-    * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU): charge
-      the outlet's bank directly, one ref per cabling -- full-per-leg
-      redundancy falls out naturally (2 cablings -> 2 full charges).
-    * **Uncabled** (planned or unconnected): attributed by U position via
-      ``unit_map`` -- leg ``a`` only for a single PSU, ``a``+``b`` (never
-      split) for 2+ PSUs. A leg absent from ``unit_map`` (fewer than 2 bound
-      feeds in the rack) is silently skipped -- robust to any feed count.
+    * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU) **in this
+      rack**: charge the outlet's bank directly, one ref per cabling -- full-
+      per-leg redundancy falls out naturally (2 cablings -> 2 full charges).
+    * **Uncabled** (planned or unconnected) -- and a device whose cabling
+      leads OUT of this rack: attributed by U position via ``unit_map`` --
+      leg ``a`` only for a single PSU, ``a``+``b`` (never split) for 2+ PSUs.
+      A leg absent from ``unit_map`` (fewer than 2 bound feeds in the rack) is
+      silently skipped -- robust to any feed count.
+
+    A device MOVED into this rack still carries its cabling to the source
+    rack's PDU until the design is implemented, so those refs name PDUs that
+    are not part of this topology. Treating that like no cabling is what makes
+    the draw follow the device across racks instead of vanishing from both.
     """
-    cabled = _cabled_bank_refs(device.get("device"))
+    cabled = [
+        ref for ref in _cabled_bank_refs(device.get("device"))
+        if ref[0] in pdus and ref[1] in pdus[ref[0]]["banks"]
+    ]
     if cabled:
         return cabled
     unit = device.get("u_position")
@@ -576,7 +585,13 @@ def _legs_for_native(device, unit_map):
     except (TypeError, ValueError):
         return []
     psu_count = len(device.get("power_ports") or [])
-    legs = ["a", "b"] if psu_count >= 2 else ["a"]
+    preferred = ["a", "b"] if psu_count >= 2 else ["a"]
+    legs = [leg for leg in preferred if leg in unit_map]
+    if not legs and unit_map:
+        # Leg letters come from the feed NAMES ("Feed B" -> b), so a rack can
+        # legitimately have no ``a`` leg at all. Charge the legs it does have
+        # rather than dropping the device's draw on the floor.
+        legs = sorted(unit_map)[:len(preferred)]
     refs = []
     for leg in legs:
         ref = unit_map.get(leg, {}).get(unit)
@@ -708,7 +723,7 @@ def build_native(rack, devices):
             )
             continue
         power_type = "planned_power" if device.get("status") == "planned" else "allocated_power"
-        for bank_ref in _legs_for_native(device, unit_map):
+        for bank_ref in _legs_for_native(device, unit_map, pdus):
             _charge_native(pdus, bank_ref, device, power_type)
 
     rack_summary = _finalize_native(pdus, _power_limitation_w(rack))
