@@ -23,8 +23,10 @@
  *     server-rendered distribution and simply do not live-update.
  *   - Toggle "Power heatmap": per-device consumption "health bar" filled
  *     left->right to the device's share of the rack's BIGGEST consumer
- *     (biggest = 100% red, others proportionally toward green), or, in
- *     distribution mode, tinted by the load-vs-breaker of the device's bank.
+ *     (biggest = 100% red, others proportionally toward green). It shows that
+ *     device's OWN contribution only -- bank load/breaker is carried by the chip
+ *     strip, never restated on the tiles. A device with a power port but no known
+ *     draw reads as a neutral hatch, since absence of data is not zero draw.
  *     Off restores the normal styling exactly (the chip strip stays).
  *
  * Read-only: pure view layer -- no widget state, no dirty flag, nothing saved.
@@ -94,10 +96,6 @@
         var s = Math.max(0, Math.min(1, share));
         return "hsl(" + Math.round(120 * (1 - s)) + ", 70%, 45%)";
     }
-
-    // A bank over its breaker paints a distinct hard red (Bender's "!!!"),
-    // darker than the gradient's top so an overload reads as more than "100%".
-    var OVERLOAD_COL = "#b01919";
 
     // ---- distribution model (docs/pdu-distribution-spec.md) -----------------
 
@@ -369,24 +367,18 @@
                 return;
             }
             tile.classList.remove("nbx-rd-heat-unknown");
-            // Distribution mode: tint by the tile's BANK load/breaker (its A/B
-            // leg accented), so you can see how draw lands per bank. A consumer
-            // the Distribution didn't attribute to a bank falls back to the
-            // per-device rack-share tint so nothing goes uncolored.
+            // Feed legs still come from the Distribution: the A/B edge accent says
+            // WHICH leg a device lands on, which is identity, not load.
             if (banksIdx) {
                 var entry = banksIdx.byName[visibleName(content)];
-                if (entry && entry.hottest) {
-                    var info = entry.hottest;
-                    var over = info.state === "overload";
-                    var pct = over ? 100 : Math.max(0, Math.min(100, info.util));
-                    content.style.setProperty("--nbx-rd-heat-pct", pct.toFixed(1) + "%");
-                    content.style.setProperty("--nbx-rd-heat-col",
-                        over ? OVERLOAD_COL : heatColor(pct / 100));
-                    setFeedClasses(tile, entry.feeds);
-                    return;
-                }
-                setFeedClasses(tile, null);
+                setFeedClasses(tile, entry ? entry.feeds : null);
             }
+            // The fill is this device's OWN contribution -- its share of the rack's
+            // biggest consumer, green(low) -> red(top). It deliberately does NOT
+            // restate its bank's utilization (user ruling 2026-08-18): tinting every
+            // tile in a hot bank the same red erased all per-device signal, so a
+            // 300 W switch painted identically to an 800 W server. Bank health is
+            // carried by the per-bank chips, which is where it belongs.
             var share = maxDraw > 0 ? draw / maxDraw : 0;
             content.style.setProperty("--nbx-rd-heat-pct", (share * 100).toFixed(1) + "%");
             content.style.setProperty("--nbx-rd-heat-col", heatColor(share));
