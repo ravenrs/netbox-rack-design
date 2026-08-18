@@ -1033,7 +1033,7 @@
 }
 /* Devices with no power data read as a neutral hatch, not green (absence of
    data != zero consumption). */
-.nbx-rd-heatmap .grid-stack-item.nbx-rd-heat-unknown > .grid-stack-item-content {
+.nbx-rd-heatmap .grid-stack-item.nbx-rd-heat-unknown:not(.nbx-rd-opposite):not(.nbx-rd-state-move_out_ghost) > .grid-stack-item-content {
     background-color: #b7b7b7 !important;
     background-image: repeating-linear-gradient(
         45deg, transparent, transparent 4px,
@@ -1071,9 +1071,10 @@
 }
 
 /* Per-bank breaker legend: chips under the power bar, one per PDU bank, colored
-   by state. Shown only while the heatmap toggle is active. */
+   by state. ALWAYS visible (like the power bar itself) -- bank health is not a
+   heatmap opt-in; the heatmap toggle only controls per-tile shading. */
 .nbx-rd-dist-legend {
-    display: none;
+    display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
     gap: 0.3rem 0.6rem;
@@ -1081,7 +1082,6 @@
     font-size: 0.72rem;
     line-height: 1.2;
 }
-.nbx-rd-heatmap-active .nbx-rd-dist-legend { display: flex; }
 /* One column per PDU: its banks stack under each other. */
 .nbx-rd-dist-pdu {
     display: flex;

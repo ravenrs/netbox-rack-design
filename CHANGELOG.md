@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-08-18
+
+### Release Summary
+
+Bug-fix release for the editor's power heatmap. Three defects made the power view
+show less than it knew: device tiles were tinted by their PDU bank's utilization
+rather than their own draw, so every device in a hot bank painted identically red
+and a 300 W switch was indistinguishable from an 800 W server; the "unknown draw"
+hatch never rendered, so a device with an unmeasured power port looked exactly like
+passive gear with no ports at all; and the per-bank chip strip was still hidden
+behind the heatmap toggle despite 0.15.0 intending it to be always visible.
+
+### Fixed
+- **Heatmap shows each device's own consumption.** A tile's fill and colour are now
+  its draw as a share of the rack's biggest consumer (green → red), instead of
+  restating its bank's utilization. Bank health is carried by the per-bank chips,
+  where it is not repeated once per tile. Feed A/B edge accents are unchanged.
+- **Unknown-draw hatch now renders.** The neutral hatch for a device with a power
+  port but no known draw was defined but never applied: the generic heatmap rule
+  carried two `:not()` guards, putting it at a higher specificity than the
+  unknown-draw rule, and both used `!important`. The unknown rule now carries the
+  same guards and wins.
+- **Per-bank chip strip is always visible.** 0.15.0 made the strip render
+  unconditionally but left the CSS rule gating it on the heatmap toggle, so it
+  stayed hidden until the toggle was on. The strip now follows the power bar and is
+  always shown; the heatmap toggle controls per-tile shading only.
+
 ## [0.15.1] - 2026-08-17
 
 ### Release Summary
