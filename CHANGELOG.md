@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-19
+
+### Release Summary
+
+NetBox 4.5 and 4.6 support. The plugin declared `max_version = "4.4.99"`, so every
+install on a current NetBox refused to load with *"requires NetBox maximum version
+4.4.99"* (#25) — two minor versions of NetBox had shipped past the supported ceiling.
+The range is now 4.4.0 – 4.6.99, served by a single codebase: all version-specific
+knowledge lives in one new module, `netbox_rack_design/compat.py`, and CI tests every
+declared version rather than only the oldest. Almost nothing in the plugin itself had
+to change — two core APIs moved and the rest was test scaffolding. Also fixes a rack
+editor bug, unrelated to NetBox versions, where a dragged device landed away from the
+green landing preview whenever the browser was not at 100% zoom.
+
+### Added
+
+- **NetBox 4.5.x and 4.6.x are supported** (`min_version` 4.4.0, `max_version`
+  4.6.99). Verified end to end against 4.4.8, 4.5.10 and 4.6.8: the plugin's own test
+  suite, a missing-migration check, and the Playwright editor suites all pass on each,
+  the last of these against a real database migrated forward from 4.4.
+- **CI now tests the whole declared range.** `.github/workflows/ci.yaml` takes NetBox
+  as a matrix dimension (4.4.8 and 4.5.10 on Python 3.12/3.14, 4.6.8 on 3.12/3.13/3.14,
+  `fail-fast: false`), so the declared compatibility range can no longer drift away
+  from what is actually tested.
+- **`netbox_rack_design/compat.py`** — the single module allowed to know which NetBox
+  it runs on. Each shim uses capability detection rather than a version comparison, so
+  it keeps working when the next minor moves things again.
+
+### Fixed
+
+- **A dragged device now lands where the cursor points at any browser zoom level.**
+  Away from 100% zoom, a device could land up to several rows from the green landing
+  preview — worst on multi-U devices. Two row computations disagreed: the plugin
+  measures the grid's real rect, so its row height tracks zoom (11px at 100%, 12.1 at
+  110%, 16.5 at 150%) and matches the pointer coordinates, while GridStack uses a fixed
+  `cellHeight` of 11 CSS px and is therefore only correct at 100%. Placement accepted
+  the engine's row whenever the pointer fell inside the tile as parked — comparing rows
+  measured in those two different spaces — so under zoom it committed the wrong one
+  while the preview showed the right one. The cursor's row is now always authoritative.
+- **A whole-U device no longer lands on a half-unit boundary.** The in-tile grab offset
+  and the pointer row are floored independently, so drifting half a unit vertically
+  during a move flipped the parity. Whole-unit alignment is now restored for a device
+  that *started* on a whole unit, leaving genuinely half-unit-mounted devices (a rack
+  with half-unit mounting holds devices at x.5) on their own rows.
+- **API tokens minted by the test suite work on 4.5+.** From NetBox 4.5 a new token is
+  a v2 token whose secret is never stored, so `Token.key` — the entire secret in 4.4 —
+  became a non-sensitive identifier and the legacy header form returns
+  `403 Invalid v1 token`.
+
+### Changed
+
+- **`Design` no longer inherits `PrimaryModel`.** That base contributed only
+  `description` and `comments`, both now declared on `Design` itself with identical
+  definitions, and NetBox 4.5 additionally gave it an `owner` foreign key. Inheriting a
+  base whose field set changes between NetBox minors would make the plugin's own schema
+  version-dependent — the same model would need a migration on 4.5+ that is invalid on
+  4.4. **No migration and no database change on any supported version:** the two columns
+  were already materialized in migration 0001, and `makemigrations --check` is clean on
+  4.4.8, 4.5.10 and 4.6.8 alike. The REST API and the GraphQL filter input are both
+  unchanged; `Design` gains no `owner` field.
+- The `Framework :: Django` classifiers now list 5.2 and 6.0, the Django versions the
+  supported NetBox range ships (4.4/4.5 → 5.2, 4.6 → 6.0).
+
+### Notes for GraphQL consumers
+
+Independently of this plugin, **NetBox 4.5 changed GraphQL filter syntax**: queries
+filtering by object ID or enum must now use a lookup, so `id: 123` becomes
+`id: {exact: 123}` (netbox-community/netbox#19338). On 4.5+ the `id` field of every
+plugin filter input is therefore `IDComparisonFilterLookup` rather than `ID`. Queries
+written against 4.4 need updating when the NetBox host is upgraded; the plugin's filter
+fields themselves are unchanged.
+
 ## [0.15.3] - 2026-08-18
 
 ### Release Summary

@@ -4,7 +4,26 @@ from dcim.models import DeviceRole, DeviceType, Manufacturer, Rack, Site
 from tenancy.models import Tenant
 from utilities.testing import create_test_device
 
-__all__ = ("create_dcim_environment",)
+from ..compat import API_TOKEN_PREFIX, HAS_V2_API_TOKENS
+
+__all__ = ("create_dcim_environment", "api_token_header")
+
+
+def api_token_header(token):
+    """
+    Build the REST API auth header for a token, in the form the running NetBox
+    understands.
+
+    NetBox <=4.4 carries the whole secret in ``Token.key`` and expects the legacy
+    ``Token <key>`` header. From 4.5 a new token is a v2 token: ``key`` only
+    identifies it and the secret is ``token.token`` (readable while the instance is
+    in memory, never stored), sent as ``Bearer nbt_<key>.<secret>``. Mirrors NetBox's
+    own ``APITestCase`` in each version, so tests that mint an extra user's token by
+    hand stay valid across the supported range.
+    """
+    if HAS_V2_API_TOKENS:
+        return {"HTTP_AUTHORIZATION": f"Bearer {API_TOKEN_PREFIX}{token.key}.{token.token}"}
+    return {"HTTP_AUTHORIZATION": f"Token {token.key}"}
 
 
 def create_dcim_environment():

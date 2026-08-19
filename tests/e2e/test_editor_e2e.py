@@ -647,9 +647,19 @@ class EditorE2ETestCase(unittest.TestCase):
                 """() => getComputedStyle(
                     document.querySelector('.nbx-rd-rack')).backgroundColor""")
 
+        # WHERE the attribute lands is version-dependent: NetBox 4.4 mirrors
+        # data-bs-theme onto <body> as well, 4.5+ sets it on <html> only. Read both
+        # and compare the pair, so the test detects the switch on any supported
+        # version (the plugin's palette is declared for both anchors either way).
+        def theme_state():
+            return self.page.evaluate(
+                """() => [
+                    document.documentElement.getAttribute('data-bs-theme'),
+                    document.body.getAttribute('data-bs-theme'),
+                ]""")
+
         before = chassis_bg()
-        before_theme = self.page.evaluate(
-            "() => document.body.getAttribute('data-bs-theme')")
+        before_theme = theme_state()
 
         # NetBox renders the colour-mode control several times (desktop + mobile
         # navbars, one button per direction). Click the visible ones until the
@@ -663,16 +673,14 @@ class EditorE2ETestCase(unittest.TestCase):
                     continue
                 btn.click(force=True)
                 self.page.wait_for_timeout(1200)   # preference round-trip + repaint
-                if self.page.evaluate(
-                        "() => document.body.getAttribute('data-bs-theme')") != before_theme:
+                if theme_state() != before_theme:
                     switched = True
                     break
             if switched:
                 break
 
         self.assertNotEqual(
-            self.page.evaluate("() => document.body.getAttribute('data-bs-theme')"),
-            before_theme, "NetBox did not switch the colour mode")
+            theme_state(), before_theme, "NetBox did not switch the colour mode")
         self.assertNotEqual(
             chassis_bg(), before,
             "rack chassis kept its old colour after a live theme switch")

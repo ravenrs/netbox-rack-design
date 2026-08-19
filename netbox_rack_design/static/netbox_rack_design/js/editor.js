@@ -1518,9 +1518,22 @@
         // "dropped on 23, landed on 22"). An integer-U device (even gsH) has
         // only even valid tops, and floor-to-even is exactly the unit that
         // contains the cursor row -- so pointing anywhere inside a unit lands
-        // the device ON it. Moves are untouched: their grabRows already
-        // preserves the source tile's own U-alignment.
-        if (g.palette && g.gsH % 2 === 0) { top -= top % 2; }
+        // the device ON it.
+        //
+        // A MOVE needs the same snap, for a different reason. grabRows was read
+        // to be the source tile's own U-alignment, but that only holds while the
+        // pointer keeps the same offset WITHIN a unit that it had at grab time:
+        // floor() is applied to the grab offset and to the pointer row
+        // independently, so drifting half a unit vertically flips the parity and
+        // the tile lands on a half-unit boundary. Snapping is only correct for a
+        // device that STARTED on a whole unit, though -- a rack with half-unit
+        // mounting legitimately holds devices at x.5 (target_position 33.5), and
+        // those must keep their odd rows.
+        if (g.gsH % 2 === 0) {
+            if (g.palette || (g.srcTop != null && g.srcTop % 2 === 0)) {
+                top -= top % 2;
+            }
+        }
         top = Math.max(0, Math.min(top, maxRow - g.gsH));
         var block = g.lastHost.closest(".nbx-rd-rack-block");
         return {
@@ -1648,8 +1661,13 @@
             }
         }
         if (grabRows == null) { return; }
+        // The row the tile occupied BEFORE the gesture: rdCursorCandidate snaps a
+        // whole-U device back to whole units only if it started on one, so a
+        // legitimately half-unit-mounted device keeps its odd rows.
+        var srcNode = el.gridstackNode;
         rdCursorGesture = {
             el: el, gsH: gsH, isFullDepth: !!isFullDepth,
+            srcTop: srcNode && srcNode.y != null ? srcNode.y : null,
             grabRows: grabRows, lastHost: null, lastRow: null,
         };
         rdUpdateCursorGesture();
@@ -3490,10 +3508,17 @@
             var node = itemEl.gridstackNode;
             if (!node || node.y == null) { return true; }
             var curHost = itemEl.closest(".grid-stack");
-            if (g.lastHost === curHost
-                    && g.lastRow >= node.y && g.lastRow < node.y + (node.h || gsH)) {
-                return true;
-            }
+            // NOTE: there used to be a "close enough" shortcut here -- if the pointer
+            // row fell anywhere inside the tile as the engine parked it, the engine's
+            // row was accepted as-is. It compared two rows measured in DIFFERENT
+            // spaces: g.lastRow comes from the host's measured rect (correct at any
+            // browser zoom) while node.y comes from GridStack's fixed `cellHeight`
+            // of 11 CSS px (correct only at 100%). Under zoom the two diverge -- at
+            // 110% the same point reads row 38 by rect and 42 by cellHeight -- so the
+            // shortcut silently handed the placement to the wrong value while the
+            // green preview, drawn from the rect, showed the right one. The cursor is
+            // authoritative (spec §4.1), so always enforce its rows; when the engine
+            // already agrees, grid.update() below is a no-op anyway.
             var verdict = rdCanPlaceAt(
                 itemEl, cand.rackId, cand.face, cand.top, gsH, isFullDepth);
             if (!verdict.ok || g.lastHost !== curHost) {

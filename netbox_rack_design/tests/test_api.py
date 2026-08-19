@@ -35,7 +35,7 @@ from ..models import (
     FavoriteDeviceType,
     HiddenDesignRack,
 )
-from .utils import create_dcim_environment
+from .utils import api_token_header, create_dcim_environment
 
 
 class DesignGroupTest(APIViewTestCases.APIViewTestCase):
@@ -1663,7 +1663,7 @@ class HiddenDesignRackTest(APITestCase):
         super().setUp()  # builds self.user / self.token / self.header
         self.user_b = User.objects.create_user(username="user_b")
         self.token_b = Token.objects.create(user=self.user_b)
-        self.header_b = {"HTTP_AUTHORIZATION": f"Token {self.token_b.key}"}
+        self.header_b = api_token_header(self.token_b)
 
     def _list_url(self):
         return reverse("plugins-api:netbox_rack_design-api:hiddendesignrack-list")
@@ -1830,7 +1830,7 @@ class FavoriteDeviceTypeTest(APITestCase):
         # A second authenticated user (user B) with their own token/header.
         self.user_b = User.objects.create_user(username="user_b")
         self.token_b = Token.objects.create(user=self.user_b)
-        self.header_b = {"HTTP_AUTHORIZATION": f"Token {self.token_b.key}"}
+        self.header_b = api_token_header(self.token_b)
 
     def _list_url(self):
         return reverse(

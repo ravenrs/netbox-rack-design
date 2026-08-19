@@ -68,13 +68,14 @@ More in the [documentation](https://ravenrs.github.io/netbox-rack-design/).
 
 | Plugin Version | Minimum NetBox Version | Maximum NetBox Version | Python    |
 |----------------|------------------------|------------------------|-----------|
-| 0.13.2         | 4.4.0                  | 4.4.99                 | 3.12+     |
+| 0.16.0         | 4.4.0                  | 4.6.99                 | 3.12+     |
+| 0.15.x         | 4.4.0                  | 4.4.99                 | 3.12+     |
 
 The supported NetBox range is enforced at load time via the plugin's `min_version` / `max_version`. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full per-version matrix.
 
 ## Dependencies
 
-- **NetBox** 4.4.0 – 4.4.99
+- **NetBox** 4.4.0 – 4.6.99 (tested against 4.4.8, 4.5.10 and 4.6.8)
 - **Python** 3.12 or later
 
 No additional Python packages are required beyond NetBox's own dependencies.
