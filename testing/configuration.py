@@ -43,13 +43,23 @@ REDIS = {
 
 # Security settings (test-only values)
 SECRET_KEY = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-API_TOKEN_PEPPERS = ['test-pepper-for-api-tokens']
+# NetBox 4.5+ hashes API tokens with a keyed pepper and looks the newest one up by
+# ID (users.utils.get_current_pepper -> API_TOKEN_PEPPERS.keys()), so this MUST be a
+# mapping of id -> value; a list raises AttributeError the first time a token is
+# minted. NetBox 4.4 has no v2 tokens and ignores the setting entirely, so the dict
+# form is safe across the supported range.
+API_TOKEN_PEPPERS = {
+    1: 'TEST-VALUE-DO-NOT-USE-TEST-VALUE-DO-NOT-USE-TEST-VALUE-DO-NOT-USE',
+}
 
 # For testing, allow all hosts
 ALLOWED_HOSTS = ['*']
 
-# Enable debug mode for testing
-DEBUG = True
+# Debug mode stays OFF. Django forces DEBUG=False while running tests anyway, and
+# from NetBox 4.5 the bundled django-debug-toolbar (kept in INSTALLED_APPS whenever
+# DEBUG is true) fails the system check with debug_toolbar.E001 under tests, which
+# aborts the whole run before a single test executes.
+DEBUG = False
 
 # Plugin configuration
 PLUGINS = [

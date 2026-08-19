@@ -15,7 +15,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
-from netbox.models import NetBoxModel, PrimaryModel
+from netbox.models import NetBoxModel
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
 
@@ -82,10 +82,22 @@ class DesignGroup(NetBoxModel):
             ancestor = ancestor.parent
 
 
-class Design(PrimaryModel):
+class Design(NetBoxModel):
     """
     A proposed set of rack changes (one plan / one version).
+
+    Deliberately NOT a ``PrimaryModel``: that base contributes only ``description``
+    and ``comments``, both declared below, and in NetBox 4.5 it also began carrying
+    an ``owner`` FK (``OwnerMixin``). Inheriting a base whose field set changes
+    between NetBox minors would make the plugin's own schema version-dependent --
+    the same design would need a migration on 4.5+ that is invalid on 4.4. Owning
+    the two fields here keeps the table identical across the supported range.
     """
+
+    # Formerly inherited from PrimaryModel; unchanged definitions, so the database
+    # columns (already materialized in migration 0001) stay exactly as they were.
+    description = models.CharField(max_length=200, blank=True)
+    comments = models.TextField(blank=True)
 
     title = models.CharField(max_length=200)
     site = models.ForeignKey(

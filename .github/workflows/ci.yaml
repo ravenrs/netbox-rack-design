@@ -31,13 +31,33 @@ jobs:
         run: ruff check netbox_rack_design/
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
+    name: Test (NetBox ${{ matrix.netbox-version }} / Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     needs: lint
 
+    # The declared min_version/max_version range (4.4.0 - 4.6.99) is only honest if
+    # CI tests BOTH ends of it plus the minor in between, so NetBox is a matrix
+    # dimension. Deliberately a sparse `include` rather than a full cross product:
+    # the newest NetBox gets the whole Python sweep, the older ones only their
+    # supported edges. fail-fast is off so one bad pair cannot mask the others.
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13', '3.14']
+        include:
+          - netbox-version: 'v4.4.8'
+            python-version: '3.12'
+          - netbox-version: 'v4.4.8'
+            python-version: '3.14'
+          - netbox-version: 'v4.5.10'
+            python-version: '3.12'
+          - netbox-version: 'v4.5.10'
+            python-version: '3.14'
+          - netbox-version: 'v4.6.8'
+            python-version: '3.12'
+          - netbox-version: 'v4.6.8'
+            python-version: '3.13'
+          - netbox-version: 'v4.6.8'
+            python-version: '3.14'
 
     services:
       postgres:
@@ -75,9 +95,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Clone NetBox
+      - name: Clone NetBox ${{ matrix.netbox-version }}
         run: |
-          git clone --depth 1 --branch v4.4.8 https://github.com/netbox-community/netbox.git
+          git clone --depth 1 --branch ${{ matrix.netbox-version }} https://github.com/netbox-community/netbox.git
 
       - name: Install NetBox dependencies
         working-directory: netbox

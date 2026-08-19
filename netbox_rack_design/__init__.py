@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.15.3"
+__version__ = "0.16.0"
 
 
 from netbox.plugins import PluginConfig
@@ -24,7 +24,7 @@ class RackdesignConfig(PluginConfig):
     version = __version__
     base_url = "rack-design"
     min_version = "4.4.0"
-    max_version = "4.4.99"
+    max_version = "4.6.99"
     graphql_schema = "graphql.schema"
     default_settings = {
         # Device statuses the plugin treats as "planned".
