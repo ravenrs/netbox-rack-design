@@ -26,6 +26,7 @@ from ..models import (
     HiddenDesignRack,
 )
 from .serializers import (
+    CopyFeedsSerializer,
     DesignGroupSerializer,
     DesignPlacementSerializer,
     DesignRackScopeSerializer,
@@ -84,6 +85,22 @@ def _feed_dict(feed, source):
     }
 
 
+def _retarget_feed_name(name, source_rack_name, target_rack_name):
+    """Rename a copied feed for the rack it lands on.
+
+    Feeds are conventionally named after their rack (``R101-A``/``R101-B``), so a
+    copy onto R103 should read ``R103-A``/``R103-B`` rather than carry the source
+    rack's name. Only a case-insensitive rack-name PREFIX is substituted; any
+    other naming scheme is left verbatim (a feed called "Utility A" stays
+    "Utility A"), and the result is clipped to DesignPowerFeed.name's max_length.
+    """
+    name = name or ""
+    src = source_rack_name or ""
+    if src and name.lower().startswith(src.lower()):
+        name = (target_rack_name or "") + name[len(src):]
+    return name[:100]
+
+
 class ChangeDesignPermissions(TokenPermissions):
     """
     These detail @actions (save-layout, add-rack, remove-rack) are writes that
@@ -122,7 +139,8 @@ class DesignViewSet(NetBoxModelViewSet):
 
     def get_permissions(self):
         action = getattr(self, "action", None)
-        if action in ("save_layout", "add_rack", "remove_rack", "rack_power", "planned_feed"):
+        if action in ("save_layout", "add_rack", "remove_rack", "rack_power",
+                      "planned_feed", "copy_feeds"):
             return [ChangeDesignPermissions()]
         if action in ("preview_name", "power_source", "feeds", "recompute_distribution"):
             return [ViewDesignPermissions()]
@@ -220,7 +238,12 @@ class DesignViewSet(NetBoxModelViewSet):
         Body: identical to ``save-layout`` (:class:`SaveLayoutSerializer`), so the
         editor reuses its existing per-rack save payload.
 
-        Returns ``{"distributions": {"<rack_id>": <distribution-json-or-null>}}``.
+        Returns ``{"distributions": {"<rack_id>": <distribution-json-or-null>},
+        "power": {"<rack_id>": <rack power summary without "distribution">}}``.
+        The ``power`` block keeps the rack BAR live as well: its capacity comes
+        from the rack's feeds (planned ones included) via maths the browser must
+        not duplicate, so without it the denominator would stay at whatever the
+        page was rendered with until the next Save.
         Performs NO writes (read-only preview; requires only ``view`` on the
         design).
 
@@ -246,12 +269,14 @@ class DesignViewSet(NetBoxModelViewSet):
         self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
 
         distributions = {}
+        powers = {}
         with transaction.atomic():
             for rack_data in data["racks"]:
                 rack_id = rack_data["rack_id"]
                 rack = Rack.objects.filter(pk=rack_id).first()
                 if rack is None:
                     distributions[str(rack_id)] = None
+                    powers[str(rack_id)] = None
                     continue
                 items = []
                 for face_key in ("front", "rear", "other"):
@@ -285,12 +310,24 @@ class DesignViewSet(NetBoxModelViewSet):
                 rack = Rack.objects.get(pk=rack_id)
                 elevation = projection.project_rack(design, rack)
                 distributions[str(rack_id)] = elevation.power.get("distribution")
+                # The rack-level summary rides along so the editor's power BAR is
+                # live too, not just the per-bank chips. Capacity is the reason:
+                # it comes from the rack's feeds -- including PLANNED ones -- and
+                # a browser must not re-derive the derating/phase maths, so the
+                # bar's denominator would otherwise stay frozen at whatever the
+                # page was rendered with until the next Save (user 2026-08-20).
+                power = {k: v for k, v in elevation.power.items()
+                         if k != "distribution"}
+                powers[str(rack_id)] = power
 
             # Read-only: discard every transient placement. Must be the LAST DB
             # action in this atomic block (no ORM use is allowed after it).
             transaction.set_rollback(True)
 
-        return Response({"distributions": distributions}, status=status.HTTP_200_OK)
+        return Response(
+            {"distributions": distributions, "power": powers},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"], url_path="add-rack")
     def add_rack(self, request, pk=None):
@@ -481,7 +518,10 @@ class DesignViewSet(NetBoxModelViewSet):
     def power_source(self, request, pk=None):
         """
         Read-only lookup for the "copy from rack" mode of the rack power dialog:
-        a source rack's custom fields (``kind=rack``). Performs NO writes.
+        a source rack's power planning inputs (``kind=rack``) -- its custom
+        fields AND its power feeds, which is everything a greenfield rack needs
+        to inherit from a provisioned sibling. Performs NO writes (the copy
+        itself is POST ``copy-feeds/`` + POST ``rack-power/``).
 
         In the universal feed-binding design a planned PDU **binds to a feed**
         (see the ``feeds``/``planned-feed`` actions) rather than copying another
@@ -489,15 +529,22 @@ class DesignViewSet(NetBoxModelViewSet):
         is the only remaining copy-from-rack flow.
 
         GET .../designs/<pk>/power-source/?rack_id=<id>&kind=rack
-          kind=rack -> {"custom_fields": {...}}
+          kind=rack -> {"custom_fields": {...},
+                        "feeds": [{"id","name","voltage","amperage","phase",
+                                   "supply","source"}, ...]}
+          ``feeds`` are the source rack's REAL feeds, or -- when it has none --
+          this design's planned feeds for it, so a rack planned earlier in the
+          same design can be cloned too.
 
         URL name: plugins-api:netbox_rack_design-api:design-power-source
         Path:     /api/plugins/rack-design/designs/<pk>/power-source/
         """
         if request.user.is_authenticated:
             self.queryset = Design.objects.restrict(request.user, "view")
-        # Enforces design-level view permission/object scoping for this lookup.
-        self.get_object()
+        # Enforces design-level view permission/object scoping for this lookup;
+        # the design is also needed to report ITS planned feeds for the source
+        # rack when that rack has no real ones.
+        design = self.get_object()
 
         kind = request.query_params.get("kind")
         if kind != "rack":
@@ -514,8 +561,112 @@ class DesignViewSet(NetBoxModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        logger.debug("api.power_source: kind=rack rack_id=%s", rack_id)
-        return Response({"custom_fields": dict(rack.cf)}, status=status.HTTP_200_OK)
+        feeds = [
+            _feed_dict(feed, "real")
+            for feed in PowerFeed.objects.filter(rack=rack).order_by("name")
+        ]
+        if not feeds:
+            feeds = [
+                _feed_dict(feed, "planned")
+                for feed in DesignPowerFeed.objects.filter(
+                    design=design, rack=rack).order_by("name")
+            ]
+        logger.debug(
+            "api.power_source: kind=rack rack_id=%s feeds=%d", rack_id, len(feeds))
+        return Response(
+            {"custom_fields": dict(rack.cf), "feeds": feeds},
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="copy-feeds")
+    def copy_feeds(self, request, pk=None):
+        """
+        Clone a source rack's feeds onto a target rack as PLANNED feeds -- the
+        "copy from rack" half of the rack power dialog that carries the supply
+        itself, not just the custom fields (docs/pdu-distribution-spec.md §6.3).
+
+        A greenfield rack in a row is normally fed exactly like its provisioned
+        siblings, so one copy gives it the same electricals instead of retyping
+        each feed. The source's REAL feeds are copied when it has any, otherwise
+        this design's planned feeds for it (so a rack planned earlier in the same
+        design can be cloned too).
+
+        Each copied feed is named for the TARGET rack when the source name is
+        prefixed with the source rack's name (``R101-A`` copied from R101 to R103
+        becomes ``R103-A``); any other name is kept verbatim. Upserts by the
+        ``(design, rack, name)`` unique_together, so re-copying updates the
+        electricals instead of duplicating rows. Writes ONLY DesignPowerFeed
+        rows -- never dcim, and never the target rack.
+
+        POST .../designs/<pk>/copy-feeds/
+          body {"rack_id": <target>, "source_rack_id": <source>}
+          -> {"feeds": [{"id","name","voltage","amperage","phase","supply"}, ...],
+              "created": <n>, "updated": <n>}
+
+        URL name: plugins-api:netbox_rack_design-api:design-copy-feeds
+        Path:     /api/plugins/rack-design/designs/<pk>/copy-feeds/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+
+        body = CopyFeedsSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        target = Rack.objects.filter(pk=data["rack_id"]).first()
+        if target is None:
+            return Response({"rack_id": ["Rack does not exist."]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # Same-site rule, mirroring add-rack / rack-power / planned-feed.
+        if target.site_id != design.site_id:
+            return Response({"rack_id": ["This rack is not in the design's site."]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        source = Rack.objects.filter(pk=data["source_rack_id"]).first()
+        if source is None:
+            return Response({"source_rack_id": ["Rack does not exist."]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if source.pk == target.pk:
+            return Response(
+                {"source_rack_id": ["Source and target rack must differ."]},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        sources = list(PowerFeed.objects.filter(rack=source).order_by("name"))
+        if not sources:
+            sources = list(DesignPowerFeed.objects.filter(
+                design=design, rack=source).order_by("name"))
+
+        copied, created_count, updated_count = [], 0, 0
+        for feed in sources:
+            name = _retarget_feed_name(feed.name, source.name, target.name)
+            electricals = {
+                "voltage": feed.voltage,
+                "amperage": feed.amperage,
+                "phase": getattr(feed.phase, "value", feed.phase),
+                "supply": getattr(feed.supply, "value", feed.supply),
+            }
+            planned, created = DesignPowerFeed.objects.get_or_create(
+                design=design, rack=target, name=name, defaults=electricals)
+            if created:
+                created_count += 1
+            else:
+                for field_name, value in electricals.items():
+                    setattr(planned, field_name, value)
+                planned.save()
+                updated_count += 1
+            copied.append(planned)
+
+        logger.debug(
+            "api.copy_feeds: design=%s %s -> %s created=%d updated=%d",
+            design.pk, source.name, target.name, created_count, updated_count)
+        return Response(
+            {
+                "feeds": PlannedFeedSerializer(copied, many=True).data,
+                "created": created_count,
+                "updated": updated_count,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["get"], url_path="feeds")
     def feeds(self, request, pk=None):
@@ -1346,8 +1497,15 @@ class DeviceTypePowerViewSet(viewsets.ViewSet):
     projection applies to a planned add (``device_type_power_summary``). It is
     read-only and performs no writes; unknown ids are simply omitted.
 
+    The optional ``role_id`` is the role the add would carry (the editor's
+    palette Role select). It matters because the excluded-role rule
+    (``power_exclude_roles``) lives in the projection: a PDU is not a consumer,
+    so with the PDU role selected a type reports a known 0 W instead of the
+    unknown its draw-less inlet template would otherwise yield -- the same
+    figure the slot gets after Save. An unknown/blank role_id is ignored.
+
     Endpoint:
-      GET /api/plugins/rack-design/device-type-power/?id=1&id=2...
+      GET /api/plugins/rack-design/device-type-power/?id=1&id=2...[&role_id=9]
         -> {"results": {"1": {"draw_w", "draw_known", "power_ports": [...]}, ...}}
     """
 
@@ -1361,13 +1519,21 @@ class DeviceTypePowerViewSet(viewsets.ViewSet):
                 ids.append(int(raw))
             except (TypeError, ValueError):
                 continue
+        role = None
+        try:
+            role_id = int(request.query_params.get("role_id") or 0)
+        except (TypeError, ValueError):
+            role_id = 0
+        if role_id:
+            role = DeviceRole.objects.filter(pk=role_id).first()
         results = {}
         if ids:
             types = DeviceType.objects.filter(pk__in=ids).prefetch_related(
                 "powerporttemplates"
             )
             for dt in types:
-                results[str(dt.pk)] = projection.device_type_power_summary(dt)
+                results[str(dt.pk)] = projection.device_type_power_summary(
+                    dt, role=role)
         return Response({"results": results})
 
 

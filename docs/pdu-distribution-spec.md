@@ -22,9 +22,9 @@ only as a bring-your-own-script hook.
 
 | Tier | Who it's for | Mechanism |
 |---|---|---|
-| **Base** (announced) | anyone who follows the two naming conventions | `distribution_mode = "builtin"`: bank from the outlet port name, breaker from the **bound feed**, feed-leg from the binding. No config, no script. |
-| **Config bridge** | sites that keep power limits/topology in **custom fields** | `planning_fields` config maps *custom fields only* into the planning dialogs and the script's view of the rack. Never touches native fields. |
-| **Script** | sites whose distribution *behaviour* differs | `distribution_mode = "script"`: a dotted path to `fn(rack, devices) -> Distribution`. Only for logic (direction, ceilings, PSU schemes) — **never** for feed *data*. |
+| **`"none"`** | racks/sites with no per-bank accounting | No bank attribution at all — where a device sits is irrelevant because there is no way to know which bank feeds it. The heatmap falls back to a per-device share of the rack total. |
+| **`"builtin"`** (announced) | anyone who follows the two naming conventions | Purely native: bank from the outlet port name, breaker from the **bound feed**, feed-leg from the binding, rack units split symmetrically across banks in a fixed direction. Reads **no custom fields at all** — no rack ceiling, no PDU orientation. |
+| **`"script"`** | sites whose distribution *logic* differs | A dotted path to `fn(rack, devices) -> Distribution`. This is where distribution **logic** lives — the conventions of a company or a data centre — and the only tier where custom fields reach the engine, via the `planning_fields` config bridge (merged over `rack.cf` for this tier only). On any failure the engine logs a warning and returns `None`; the heatmap degrades to the per-device view and never breaks the editor. |
 
 ### 0.2 The universal split — native vs config
 
@@ -32,11 +32,21 @@ only as a bring-your-own-script hook.
   voltage/amperage/phase/supply, port `allocated_draw`, the outlet port name, the
   device name — the plugin reads these directly. They exist on every NetBox
   instance, so no mapping is needed.
-- **Config bridges custom fields only.** Site quirks that live in custom fields —
-  `power_limitation` (rack ceiling), `pdu_location` (unit→bank direction), and any
-  future field — are declared in `planning_fields`, so the plugin never hardcodes
-  a site's cf names. A DC that doesn't use them simply doesn't declare them; the
-  dialog shows nothing extra and the base feature still works.
+- **The builtin tier is purely native — it reads no custom fields at all.** Bank
+  identity, breaker sizing, and the unit→bank split direction all come from
+  outlet names and feed bindings; there is no rack-ceiling lookup and no
+  PDU-orientation lookup in `"builtin"`. Custom fields matter only once a site
+  needs *behaviour* the two conventions can't express.
+- **Config bridges custom fields only, and only for the script tier.** Site
+  quirks that live in custom fields — `power_limitation` (rack ceiling: the
+  PDUs may total more breaker capacity than the hall can cool, so the cap is a
+  separate fact that must alarm independently), `pdu_location` (which end of
+  the rack a PDU's tail/inlet faces, so a script knows where each bank
+  physically sits), and any future field — are declared in `planning_fields`
+  and reached by a `distribution_script` through its `source` key, so the
+  plugin never hardcodes a site's cf names *in the code it ships*. A DC that
+  doesn't run a script simply doesn't declare them; the dialog shows nothing
+  extra and the base feature still works.
 
 ### 0.3 The two universal conventions
 
@@ -95,17 +105,20 @@ the PDU+bank feeding it — so an **uncabled** device is still attributed by its
 position.
 
 ```
-units          = [1 .. rack.u_height]          # reversed if pdu_location == "top"
+units          = [1 .. rack.u_height]          # reversed if direction == "top"
 bank_count/rack = Σ(power_bank_count over PDUs) / 2      # /2 because a & b mirror
 units_per_bank  = round(len(units) / bank_count/rack)
 ```
 
 Walking PDUs in feed order, each bank claims the next contiguous `units_per_bank`
 slice of its leg's unit list. **Remainder** units attach to the **previous**
-bank, so every unit is owned. `pdu_location` (`top`/`bottom`, a rack custom field
-read via the config bridge) flips the direction so bank 1 sits where the PDU
-physically starts. **`pdu_location` is optional**: absent, direction defaults to
-`bottom`.
+bank, so every unit is owned. **The builtin always splits in a fixed direction**
+(bank 1 at the bottom) — it consults no custom field at all. A script variant
+(e.g. `distribution_example.py`) may instead read the rack custom field
+`pdu_location` (`top`/`bottom` — which end of the rack the PDU's tail/inlet
+faces) through the `planning_fields` config bridge and flip the direction so
+bank 1 sits where the PDU physically starts; there, `pdu_location` is
+**optional**: absent, direction defaults to `bottom`.
 
 **PDU scheme** — the multiset of per-PDU bank counts, sorted and `_`-joined, is
 looked up in `BANK_LIST_TO_PDU_SCHEMAS` to label the topology (validation aid;
@@ -207,10 +220,13 @@ Toggle off → styling restores exactly (pure view state, never persisted).
 "distribution_mode": "none",
 # Dotted path to a callable used when distribution_mode == "script".
 "distribution_script": "",
-# Custom-field bridge for the planning dialogs (Tier 2). Maps site custom
-# fields into the rack/PDU planning inputs -- NATIVE fields are never listed
-# here. Empty by default (base feature needs none). Both "rack" and "pdu" keys
-# are optional; each is a list of {key,label,type,source,choices?}. Example:
+# Custom-field bridge for the planning dialogs -- meaningful only when
+# distribution_mode == "script" (the builtin tier reads no custom fields, so
+# it ignores this entirely). Maps site custom fields into the rack/PDU
+# planning inputs and into the script's view of the rack -- NATIVE fields are
+# never listed here. Empty by default (the builtin feature needs none). Both
+# "rack" and "pdu" keys are optional; each is a list of
+# {key,label,type,source,choices?}. Example:
 #   "planning_fields": {
 #     "rack": [
 #       {"key": "power_limitation", "label": "Power limitation (W)",
@@ -232,6 +248,13 @@ native attribute *to read from a copy source*) — the same token grammar as the
 naming templates, so it's self-documenting. It seeds the dialog / copy-from-rack;
 it is **never written back** to a native field (the planned object has no real
 record). `type` ∈ `{number, text, choice}`; `choices` for `choice`.
+
+**`source` is meaningful to scripts only** — the builtin tier never resolves a
+`planning_fields` entry, so with `distribution_mode` at `"none"` or `"builtin"`
+the map has nothing to feed. Consequently the rack/PDU planning dialogs' manual
+cf inputs are a **script-tier feature**: they only surface entries once a
+`distribution_script` (and a matching `planning_fields` declaration) are
+configured to consume them.
 
 There is no `naming_template`-style middle mode: distribution can't be a format
 string, so it's off (`none`), built-in (`builtin`), or fully delegated
@@ -311,8 +334,10 @@ for distribution *behaviour* only.
 
 Unchanged in shape/purpose: one row per `(design, rack)`, holding the planned
 `custom_fields` (e.g. `power_limitation`, `pdu_location`) merged **in-memory**
-over `rack.cf` before the distribution runs (never written to `dcim.Rack`). Now
-populated via the `planning_fields`-driven rack dialog.
+over `rack.cf` before the distribution runs (never written to `dcim.Rack`). This
+merge only matters for `distribution_mode = "script"` — a `distribution_script`
+reads it through the `planning_fields` config bridge; the builtin tier ignores
+`rack.cf` entirely. Now populated via the `planning_fields`-driven rack dialog.
 
 ### 6.5 Planned-PDU custom fields — device reference vs manual entry
 
@@ -496,12 +521,15 @@ planned), bank/leg, breaker, override applied, and every graceful fallback.
 - [ ] `DesignPowerFeed` round-trips; `unique_together(design, rack, name)`;
       cascade on design delete.
 
-**Config bridge (Tier 2) — custom fields only:**
+**Config bridge (script tier only) — custom fields only:**
+- [ ] `distribution_mode = "builtin"` never resolves `planning_fields` and never
+      reads `rack.cf`; only `distribution_mode = "script"` does.
 - [ ] Rack/PDU planning dialogs render their cf inputs from `planning_fields`; no
-      cf name is hardcoded in JS/HTML.
+      cf name is hardcoded in JS/HTML, and the dialogs' manual cf inputs only
+      apply when a script is configured to consume them.
 - [ ] `planning_fields` includes both `"rack"` and `"pdu"` keys (both optional);
       `"pdu"` drives the PDU dialog's manual cf inputs.
-- [ ] `power_limitation` / `pdu_location` reach the script via
+- [ ] `power_limitation` / `pdu_location` reach a `distribution_script` via
       `DesignRackPower` merged over `rack.cf`, without writing `dcim.Rack`.
 - [ ] `planning_fields = {}` (default) → dialogs show only native inputs; base
       feature unaffected.

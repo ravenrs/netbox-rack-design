@@ -512,19 +512,22 @@ def _collect_pdus(rack, devices):
     return pdus
 
 
-def _unit_to_bank(rack, pdus):
+def _unit_to_bank(rack, pdus, *, reversed_direction=False):
     """Map each rack unit to a ``(pdu_name, bank_id)`` per feed leg (docs/pdu-
     distribution-spec.md §2.1).
 
     Splits the rack's units into contiguous, equal-sized slices -- one per
     bank on that leg, in bank order -- so an uncabled device can be attributed
-    to a bank by its U position. ``pdu_location`` (``top``/``bottom``, read via
-    the config-bridge ``rack.cf``) flips the direction so bank 1 sits where the
-    PDU physically starts; absent, it defaults to ``bottom``. Returns
+    to a bank by its U position. The builtin reads no custom fields; cf-driven
+    behaviour (e.g. a ``pdu_location`` override that flips which end bank 1
+    sits at) is script-only, so this always uses the current default direction
+    (equivalent to ``pdu_location`` absent/``"bottom"``) unless a caller
+    explicitly passes ``reversed_direction=True`` -- a hook for a future script
+    that wants the reversed direction without reimplementing this algorithm;
+    :func:`build_native` never passes it. Returns
     ``{leg: {unit: (pdu_name, bank_id)}}``."""
-    pdu_location = (rack.cf or {}).get("pdu_location") or "bottom"
     units = list(range(1, (rack.u_height or 0) + 1))
-    if pdu_location == "top":
+    if reversed_direction:
         units.reverse()
 
     result = {}
@@ -632,7 +635,12 @@ def _charge_native(pdus, bank_ref, device, power_type):
 
 def _power_limitation_w(rack):
     """Rack ceiling in watts from the ``power_limitation`` custom field (stored
-    in kW as free text, read via the config-bridge ``rack.cf``), or ``None``."""
+    in kW as free text, read straight off ``rack.cf``), or ``None``.
+
+    The builtin reads no custom fields, so :func:`build_native` never calls
+    this -- it always passes ``None`` for the rack ceiling. This helper is kept
+    only because a ``script``-mode engine may still want it; cf-driven
+    ceilings are script-only now."""
     raw = (rack.cf or {}).get("power_limitation")
     if raw in (None, ""):
         return None
@@ -697,6 +705,14 @@ def build_native(rack, devices):
     ``None`` when the rack has no resolvable PDUs (the heatmap then stays
     per-device). Never raises -- degrades by logging (debug) and omitting the
     unresolvable piece, same tolerance as the ``script`` mode fallback.
+
+    Purely native: the builtin reads no custom fields at all -- not
+    ``pdu_location`` (unit-to-bank direction always uses the current default,
+    i.e. bank 1 at the bottom) and not ``power_limitation`` (no rack ceiling is
+    applied, so ``rack.power_limitation_w`` is always ``None`` and no "exceeds
+    power limitation" warning can fire). Bank-overload warnings (allocated
+    draw over a bank's breaker, computed purely from feed data) are unaffected.
+    All cf-driven behaviour belongs exclusively to ``distribution_mode="script"``.
     """
     pdus = _collect_pdus(rack, devices)
     if not pdus:
@@ -726,7 +742,9 @@ def build_native(rack, devices):
         for bank_ref in _legs_for_native(device, unit_map, pdus):
             _charge_native(pdus, bank_ref, device, power_type)
 
-    rack_summary = _finalize_native(pdus, _power_limitation_w(rack))
+    # No rack ceiling in builtin mode -- the builtin reads no custom fields, so
+    # `power_limitation` (script-only) is never consulted here.
+    rack_summary = _finalize_native(pdus, None)
     logger.debug(
         "distribution.build_native: rack=%r pdus=%d alarm=%s",
         getattr(rack, "name", None), len(pdus), rack_summary["alarm"],
@@ -736,7 +754,10 @@ def build_native(rack, devices):
         # table lives only in the internal tooling, not this codebase) -- left
         # blank like the reference script; a site script may fill it in.
         "scheme": "",
-        "pdu_location": (rack.cf or {}).get("pdu_location"),
+        # Always None in builtin mode: the builtin reads no custom fields, so
+        # there is no `pdu_location` to report -- kept as a key for shape
+        # stability (a script-mode Distribution still populates it).
+        "pdu_location": None,
         "pdus": pdus,
         "rack": rack_summary,
     }
@@ -792,10 +813,13 @@ def generate_distribution(elevation, *, mode=None):
 
     # Per-design rack power cf override (docs/pdu-distribution-spec.md): merge
     # DesignRackPower.power_config over the in-memory rack.cf right before the
-    # engine runs, so it reads planned power_limitation/pdu_location. In-memory
-    # only, never persisted; only reached in "builtin"/"script" mode so "none"
-    # mode never queries DesignRackPower.
-    apply_rack_power_override(elevation)
+    # engine runs, so a script reads planned power_limitation/pdu_location.
+    # In-memory only, never persisted. The builtin reads no custom fields at
+    # all, so this override -- which exists purely to feed a script -- is only
+    # applied in "script" mode; "none" mode never reaches here either, so it
+    # never queries DesignRackPower.
+    if mode == "script":
+        apply_rack_power_override(elevation)
     devices = devices_from_elevation(elevation)
     planned_pdu_count = sum(
         1 for d in devices

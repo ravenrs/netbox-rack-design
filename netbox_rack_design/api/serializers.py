@@ -281,6 +281,14 @@ class PlannedFeedSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "voltage", "amperage", "phase", "supply")
 
 
+class CopyFeedsSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/copy-feeds/ (clone a rack's feeds as
+    planned feeds onto another rack)."""
+
+    rack_id = serializers.IntegerField()
+    source_rack_id = serializers.IntegerField()
+
+
 class PlannedFeedUpsertSerializer(serializers.Serializer):
     """Body for POST .../designs/<pk>/planned-feed/ (upsert by rack+name)."""
 
