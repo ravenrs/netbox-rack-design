@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-20
+
+### Release Summary
+
+The power-distribution engine's three modes are now cleanly separated. `builtin` is
+purely native: it derives breaker banks from PDU outlet names and feed bindings and
+reads **no custom fields at all**, so a public install can no longer be steered by
+field names that only mean something inside one organisation. Everything
+custom-field-driven — a rack power ceiling, a PDU orientation — belongs to
+`distribution_mode = "script"`, which is the tier meant to carry a site's own
+conventions. Alongside that, greenfield planning gets a real shortcut: the rack power
+dialog can now clone a sibling rack's feeds, and the editor's power bar stops waiting
+for a Save to tell the truth — capacity now refreshes live when feeds change, exactly
+like the per-bank chips already did.
+
+### **Breaking Changes**
+
+- **`distribution_mode = "builtin"` no longer reads the `power_limitation` or
+  `pdu_location` rack custom fields.** Previously the built-in engine read both
+  literally off `rack.cf`, which shipped one organisation's field names in a public
+  plugin — the documentation had always claimed the opposite. In `builtin` the
+  unit-to-bank split now always uses the fixed default direction, no rack ceiling is
+  applied (`Distribution["rack"]["power_limitation_w"]` is always `null`) and
+  `Distribution["pdu_location"]` is always `null`. Bank-overload alarms, which come
+  from feed data alone, are unchanged.
+  **Migration:** if you relied on either field, set
+  `distribution_mode = "script"` with `distribution_script` pointing at
+  `netbox_rack_design.distribution_example.build` (or your own copy), and declare the
+  fields in `planning_fields` **including each entry's `source`**, e.g.
+  `{"key": "power_limitation", "type": "number", "source": "cf.power_limitation"}`.
+  An entry without `source` renders in the dialog but resolves to nothing.
+- **The per-design rack power override (`DesignRackPower`) is applied in `script` mode
+  only.** It exists to feed a script; in `builtin` it is ignored.
+- **The rack and PDU planning dialogs only show their custom-field inputs when
+  `distribution_mode = "script"`.** In `none`/`builtin` the rack dialog keeps its
+  "Copy from rack" row and explains why the manual fields are hidden, rather than
+  offering inputs nothing would read.
+
+### Added
+
+- **Copy a rack's power from a sibling rack.** The rack "Power" dialog's *Copy from
+  rack* mode now clones the source rack's feeds as planned `DesignPowerFeed` rows, not
+  just its custom fields — a greenfield rack in a row inherits the supply of the
+  provisioned rack next door in one step. Copied feeds are renamed for the rack they
+  land on (`R101-A` → `R103-A`; any other naming scheme is kept verbatim) and upsert by
+  `(design, rack, name)`, so re-copying updates instead of duplicating. New endpoint
+  `POST /api/plugins/rack-design/designs/<pk>/copy-feeds/`; `power-source/?kind=rack`
+  now also reports the source rack's feeds so the dialog can preview them (falling back
+  to the design's planned feeds when the source rack has none).
+- **`recompute-distribution` also returns each rack's power summary** (`power` block:
+  draw, capacity, utilisation, thresholds), which is what makes live capacity possible —
+  the derating and phase maths stay on the server.
+
+### Fixed
+
+- **The rack power bar's capacity is now live.** Adding or copying a planned feed used
+  to leave the denominator at whatever the page was rendered with until the next Save
+  or reload, so a greenfield rack could read `1000 / 1000 W` in red while its banks
+  were green. Capacity and thresholds now refresh from the server on the same signal
+  the per-bank chips already used.
+- **A freshly dropped PDU no longer paints as the unknown-draw hatch.** The palette
+  resolved a device type's draw without knowing the role it would be given, so a PDU —
+  whose inlet template carries no draw — came back "unknown", while the very same PDU
+  after Save read a known 0 W like passive gear. `device-type-power/` now accepts an
+  optional `role_id` and applies the projection's `power_exclude_roles` rule, and the
+  palette re-stamps its rows when the Role selector changes.
+
+### Changed
+
+- `docs/pdu-distribution-spec.md` and `docs/power-distribution.md` now describe the
+  three tiers as implemented, scope every "the plugin never hardcodes your custom-field
+  names" claim to the script tier, document `source` as script-only, and correct
+  `pdu_location`, which was documented as a PDU-level custom field when it is
+  rack-level.
+
 ## [0.16.0] - 2026-08-19
 
 ### Release Summary

@@ -650,6 +650,18 @@
         try { return JSON.parse(el.textContent || "{}") || {}; } catch (e) { return {}; }
     })();
 
+    // The effective power-distribution engine (docs/pdu-distribution-spec.md),
+    // read once from the editor-data json_script global. Custom-field planning
+    // inputs (rack ceiling, PDU orientation, ...) are consumed ONLY by a
+    // user's distribution script in "script" mode -- the native "none" and
+    // "builtin" engines never read a custom field, so the power dialogs must
+    // not offer manual cf inputs they cannot deliver on.
+    var DISTRIBUTION_MODE = (function () {
+        var el = document.getElementById("rd-distribution-mode");
+        if (!el) { return "none"; }
+        try { return JSON.parse(el.textContent || "\"none\"") || "none"; } catch (e) { return "none"; }
+    })();
+
     // The rack's real PowerFeeds + this design's planned DesignPowerFeeds, for
     // the bind-to-feed picker (real first, then planned). Never writes.
     function fetchFeeds(rackId) {
@@ -705,6 +717,34 @@
             headers: { "Accept": "application/json" },
         }).then(function (resp) { return resp.ok ? resp.json() : null; })
             .catch(function () { return null; });
+    }
+
+    // A feed change moves the rack's CAPACITY but mutates no tile, so the
+    // heatmap's MutationObserver never sees it. Ask it to pull fresh numbers
+    // (capacity from the server, chips from the distribution engine) so the bar
+    // updates without a layout Save or a page reload.
+    function refreshLivePower() {
+        var hm = window.NbxRdPowerHeatmap;
+        if (hm && typeof hm.refresh === "function") { hm.refresh(); }
+    }
+
+    // Clone a source rack's feeds onto this rack as PLANNED feeds (the other
+    // half of "copy from rack": the supply itself, not just the custom fields).
+    // Writes only DesignPowerFeed rows; upserts by rack+name server-side.
+    function postCopyFeeds(rackId, sourceRackId) {
+        rdTrace("dist.copyfeeds.save", { rackId: rackId, sourceRackId: sourceRackId });
+        return fetch(API_BASE + "copy-feeds/", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+            body: JSON.stringify({
+                rack_id: parseInt(rackId, 10),
+                source_rack_id: parseInt(sourceRackId, 10),
+            }),
+        }).then(function (resp) {
+            if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+            return resp.json();
+        });
     }
 
     function postRackPower(rackId, powerConfig) {
@@ -844,11 +884,17 @@
         var currentPlanned = widget.planned_power_feed_id != null ? widget.planned_power_feed_id : null;
         // Custom-field capture (docs/pdu-distribution-spec.md §6): a planned PDU's
         // cf come EITHER from referencing a real PDU (power_source_device, cf read
-        // live) OR from manual entry (power_config.custom_fields). The manual
-        // sub-form is driven by PLANNING_FIELDS.pdu -- empty => reference-only.
-        var pduFields = (PLANNING_FIELDS && PLANNING_FIELDS.pdu) || [];
+        // live) OR from manual entry (power_config.custom_fields). Both paths only
+        // ever feed a user's distribution script -- the native "none"/"builtin"
+        // engines never read a custom field -- so this whole section is
+        // script-mode-only. The manual sub-form is further driven by
+        // PLANNING_FIELDS.pdu -- empty => reference-only.
+        var pduScriptMode = DISTRIBUTION_MODE === "script";
+        var pduFields = pduScriptMode ? ((PLANNING_FIELDS && PLANNING_FIELDS.pdu) || []) : [];
         var currentSourceDev = widget.power_source_device_id != null ? widget.power_source_device_id : null;
         var currentManualCf = (widget.power_config && widget.power_config.custom_fields) || null;
+        // Existing bindings stay visible/editable even outside "script" mode --
+        // hiding a value someone already set would silently strand it.
         var showCfSection = pduFields.length > 0 || currentSourceDev != null;
         rdTrace("feed.bind.open", {
             rackId: rackId, label: widget.label,
@@ -857,7 +903,12 @@
         });
 
         var cfSectionHtml = "";
-        if (showCfSection) {
+        if (!showCfSection && !pduScriptMode) {
+            cfSectionHtml =
+                '<hr class="my-2"><div class="form-text">'
+                + 'Custom-field capture is hidden because distribution_mode is not "script" '
+                + '— only a distribution script reads them.</div>';
+        } else if (showCfSection) {
             var pduRacks = racksInDom();
             var manualFieldsHtml = pduFields.map(function (f) {
                 var safeLabel = String(f.label || f.key).replace(/&/g, "&amp;").replace(/</g, "&lt;");
@@ -1043,6 +1094,9 @@
                 newForm.style.display = "none";
                 currentPlanned = saved.id;
                 fetchFeeds(rackId).then(renderList);
+                // A new feed changes the rack's capacity; pull it live so the bar
+                // does not sit on the pre-feed denominator until the next Save.
+                refreshLivePower();
             }).catch(function (err) {
                 newStatus.textContent = "Could not create feed: " + String(err);
             });
@@ -1190,7 +1244,14 @@
         overlay.className = "modal fade nbx-rd-power-modal";
         overlay.setAttribute("tabindex", "-1");
         var racks = racksInDom().filter(function (r) { return String(r.id) !== String(rackId); });
-        var fields = (PLANNING_FIELDS && PLANNING_FIELDS.rack) || [];
+        // Manual cf planning inputs only ever reach a user's distribution
+        // script (docs/pdu-distribution-spec.md §5): the native "none" and
+        // "builtin" engines never read a custom field, so offering these
+        // inputs outside "script" mode would promise an effect the active
+        // engine cannot deliver. "Copy from rack" stays available in every
+        // mode -- feeds are native data.
+        var scriptMode = DISTRIBUTION_MODE === "script";
+        var fields = scriptMode ? ((PLANNING_FIELDS && PLANNING_FIELDS.rack) || []) : [];
         var fieldsHtml = fields.map(function (f) {
             var safeLabel = String(f.label || f.key).replace(/&/g, "&amp;").replace(/</g, "&lt;");
             return '<div class="col"><label class="form-label small mb-0">' + safeLabel + "</label>"
@@ -1224,7 +1285,9 @@
                     + '<label class="form-check-label" for="nbx-rd-rackpower-manual">Manual entry</label>'
                     + "</div>"
                     + '<div class="row g-2 ms-1 mt-1">' + fieldsHtml + "</div>")
-                : "")
+                : (!scriptMode
+                    ? '<div class="form-text mt-2">Manual planning fields are hidden because distribution_mode is not "script" — only a distribution script reads them.</div>'
+                    : ""))
             + "</div>"
             + '<div class="modal-footer">'
             + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
@@ -1241,6 +1304,11 @@
 
         var loadedCf = (existing && existing.custom_fields) || {};
         var copiedFrom = (existing && existing.copied_from) || null;
+        // The source rack's feeds, previewed by Load and cloned as PLANNED feeds
+        // by the confirm handler (docs/pdu-distribution-spec.md §6.3): a
+        // greenfield rack is normally fed like its provisioned siblings, so the
+        // copy carries the supply, not just the planning custom fields.
+        var loadedFeeds = [];
 
         function setFieldValues(cf) {
             fields.forEach(function (f) {
@@ -1280,7 +1348,21 @@
                 setFieldValues(loadedCf);
                 var srcRackName = (rackSelect.selectedOptions[0] || {}).textContent || "";
                 copiedFrom = { rack_id: parseInt(srcRackId, 10), rack_name: srcRackName };
-                statusEl.textContent = "Loaded from " + srcRackName + ".";
+                // Preview BOTH halves of the copy: the feeds this rack will
+                // inherit (created as planned feeds on Save) and how many
+                // planning custom fields came across.
+                loadedFeeds = (data.feeds || []).slice();
+                var cfCount = Object.keys(loadedCf).filter(function (k) {
+                    return loadedCf[k] !== null && loadedCf[k] !== "";
+                }).length;
+                var bits = ["Loaded from " + srcRackName + "."];
+                if (loadedFeeds.length) {
+                    bits.push("Feeds to copy: " + loadedFeeds.map(feedRowLabel).join(", ") + ".");
+                } else {
+                    bits.push("That rack has no feeds to copy.");
+                }
+                bits.push(cfCount + " power field(s) copied.");
+                statusEl.textContent = bits.join(" ");
             });
         });
 
@@ -1313,11 +1395,29 @@
                 custom_fields: cf,
             };
             rdTrace("dist.dialog.confirm", { rackId: rackId, kind: "rack", source: mode, fields: cf });
-            postRackPower(rackId, cfg).then(function () {
-                createToast("success", "Saved", "Rack power settings saved.");
+            // Copy mode carries the supply as well: clone the source rack's feeds
+            // as planned feeds, then store the planning cf. Both persist at once
+            // (this is design data, not layout), and the power bar + bank chips
+            // refresh LIVE off the recompute -- no layout Save, no reload.
+            var copySource = (mode === "copy_rack" && copiedFrom && copiedFrom.rack_id != null)
+                ? copiedFrom.rack_id : null;
+            var feedsCopied = copySource != null
+                ? postCopyFeeds(rackId, copySource).then(function (res) {
+                    return (res && res.feeds) ? res.feeds.length : 0;
+                })
+                : Promise.resolve(0);
+            feedsCopied.then(function (count) {
+                return postRackPower(rackId, cfg).then(function () { return count; });
+            }).then(function (count) {
+                createToast(
+                    "success", "Saved",
+                    count
+                        ? "Rack power settings saved; " + count + " feed(s) copied."
+                        : "Rack power settings saved.");
                 var btn = document.querySelector(
                     '.nbx-rd-rack-block[data-rack-id="' + rackId + '"] [data-rd-rack-power-btn]');
                 if (btn) { btn.classList.add("has-config"); }
+                refreshLivePower();
             }).catch(function (err) {
                 createToast("danger", "Error", "Could not save rack power: " + String(err));
             });
@@ -5182,8 +5282,11 @@
     // Distribution WITHOUT persisting anything. This is what lets the editor's
     // per-bank chips refresh live on every edit, exactly like the always-live
     // total power bar, using the very same engine as Save. Resolves to
-    // {"<rackId>": <distribution-or-null>, ...} or null on any failure (the
-    // caller then keeps the last-known distribution rather than blanking).
+    // {distributions: {"<rackId>": <distribution-or-null>, ...},
+    //  power: {"<rackId>": <rack power summary>}} or null on any failure (the
+    // caller then keeps the last-known numbers rather than blanking). The power
+    // block carries the CAPACITY, which only the server can derive (feed
+    // derating/phase maths over real AND planned feeds).
     var recomputeDistUrl = saveUrl
         ? saveUrl.replace(/save-layout\/?$/, "recompute-distribution/") : "";
     function recomputeDistribution() {
@@ -5199,7 +5302,8 @@
         }).then(function (response) {
             return response.ok ? response.json() : null;
         }).then(function (data) {
-            return (data && data.distributions) ? data.distributions : null;
+            if (!data || !data.distributions) { return null; }
+            return { distributions: data.distributions, power: data.power || {} };
         }).catch(function () { return null; });
     }
 
@@ -5350,15 +5454,25 @@
         // attributes ride the palette <li>, so the drag-in CLONE inherits them;
         // onPaletteDrop copies them onto the tile content (which the heatmap
         // reads). Best-effort: a drop before this resolves just falls back to 0.
+        // The selected palette Role rides along: the excluded-role rule
+        // (power_exclude_roles) lives in the projection, so only the server can
+        // say that a PDU-role add is a known 0 W rather than the unknown its
+        // draw-less inlet template implies. Changing the Role select therefore
+        // re-stamps the rendered rows (see the change listener below).
         var powerUrl = "/api/plugins/rack-design/device-type-power/";
+        function paletteRoleId() {
+            var el = document.getElementById("id_device_role");
+            return (el && el.value) ? el.value : "";
+        }
         function stampDraw(container) {
             if (!container) { return; }
             var rows = Array.prototype.slice.call(
                 container.querySelectorAll(".nbx-rd-palette-item[data-device-type-id]"));
             if (!rows.length) { return; }
+            var roleId = paletteRoleId();
             var url = powerUrl + "?" + rows.map(function (r) {
                 return "id=" + encodeURIComponent(r.getAttribute("data-device-type-id"));
-            }).join("&");
+            }).join("&") + (roleId ? "&role_id=" + encodeURIComponent(roleId) : "");
             fetch(url, {
                 credentials: "same-origin",
                 headers: { "Accept": "application/json" },
@@ -5474,6 +5588,18 @@
             manufEl.addEventListener("change", function () {
                 lastKey = currentKey();
                 fetchTypes();
+            });
+        }
+
+        // The projected draw of an already-rendered row depends on the Role that
+        // would be assigned (power_exclude_roles: a PDU-role add is a known 0 W,
+        // not a consumer), so a Role change re-stamps both palettes rather than
+        // leaving rows carrying the previous role's figure.
+        var roleSelectEl = document.getElementById("id_device_role");
+        if (roleSelectEl) {
+            roleSelectEl.addEventListener("change", function () {
+                stampDraw(listEl);
+                stampDraw(quickListEl);
             });
         }
 

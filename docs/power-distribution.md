@@ -66,6 +66,11 @@ Under these conventions, the plugin distributes each device's load per bank:
 Per-bank breaker = `pdu_input_draw / power_bank_count` (where
 `power_bank_count` is the distinct bank IDs on that PDU).
 
+`"builtin"` reads **no custom fields at all** — no rack power ceiling, no PDU
+orientation — and always splits rack units across banks symmetrically in a
+fixed direction. Sites that need either of those need `distribution_mode =
+"script"` (below).
+
 ## Mode: `script`
 
 For distribution behavior a configuration cannot express, point `distribution_script` at any
@@ -174,8 +179,9 @@ After feeds are defined, each PDU binding travels with the design and is
 restored on load. A PDU with no binding is omitted from the distribution (logged,
 no error).
 
-A planned PDU's custom fields — e.g., `pdu_location` (top/bottom, for directing
-which bank claims which units) — come from one source:
+A planned PDU's custom fields — e.g., `pdu_scheme` (a site-specific topology
+label; used by a `distribution_script`, not by `"builtin"`) — come from one
+source:
 
 - **Live device reference** — if you link the PDU to an existing real device via
   `power_source_device`, its custom fields are read live on every heatmap
@@ -185,12 +191,25 @@ which bank claims which units) — come from one source:
 
 The two are mutually exclusive per placement.
 
-## Planning fields — custom-field bridge
+Note `pdu_location` (top/bottom, for directing which bank claims which units)
+is a **rack**-level custom field, not a PDU-level one — it is declared under
+`planning_fields["rack"]` (see the example above) and reaches a
+`distribution_script` via `DesignRackPower` merged over `rack.cf`, the same
+path as `power_limitation`. It has nothing to do with `power_source_device` /
+`power_config`, which resolve a *PDU's* custom fields.
+
+## Planning fields — custom-field bridge (script tier only)
 
 Most sites keep power policy in **custom fields**: power limitations (rack
-ceiling), PDU locations (direction), or future site-specific fields. The plugin
-never hardcodes a site's custom-field names — instead, `planning_fields` in
-`PLUGINS_CONFIG` maps them generically so the code never changes per deployment.
+ceiling), PDU locations (direction), or future site-specific fields. These
+reach the engine **only under `distribution_mode = "script"`** — the `"builtin"`
+mode reads no custom fields at all. A `distribution_script` never hardcodes a
+site's custom-field names — instead, `planning_fields` in `PLUGINS_CONFIG` maps
+them generically, resolved by name through each entry's `source` key, so the
+shipped code never changes per deployment. The rack/PDU planning dialogs'
+manual cf inputs are therefore a script-tier feature too: with `"none"` or
+`"builtin"`, `planning_fields` has nothing to feed and the dialogs show only
+native inputs.
 
 ```python
 "planning_fields": {
@@ -331,10 +350,11 @@ A quick end-to-end check that distribution works the way you expect:
    PDU outlet, it charges that bank; if uncabled (planned), it charges the bank
    corresponding to its new U position.
 
-5. **Check custom fields (if using `planning_fields`).** Add a rack with a
-   `power_limitation` custom field. Open the **Power** dialog and verify the
-   field appears as configured. Same for PDU-role fields if your script reads
-   them.
+5. **Check custom fields (script tier only).** If you've switched to
+   `distribution_mode = "script"` with `planning_fields` configured, add a rack
+   with a `power_limitation` custom field. Open the **Power** dialog and verify
+   the field appears as configured. Same for PDU-role fields if your script
+   reads them. (Skip this step under `"builtin"` — it reads no custom fields.)
 
 Nothing here writes to `dcim`: distribution only ever runs on the read-only
 projection, never on page load or on **Save**.
@@ -376,10 +396,16 @@ degrades to `none` gracefully — logs a warning, never errors the editor.
 - Verify cabling: a cabled device should charge the PDU outlet's bank directly
   (the first segment before `/`).
 - Verify uncabled devices are placed at their intended U positions. The rack
-  distribution assumes unit-to-bank mapping based on PDU location and bank
+  distribution assumes a unit-to-bank mapping based on direction and bank
   count; a device at U5 might charge a different bank than U7.
-- Check `pdu_location` if using the config bridge: `"top"` or `"bottom"`
-  determines the direction (default `"bottom"`).
+- **`distribution_mode = "builtin"`** always splits in a fixed direction (bank 1
+  at the bottom) — it does not read the rack custom field `pdu_location` or any
+  other cf.
+- **`distribution_mode = "script"`** may read the rack custom field
+  `pdu_location` (`"top"` or `"bottom"`) through the `planning_fields` config
+  bridge to flip the direction (default `"bottom"` when the field is absent) —
+  check your script and its `planning_fields["rack"]` entry if the direction is
+  wrong.
 - Inspect the debug logs: `logger.debug` messages in `distribution_example.py` /
   `distribution_advanced_example.py` trace each device charge and unit mapping.
 

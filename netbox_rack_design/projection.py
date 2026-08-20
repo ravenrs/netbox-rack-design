@@ -573,12 +573,12 @@ def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_p
     }
 
 
-def device_type_power_summary(device_type, basis=None):
+def device_type_power_summary(device_type, basis=None, role=None):
     """Projected power for a bare device TYPE (no real device yet) -- the draw a
     freshly dropped catalog add carries BEFORE it is saved. Mirrors exactly what
     ``_project_power`` computes for the resulting 'add' slot (same basis, same
-    PowerPortTemplate resolution), so a palette add shows the same draw live as
-    it will after Save + reload.
+    PowerPortTemplate resolution, same excluded-role rule), so a palette add
+    shows the same draw live as it will after Save + reload.
 
     Returns ``{"draw_w": float, "draw_known": bool, "power_ports": [...]}`` where
     each ``power_ports`` entry is ``{"name", "draw", "connected": None}`` (a
@@ -586,15 +586,27 @@ def device_type_power_summary(device_type, basis=None):
     power-port templates that carry no draw value (a powered type we can't
     account for); a type with no templates at all is passive -> known 0.
 
+    ``role`` is the role the add would carry (the editor's palette Role select).
+    A role in ``power_exclude_roles`` is power infrastructure -- a PDU is not a
+    consumer -- so it reports the same ``draw_w=0`` / ``draw_known=True`` that
+    ``_project_power`` gives the saved slot, instead of the unknown a PDU inlet
+    template would otherwise produce. Its per-PSU ``power_ports`` are still
+    listed, exactly as ``_project_power`` does for an excluded slot.
+
     ``basis`` defaults to the configured ``power_draw_basis``.
     """
+    config = _power_config()
     if basis is None:
-        basis = _power_config()["basis"]
+        basis = config["basis"]
+    ports = _device_power_ports(None, device_type, basis)
+    exclude = {r.lower() for r in config["exclude_roles"]}
+    if role is not None and (role.slug or "").lower() in exclude:
+        return {"draw_w": 0.0, "draw_known": True, "power_ports": ports}
     watts, status = _device_draw_w(None, device_type, basis)
     return {
         "draw_w": watts,
         "draw_known": status != "unknown",
-        "power_ports": _device_power_ports(None, device_type, basis),
+        "power_ports": ports,
     }
 
 

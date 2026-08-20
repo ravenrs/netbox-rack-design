@@ -451,13 +451,35 @@
         liveDistPending = window.setTimeout(function () {
             liveDistPending = null;
             var seq = ++liveDistSeq;
-            editor.recomputeDistribution().then(function (dists) {
+            editor.recomputeDistribution().then(function (res) {
                 // Drop a stale response (a newer edit already fired) or a null one
                 // (the request failed) -- never blank the chips on a hiccup.
-                if (seq !== liveDistSeq || !dists) { return; }
+                if (seq !== liveDistSeq || !res) { return; }
+                var dists = res.distributions || {};
                 Object.keys(dists).forEach(function (rackId) {
                     var d = dists[rackId];
                     liveDist[rackId] = (d && d.pdus) ? d : null;
+                });
+                // Capacity/thresholds come from the server (feed derating maths
+                // over real AND planned feeds, which the browser must not
+                // duplicate), so a feed added mid-session moves the bar's
+                // denominator without a Save. The DRAW stays client-side: it is
+                // already live off the tiles and must not lag behind a drag.
+                var powers = res.power || {};
+                Object.keys(powers).forEach(function (rackId) {
+                    var p = powers[rackId];
+                    if (!p || p.capacity_w == null) { return; }
+                    var block = document.querySelector(
+                        '.nbx-rd-rack-block[data-rack-id="' + rackId + '"]');
+                    var bar = block && block.querySelector(".nbx-rd-power-bar");
+                    if (!bar) { return; }
+                    bar.setAttribute("data-rd-power-capacity", Math.round(p.capacity_w));
+                    if (p.warn_pct != null) {
+                        bar.setAttribute("data-rd-power-warn", p.warn_pct);
+                    }
+                    if (p.critical_pct != null) {
+                        bar.setAttribute("data-rd-power-critical", p.critical_pct);
+                    }
                 });
                 recomputeAll();
             });
@@ -589,6 +611,13 @@
             if (toggle.checked) { applyHeatAll(true); }
         }
     }
+
+    // Public hook: a feed change (define/copy a planned feed) mutates no tile, so
+    // the MutationObserver never fires -- the dialogs call this to pull fresh
+    // capacity + chips without a Save or a reload.
+    window.NbxRdPowerHeatmap = {
+        refresh: function () { requestLiveDistribution(); recomputeAll(); },
+    };
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", init);

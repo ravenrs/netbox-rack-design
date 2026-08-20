@@ -18,6 +18,7 @@ from utilities.views import ContentTypePermissionRequiredMixin, register_model_v
 
 from . import filtersets, forms, models, projection, tables
 from .choices import DesignStatusChoices
+from .distribution import DEFAULT_DISTRIBUTION_MODE
 
 PLUGIN_NAME = "netbox_rack_design"
 
@@ -386,6 +387,14 @@ def _design_editor_context(request, design):
         # the rack-power dialog's dynamically-rendered fields. `{}` (default) ->
         # the dialog shows only the copy-from-rack row, no hardcoded cf inputs.
         "planning_fields": get_plugin_config(PLUGIN_NAME, "planning_fields", {}),
+        # Effective power-distribution engine (docs/pdu-distribution-spec.md):
+        # editor.js reads this to decide whether the rack/PDU power dialogs'
+        # manual cf inputs are worth showing at all -- they only ever reach a
+        # user's distribution script, so in "none"/"builtin" mode rendering
+        # them would promise an effect the active engine cannot deliver.
+        "distribution_mode": get_plugin_config(
+            PLUGIN_NAME, "distribution_mode", DEFAULT_DISTRIBUTION_MODE
+        ),
     }
 
 

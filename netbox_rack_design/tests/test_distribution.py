@@ -433,6 +433,16 @@ class BuildNativeTestCase(TestCase):
     def _elevation(self, rack=None):
         return project_rack(self.design, rack or self.racks[0])
 
+    def _set_rack_cf(self, rack, **cf):
+        """Set custom-field values on a real rack and make them visible: ``cf``
+        is a ``cached_property``, so a re-set value needs the cache dropped
+        after the reload (mirrors test_distribution_example.py's ``_set_cf``)."""
+        for k, v in cf.items():
+            rack.custom_field_data[k] = v
+        rack.save()
+        rack.refresh_from_db()
+        rack.__dict__.pop("cf", None)
+
     # --- builtin mode / none mode plumbing ----------------------------------
 
     def test_builtin_mode_returns_distribution_for_cabled_real_pdu(self):
@@ -460,6 +470,10 @@ class BuildNativeTestCase(TestCase):
             set(dist["rack"]),
             {"power_limitation_w", "power_consumption_w", "alarm", "warnings"},
         )
+        # The builtin reads no custom fields: `pdu_location` stays a key for
+        # shape stability, but is always None (no rack cf was even set here).
+        self.assertIsNone(dist["pdu_location"])
+        self.assertIsNone(dist["rack"]["power_limitation_w"])
 
     def test_none_mode_still_returns_none(self):
         self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
@@ -662,9 +676,13 @@ class BuildNativeTestCase(TestCase):
         ]
         self.assertIn("single-corded", charged)
 
-    # --- apply_rack_power_override wiring -------------------------------------
+    # --- apply_rack_power_override wiring (builtin ignores it entirely) ------
 
-    def test_rack_power_override_takes_effect_in_builtin_mode(self):
+    def test_rack_power_override_has_no_effect_in_builtin_mode(self):
+        """The per-design rack power cf override exists to feed a `script`
+        engine; the builtin reads no custom fields at all, so it must be
+        completely unaffected -- same banks as with no override, and
+        `pdu_location` still reported as None."""
         self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
         DesignRackPower.objects.create(
             design=self.design, rack=self.racks[0],
@@ -672,4 +690,55 @@ class BuildNativeTestCase(TestCase):
         )
         dist = generate_distribution(self._elevation(), mode="builtin")
         self.assertIsNotNone(dist)
-        self.assertEqual(dist["pdu_location"], "top")
+        self.assertIsNone(dist["pdu_location"])
+        no_override_dist = build_native(self.racks[0], devices_from_elevation(self._elevation()))
+        self.assertEqual(
+            {b: banks["units"] for b, banks in dist["pdus"]["rack1-pdu-1"]["banks"].items()},
+            {b: banks["units"] for b, banks in no_override_dist["pdus"]["rack1-pdu-1"]["banks"].items()},
+        )
+
+    def test_builtin_ignores_rack_cf_power_limitation(self):
+        """A rack cf `power_limitation` that a load would clearly exceed must
+        raise no alarm in builtin mode -- the builtin never even looks at it."""
+        self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
+        self._set_rack_cf(self.racks[0], power_limitation=0.001)  # 1W ceiling
+        dev = create_test_device(
+            "loaded", site=self.site, rack=self.racks[0], position=5, face="front")
+        PowerPort.objects.create(device=dev, name="psu1", allocated_draw=400)
+
+        dist = generate_distribution(self._elevation(), mode="builtin")
+        self.assertIsNotNone(dist)
+        self.assertIsNone(dist["rack"]["power_limitation_w"])
+        self.assertFalse(dist["rack"]["alarm"])
+        self.assertEqual(dist["rack"]["warnings"], [])
+
+    def test_builtin_ignores_rack_cf_pdu_location(self):
+        """A rack cf `pdu_location` = "top" must not flip the unit->bank
+        direction in builtin mode -- the map must be identical to the no-cf
+        case (bank 1 stays at the bottom, the current default direction)."""
+        self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
+        baseline = build_native(self.racks[0], devices_from_elevation(self._elevation()))
+        baseline_units = {
+            b: banks["units"] for b, banks in baseline["pdus"]["rack1-pdu-1"]["banks"].items()
+        }
+
+        self._set_rack_cf(self.racks[0], pdu_location="top")
+        with_cf = build_native(self.racks[0], devices_from_elevation(self._elevation()))
+        with_cf_units = {
+            b: banks["units"] for b, banks in with_cf["pdus"]["rack1-pdu-1"]["banks"].items()
+        }
+        self.assertEqual(with_cf_units, baseline_units)
+
+    def test_bank_overload_alarm_still_fires_in_builtin_mode(self):
+        """Bank-overload warnings (allocated draw over a bank's breaker) are
+        unchanged by this fix -- they come purely from feed data, not cf."""
+        self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
+        dev = create_test_device(
+            "overloader", site=self.site, rack=self.racks[0], position=5, face="front")
+        # feed_a breakers at 230*32=7360W split across 2 banks -> 3680W/bank.
+        PowerPort.objects.create(device=dev, name="psu1", allocated_draw=5000)
+
+        dist = generate_distribution(self._elevation(), mode="builtin")
+        self.assertIsNotNone(dist)
+        self.assertTrue(dist["rack"]["alarm"])
+        self.assertTrue(any("exceeds breaker" in w for w in dist["rack"]["warnings"]))

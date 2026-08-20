@@ -1296,6 +1296,33 @@ class RecomputeDistributionTest(APITestCase):
         )
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
 
+    def test_recompute_returns_live_rack_power_summary(self):
+        """The response carries the rack-level power summary too, so the editor's
+        BAR is live: its capacity comes from the rack's feeds (planned included),
+        maths the browser must not duplicate."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {"design_id": self.design.pk,
+                "racks": [{"rack_id": self.rack.pk, "front": []}]}
+        base = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(base, status.HTTP_200_OK)
+        power = base.data["power"][str(self.rack.pk)]
+        self.assertIn("capacity_w", power)
+        self.assertIn("draw_w", power)
+        # No "distribution" key: the per-bank blob rides the other half of the
+        # response, and duplicating it would double every payload.
+        self.assertNotIn("distribution", power)
+        before = power["capacity_w"]
+
+        # A planned feed on this rack raises the capacity WITHOUT a save: the
+        # editor reads exactly this to move the bar's denominator.
+        DesignPowerFeed.objects.create(
+            design=self.design, rack=self.rack, name="Extra", voltage=230,
+            amperage=32, phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        after = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(after, status.HTTP_200_OK)
+        self.assertGreater(after.data["power"][str(self.rack.pk)]["capacity_w"], before)
+
     def test_recompute_requires_view_permission(self):
         # No permission granted -> 403 (POST maps to view_design for this action).
         resp = self.client.post(
@@ -2021,6 +2048,45 @@ class DeviceTypePowerTest(APITestCase):
         self.assertTrue(info["draw_known"])
         self.assertEqual(info["power_ports"], [])
 
+    def test_excluded_role_reports_known_zero(self):
+        """With a role in power_exclude_roles (a PDU) the type reports a KNOWN 0 W
+        -- the same figure _project_power gives the saved slot. Without this, a
+        PDU whose inlet template carries no draw would paint as the unknown hatch
+        while its saved twin reads like passive gear."""
+        from dcim.models import DeviceRole
+
+        role = DeviceRole.objects.create(name="DTP PDU", slug="pdu")
+        response = self.client.get(
+            self._url() + f"?id={self.dt_unknown.pk}&role_id={role.pk}", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        info = response.data["results"][str(self.dt_unknown.pk)]
+        self.assertEqual(info["draw_w"], 0.0)
+        self.assertTrue(info["draw_known"])
+        # The per-PSU detail is still reported, exactly as _project_power does
+        # for an excluded slot.
+        self.assertEqual([p["name"] for p in info["power_ports"]], ["PSU1"])
+
+    def test_consumer_role_leaves_the_draw_alone(self):
+        """A role that is NOT excluded changes nothing: the type's own draw wins."""
+        from dcim.models import DeviceRole
+
+        role = DeviceRole.objects.create(name="DTP Server", slug="server")
+        response = self.client.get(
+            self._url() + f"?id={self.dt_known.pk}&role_id={role.pk}", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        info = response.data["results"][str(self.dt_known.pk)]
+        self.assertEqual(info["draw_w"], 200.0)
+        self.assertTrue(info["draw_known"])
+
+    def test_unresolvable_role_id_is_ignored(self):
+        """A bogus/blank role_id must not error -- it just means "no role yet"."""
+        for raw in ("9999999", "abc", ""):
+            response = self.client.get(
+                self._url() + f"?id={self.dt_unknown.pk}&role_id={raw}", **self.header)
+            self.assertHttpStatus(response, status.HTTP_200_OK)
+            info = response.data["results"][str(self.dt_unknown.pk)]
+            self.assertFalse(info["draw_known"], raw)
+
     def test_batch_ids_and_unknown_id_omitted(self):
         """Multiple ids resolve together; a non-existent id is simply absent."""
         url = (self._url()
@@ -2197,6 +2263,43 @@ class PowerSourceTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(response.data["custom_fields"], dict(rack.cf))
 
+    def test_kind_rack_returns_source_rack_feeds(self):
+        """kind=rack also returns the source rack's REAL feeds, so the copy-from-
+        rack row can preview (and then clone) the supply, not just the cf."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        panel = PowerPanel.objects.create(site=self.site, name="PS Panel")
+        PowerFeed.objects.create(
+            power_panel=panel, rack=rack, name=f"{rack.name}-A", voltage=230,
+            amperage=32, phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}&kind=rack", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        feeds = response.data["feeds"]
+        self.assertEqual(len(feeds), 1, feeds)
+        self.assertEqual(feeds[0]["name"], f"{rack.name}-A")
+        self.assertEqual(feeds[0]["amperage"], 32)
+        self.assertEqual(feeds[0]["source"], "real")
+
+    def test_kind_rack_falls_back_to_planned_feeds(self):
+        """A source rack with no real feeds reports the design's PLANNED feeds for
+        it, so a rack planned earlier in the same design can be cloned too."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        DesignPowerFeed.objects.create(
+            design=self.design, rack=rack, name="Planned A", voltage=400,
+            amperage=16, phase=PowerFeedPhaseChoices.PHASE_3PHASE,
+        )
+        response = self.client.get(
+            self._url() + f"?rack_id={rack.pk}&kind=rack", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        feeds = response.data["feeds"]
+        self.assertEqual([f["name"] for f in feeds], ["Planned A"])
+        self.assertEqual(feeds[0]["source"], "planned")
+
     def test_kind_pdu_now_rejected(self):
         """kind=pdu was removed with the feed-binding redesign -> 400."""
         self.add_permissions("netbox_rack_design.view_design")
@@ -2325,6 +2428,164 @@ class FeedsActionTest(APITestCase):
             self._url() + f"?rack_id={rack.pk}", **self.header
         )
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+
+class CopyFeedsActionTest(APITestCase):
+    """
+    Tests for the DesignViewSet copy-feeds action: clone a source rack's feeds
+    onto a target rack as PLANNED feeds -- the half of "copy from rack" that
+    carries the supply itself. Writes only DesignPowerFeed rows.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.source = cls.racks[0]
+        cls.target = cls.racks[1]
+        cls.design = Design.objects.create(title="Copy feeds design", site=cls.site)
+        panel = PowerPanel.objects.create(site=cls.site, name="CF Panel")
+        for suffix, amps in (("A", 32), ("B", 16)):
+            PowerFeed.objects.create(
+                power_panel=panel, rack=cls.source,
+                name=f"{cls.source.name}-{suffix}", voltage=230, amperage=amps,
+                phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+            )
+
+    def _url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-copy-feeds",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def _post(self, **body):
+        return self.client.post(self._url(), body, format="json", **self.header)
+
+    def _grant(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+
+    def test_copies_real_feeds_renamed_for_the_target_rack(self):
+        """Each real feed becomes a planned feed on the target, with the source
+        rack-name prefix swapped for the target's (R1-A -> R2-A)."""
+        self._grant()
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["created"], 2, response.data)
+        self.assertEqual(response.data["updated"], 0, response.data)
+        planned = DesignPowerFeed.objects.filter(
+            design=self.design, rack=self.target).order_by("name")
+        self.assertEqual(
+            [f.name for f in planned],
+            [f"{self.target.name}-A", f"{self.target.name}-B"],
+        )
+        # Electricals ride along per feed (32 A and 16 A, not one flattened value).
+        self.assertEqual([f.amperage for f in planned], [32, 16])
+        self.assertEqual([f.voltage for f in planned], [230, 230])
+        # The source rack is untouched: no planned feeds were created for it.
+        self.assertFalse(
+            DesignPowerFeed.objects.filter(design=self.design, rack=self.source).exists()
+        )
+
+    def test_repeat_copy_updates_instead_of_duplicating(self):
+        """Upsert by (design, rack, name): a second copy after the source's
+        electricals changed updates the same rows."""
+        self._grant()
+        self.assertHttpStatus(
+            self._post(rack_id=self.target.pk, source_rack_id=self.source.pk),
+            status.HTTP_200_OK,
+        )
+        feed = PowerFeed.objects.get(rack=self.source, name=f"{self.source.name}-A")
+        feed.amperage = 63
+        feed.save()
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["created"], 0, response.data)
+        self.assertEqual(response.data["updated"], 2, response.data)
+        self.assertEqual(
+            DesignPowerFeed.objects.filter(design=self.design, rack=self.target).count(), 2
+        )
+        self.assertEqual(
+            DesignPowerFeed.objects.get(
+                design=self.design, rack=self.target, name=f"{self.target.name}-A"
+            ).amperage,
+            63,
+        )
+
+    def test_non_rack_named_feed_keeps_its_name(self):
+        """A feed not named after its rack is copied verbatim."""
+        self._grant()
+        PowerFeed.objects.filter(rack=self.source).delete()
+        panel = PowerPanel.objects.get(name="CF Panel")
+        PowerFeed.objects.create(
+            power_panel=panel, rack=self.source, name="Utility A", voltage=230,
+            amperage=32, phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        self.assertHttpStatus(
+            self._post(rack_id=self.target.pk, source_rack_id=self.source.pk),
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            [f.name for f in DesignPowerFeed.objects.filter(
+                design=self.design, rack=self.target)],
+            ["Utility A"],
+        )
+
+    def test_source_without_real_feeds_copies_its_planned_feeds(self):
+        """A source rack planned earlier in the same design can be cloned."""
+        self._grant()
+        PowerFeed.objects.filter(rack=self.source).delete()
+        DesignPowerFeed.objects.create(
+            design=self.design, rack=self.source, name=f"{self.source.name}-A",
+            voltage=400, amperage=16, phase=PowerFeedPhaseChoices.PHASE_3PHASE,
+        )
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        copied = DesignPowerFeed.objects.get(design=self.design, rack=self.target)
+        self.assertEqual(copied.name, f"{self.target.name}-A")
+        self.assertEqual(copied.voltage, 400)
+        self.assertEqual(copied.phase, PowerFeedPhaseChoices.PHASE_3PHASE)
+
+    def test_source_with_no_feeds_is_a_no_op(self):
+        """Nothing to copy -> 200 with an empty list, no rows written."""
+        self._grant()
+        PowerFeed.objects.filter(rack=self.source).delete()
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["feeds"], [])
+        self.assertEqual(
+            DesignPowerFeed.objects.filter(design=self.design).count(), 0
+        )
+
+    def test_same_rack_rejected(self):
+        """Copying a rack onto itself is a 400, not a self-duplicating no-op."""
+        self._grant()
+        response = self._post(rack_id=self.source.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_rack_outside_the_designs_site_rejected(self):
+        """Same-site rule, mirroring add-rack / rack-power / planned-feed."""
+        self._grant()
+        other_site = Site.objects.create(name="CF Other", slug="cf-other")
+        stray = Rack.objects.create(name="CF Stray", site=other_site, u_height=10)
+        response = self._post(rack_id=stray.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_source_rack_rejected(self):
+        self._grant()
+        response = self._post(rack_id=self.target.pk, source_rack_id=9999999)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_requires_change_permission(self):
+        """View-only users cannot copy: this action writes."""
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(DesignPowerFeed.objects.count(), 0)
 
 
 class PlannedFeedActionTest(APITestCase):

@@ -83,6 +83,11 @@
         {# dynamically -- no cf name is ever hardcoded in JS/HTML.             #}
         {{ planning_fields|json_script:"rd-planning-fields" }}
 
+        {# Effective power-distribution engine (docs/pdu-distribution-spec.md): #}
+        {# editor.js reads this to gate the power dialogs' manual cf inputs --  #}
+        {# they only ever reach a user's distribution script.                  #}
+        {{ distribution_mode|json_script:"rd-distribution-mode" }}
+
         {# ---- ONE always-visible toolbar line: the state-LEGEND filter and the #}
         {# Role/Tenant selects share a single horizontal row above the drawer +  #}
         {# racks shell, visible regardless of which drawer sections are open.     #}
