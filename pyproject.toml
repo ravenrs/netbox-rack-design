@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name =  "netbox-rack-design"
-version = "0.17.0"
+version = "0.17.1"
 authors = [
     {name = "Petr Voronov", email = "ravenrs@gmail.com"},
 ]
@@ -46,9 +46,10 @@ test = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/ravenrs/netbox-rack-design/blob/main/README.md"
+Documentation = "https://ravenrs.github.io/netbox-rack-design/"
 Source = "https://github.com/ravenrs/netbox-rack-design"
 Tracker = "https://github.com/ravenrs/netbox-rack-design/issues"
+Tutorial = "https://www.youtube.com/playlist?list=PLQrzYAZqdcXg"
 
 [tool.ruff]
 line-length = 120

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-08-21
+
+### Release Summary
+
+Packaging-metadata release. No plugin code changed — the plugin behaves exactly as
+0.17.0 does on NetBox 4.4 through 4.6. This ships the project links that point users at
+the newly completed documentation: the full ten-part video tutorial, and a `Documentation`
+URL that now resolves to the published docs site rather than the raw README on GitHub.
+
+### Changed
+
+- `[project.urls] Documentation` now points at <https://ravenrs.github.io/netbox-rack-design/>
+  (the MkDocs site) instead of the README blob on GitHub, so the PyPI sidebar links to the
+  real documentation.
+- README links the complete ten-part tutorial playlist alongside the existing two-minute
+  quick tour.
+
+### Added
+
+- `[project.urls] Tutorial` — the full tutorial playlist, surfaced as a link on the PyPI
+  project page.
+
 ## [0.17.0] - 2026-08-20
 
 ### Release Summary
