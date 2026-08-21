@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.17.1"
+__version__ = "0.17.2"
 
 
 from netbox.plugins import PluginConfig
@@ -18,7 +18,7 @@ from netbox.plugins import PluginConfig
 class RackdesignConfig(PluginConfig):
     name = "netbox_rack_design"
     verbose_name = "NetBox Rack Design"
-    description = "NetBox plugin for Rack Design."
+    description = "Plan rack changes as versioned designs — a visual multi-rack editor with naming and power projection, read-only over your live DCIM data until you apply."
     author= "Petr Voronov"
     author_email = "ravenrs@gmail.com"
     version = __version__
