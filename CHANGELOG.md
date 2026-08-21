@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-08-21
+
+### Release Summary
+
+Certification-readiness release. No functional change — the plugin behaves exactly as
+0.17.1 does on NetBox 4.4 through 4.6. This corrects the package metadata a NetBox Labs
+certification review reads first: the distribution described itself with the generator's
+placeholder one-liner, the README compatibility matrix had fallen behind the shipped
+versions, and the maturity classifier still said Alpha.
+
+### Changed
+
+- **Package description** replaced the cookiecutter placeholder
+  (`"NetBox plugin for Rack Design."`) with a real value statement, in both
+  `pyproject.toml` and `PluginConfig.description`. This is the summary shown on the PyPI
+  project page and in NetBox's own installed-plugins list.
+- **README compatibility matrix** now lists `0.17.x`; it previously stopped at `0.16.0`,
+  three releases behind. `COMPATIBILITY.md` was already current.
+- **Maturity classifier** raised from `Development Status :: 3 - Alpha` to
+  `4 - Beta`, matching the shipped feature set.
+
 ## [0.17.1] - 2026-08-21
 
 ### Release Summary

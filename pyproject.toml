@@ -7,18 +7,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name =  "netbox-rack-design"
-version = "0.17.1"
+version = "0.17.2"
 authors = [
     {name = "Petr Voronov", email = "ravenrs@gmail.com"},
 ]
-description = "NetBox plugin for Rack Design."
+description = "Plan rack changes as versioned designs — a visual multi-rack editor with naming and power projection, read-only over your live DCIM data until you apply."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["netbox", "netbox-plugin"]
 
 classifiers=[
-    'Development Status :: 3 - Alpha',
+    'Development Status :: 4 - Beta',
     'Framework :: Django',
     # The supported NetBox range spans three Django majors: 4.4.x and 4.5.x ship
     # Django 5.2, 4.6.x ships Django 6.0.
