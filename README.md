@@ -8,6 +8,8 @@
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=2N1hwF_oUYc"><b>▶ Watch the 2-minute quick tour</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://www.youtube.com/playlist?list=PLQrzYAZqdcXg"><b>▶ Full 10-part tutorial</b></a>
 </p>
 
 NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection and an auto-naming engine already built in — an explicit Apply step and conflict detection are still arriving in later stages.
@@ -38,6 +40,8 @@ Rack Design pairs a structured data model with an interactive visual editor for 
 ## Screenshots
 
 ▶ **[Watch the 2-minute quick tour](https://www.youtube.com/watch?v=2N1hwF_oUYc)** — the editor, moves, and the power heatmap in action.
+
+▶ **[Full 10-part tutorial playlist](https://www.youtube.com/playlist?list=PLQrzYAZqdcXg)** — the data model, the editor, the naming engine, power projection and rebalancing, greenfield planned power, per-bank distribution, and the REST/GraphQL/search integrations, one part per topic.
 
 **Power heatmap with per-PDU / per-bank distribution** — each bank shows load vs.
 breaker, overloads in red, feeds color-coded per leg.
