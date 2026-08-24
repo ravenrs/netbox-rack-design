@@ -1,15 +1,24 @@
 """REST API serializers for NetBox Rack Design."""
 
-from dcim.api.serializers import RackSerializer
+from dcim.api.serializers import (
+    DeviceRoleSerializer,
+    DeviceSerializer,
+    DeviceTypeSerializer,
+    RackSerializer,
+    SiteSerializer,
+)
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import Rack
 from netbox.api.fields import SerializedPKRelatedField
-from netbox.api.serializers import NetBoxModelSerializer
+from netbox.api.serializers import NetBoxModelSerializer, WritableNestedSerializer
 from rest_framework import serializers
+from tenancy.api.serializers import TenantSerializer
 
 from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 
 __all__ = (
+    "NestedDesignGroupSerializer",
+    "NestedDesignSerializer",
     "DesignGroupSerializer",
     "DesignSerializer",
     "DesignPlacementSerializer",
@@ -25,10 +34,37 @@ __all__ = (
 )
 
 
+# Self-referential FKs (DesignGroup.parent, Design.root / based_on / depends_on)
+# cannot reference their own serializer from inside its class body, so they get an
+# explicit brief serializer each -- the same shape as the corresponding
+# ``brief_fields``, and the pattern core uses for its own recursive relations
+# (e.g. dcim NestedRegionSerializer). WritableNestedSerializer renders the brief
+# representation on read and accepts a PK (or an attrs dict) on write.
+class NestedDesignGroupSerializer(WritableNestedSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:designgroup-detail"
+    )
+
+    class Meta:
+        model = DesignGroup
+        fields = ("id", "url", "display", "name")
+
+
+class NestedDesignSerializer(WritableNestedSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:design-detail"
+    )
+
+    class Meta:
+        model = Design
+        fields = ("id", "url", "display", "title", "version", "status")
+
+
 class DesignGroupSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rack_design-api:designgroup-detail"
     )
+    parent = NestedDesignGroupSerializer(required=False, allow_null=True)
 
     class Meta:
         model = DesignGroup
@@ -52,6 +88,16 @@ class DesignSerializer(NetBoxModelSerializer):
         required=False,
         many=True,
     )
+    site = SiteSerializer(nested=True)
+    group = NestedDesignGroupSerializer(required=False, allow_null=True)
+    root = NestedDesignSerializer(required=False, allow_null=True)
+    based_on = NestedDesignSerializer(required=False, allow_null=True)
+    depends_on = SerializedPKRelatedField(
+        queryset=Design.objects.all(),
+        serializer=NestedDesignSerializer,
+        required=False,
+        many=True,
+    )
 
     class Meta:
         model = Design
@@ -67,6 +113,12 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rack_design-api:designplacement-detail"
     )
+    design = NestedDesignSerializer()
+    device = DeviceSerializer(nested=True, required=False, allow_null=True)
+    device_type = DeviceTypeSerializer(nested=True, required=False, allow_null=True)
+    device_role = DeviceRoleSerializer(nested=True, required=False, allow_null=True)
+    tenant = TenantSerializer(nested=True, required=False, allow_null=True)
+    target_rack = RackSerializer(nested=True, required=False, allow_null=True)
 
     class Meta:
         model = DesignPlacement

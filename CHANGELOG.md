@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-24
+
+### Release Summary
+
+Minor release fixing REST API conformance. Foreign keys on the Design, DesignGroup and
+DesignPlacement endpoints were serialized as bare integers instead of the nested brief
+objects every core NetBox endpoint returns. They now match core. A latent N+1 on the
+placements endpoint was found and fixed in the same pass, so the list endpoints issue
+*fewer* queries than before despite returning more data.
+
+### **Breaking Changes**
+
+- **REST API foreign keys now return nested objects instead of integers.** A response
+  field that previously read `"site": 345` now reads
+  `"site": {"id": 345, "url": "...", "display": "AMS1", "name": "AMS1", "slug": "ams1", ...}`.
+  Affected fields: `Design.site` / `group` / `root` / `based_on` / `depends_on`,
+  `DesignPlacement.design` / `device` / `device_type` / `device_role` / `tenant` /
+  `target_rack`, and `DesignGroup.parent`.
+
+  *Migration:* read the id from the nested object — `design["site"]["id"]` instead of
+  `design["site"]`. Alternatively request `?brief=true`, or select the fields you need
+  with `?fields=`. **Writes are unaffected**: POST and PATCH still accept a bare primary
+  key (or an attributes dict) for every one of these fields, so no client that only
+  writes needs to change.
+
+### Fixed
+
+- Foreign keys across all three API serializers were listed in `Meta.fields` but never
+  declared, so DRF fell back to `PrimaryKeyRelatedField`. They are now declared with the
+  core `Serializer(nested=True)` pattern; the four self-referential relations
+  (`Design.root` / `based_on` / `depends_on`, `DesignGroup.parent`) use dedicated
+  `WritableNestedSerializer` classes, matching how core handles its own recursive
+  relations.
+- `DesignPlacementViewSet` had no `select_related`/`prefetch_related` at all. Because
+  NetBox's base viewset prefetches every relation listed in `Meta.fields` regardless of
+  whether the serializer declares it, those rows were already being fetched and then
+  discarded. All three viewsets now join their foreign keys up front.
+
+### Changed
+
+- Query-count baselines updated for the reduced query counts on the list endpoints:
+  `designplacement` 15 → 12, `designgroup` 13 → 12, `design` 16 → 15.
+
 ## [0.17.2] - 2026-08-21
 
 ### Release Summary
