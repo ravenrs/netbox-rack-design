@@ -54,7 +54,7 @@ __all__ = (
 
 
 class DesignGroupViewSet(NetBoxModelViewSet):
-    queryset = DesignGroup.objects.all()
+    queryset = DesignGroup.objects.select_related("parent").prefetch_related("tags")
     serializer_class = DesignGroupSerializer
     filterset_class = filtersets.DesignGroupFilterSet
 
@@ -133,7 +133,9 @@ class ViewDesignPermissions(TokenPermissions):
 
 
 class DesignViewSet(NetBoxModelViewSet):
-    queryset = Design.objects.prefetch_related("placements", "depends_on", "racks", "tags")
+    queryset = Design.objects.select_related(
+        "site", "group", "root", "based_on"
+    ).prefetch_related("placements", "depends_on", "racks", "tags")
     serializer_class = DesignSerializer
     filterset_class = filtersets.DesignFilterSet
 
@@ -1427,7 +1429,17 @@ class DesignViewSet(NetBoxModelViewSet):
 
 
 class DesignPlacementViewSet(NetBoxModelViewSet):
-    queryset = DesignPlacement.objects.all()
+    # Every FK below is rendered as a nested brief by DesignPlacementSerializer, so
+    # each one must be joined up front or the list endpoint issues a query per row
+    # (device_type__manufacturer because the nested DeviceType brief includes it).
+    queryset = DesignPlacement.objects.select_related(
+        "design",
+        "device",
+        "device_type__manufacturer",
+        "device_role",
+        "tenant",
+        "target_rack",
+    ).prefetch_related("tags")
     serializer_class = DesignPlacementSerializer
     filterset_class = filtersets.DesignPlacementFilterSet
 

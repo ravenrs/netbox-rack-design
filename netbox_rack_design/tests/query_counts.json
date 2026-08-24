@@ -1,8 +1,8 @@
 {
-  "design:api_list_objects": 16,
+  "design:api_list_objects": 15,
   "design:list_objects_with_permission": 17,
-  "designgroup:api_list_objects": 13,
+  "designgroup:api_list_objects": 12,
   "designgroup:list_objects_with_permission": 17,
-  "designplacement:api_list_objects": 15,
+  "designplacement:api_list_objects": 12,
   "designplacement:list_objects_with_permission": 19
 }
