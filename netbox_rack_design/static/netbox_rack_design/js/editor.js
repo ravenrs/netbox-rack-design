@@ -191,6 +191,11 @@
         return;
     }
 
+    // The BLADE LAYER renders chassis as degenerate racks (spec §10.3). The
+    // editor is otherwise identical, so this single flag carries the difference:
+    // which device types the grids accept, and which the palette offers.
+    var isBladeLayer = !!root.querySelector('[data-rd-blade-layer="true"]');
+
     // ---- Shared context from the template ----------------------------------
     var saveUrl = root.getAttribute("data-save-url");
 
@@ -1526,6 +1531,15 @@
         return null;
     }
 
+    // True when this element represents a CHILD device type -- a blade. Read from
+    // the palette row's stamp, or from a placed tile's own marker.
+    function rdIsBladeEl(el) {
+        if (!el) { return false; }
+        return el.getAttribute("data-subdevice-role") === "child"
+            || el.classList.contains("nbx-rd-palette-blade")
+            || el.classList.contains("nbx-rd-blade");
+    }
+
     function rdMaxRow(host) {
         var fromAttr = parseInt(host.getAttribute("gs-max-row"), 10);
         if (!isNaN(fromAttr) && fromAttr > 0) { return fromAttr; }
@@ -1648,6 +1662,7 @@
     function rdUpdateCursorGesture() {
         var g = rdCursorGesture;
         if (!g || !rdLastPointer) { return; }
+
         var host = rdFaceHostAt(rdLastPointer.x, rdLastPointer.y);
         if (!host) {
             g.lastHost = null;
@@ -1773,6 +1788,76 @@
         rdUpdateCursorGesture();
     }
 
+    // ========================================================================
+    // Bay layer (spec §10): planned blades live here, not in a GridStack grid.
+    // ------------------------------------------------------------------------
+    // A blade is refused by every grid's acceptWidgets (see makeAccept), so
+    // nothing else in the editor can materialise one. This module owns the whole
+    // lifecycle: commit a palette drop into a bay cell, render the planned entry,
+    // remove it again, and hand the pending set to the save payload.
+    //
+    // Each pending add is keyed by a client-side ``ref``, which is also what the
+    // save contract (§10.6) uses to let a blade point at a chassis the SAME save
+    // is creating -- that chassis has no placement id yet.
+    // ========================================================================
+    var rdBayAdds = [];        // [{ref, rackId, cellEl, ...}] -- planned blades
+    var rdBayRemoves = [];     // [{rackId, deviceId, cellEl}] -- REAL blades flagged
+    var rdBayRefSeq = 0;
+
+    function rdNextBayRef() {
+        rdBayRefSeq += 1;
+        return "bay-" + rdBayRefSeq;
+    }
+
+    // Identify the chassis a bay cell belongs to, in the two forms the save
+    // contract needs: a REAL bay (its dcim pk, stamped by the projection) or a
+    // PLANNED chassis (the owning tile's widget index, resolved to a ``ref`` at
+    // payload time because the chassis add may not exist server-side yet).
+    function rdBayOwner(cellEl) {
+        var tile = cellEl.closest(".grid-stack-item");
+        var block = cellEl.closest(".nbx-rd-rack-block");
+        var widx = tile ? parseInt(tile.getAttribute("data-widget-index"), 10) : NaN;
+        return {
+            rackId: block ? parseInt(block.getAttribute("data-rack-id"), 10) : null,
+            tileEl: tile,
+            widgetIndex: isNaN(widx) ? null : widx,
+            bayId: parseInt(cellEl.getAttribute("data-bay-id"), 10) || null,
+            bayName: cellEl.getAttribute("data-bay-name") || "",
+        };
+    }
+
+    // The pending adds for one rack, in the shape SaveLayoutItemSerializer wants
+    // (spec §10.6). A blade whose chassis is itself planned resolves its parent
+    // through ``refFor`` -- the caller supplies it because only the rack
+    // controller knows which widget index maps to which item ref.
+    function rdBayItemsForRack(rackId, refFor) {
+        var out = [];
+        rdBayRemoves.forEach(function (r) {
+            if (r.rackId !== rackId) { return; }
+            // A blade removal needs no bay target: it is an ordinary `remove` of
+            // the device, and the model takes no target for a removal at all.
+            out.push({ kind: "remove", device_id: r.deviceId });
+        });
+        rdBayAdds.forEach(function (a) {
+            if (a.rackId !== rackId) { return; }
+            var item = {
+                kind: "add",
+                device_type_id: a.deviceTypeId,
+                target_bay_name: a.bayName,
+                proposed_name: "",
+            };
+            if (a.bayId) {
+                item.target_bay_id = a.bayId;
+            } else {
+                var parentRef = refFor ? refFor(a.parentWidgetIndex) : null;
+                if (!parentRef) { return; }   // chassis vanished -- drop the blade
+                item.parent_ref = parentRef;
+            }
+            out.push(item);
+        });
+        return out;
+    }
+
     function rdEndCursorGesture() {
         rdCursorGesture = null;
         rdClearCursorInds();
@@ -1870,6 +1955,14 @@
 
         // ---- Hydrate this rack's widget payload (index -> widget) ----------
         var widgets = [];
+        // In the BLADE LAYER a "rack" is a chassis column whose id is synthetic
+        // (spec §10.3) -- the real rack lives on data-real-rack-id. Anything sent
+        // to the SERVER must use the real one: the naming engine resolves a
+        // dcim.Rack, and a chassis device pk is not one (which silently produced
+        // unnamed blades -- the preview simply never resolved).
+        var realRackId = parseInt(block.getAttribute("data-real-rack-id"), 10);
+        var serverRackId = !isNaN(realRackId) ? realRackId : rackId;
+
         var dataEl = document.getElementById("rd-editor-data-" + rackId);
         try {
             widgets = JSON.parse((dataEl && dataEl.textContent) || "[]");
@@ -2018,6 +2111,13 @@
         function makeAccept(isTray) {
             return function (el) {
                 if (!el) { return false; }
+                // Container/type agreement (spec §10.3), enforced at the drop
+                // gate rather than after the fact: a CHILD type may only ever land
+                // in a chassis column, and a non-child only ever in a rack. Core
+                // forbids a child device a rack position and a face, and forbids a
+                // non-child a device bay, so neither is a legal target for the
+                // other and the editor must never let the gesture complete.
+                if (rdIsBladeEl(el) !== isBladeLayer) { return false; }
                 if (el.getAttribute && el.getAttribute("data-device-type-id") != null) {
                     return true;
                 }
@@ -2513,6 +2613,14 @@
         // (read from the palette item's data-is-full-depth in onPaletteDrop).
         function isFullDepthWidget(w) {
             if (!w) { return false; }
+            // A container with no REAR grid has no opposite face, so nothing in it
+            // can be full-depth -- and the shadow pass must never run. The blade
+            // layer is exactly that case (spec §10.2: a chassis column has one
+            // face, so blades cast no shadow). Without this guard a blade whose
+            // DEVICE happens to be flagged full-depth elsewhere in the design
+            // grew a phantom hatch on its own grid: a duplicate tile, and a
+            // spurious dirty flag on load.
+            if (!rearGrid) { return false; }
             if (w.device_id != null && fullDepthDeviceIds[w.device_id]) { return true; }
             return !!w.is_full_depth;
         }
@@ -4605,11 +4713,44 @@
             walkGrid(rearGrid, "rear");
             walkGrid(trayGrid, "other");
 
+            // Bays (spec §10.6). A blade into a chassis that is ALSO being added
+            // here cannot carry a placement id -- the chassis row does not exist
+            // until this same save creates it -- so the chassis item is stamped
+            // with a client ref and the blade points at it. Only chassis adds that
+            // actually made it into the payload get a ref, so a blade whose
+            // chassis was cancelled resolves to null and is dropped with it.
+            var refByWidgetIndex = {};
+            function refForWidgetIndex(widx) {
+                if (widx == null) { return null; }
+                if (refByWidgetIndex[widx]) { return refByWidgetIndex[widx]; }
+                var tile = block.querySelector('[data-widget-index="' + widx + '"]');
+                if (!tile) { return null; }
+                var st = state[widx];
+                if (!st || st.removed || !st.widget || st.widget.kind !== "add") { return null; }
+                var target = null;
+                [buckets.front, buckets.rear, buckets.other].forEach(function (bucket) {
+                    bucket.forEach(function (it) {
+                        if (target) { return; }
+                        if (it.kind === "add" && !it.cancel
+                                && it.device_type_id === st.widget.device_type_id
+                                && it.placement_id === (st.widget.placement_id != null
+                                                        ? st.widget.placement_id : null)) {
+                            target = it;
+                        }
+                    });
+                });
+                if (!target) { return null; }
+                if (!target.ref) { target.ref = "chassis-" + widx; }
+                refByWidgetIndex[widx] = target.ref;
+                return target.ref;
+            }
+
             return {
                 rack_id: rackId,
                 front: buckets.front,
                 rear: buckets.rear,
                 other: buckets.other,
+                bays: rdBayItemsForRack(rackId, refForWidgetIndex),
             };
         }
 
@@ -4719,6 +4860,8 @@
 
             var uHeight = parseFloat(el.getAttribute("data-u-height")) || 1;
             var isFullDepth = el.getAttribute("data-is-full-depth") === "true";
+            // Read before finishAdd strips the palette attributes off the clone.
+            var subRole = el.getAttribute("data-subdevice-role") || "";
             var label = el.getAttribute("data-label") || ("Device type " + dtId);
             var model = el.getAttribute("data-model") || label;
             var gsH = Math.max(1, Math.round(uHeight * 2));
@@ -4859,6 +5002,7 @@
                 el.removeAttribute("data-is-full-depth");
                 el.removeAttribute("data-label");
                 el.removeAttribute("data-model");
+                el.removeAttribute("data-subdevice-role");
                 el.classList.remove("nbx-rd-palette-item");
                 el.classList.add("nbx-rd-state-add");
                 el.querySelectorAll(".nbx-rd-fav-btn").forEach(function (s) { s.remove(); });
@@ -4904,6 +5048,7 @@
                 span.textContent = label;
                 content.appendChild(btn);
                 content.appendChild(span);
+
 
                 // ---- Editable proposed-name field + collision warning (Phase 3 A) --
                 // The name auto-fills from the read-only preview-name endpoint. If the
@@ -5015,7 +5160,7 @@
                     device_type: widget.device_type_id,
                     device_role: roleId,
                     tenant: tenantId,
-                    target_rack: rackId,
+                    target_rack: serverRackId,
                     target_position: uPosition,
                     target_face: face,
                     index: nextAddIndex(),
@@ -5268,12 +5413,75 @@
     // the body. Build a payload keyed by rack — one slice per rack. Shared by the
     // save flow AND the live per-bank recompute below so both send an identical
     // payload (no second serializer to drift).
+    // Translate one CHASSIS COLUMN's rack-shaped payload into the `bays` bucket
+    // the save contract expects (spec §10.6).
+    //
+    // The column is a degenerate rack, so initRack produces ordinary front[]
+    // items whose `u_position` is the 1-based BAY INDEX (see the view: one bay ==
+    // one whole "U"). Everything else the server needs -- which real bay, or
+    // which planned chassis -- is stamped on the block, so the translation is
+    // pure lookup and initRack itself stays untouched.
+    function bladeColumnPayload(block, rackPayload) {
+        var bayNames = [];
+        try {
+            bayNames = JSON.parse(block.getAttribute("data-bay-names") || "[]");
+        } catch (e) { bayNames = []; }
+        var realRackId = parseInt(block.getAttribute("data-real-rack-id"), 10);
+        var chassisId = parseInt(block.getAttribute("data-chassis-id"), 10);
+        var chassisPlacement = parseInt(block.getAttribute("data-chassis-placement"), 10);
+        // Bay ids come from the BLOCK, parallel to the names: an empty bay renders
+        // no element (the striped enclosure behind the grid IS the empty slot), so
+        // a drop into one has nothing of its own to read an id from.
+        var bayIds = [];
+        try {
+            bayIds = JSON.parse(block.getAttribute("data-bay-ids") || "[]");
+        } catch (e) { bayIds = []; }
+
+        var bays = [];
+        (rackPayload.front || []).forEach(function (item) {
+            var index = Math.round(parseFloat(item.u_position));
+            var name = bayNames[index - 1];
+            if (!name) { return; }               // dropped outside the bay range
+            var out = {
+                kind: item.kind,
+                device_id: item.device_id,
+                device_type_id: item.device_type_id,
+                placement_id: item.placement_id,
+                target_bay_name: name,
+            };
+            if (item.proposed_name !== undefined) { out.proposed_name = item.proposed_name; }
+            if (item.cancel) { out.cancel = true; }
+            if (item.device_role_id != null) { out.device_role_id = item.device_role_id; }
+            if (item.tenant_id != null) { out.tenant_id = item.tenant_id; }
+            if (!isNaN(chassisId)) {
+                // Real chassis: address the bay by its dcim pk, looked up by the
+                // same index the tile landed on.
+                var bayId = bayIds[index - 1];
+                if (bayId) { out.target_bay_id = bayId; }
+            } else if (!isNaN(chassisPlacement)) {
+                // Planned chassis: it exists as a placement already (the layer only
+                // renders chassis the design has saved), so point at it directly --
+                // no client ref needed here, unlike a same-submit chassis add.
+                out.parent_placement_id = chassisPlacement;
+            }
+            bays.push(out);
+        });
+        return { rack_id: realRackId, bays: bays };
+    }
+
     function buildLayoutPayload() {
         var m = saveUrl ? saveUrl.match(/designs\/(\d+)\//) : null;
-        return {
-            design_id: m ? parseInt(m[1], 10) : null,
-            racks: rackControllers.map(function (c) { return c.buildRackPayload(); }),
-        };
+        var racks = [];
+        rackControllers.forEach(function (c) {
+            var payload = c.buildRackPayload();
+            var block = document.getElementById("rd-rack-" + payload.rack_id);
+            if (block && block.getAttribute("data-chassis-key")) {
+                racks.push(bladeColumnPayload(block, payload));
+                return;
+            }
+            racks.push(payload);
+        });
+        return { design_id: m ? parseInt(m[1], 10) : null, racks: racks };
     }
 
     // POST the CURRENT (unsaved) layout to the read-only recompute-distribution
@@ -5307,7 +5515,10 @@
         }).catch(function () { return null; });
     }
 
-    function doSave() {
+    // ``redirectTo`` (optional): where to go after a successful save instead of
+    // reloading in place -- used by the layer switch so "Save and switch" is one
+    // action rather than save, wait, then click again.
+    function doSave(redirectTo) {
         clearAllErrors();
         var payload = buildLayoutPayload();
 
@@ -5326,11 +5537,18 @@
                 response.json().then(function () {
                     changesMade = false;
                     createToast("success", "Saved", "Layout saved.");
-                    window.location.reload();
+                    // A layer switch saves and GOES; everything else reloads in
+                    // place, as it always did.
+                    if (redirectTo) {
+                        window.location.href = redirectTo;
+                    } else {
+                        window.location.reload();
+                    }
                 });
             } else if (response.status === 304) {
                 changesMade = false;
                 createToast("info", "No changes", "No changes were detected.");
+                if (redirectTo) { window.location.href = redirectTo; }
             } else if (response.status === 403) {
                 if (saveButton) { saveButton.removeAttribute("disabled"); }
                 response.text().then(function (text) {
@@ -5372,7 +5590,9 @@
     }
 
     if (saveButton) {
-        saveButton.addEventListener("click", doSave);
+        // Wrapped, not passed directly: the click event would arrive as
+        // doSave's `redirectTo` argument and be treated as a URL.
+        saveButton.addEventListener("click", function () { doSave(); });
     }
 
     // ---- Shared device-type catalog palette + drag-in ----------------------
@@ -5381,6 +5601,11 @@
     // placement on that rack (the drop handler is wired per-rack in initRack).
     // No dcim.Device is ever created.
     (function setupPalette() {
+        // The BLADE LAYER (spec §10.3) filters the whole catalog to CHILD device
+        // types. Not a validation -- a filter: a rack-mountable type is never
+        // offered as a blade in the first place, so the mistake cannot be made.
+        var subdeviceFilter = isBladeLayer ? "&subdevice_role=child" : "";
+
         var paletteEl = document.getElementById("nbx-rd-palette");
         var searchEl = document.getElementById("nbx-rd-palette-search");
         var manufEl = document.getElementById("id_manufacturer");
@@ -5408,6 +5633,15 @@
             li.setAttribute("data-device-type-id", dt.id);
             li.setAttribute("data-u-height", uHeight);
             li.setAttribute("data-is-full-depth", dt.is_full_depth ? "true" : "false");
+            // Subdevice role (spec §10.3): a CHILD type is a blade -- it may not be
+            // racked at all, so its only legal target is a free device bay. Stamped
+            // here so the drag layer can pick the target set without re-querying.
+            var subrole = "";
+            if (dt.subdevice_role) {
+                subrole = dt.subdevice_role.value || dt.subdevice_role || "";
+            }
+            li.setAttribute("data-subdevice-role", subrole);
+            if (subrole === "child") { li.classList.add("nbx-rd-palette-blade"); }
             var manuf = (dt.manufacturer && (dt.manufacturer.name || dt.manufacturer.display)) || "";
             var model = dt.model || dt.display || ("type " + dt.id);
             var label = (manuf ? manuf + " " : "") + model;
@@ -5422,7 +5656,10 @@
             model.textContent = dt.model || dt.display || ("Device type " + dt.id);
             var meta = document.createElement("div");
             meta.className = "nbx-rd-palette-meta";
-            meta.textContent = (manuf ? manuf + " · " : "") + uHeight + "U" + (dt.is_full_depth ? " · full-depth" : "");
+            meta.textContent = (manuf ? manuf + " · " : "")
+                + (subrole === "child" ? "blade · fits a device bay"
+                   : (uHeight + "U" + (dt.is_full_depth ? " · full-depth" : "")
+                      + (subrole === "parent" ? " · chassis" : "")));
             content.appendChild(model);
             content.appendChild(meta);
             li.appendChild(content);
@@ -5519,7 +5756,7 @@
             }
             // NOTE: not brief — the brief DeviceType serializer omits u_height
             // and is_full_depth, which the tiles need to size correctly.
-            var url = "/api/dcim/device-types/?limit=200";
+            var url = "/api/dcim/device-types/?limit=200" + subdeviceFilter;
             ids.forEach(function (id) { url += "&id=" + encodeURIComponent(id); });
             fetch(url, {
                 credentials: "same-origin",
@@ -5554,7 +5791,7 @@
             // and is_full_depth, so a brief row would size every tile at 1U and
             // a multi-U type (e.g. a 2U FX2) would jump to its real height only
             // after Save. Fetching the full serializer keeps drag == saved size.
-            var url = "/api/dcim/device-types/?limit=50";
+            var url = "/api/dcim/device-types/?limit=50" + subdeviceFilter;
             if (q) { url += "&q=" + encodeURIComponent(q); }
             if (manufId) { url += "&manufacturer_id=" + encodeURIComponent(manufId); }
             setStatus("Searching…");
@@ -5707,7 +5944,12 @@
             var newName = content.getAttribute("data-new-name");
             var movedTo = content.getAttribute("data-moved-to");
             var power = content.getAttribute("data-power");
-            if (!name && !deviceType && !role && !tenant && !power) { return false; }
+            // Chassis occupancy (spec §10.4): the rack view answers "what is in
+            // there / is there room" without trying to edit it.
+            var baysUsed = content.getAttribute("data-bays-used");
+            var baysTotal = content.getAttribute("data-bays-total");
+            var bayOccupants = content.getAttribute("data-bay-occupants");
+            if (!name && !deviceType && !role && !tenant && !power && !baysTotal) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -5723,6 +5965,7 @@
                 ["Tenant", tenant],
                 ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
                 ["To", movedTo],
+                ["Bays", baysTotal ? (baysUsed + " of " + baysTotal + " used") : null],
             ].forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");
@@ -5736,6 +5979,17 @@
                 row.appendChild(val);
                 hcard.appendChild(row);
             });
+            // Bay occupants, one per line -- a chassis with eight blades would be
+            // unreadable squeezed onto the single "Bays" row above.
+            if (bayOccupants) {
+                bayOccupants.split(", ").forEach(function (entry) {
+                    var row = document.createElement("div");
+                    row.className = "nbx-rd-hovercard-row nbx-rd-hovercard-bay";
+                    row.textContent = entry;
+                    hcard.appendChild(row);
+                });
+            }
+
             // Power supplies: one row per PSU (name + allocated draw), an
             // "(nc)" marker on any port not cabled to power. data-power is
             // "name:draw:conn|..." (conn 1/0, blank for a catalog template).
@@ -5921,7 +6175,40 @@
         // rdBuildModel's association pass; null until then / if none exists.
         this.shadow = null;
         this.ghost = null;
+        // Device bays (spec §10.2). A Bay is to a Device what a Unit is to a
+        // Face: the slot a placement competes for. Empty for a non-parent type.
+        this.bays = [];
+        // The Bay this device occupies, when it is a blade. A blade claims no
+        // Units and casts no Shadow -- it sits inside its parent's envelope,
+        // which already claims those rows -- so y/rows/face stay null/"".
+        this.bay = null;
     }
+
+    // One device bay (spec §10.2): the bay-side twin of Unit (§2.3). Named
+    // rather than numbered, and single-occupancy, so it has no row range, never
+    // partially overlaps, and never displaces -- a drop onto an occupied bay is
+    // rejected outright (§10.3).
+    function RDBay(parent, name, el) {
+        this.parent = parent || null;
+        this.name = name || "";
+        this.el = el || null;
+        this.occupant = null;
+        this.state = null;
+    }
+
+    // True when this bay can accept a blade right now: empty, or emptied by the
+    // plan (a `remove`-flagged occupant has vacated -- spec §10.3, the
+    // vacating-slot rule of §4.3 minus the displacement stripe).
+    RDBay.prototype.isFree = function () {
+        if (this.occupant === null) { return true; }
+        return this.state === "remove";
+    };
+
+    // The claim standing in this bay, mirroring Unit.claims() (§2.3) but for a
+    // single-occupancy slot: [] or one {device, kind:"bay"}.
+    RDBay.prototype.claims = function () {
+        return this.occupant ? [{ device: this.occupant, kind: "bay" }] : [];
+    };
 
     // The opposite-face projection of a full-depth device (spec §2.2). Has no
     // lifecycle of its own in Phase 1 either -- it is just the derived-opposite
@@ -6181,6 +6468,30 @@
                     el: el,
                     widgetIndex: isNaN(idx) ? null : idx,
                 });
+                // Bays (spec §10.2): a parent tile carries a strip of bay cells.
+                // Each becomes an RDBay owned by this device; an occupied one
+                // also becomes a blade RDDevice whose container is that bay, so
+                // the read-model holds blades as first-class devices rather than
+                // as markup inside someone else's tile.
+                el.querySelectorAll(".nbx-rd-bay").forEach(function (bayEl) {
+                    var bay = new RDBay(device, bayEl.getAttribute("data-bay-name") || "", bayEl);
+                    bay.state = bayEl.getAttribute("data-bay-state") || null;
+                    var occupantLabel = bayEl.getAttribute("data-bay-device");
+                    if (occupantLabel) {
+                        var blade = new RDDevice({
+                            label: occupantLabel,
+                            rackId: rackId,
+                            face: "",
+                            state: bay.state || "existing",
+                            el: bayEl,
+                        });
+                        blade.bay = bay;
+                        bay.occupant = blade;
+                        model.devices.push(blade);
+                    }
+                    device.bays.push(bay);
+                });
+
                 model.devices.push(device);
                 if (face === "front" || face === "rear") {
                     rack.faces[face].devices.push(device);
@@ -6339,6 +6650,36 @@
             });
         });
 
+        // I5 (spec §10.2): a Bay holds at most one occupant, and a Device occupies
+        // at most one Bay. I1/I2 above cannot catch this -- a blade claims no rows
+        // and casts no shadow -- so bay containment is checked on its own terms.
+        var bayOccupancy = {};
+        model.devices.forEach(function (d) {
+            d.bays.forEach(function (bay) {
+                var key = d.rackId + "/" + (d.widgetIndex != null ? d.widgetIndex : d.label) + "/" + bay.name;
+                if (bayOccupancy[key]) {
+                    out.push(
+                        "I5 rack " + d.rackId + ": " + d.label
+                        + " has more than one bay named " + bay.name
+                    );
+                }
+                bayOccupancy[key] = true;
+            });
+        });
+        var seatedIn = {};
+        model.devices.forEach(function (d) {
+            if (!d.bay) { return; }
+            var who = d.rackId + "/" + d.label;
+            if (seatedIn[who]) {
+                out.push(
+                    "I5 rack " + d.rackId + ": " + d.label + " occupies more than one bay ("
+                    + seatedIn[who] + " and " + d.bay.name + ")"
+                );
+                return;
+            }
+            seatedIn[who] = d.bay.name;
+        });
+
         model.devices.forEach(function (d) {
             if (!d.isFullDepth) { return; }
             var expectedFace = (d.face === "front") ? "rear" : ((d.face === "rear") ? "front" : null);
@@ -6488,6 +6829,58 @@
         check: function () { return rdCheckInvariants(rdBuildModel()); },
         canPlaceAt: rdCanPlaceAt,
     };
+
+    // ---- Layer switch with unsaved changes (spec §10.3) --------------------
+    // The rack view and the blade layer are separate pages, so switching is a
+    // navigation and would drop unsaved edits. The browser's beforeunload guard
+    // below catches that, but a bare "leave site?" is a poor answer when the
+    // user's actual intent is "keep my work". Offer the three real choices.
+    function showSaveBeforeSwitchDialog(targetUrl) {
+        var overlay = document.createElement("div");
+        overlay.className = "modal fade nbx-rd-switch-modal";
+        overlay.setAttribute("tabindex", "-1");
+        overlay.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered modal-sm">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h5 class="modal-title">Unsaved changes</h5>'
+            + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+            + "</div>"
+            + '<div class="modal-body"><p>You have unsaved changes. '
+            + "Save them before switching view?</p></div>"
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
+            + '<button type="button" class="btn btn-sm btn-outline-danger" data-rd-switch-discard>'
+            + "Discard</button>"
+            + '<button type="button" class="btn btn-sm btn-primary" data-rd-switch-save>'
+            + "Save and switch</button>"
+            + "</div></div></div>";
+        document.body.appendChild(overlay);
+
+        var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
+        var modal = ctor ? new ctor(overlay) : null;
+        overlay.addEventListener("hidden.bs.modal", function () { overlay.remove(); });
+
+        overlay.querySelector("[data-rd-switch-discard]").addEventListener("click", function () {
+            changesMade = false;                 // disarm beforeunload
+            if (modal) { modal.hide(); }
+            window.location.href = targetUrl;
+        });
+        overlay.querySelector("[data-rd-switch-save]").addEventListener("click", function () {
+            if (modal) { modal.hide(); }
+            doSave(targetUrl);
+        });
+        if (modal) { modal.show(); } else if (window.confirm("Save your changes before switching?")) {
+            doSave(targetUrl);
+        }
+    }
+
+    document.addEventListener("click", function (event) {
+        var link = event.target.closest && event.target.closest("[data-rd-layer-switch]");
+        if (!link || !changesMade) { return; }
+        event.preventDefault();
+        showSaveBeforeSwitchDialog(link.getAttribute("href"));
+    }, true);
 
     // ---- Unsaved-changes guard (design-level) ------------------------------
     window.addEventListener("beforeunload", function (event) {

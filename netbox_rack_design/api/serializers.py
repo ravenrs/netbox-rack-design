@@ -1,6 +1,7 @@
 """REST API serializers for NetBox Rack Design."""
 
 from dcim.api.serializers import (
+    DeviceBaySerializer,
     DeviceRoleSerializer,
     DeviceSerializer,
     DeviceTypeSerializer,
@@ -19,6 +20,7 @@ from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 __all__ = (
     "NestedDesignGroupSerializer",
     "NestedDesignSerializer",
+    "NestedDesignPlacementSerializer",
     "DesignGroupSerializer",
     "DesignSerializer",
     "DesignPlacementSerializer",
@@ -27,6 +29,7 @@ __all__ = (
     "FavoriteToggleSerializer",
     "DesignRackScopeSerializer",
     "HiddenRackToggleSerializer",
+    "HiddenChassisToggleSerializer",
     "HiddenRackShowAllSerializer",
     "RackPowerSerializer",
     "PlannedFeedSerializer",
@@ -109,6 +112,16 @@ class DesignSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "title", "version", "status")
 
 
+class NestedDesignPlacementSerializer(WritableNestedSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:designplacement-detail"
+    )
+
+    class Meta:
+        model = DesignPlacement
+        fields = ("id", "url", "display", "kind")
+
+
 class DesignPlacementSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rack_design-api:designplacement-detail"
@@ -119,6 +132,10 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
     device_role = DeviceRoleSerializer(nested=True, required=False, allow_null=True)
     tenant = TenantSerializer(nested=True, required=False, allow_null=True)
     target_rack = RackSerializer(nested=True, required=False, allow_null=True)
+    # Device-bay targeting: a real dcim.DeviceBay (existing chassis) or the
+    # placement of a chassis planned in the same design.
+    target_bay = DeviceBaySerializer(nested=True, required=False, allow_null=True)
+    parent_placement = NestedDesignPlacementSerializer(required=False, allow_null=True)
 
     class Meta:
         model = DesignPlacement
@@ -126,6 +143,7 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
             "id", "url", "display", "design", "kind", "device", "device_type",
             "proposed_name", "device_role", "tenant",
             "target_rack", "target_position", "target_face",
+            "parent_placement", "target_bay", "target_bay_name",
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "kind")
@@ -182,6 +200,27 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     # an alternative to a manual ``power_config``. WITHOUT a default so an item
     # that omits it leaves the placement's existing source device alone.
     power_source_device_id = serializers.IntegerField(required=False, allow_null=True)
+    # --- device-bay targeting (a blade into a chassis) ----------------------
+    # ``ref`` is a CLIENT-side identifier the editor stamps on an item so another
+    # item in the SAME submit can point at it. It is needed because a blade going
+    # into a chassis that is itself being added has no placement_id to reference
+    # yet -- the chassis row does not exist until this save creates it. The view
+    # processes the rack buckets first, records ref -> placement, then resolves
+    # ``parent_ref`` on the bay items. Neither is persisted.
+    ref = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    parent_ref = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    # The chassis placement when it ALREADY EXISTS (the blade layer only renders
+    # chassis the design has saved, so it addresses them by pk rather than by a
+    # client ref -- ``parent_ref`` is only needed for a chassis being created by
+    # the very same submit).
+    parent_placement_id = serializers.IntegerField(required=False, allow_null=True)
+    # The real dcim.DeviceBay this blade goes into (chassis already in DCIM).
+    target_bay_id = serializers.IntegerField(required=False, allow_null=True)
+    # Which bay, by name -- required for a planned chassis (its bays do not exist
+    # yet) and mirrored from the real bay otherwise.
+    target_bay_name = serializers.CharField(
+        required=False, allow_blank=True, max_length=64
+    )
 
     def validate(self, data):
         kind = data["kind"]
@@ -207,6 +246,10 @@ class SaveLayoutRackSerializer(serializers.Serializer):
     front = SaveLayoutItemSerializer(many=True, required=False, default=list)
     rear = SaveLayoutItemSerializer(many=True, required=False, default=list)
     other = SaveLayoutItemSerializer(many=True, required=False, default=list)
+    # Blades: placed IN a chassis bay rather than AT a rack unit, so they cannot
+    # live in a face bucket. Processed after the face buckets so a blade can
+    # reference a chassis created by the same submit (see ``ref``/``parent_ref``).
+    bays = SaveLayoutItemSerializer(many=True, required=False, default=list)
 
 
 class SaveLayoutSerializer(serializers.Serializer):
@@ -300,6 +343,13 @@ class HiddenRackShowAllSerializer(serializers.Serializer):
     """Body for POST .../hidden-design-racks/show-all/ (per-user view state)."""
 
     design_id = serializers.IntegerField()
+
+
+class HiddenChassisToggleSerializer(serializers.Serializer):
+    """Body for POST .../hidden-design-chassis/toggle/ (blade layer view state)."""
+
+    design_id = serializers.IntegerField()
+    chassis_id = serializers.IntegerField()
 
 
 # ---------------------------------------------------------------------------

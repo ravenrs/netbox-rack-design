@@ -52,6 +52,30 @@
         </tr>
       </table>
     </div>
+    {# Device-bay targeting: shown only for a blade placement, since a rack-slot #}
+    {# placement would otherwise render three empty rows.                        #}
+    {% if object.target_bay or object.parent_placement %}
+    <div class="card">
+      <h2 class="card-header">{% trans "Device bay" %}</h2>
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">{% trans "Chassis" %}</th>
+          <td>
+            {% if object.target_bay %}{{ object.target_bay.device|linkify }}
+            {% else %}{{ object.parent_placement|linkify }}
+              <span class="badge text-bg-blue">{% trans "planned" %}</span>{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "Bay" %}</th>
+          <td>
+            {% if object.target_bay %}{{ object.target_bay|linkify }}
+            {% else %}{{ object.target_bay_name|placeholder }}{% endif %}
+          </td>
+        </tr>
+      </table>
+    </div>
+    {% endif %}
     {% include 'inc/panels/tags.html' %}
     {% plugin_right_page object %}
   </div>

@@ -42,13 +42,29 @@
       {# and the hover card (see rack_design.js). #}
       <div class="card-body" id="rd-elevation">
 
-        {# Legend — also acts as a per-state filter (see legend_filter.js). #}
-        <div class="nbx-rd-legend mb-3" data-rd-legend>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
-          <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+        {# Legend — also acts as a per-state filter (see legend_filter.js) — and #}
+        {# the power-heatmap toggle, on ONE row: the heatmap is a pure view      #}
+        {# layer (docs/power-projection-spec.md §3), so it belongs here just as  #}
+        {# much as in the editor. power_heatmap.js needs nothing editable: it    #}
+        {# reads each tile's own data-draw-w and, with no editor present, simply #}
+        {# renders the static server distribution without live recompute.       #}
+        <div class="nbx-rd-toolbar mb-3 d-flex flex-wrap align-items-center gap-3" data-rd-toolbar>
+          <div class="nbx-rd-legend" data-rd-legend>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+          </div>
+          <div class="vr nbx-rd-toolbar-sep d-none d-md-block" aria-hidden="true"></div>
+          <label class="nbx-rd-filter" title="{% trans 'Color devices by power consumption (share of rack total)' %}">
+            <input type="checkbox" data-rd-power-heatmap>{% trans "Power heatmap" %}
+          </label>
+          <span class="nbx-rd-heat-legend" aria-hidden="true">
+            <span class="small text-muted">{% trans "low" %}</span>
+            <span class="nbx-rd-heat-scale"></span>
+            <span class="small text-muted">{% trans "high" %}</span>
+          </span>
         </div>
 
         {% if rack_blocks %}
@@ -72,4 +88,7 @@
   <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
   <script src="{% static 'netbox_rack_design/js/rack_design.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
+  {# Same toggle as the editor's. It shares the nbxRdPowerHeatmap localStorage #}
+  {# preference, so on/off carries between the elevation and the editor.       #}
+  <script src="{% static 'netbox_rack_design/js/power_heatmap.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}

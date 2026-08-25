@@ -141,3 +141,41 @@ def slot_tenant_name(slot):
     if placement is not None and placement.tenant:
         return placement.tenant.name
     return ""
+
+
+@register.filter()
+def bays_used(bays):
+    """
+    How many of a chassis's bays are occupied, in the PROJECTED world.
+
+    A blade this design removes has vacated, so it does not count as used --
+    the same vacating-slot reading the rack rows use (spec §4.3/§10.3).
+    """
+    return sum(
+        1 for bay in (bays or ())
+        if bay.get("occupied") and bay.get("state") != "remove"
+    )
+
+
+@register.filter()
+def bay_occupants(bays):
+    """
+    The occupant names of a chassis's bays, for the hover card (spec §10.4).
+
+    ``bay: name`` per entry so the reader can tell WHICH bay holds what. Just
+    the name -- the planned state is NOT appended: it read as "(add)" noise
+    after every planned blade and told the reader nothing the tile's own colour
+    does not (user 2026-08-25). The rack view reports this; editing happens in
+    the blade layer.
+    """
+    out = []
+    for index, bay in enumerate(bays or (), start=1):
+        if not bay.get("occupied"):
+            continue
+        label = bay.get("label") or ""
+        # Numbered like a rack unit, not named: bay names in the wild are a mix
+        # of "slot3", "top-left" and "pci9", so the NUMBER is the only stable
+        # identifier a reader can use. The real name stays on the bay row in the
+        # blade layer, where there is room for it.
+        out.append(f"Bay {index}: {label}")
+    return ", ".join(out)

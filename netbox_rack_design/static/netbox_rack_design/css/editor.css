@@ -61,6 +61,259 @@
     pointer-events: none;
 }
 
+/* ---- Device-bay strip on a parent (chassis) tile ------------------------- */
+/* A blade cannot carry a rack position or a face (core forbids it), so its only
+   possible home in an elevation is inside its parent's bay. The strip renders
+   every bay of a parent device -- filled ones named, empty ones as a "+" -- so
+   the free capacity of a chassis is readable at a glance. Sized to survive a
+   short tile: it wraps, and scrolls inside the tile rather than overflowing it. */
+.nbx-rd-bays {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    margin-top: 2px;
+    padding: 0 2px 2px;
+    overflow-y: auto;
+    max-height: 100%;
+    pointer-events: none;
+}
+.nbx-rd-bay {
+    /* Two per row: a chassis is commonly 4-16 bays and a 2-4U tile has room for
+       a handful of rows, so a single column would hide most of them behind a
+       scroll. min-width:0 lets the basis win over the content's intrinsic size. */
+    flex: 1 1 45%;
+    min-width: 0;
+    max-width: 100%;
+    padding: 0 3px;
+    border-radius: 2px;
+    font-size: 9px;
+    line-height: 13px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: auto;
+}
+.nbx-rd-bay-filled {
+    background: rgba(0, 0, 0, .28);
+    color: inherit;
+}
+.nbx-rd-bay-empty {
+    background: transparent;
+    border: 1px dashed currentColor;
+    opacity: .5;
+}
+.nbx-rd-bay-mark {
+    opacity: .8;
+}
+/* The tile body is a centred flex ROW (rack_design.css), so without this the
+   strip and the device name fight for the same space and a name like
+   "IDS-9621-2" wraps to three lines. Give the name its own left column with an
+   ellipsis and let the strip take the remainder. Scoped with :has() so ordinary
+   tiles keep the centred single-label layout untouched. */
+.grid-stack-item-content:has(> .nbx-rd-bays) {
+    justify-content: flex-start;
+    gap: 3px;
+}
+.grid-stack-item-content:has(> .nbx-rd-bays) > .nbx-rd-label,
+.grid-stack-item-content:has(> .nbx-rd-bays) > .nbx-rd-name-display {
+    flex: 0 0 auto;
+    max-width: 30%;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The × on a planned blade: same affordance as a planned rack tile's, scaled to
+   a bay cell. Always visible (not hover-only) -- a bay cell is small enough that
+   a hover-reveal control is easy to miss. */
+.nbx-rd-bay-remove {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    opacity: .7;
+    font-size: 11px;
+    line-height: 1;
+    padding: 0 0 0 3px;
+    cursor: pointer;
+}
+.nbx-rd-bay-remove:hover {
+    opacity: 1;
+}
+
+/* ---- Blade layer (spec §10.3/§10.4) -------------------------------------- */
+/* A chassis is rendered AS a rack: a labelled column of bays. Sized so a bay row
+   is comfortably readable -- the whole point of moving bays out of the rack tile
+   is that an 8- or 18-bay chassis has room for names here. */
+/* A chassis column carries ONE short device name per row, so it needs nowhere
+   near a rack's 220px. Narrow columns are the whole point here: a design can hold
+   a dozen chassis and they must be comparable side by side without scrolling. */
+.nbx-rd-chassis-block {
+    /* Wide enough for a real device name (ndlo-dtray-1-left, ams-fx-slot3) and
+       the chassis name in the header without truncating to "ndlo-c...". Narrower
+       than a rack's 220px, because a bay row holds one short name, not a 42U
+       elevation -- but not so narrow that the thing you came to read is elided. */
+    min-width: 210px;
+    max-width: 260px;
+    flex: 0 0 auto;
+}
+/* .nbx-rd-rack hardcodes width:220px for a real rack; a bay column sizes to its
+   own block instead. */
+.grid-stack.nbx-rd-chassis-grid {
+    /* Must be a REAL width, not auto: GridStack lays its items out against the
+       host's box, and `width:auto; min-width:0` inside a flex row collapsed the
+       whole enclosure to a sliver the moment the drawer opened. */
+    width: 100%;
+    float: none;
+}
+.nbx-rd-chassis-body .nbx-rd-grid-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+/* The header must not be what forces the column wide: rack + type + usage stack
+   and truncate rather than pushing the block out. */
+.nbx-rd-chassis-block .nbx-rd-rack-block-header {
+    max-width: 100%;
+    overflow: hidden;
+}
+.nbx-rd-chassis-block .nbx-rd-rack-block-title,
+.nbx-rd-chassis-block .nbx-rd-rack-block-header > div {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+.nbx-rd-chassis-body {
+    display: flex;
+    gap: 4px;
+    align-items: stretch;
+}
+/* The bay-number column, mirroring a rack's unit numbers: narrow, right-aligned. */
+.nbx-rd-chassis-labels {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 22px;
+}
+.nbx-rd-chassis-label {
+    height: 30px;
+    line-height: 30px;
+    font-size: 11px;
+    color: var(--nbx-rack-unit-label, #6c757d);
+    text-align: right;
+    padding-right: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* The bay column IS the rack chassis: the same repeating-stripe "empty slot"
+   background a rack draws, so an empty bay is a gap in the enclosure rather than
+   a cell with an affordance in it. One stripe per bay row (30px + 2px gap). */
+.nbx-rd-chassis-bays {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1 1 auto;
+    min-width: 0;
+    background: var(--nbx-rack-slot-bg) repeating-linear-gradient(
+        to bottom,
+        var(--nbx-rack-slot-bg) 0px,
+        var(--nbx-rack-slot-bg) 30px,
+        var(--nbx-rack-slot-border) 30px,
+        var(--nbx-rack-slot-border) 32px
+    );
+    border: 2px solid var(--nbx-rack-unit-color);
+}
+.nbx-rd-chassis-bay {
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    padding: 0 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+/* An OCCUPIED bay is a tile, exactly like a device in a rack unit. An empty one
+   draws nothing at all -- the stripe behind it is the empty slot. */
+.nbx-rd-chassis-bay[data-device-id],
+.nbx-rd-chassis-bay[data-placement-id] {
+    border: 1px solid var(--nbx-rack-slot-border);
+    border-radius: 3px;
+    background: var(--nbx-rack-slot-bg);
+}
+/* The blade layer's canvas needs a FLOOR, not just its content height.
+   A 4-bay chassis is only 88px tall, so without this the whole editor shell
+   collapses to that -- and the drawer beside it (manufacturer select, search
+   box, results list) is clipped to a sliver, which is exactly what a 4-bay
+   design looked like. 16 bays is the floor: enough room for the palette to be
+   usable no matter how small the chassis in scope are. */
+.nbx-rd-blade-scroll {
+    align-items: flex-start;
+    min-height: calc(16 * 22px + 44px);
+    gap: 0.75rem;
+}
+
+/* A bay row is 22px: a long blade name must ELLIPSIS, never wrap onto the next
+   bay. Without this "Supermicro AS-3015MR-H8TNR_Blade_lff2" spilled across two
+   rows and overlapped its neighbours. */
+.nbx-rd-chassis-grid .grid-stack-item-content {
+    overflow: hidden;
+}
+.nbx-rd-chassis-grid .nbx-rd-label,
+.nbx-rd-chassis-grid .nbx-rd-name-display {
+    display: block;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.15;
+}
+
+/* Cursor-governed bay targeting (spec §4.1 applied to §10.3): during a blade
+   drag the bay under the cursor shows the same allow/deny verdict the rack rows
+   show, so "where will this land" is answered identically in both containers. */
+.nbx-rd-bay-allow {
+    outline: 2px solid var(--nbx-rd-allow, #2fb344);
+    outline-offset: -1px;
+    background: rgba(47, 179, 68, .30);
+}
+.nbx-rd-bay-deny {
+    outline: 2px solid var(--nbx-rd-deny, #d63939);
+    outline-offset: -1px;
+    background: rgba(214, 57, 57, .30);
+    cursor: not-allowed;
+}
+/* A blade row in the palette: it cannot be racked, so it reads differently from
+   the rack-mountable types it sits beside. */
+.nbx-rd-palette-blade .nbx-rd-palette-meta {
+    font-style: italic;
+}
+
+/* A bay filled by THIS design rather than by reality: same state vocabulary as
+   the rack slots (add / move_in / remove), so a planned blade reads the same way
+   a planned server does. */
+.nbx-rd-bay-add {
+    outline: 1px solid var(--nbx-rd-add, #2fb344);
+    font-weight: 600;
+}
+.nbx-rd-bay-move_in {
+    outline: 1px solid var(--nbx-rd-movein, #4299e1);
+    font-weight: 600;
+}
+.nbx-rd-bay-remove {
+    text-decoration: line-through;
+    opacity: .65;
+}
+
+/* On the hatched opposite-face copy of a full-depth chassis the bays are
+   informational only -- mute them so the hatch stays readable. */
+.grid-stack-item.nbx-rd-opposite > .grid-stack-item-content .nbx-rd-bays {
+    opacity: .45;
+}
+
 /* ---- Planned-PDU power button (docs/pdu-distribution-spec.md) ------------ */
 /* A PDU add's tile carries a small flash-icon button (top-left, opposite the
    remove x) that (re)opens its power_config dialog. Always visible -- unlike

@@ -283,3 +283,117 @@ class PowerProjectionTier1TestCase(TestCase):
         before = Device.objects.count()
         self._elev()
         self.assertEqual(Device.objects.count(), before)
+
+
+class BayPowerTestCase(TestCase):
+    """Power for a chassis and the blades in its bays.
+
+    Rule (mirrors what core does structurally): the chassis's own draw WINS --
+    its PSUs are what the PDU actually feeds, and the blades hang off its
+    outlets, so counting both double-counts. When the chassis has no resolvable
+    draw the blades are rolled up instead, so a chassis modelled without PSUs
+    still reports the load it carries.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import DeviceBayTemplate
+
+        cls.site = Site.objects.create(name="Bay PWR", slug="bay-pwr")
+        mfr = Manufacturer.objects.create(name="Bay Mfr", slug="bay-mfr")
+        cls.rack = Rack.objects.create(name="Bay Rack", site=cls.site, u_height=42)
+        cls.role = DeviceRole.objects.create(name="Bay Role", slug="bay-role")
+
+        # A chassis type WITH its own PSU draw (600 W), 2 bays.
+        cls.chassis_psu = DeviceType.objects.create(
+            manufacturer=mfr, model="Chassis-PSU", slug="chassis-psu",
+            u_height=2, is_full_depth=False,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT)
+        PowerPortTemplate.objects.create(
+            device_type=cls.chassis_psu, name="PSU1", allocated_draw=600)
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_psu, name="b1")
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_psu, name="b2")
+
+        # A chassis type with NO power data at all, 2 bays.
+        cls.chassis_bare = DeviceType.objects.create(
+            manufacturer=mfr, model="Chassis-Bare", slug="chassis-bare",
+            u_height=2, is_full_depth=False,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT)
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_bare, name="c1")
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_bare, name="c2")
+
+        # A blade type drawing 150 W.
+        cls.blade_type = DeviceType.objects.create(
+            manufacturer=mfr, model="Blade-PWR", slug="blade-pwr",
+            u_height=0, subdevice_role=SubdeviceRoleChoices.ROLE_CHILD)
+        PowerPortTemplate.objects.create(
+            device_type=cls.blade_type, name="PSU1", allocated_draw=150)
+
+        cls.design = Design.objects.create(title="Bay power", site=cls.site)
+
+    def _chassis(self, device_type, position):
+        return Device.objects.create(
+            name=f"chassis-{position}", device_type=device_type, site=self.site,
+            rack=self.rack, position=position, face="front", status="active",
+            role=self.role)
+
+    def _blade_into(self, bay, name):
+        blade = Device.objects.create(
+            name=name, device_type=self.blade_type, site=self.site,
+            rack=self.rack, position=None, status="active", role=self.role)
+        bay.installed_device = blade
+        bay.save()
+        return blade
+
+    @override_settings(PLUGINS_CONFIG=_cfg())
+    def test_chassis_with_its_own_draw_wins_over_its_blades(self):
+        chassis = self._chassis(self.chassis_psu, 10)
+        self._blade_into(chassis.devicebays.get(name="b1"), "blade-1")
+        self._blade_into(chassis.devicebays.get(name="b2"), "blade-2")
+
+        elev = project_rack(self.design, self.rack)
+        slot = next(s for s in elev.front if s["label"] == chassis.name)
+        # 600 W from the chassis PSU -- NOT 600 + 150 + 150.
+        self.assertEqual(slot["draw_w"], 600.0)
+        self.assertEqual(elev.power["draw_w"], 600.0)
+        # the blades still report their own figure, flagged as already counted
+        self.assertTrue(all(b["draw_included_in_parent"] for b in slot["bays"]))
+        self.assertEqual(slot["bays"][0]["draw_w"], 150.0)
+
+    @override_settings(PLUGINS_CONFIG=_cfg())
+    def test_chassis_without_draw_rolls_its_blades_up(self):
+        chassis = self._chassis(self.chassis_bare, 20)
+        self._blade_into(chassis.devicebays.get(name="c1"), "blade-3")
+        self._blade_into(chassis.devicebays.get(name="c2"), "blade-4")
+
+        elev = project_rack(self.design, self.rack)
+        slot = next(s for s in elev.front if s["label"] == chassis.name)
+        self.assertEqual(slot["draw_w"], 300.0)
+        self.assertTrue(slot["draw_known"])
+        self.assertEqual(elev.power["draw_w"], 300.0)
+        self.assertFalse(any(b["draw_included_in_parent"] for b in slot["bays"]))
+
+    @override_settings(PLUGINS_CONFIG=_cfg())
+    def test_planned_blade_counts_toward_the_rack(self):
+        """A blade planned into a bay of a draw-less chassis is load that will
+        exist once applied, so it must appear in the projected total."""
+        chassis = self._chassis(self.chassis_bare, 30)
+        bay = chassis.devicebays.get(name="c1")
+        DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.blade_type, target_rack=self.rack,
+            target_bay=bay, target_bay_name="c1", proposed_name="planned-blade")
+
+        elev = project_rack(self.design, self.rack)
+        slot = next(s for s in elev.front if s["label"] == chassis.name)
+        self.assertEqual(slot["draw_w"], 150.0)
+        self.assertEqual(elev.power["draw_w"], 150.0)
+
+    @override_settings(PLUGINS_CONFIG=_cfg())
+    def test_empty_draw_less_chassis_draws_nothing(self):
+        self._chassis(self.chassis_bare, 40)
+        elev = project_rack(self.design, self.rack)
+        slot = next(s for s in elev.front if s["label"] == "chassis-40")
+        self.assertEqual(slot["draw_w"], 0.0)
+        self.assertEqual(elev.power["draw_w"], 0.0)

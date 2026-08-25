@@ -8,6 +8,7 @@ from .views import (
     DesignViewSet,
     DeviceTypePowerViewSet,
     FavoriteDeviceTypeViewSet,
+    HiddenDesignChassisViewSet,
     HiddenDesignRackViewSet,
 )
 
@@ -21,6 +22,11 @@ router.register(
     "favorite-device-types",
     FavoriteDeviceTypeViewSet,
     basename="favoritedevicetype",
+)
+router.register(
+    "hidden-design-chassis",
+    HiddenDesignChassisViewSet,
+    basename="hiddendesignchassis",
 )
 router.register(
     "hidden-design-racks",

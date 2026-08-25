@@ -122,6 +122,9 @@
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
                    data-name="{{ slot.display_label }}"
+                   {# A chassis answers "is there room" from its hover card (spec §10.4):
+                      the rack view REPORTS bay occupancy, the blade layer EDITS it. #}
+                   {% if slot.bays %}data-bays-used="{{ slot.bays|bays_used }}" data-bays-total="{{ slot.bays|length }}" data-bay-occupants="{{ slot.bays|bay_occupants }}"{% endif %}
                    data-draw-w="{{ slot.draw_w|floatformat:0 }}"
                    data-draw-known="{{ slot.draw_known|yesno:'1,0' }}"
                    {% if slot.power_ports %}data-power="{% for p in slot.power_ports %}{{ p.name }}:{{ p.draw|floatformat:0 }}:{% if p.connected %}1{% elif p.connected == False %}0{% endif %}{% if not forloop.last %}|{% endif %}{% endfor %}"{% endif %}
@@ -182,6 +185,9 @@
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
                    data-name="{{ slot.display_label }}"
+                   {# A chassis answers "is there room" from its hover card (spec §10.4):
+                      the rack view REPORTS bay occupancy, the blade layer EDITS it. #}
+                   {% if slot.bays %}data-bays-used="{{ slot.bays|bays_used }}" data-bays-total="{{ slot.bays|length }}" data-bay-occupants="{{ slot.bays|bay_occupants }}"{% endif %}
                    data-draw-w="{{ slot.draw_w|floatformat:0 }}"
                    data-draw-known="{{ slot.draw_known|yesno:'1,0' }}"
                    {% if slot.power_ports %}data-power="{% for p in slot.power_ports %}{{ p.name }}:{{ p.draw|floatformat:0 }}:{% if p.connected %}1{% elif p.connected == False %}0{% endif %}{% if not forloop.last %}|{% endif %}{% endfor %}"{% endif %}
@@ -241,6 +247,9 @@
           <div class="grid-stack-item-content"
                {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
                data-name="{{ slot.display_label }}"
+               {# A chassis answers "is there room" from its hover card (spec §10.4):
+                  the rack view REPORTS bay occupancy, the blade layer EDITS it. #}
+               {% if slot.bays %}data-bays-used="{{ slot.bays|bays_used }}" data-bays-total="{{ slot.bays|length }}" data-bay-occupants="{{ slot.bays|bay_occupants }}"{% endif %}
                {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
                {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}

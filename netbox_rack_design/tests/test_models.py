@@ -6,7 +6,7 @@ These cover behaviour that the generic suites do NOT exercise: the custom
 The CRUD/permissions/changelog matrix lives in test_api.py and test_views.py.
 """
 
-from dcim.models import PowerFeed, PowerPanel, Rack, Site
+from dcim.models import DeviceType, PowerFeed, PowerPanel, Rack, Site
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
@@ -387,6 +387,190 @@ class DesignPlacementTestCase(TestCase):
         placement.planned_power_feed = planned
         with self.assertRaises(ValidationError):
             placement.full_clean()
+
+
+class BayPlacementTestCase(TestCase):
+    """Placing a blade into a chassis bay (docs: device bays / blades).
+
+    Two cases, both required: the chassis already exists in DCIM (``target_bay``
+    -> a real dcim.DeviceBay), or the chassis is itself an 'add' in the same
+    design (``parent_placement`` + ``target_bay_name``, validated against the
+    parent type's DeviceBayTemplates because no bay rows exist yet).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBayTemplate
+
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.role = env["device_role"]
+        cls.plain_type = env["device_type"]
+        manufacturer = cls.plain_type.manufacturer
+
+        cls.chassis_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Chassis-T", slug="chassis-t",
+            u_height=2, subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_type, name="bay-a")
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_type, name="bay-b")
+        cls.blade_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Blade-T", slug="blade-t",
+            u_height=0, subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
+        )
+
+        cls.design = Design.objects.create(title="Bay plan", site=cls.site)
+        cls.chassis = Device.objects.create(
+            name="Real-Chassis", site=cls.site, rack=cls.racks[0], position=40,
+            face="front", device_type=cls.chassis_type, role=cls.role,
+        )
+        # Core instantiates the DeviceBays from the type's DeviceBayTemplates when
+        # the device is created -- fetch them rather than creating duplicates.
+        cls.free_bay = cls.chassis.devicebays.get(name="bay-a")
+        cls.taken_bay = cls.chassis.devicebays.get(name="bay-b")
+        cls.sitting_blade = Device.objects.create(
+            name="Sitting-Blade", site=cls.site, rack=cls.racks[0], position=None,
+            device_type=cls.blade_type, role=cls.role,
+        )
+        cls.taken_bay.installed_device = cls.sitting_blade
+        cls.taken_bay.save()
+
+    def _blade_add(self, **kwargs):
+        defaults = {
+            "design": self.design,
+            "kind": DesignPlacementKindChoices.KIND_ADD,
+            "device_type": self.blade_type,
+            "target_rack": self.racks[0],
+        }
+        defaults.update(kwargs)
+        return DesignPlacement(**defaults)
+
+    # --- case A: real chassis -------------------------------------------------
+
+    def test_blade_into_a_real_free_bay(self):
+        p = self._blade_add(target_bay=self.free_bay, target_bay_name="bay-a")
+        p.full_clean()
+        p.save()
+        self.assertEqual(p.target_bay, self.free_bay)
+
+    def test_blade_into_an_occupied_bay_is_rejected(self):
+        p = self._blade_add(target_bay=self.taken_bay)
+        with self.assertRaises(ValidationError) as ctx:
+            p.full_clean()
+        self.assertIn("target_bay", ctx.exception.message_dict)
+
+    def test_occupied_bay_is_free_if_the_design_removes_its_occupant(self):
+        """Same projected-world rule the rack slots use: an occupant this design
+        removes has already vacated, so the bay is available."""
+        DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=self.sitting_blade,
+        )
+        p = self._blade_add(target_bay=self.taken_bay)
+        p.full_clean()
+
+    def test_bay_target_forbids_a_rack_position(self):
+        p = self._blade_add(target_bay=self.free_bay, target_position=5)
+        with self.assertRaises(ValidationError) as ctx:
+            p.full_clean()
+        self.assertIn("target_position", ctx.exception.message_dict)
+
+    def test_non_child_device_type_cannot_go_in_a_bay(self):
+        p = self._blade_add(device_type=self.plain_type, target_bay=self.free_bay)
+        with self.assertRaises(ValidationError) as ctx:
+            p.full_clean()
+        self.assertIn("target_bay", ctx.exception.message_dict)
+
+    def test_one_design_cannot_claim_the_same_real_bay_twice(self):
+        self._blade_add(target_bay=self.free_bay).save()
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._blade_add(target_bay=self.free_bay).save()
+
+    # --- case B: chassis planned in the same design ---------------------------
+
+    def test_blade_into_a_planned_chassis(self):
+        chassis_p = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.chassis_type, target_rack=self.racks[0],
+            target_position=20, target_face="front",
+        )
+        p = self._blade_add(parent_placement=chassis_p, target_bay_name="bay-a")
+        p.full_clean()
+        p.save()
+        self.assertEqual(list(chassis_p.bay_children.all()), [p])
+
+    def test_planned_bay_name_must_exist_on_the_parent_type(self):
+        chassis_p = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.chassis_type, target_rack=self.racks[0],
+            target_position=20, target_face="front",
+        )
+        p = self._blade_add(parent_placement=chassis_p, target_bay_name="nope")
+        with self.assertRaises(ValidationError) as ctx:
+            p.full_clean()
+        self.assertIn("target_bay_name", ctx.exception.message_dict)
+
+    def test_planned_parent_must_be_a_parent_device_type(self):
+        not_chassis = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.plain_type, target_rack=self.racks[0],
+            target_position=22, target_face="front",
+        )
+        p = self._blade_add(parent_placement=not_chassis, target_bay_name="bay-a")
+        with self.assertRaises(ValidationError) as ctx:
+            p.full_clean()
+        self.assertIn("parent_placement", ctx.exception.message_dict)
+
+    def test_real_bay_and_planned_parent_are_mutually_exclusive(self):
+        chassis_p = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.chassis_type, target_rack=self.racks[0],
+            target_position=20, target_face="front",
+        )
+        p = self._blade_add(parent_placement=chassis_p, target_bay=self.free_bay)
+        with self.assertRaises(ValidationError):
+            p.full_clean()
+
+    def test_edit_form_accepts_a_real_bay_and_mirrors_its_name(self):
+        """The generic create/edit form must be able to place a blade: the chassis
+        selector only scopes the bay picker, and target_bay_name is filled from
+        the chosen bay so consumers have one field to read."""
+        from ..forms import DesignPlacementForm
+
+        form = DesignPlacementForm(data={
+            "design": self.design.pk,
+            "kind": DesignPlacementKindChoices.KIND_ADD,
+            "device_type": self.blade_type.pk,
+            "target_rack": self.racks[0].pk,
+            "chassis": self.chassis.pk,
+            "target_bay": self.free_bay.pk,
+        })
+        self.assertTrue(form.is_valid(), form.errors.as_json())
+        placement = form.save()
+        self.assertEqual(placement.target_bay, self.free_bay)
+        self.assertEqual(placement.target_bay_name, "bay-a")
+
+    def test_edit_form_rejects_an_occupied_bay(self):
+        from ..forms import DesignPlacementForm
+
+        form = DesignPlacementForm(data={
+            "design": self.design.pk,
+            "kind": DesignPlacementKindChoices.KIND_ADD,
+            "device_type": self.blade_type.pk,
+            "target_rack": self.racks[0].pk,
+            "chassis": self.chassis.pk,
+            "target_bay": self.taken_bay.pk,
+        })
+        self.assertFalse(form.is_valid())
+
+    def test_bay_name_without_a_target_is_rejected(self):
+        p = self._blade_add(target_bay_name="bay-a", target_position=7, target_face="front")
+        with self.assertRaises(ValidationError) as ctx:
+            p.full_clean()
+        self.assertIn("target_bay_name", ctx.exception.message_dict)
 
 
 class DesignPowerFeedTestCase(TestCase):
