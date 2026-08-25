@@ -1,5 +1,6 @@
 """Views for NetBox Rack Design."""
 
+import json
 import os
 
 from dcim.models import PowerFeed, Rack, Site
@@ -363,6 +364,11 @@ def _design_editor_context(request, design):
         "scoped_rack_rows": scoped_rack_rows,
         # Drives the empty-state markup + the drawer's default-open override.
         "has_racks": bool(all_rack_blocks),
+        # Gates the blade-layer switch (spec §10.3/§10.4): offered only when the
+        # design's scope actually contains a chassis, so a deployment with no
+        # blade hardware never sees the feature. Cheap existence check -- the full
+        # chassis projection only runs inside the layer itself.
+        "has_chassis_in_scope": projection.has_chassis_in_scope(design),
         "save_url": f"/api/plugins/rack-design/designs/{design.pk}/save-layout/",
         # Read-only naming preview for the editor's add auto-fill (Phase 3).
         "preview_name_url": f"/api/plugins/rack-design/designs/{design.pk}/preview-name/",
@@ -483,6 +489,134 @@ class DesignEditorDefaultView(generic.ObjectView):
 
     def get_extra_context(self, request, instance):
         return _design_editor_context(request, instance)
+
+
+# A planned chassis has no device pk, so its synthetic grid id is offset past any
+# plausible dcim.Device pk. Keeps the two id namespaces disjoint inside the
+# editor's per-"rack" registries without inventing a compound key initRack would
+# have to understand.
+_PLANNED_CHASSIS_GRID_OFFSET = 1_000_000_000
+
+
+def _blade_layer_context(request, design):
+    """
+    Context for the BLADE LAYER (spec §10.3): the same workspace as the rack
+    editor, re-pointed at chassis.
+
+    A chassis IS a rack there -- bays in place of units -- so this mirrors
+    ``_design_editor_context`` field for field: every chassis in scope rendered as
+    a column, the user's hidden ones flagged (not dropped, so the Chassis panel
+    can toggle them with no reload), and the same save/preview/favourites URLs.
+    """
+    entries = projection.chassis_in_scope(design)
+    if request.user.is_authenticated:
+        hidden_chassis_ids = set(
+            models.HiddenDesignChassis.objects.filter(
+                user=request.user, design=design
+            ).values_list("chassis_id", flat=True)
+        )
+    else:
+        hidden_chassis_ids = set()
+
+    columns = []
+    for entry in entries:
+        column = projection.project_chassis(design, entry)
+        column["hidden"] = bool(
+            entry["device"] is not None and entry["device"].pk in hidden_chassis_ids
+        )
+        # --- make the column a DEGENERATE RACK for initRack (spec §10.3) ------
+        # A synthetic per-column grid id, because initRack keys every element id
+        # and its controller registry off ONE integer. A real chassis uses its
+        # device pk; a planned one is offset past any plausible device pk so the
+        # two namespaces cannot collide.
+        if entry["device"] is not None:
+            column["grid_id"] = entry["device"].pk
+        else:
+            column["grid_id"] = _PLANNED_CHASSIS_GRID_OFFSET + entry["placement"].pk
+        column["grid_id_str"] = str(column["grid_id"])
+        column["bay_names_json"] = json.dumps([s["name"] for s in column["slots"]])
+        # Parallel array of dcim.DeviceBay pks (null for a planned chassis, whose
+        # bays do not exist yet). Needed on the BLOCK because an EMPTY bay renders
+        # no element of its own -- the stripe behind the grid is the empty slot --
+        # so a drop into one has nowhere else to read the bay's id from.
+        column["bay_ids_json"] = json.dumps(
+            [(s["bay"].pk if s["bay"] is not None else None) for s in column["slots"]]
+        )
+
+        # ONE BAY == ONE WHOLE "U". A rack grid steps in HALF units (gsYToUPosition
+        # divides gsY by 2, so a 1U device is gs-h=2), so a bay is modelled as a
+        # 1U device in a rack whose height is the bay count: gs_y = (index-1)*2.
+        # With data-desc-units="true" gsYToUPosition then returns exactly the
+        # 1-based BAY INDEX, so initRack needs no arithmetic of its own and a
+        # freshly loaded column is identical to what it would save.
+        widgets = []
+        for slot in column["slots"]:
+            slot["gs_y"] = (slot["index"] - 1) * 2
+            if not slot["label"]:
+                slot["widget_index"] = None
+                continue
+            slot["widget_index"] = len(widgets)
+            placement = slot["placement"]
+            widgets.append({
+                "kind": (placement.kind if placement is not None else "existing"),
+                "device_id": slot["device"].pk if slot["device"] is not None else None,
+                "device_type_id": (
+                    slot["device_type"].pk if slot["device_type"] is not None else None
+                ),
+                "placement_id": placement.pk if placement is not None else None,
+                "u_height": 1,        # one bay == one whole unit (gsH = 2)
+                "u_position": slot["index"],
+                "label": slot["label"],
+                "face": "front",
+                "is_full_depth": False,
+                "bay_name": slot["name"],
+                "bay_id": slot["bay"].pk if slot["bay"] is not None else None,
+            })
+        column["widgets"] = widgets
+        columns.append(column)
+
+    context = _design_editor_context(request, design)
+    context.update({
+        "blade_layer": True,
+        "chassis_columns": columns,
+        "chassis_rows": [
+            {"key": c["key"], "label": c["label"], "rack": c["rack"],
+             "used": c["used"], "bay_count": c["bay_count"],
+             "device": c["device"], "hidden": c["hidden"]}
+            for c in columns
+        ],
+        "has_chassis": bool(columns),
+        # The layer's canvas is editable; the flag is separate from the rack
+        # editor's own so a read-only blade view stays possible later.
+        "editable_layer": True,
+        # The ROUTER's path, not a per-design one: HiddenDesignChassisViewSet is
+        # registered at the plugin API root and takes design_id in the body, the
+        # same shape as hidden-design-racks.
+        "hidden_chassis_url": "/api/plugins/rack-design/hidden-design-chassis/",
+    })
+    return context
+
+
+@register_model_view(models.Design, "blades", path="blades")
+class DesignBladeLayerView(generic.ObjectView):
+    """
+    The blade layer: every chassis in the design's scope as a column of bays.
+
+    URL: /plugins/rack-design/designs/<pk>/blades/
+    Name: plugins:netbox_rack_design:design_blades  (kwargs: pk)
+
+    Exists because a rack elevation cannot also be a bay elevation -- an 8-bay
+    chassis in a 3U tile is unreadable (spec §10.3, rejected 2026-08-25). Here a
+    chassis is rendered AS a rack, so every §4 rule (validate -> confirm ->
+    commit, blocking, ghosts, homecoming, cursor governance) applies verbatim
+    with one bay as the step instead of 0.5U.
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_blades.html"
+
+    def get_extra_context(self, request, instance):
+        return _blade_layer_context(request, instance)
 
 
 @register_model_view(models.Design, "list", path="", detail=False)

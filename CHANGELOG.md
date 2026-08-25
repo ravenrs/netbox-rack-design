@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-25
+
+### Release Summary
+
+Device bays and blades. A chassis was previously an opaque tile: its bays were
+invisible, its blades polluted the non-racked tray, and nothing about them could
+be planned. This release models bays as first-class planning targets, adds a
+**blade layer** for editing them, and closes a power-accounting gap that came
+with them. Full design rationale in `docs/editor-behavior-spec.md` §10.
+
+The organising idea is that **a bay is to a device what a unit is to a rack
+face** — so a chassis is rendered as a rack, and the entire existing movement
+pipeline (validate → confirm → commit, blocking, ghosts, homecoming,
+cursor-governed placement) applies to blades with no new gesture code. The only
+difference is the step: one bay instead of half a rack unit.
+
+### Added
+
+- **Blade layer** at `/plugins/rack-design/designs/<pk>/blades/` — every chassis
+  in a design's scope rendered as a column of bays, driven by the unmodified rack
+  editor. Reached from a **Blades** button in the rack view, which appears only
+  when the design's scope actually contains a chassis.
+- **Plan a blade into a bay**, in both cases that exist: a chassis already in
+  DCIM (`target_bay`), and a chassis this same design adds (`parent_placement` +
+  `target_bay_name`, validated against the type's `DeviceBayTemplates`, since no
+  bay rows exist until apply).
+- The layer's **palette is filtered to child device types**, so a rack-mountable
+  device can never be offered as a blade; conversely a blade is refused by every
+  rack grid. Container/type agreement is enforced at the drop gate, not after
+  the fact.
+- **Chassis visibility** — per-user show/hide in the layer's Chassis panel, the
+  blade-layer twin of the Design-racks panel (`HiddenDesignChassis`).
+- **Bay occupancy on the rack page**: a chassis tile's hover card reports
+  `N of M bays used` plus one line per occupant — in the editor and on the
+  read-only projected elevation alike.
+- The **power heatmap** toggle is now on the read-only elevation too, not only
+  in the editor. It is a pure view layer, so the same script drives both; the
+  on/off choice is shared between the two pages.
+- REST and GraphQL expose `parent_placement`, `target_bay` and `target_bay_name`,
+  with `?target_bay_id=` and `?parent_placement_id=` filters; the create/edit,
+  import, bulk-edit and filter forms all carry them, and the edit form's chassis
+  selector scopes the bay picker (an unfiltered `DeviceBay` list is unusable).
+- **Save-before-switch**: changing layer with unsaved work asks
+  *Cancel / Discard / Save and switch* instead of relying on the browser's
+  generic unload warning.
+
+### Fixed
+
+- **Blades no longer render in the non-racked tray.** A child device keeps its
+  `rack` but is forbidden a position, so it satisfied the tray's
+  `position__isnull=True` test and drew alongside real 0U accessories. On a
+  populated instance that is every blade in the rack.
+- **Blade power is now accounted for.** Chassis and blades can never both be
+  counted: if the chassis has a resolvable draw it wins and its blades are marked
+  as already included; if it has none, the blades roll up into it. This mirrors
+  what core achieves through cabling (`PowerPort.get_power_draw()` aggregates
+  downstream only when the port carries no value of its own) — a plan has no
+  cables, so the same result is derived from containment.
+
+### Changed
+
+- Bays are addressed by **number** rather than name in the UI. Real bay names are
+  a mix of `slot3`, `top-left` and `pci9`, so the index is the only stable
+  identifier; the real name stays in the tooltip.
+- The save payload gains a fourth per-rack bucket, `bays`, processed after the
+  face buckets so a blade can reference a chassis created by the same submit.
+  An `existing` bay item is reconciled against reality server-side, exactly as
+  face items are — the client never claims something moved.
+- **`target_face` is now preserved for full-depth devices.** Saving a layout
+  used to blank it, a dedup trick from when the editor POSTed one copy of a
+  full-depth tile per face; the editor has since sent a single item, so the
+  stored face was being discarded for nothing. API consumers diffing on
+  `(device, position, face)` no longer miss every full-depth row. A client that
+  still submits both copies gets one placement as before, and the face it was
+  mounted on wins rather than whichever copy arrived last.
+
+### Migrations
+
+- `0008` — `DesignPlacement.parent_placement` / `target_bay` / `target_bay_name`,
+  plus two uniqueness constraints (one design may claim a given bay once).
+- `0009` — `HiddenDesignChassis`.
+
+Both are additive; no existing data is rewritten.
+
 ## [0.18.0] - 2026-08-24
 
 ### Release Summary

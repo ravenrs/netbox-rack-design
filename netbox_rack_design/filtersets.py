@@ -1,7 +1,7 @@
 """FilterSets for NetBox Rack Design."""
 
 import django_filters
-from dcim.models import Device, DeviceType, Rack, Site
+from dcim.models import Device, DeviceBay, DeviceType, Rack, Site
 from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
 
@@ -70,10 +70,18 @@ class DesignPlacementFilterSet(NetBoxModelFilterSet):
         queryset=DeviceType.objects.all(), label="Device type (ID)"
     )
     kind = django_filters.MultipleChoiceFilter(choices=DesignPlacementKindChoices)
+    # Device-bay targeting: find the blades planned into a given chassis, whether
+    # the chassis is real (target_bay) or itself planned (parent_placement).
+    target_bay_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=DeviceBay.objects.all(), label="Target bay (ID)"
+    )
+    parent_placement_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=DesignPlacement.objects.all(), label="Parent placement (ID)"
+    )
 
     class Meta:
         model = DesignPlacement
-        fields = ("id", "proposed_name")
+        fields = ("id", "proposed_name", "target_bay_name")
 
     def search(self, queryset, name, value):
         if not value.strip():

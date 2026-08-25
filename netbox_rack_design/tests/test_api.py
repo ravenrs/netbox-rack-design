@@ -2713,6 +2713,195 @@ class PlannedFeedActionTest(APITestCase):
         self.assertFalse(DesignPowerFeed.objects.filter(design=self.design).exists())
 
 
+class SaveLayoutBayTest(APITestCase):
+    """save-layout persisting a blade into a device bay.
+
+    Two cases: a real chassis already in DCIM (``target_bay_id``), and a chassis
+    created by the SAME submit, which has no placement id yet and is referenced
+    through the client-side ``ref``/``parent_ref`` pair.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBayTemplate
+
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.role = env["device_role"]
+        mfr = env["device_type"].manufacturer
+        cls.design = Design.objects.create(title="Bay layout", site=cls.site)
+
+        cls.chassis_type = DeviceType.objects.create(
+            manufacturer=mfr, model="SL-Chassis", slug="sl-chassis", u_height=2,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT)
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_type, name="s1")
+        DeviceBayTemplate.objects.create(device_type=cls.chassis_type, name="s2")
+        cls.blade_type = DeviceType.objects.create(
+            manufacturer=mfr, model="SL-Blade", slug="sl-blade", u_height=0,
+            subdevice_role=SubdeviceRoleChoices.ROLE_CHILD)
+
+        cls.chassis = Device.objects.create(
+            name="sl-chassis-1", site=cls.site, rack=cls.racks[0], position=20,
+            face="front", device_type=cls.chassis_type, role=cls.role)
+        cls.bay = cls.chassis.devicebays.get(name="s1")
+
+    def _url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-save-layout",
+            kwargs={"pk": self.design.pk},
+        )
+
+    def _grant_all(self):
+        self.add_permissions(
+            "netbox_rack_design.change_design",
+            "netbox_rack_design.add_designplacement",
+            "netbox_rack_design.change_designplacement",
+            "netbox_rack_design.delete_designplacement",
+        )
+
+    def test_blade_into_a_real_bay(self):
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [{
+                "kind": "add",
+                "device_type_id": self.blade_type.pk,
+                "target_bay_id": self.bay.pk,
+                "proposed_name": "blade-in-s1",
+            }],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        p = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(p.target_bay, self.bay)
+        self.assertEqual(p.target_bay_name, "s1")   # mirrored from the bay
+        self.assertIsNone(p.target_position)
+        self.assertEqual(p.proposed_name, "blade-in-s1")
+
+    def test_blade_into_a_chassis_added_by_the_same_submit(self):
+        """The chassis has no placement id when the blade item is serialized, so
+        the blade points at it by client ref; the view resolves it after the face
+        buckets are reconciled."""
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "front": [{
+                "kind": "add",
+                "device_type_id": self.chassis_type.pk,
+                "u_position": 30, "face": "front",
+                "proposed_name": "new-chassis",
+                "ref": "c1",
+            }],
+            "bays": [{
+                "kind": "add",
+                "device_type_id": self.blade_type.pk,
+                "parent_ref": "c1",
+                "target_bay_name": "s2",
+                "proposed_name": "blade-in-new",
+            }],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        chassis_p = DesignPlacement.objects.get(design=self.design, proposed_name="new-chassis")
+        blade_p = DesignPlacement.objects.get(design=self.design, proposed_name="blade-in-new")
+        self.assertEqual(blade_p.parent_placement, chassis_p)
+        self.assertEqual(blade_p.target_bay_name, "s2")
+        self.assertIsNone(blade_p.target_bay)
+
+    def test_unknown_parent_ref_is_an_error(self):
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [{
+                "kind": "add",
+                "device_type_id": self.blade_type.pk,
+                "parent_ref": "nope",
+                "target_bay_name": "s1",
+            }],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_bay_item_without_any_target_is_an_error(self):
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [{"kind": "add", "device_type_id": self.blade_type.pk}],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_400_BAD_REQUEST)
+
+    def test_removing_a_real_blade(self):
+        """A blade already installed in a chassis is removed like any other
+        device: a `remove` placement on it, with no bay target (the model takes
+        no target for a removal). It rides the bays bucket only because that is
+        where the editor's bay layer emits it from."""
+        from dcim.models import Device
+        blade = Device.objects.create(
+            name="seated-blade", site=self.site, rack=self.racks[0], position=None,
+            device_type=self.blade_type, role=self.role)
+        bay2 = self.chassis.devicebays.get(name="s2")
+        bay2.installed_device = blade
+        bay2.save()
+
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [{"kind": "remove", "device_id": blade.pk}],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        p = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(p.kind, DesignPlacementKindChoices.KIND_REMOVE)
+        self.assertEqual(p.device, blade)
+        self.assertIsNone(p.target_bay)
+        # the real device is untouched -- it is still installed in its bay
+        bay2.refresh_from_db()
+        self.assertEqual(bay2.installed_device, blade)
+
+    def test_removing_the_same_blade_twice_is_idempotent(self):
+        from dcim.models import Device
+        blade = Device.objects.create(
+            name="seated-blade-2", site=self.site, rack=self.racks[0], position=None,
+            device_type=self.blade_type, role=self.role)
+        bay2 = self.chassis.devicebays.get(name="s2")
+        bay2.installed_device = blade
+        bay2.save()
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [{"kind": "remove", "device_id": blade.pk}],
+        }]}
+        self.client.post(self._url(), payload, format="json", **self.header)
+        self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
+
+    def test_cancelling_a_planned_blade_deletes_it(self):
+        self._grant_all()
+        placement = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.blade_type, target_rack=self.racks[0],
+            target_bay=self.bay, target_bay_name="s1", proposed_name="doomed",
+        )
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [{
+                "kind": "add",
+                "placement_id": placement.pk,
+                "target_bay_id": self.bay.pk,
+                "cancel": True,
+            }],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        self.assertFalse(DesignPlacement.objects.filter(pk=placement.pk).exists())
+
+
 class SaveLayoutFeedBindingTest(APITestCase):
     """
     Tests for save-layout persisting a PDU add's power-feed binding

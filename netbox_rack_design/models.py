@@ -27,6 +27,7 @@ __all__ = (
     "DesignRackPower",
     "FavoriteDeviceType",
     "HiddenDesignRack",
+    "HiddenDesignChassis",
 )
 
 # The plugin's hosted documentation (MkDocs -> GitHub Pages). NetBoxModel's
@@ -308,6 +309,41 @@ class DesignPlacement(NetBoxModel):
     )
     target_face = models.CharField(max_length=10, blank=True)
 
+    # --- device-bay targeting (a blade into a chassis) -------------------------
+    # Core forbids a child device from carrying a rack position or a face
+    # (dcim.Device.clean), so a blade is never placed AT a U -- it is placed IN a
+    # parent's bay. Two cases, exactly one field each:
+    #
+    #   A. the chassis already exists in DCIM -> ``target_bay`` names the real
+    #      dcim.DeviceBay row.
+    #   B. the chassis is itself an 'add' in THIS design -> it has no bays yet
+    #      (core instantiates them from the device type only when the device is
+    #      created), so the blade points at the chassis's placement via
+    #      ``parent_placement`` and names its bay via ``target_bay_name``, which is
+    #      validated against the parent type's DeviceBayTemplates.
+    #
+    # ``target_bay_name`` is also filled in case A (mirroring the bay's name) so a
+    # consumer has one field to read for "which bay" regardless of case.
+    parent_placement = models.ForeignKey(
+        to="self",
+        on_delete=models.CASCADE,
+        related_name="bay_children",
+        blank=True,
+        null=True,
+        help_text="The placement of the chassis this blade goes into, when the "
+                  "chassis is itself planned in this design.",
+    )
+    target_bay = models.ForeignKey(
+        to="dcim.DeviceBay",
+        on_delete=models.CASCADE,
+        related_name="design_placements",
+        blank=True,
+        null=True,
+        help_text="The real device bay this blade goes into, when the chassis "
+                  "already exists in DCIM.",
+    )
+    target_bay_name = models.CharField(max_length=64, blank=True)
+
     # MANUAL custom-field bridge for a PLANNED PDU add (docs/pdu-distribution-spec
     # §6): the site-specific CUSTOM fields (declared via the ``planning_fields``
     # config) the distribution script wants but which a planned PDU (no real
@@ -358,6 +394,22 @@ class DesignPlacement(NetBoxModel):
         ordering = ("design", "target_position", "pk")
         verbose_name = "design placement"
         verbose_name_plural = "design placements"
+        constraints = [
+            # One design may claim a given bay once. Scoped to the design, not
+            # global: two independent designs may each plan the same bay -- they
+            # are competing proposals, and conflict detection between designs is
+            # a separate concern from a design contradicting itself.
+            models.UniqueConstraint(
+                fields=("design", "target_bay"),
+                condition=models.Q(target_bay__isnull=False),
+                name="%(app_label)s_%(class)s_unique_design_target_bay",
+            ),
+            models.UniqueConstraint(
+                fields=("design", "parent_placement", "target_bay_name"),
+                condition=models.Q(parent_placement__isnull=False),
+                name="%(app_label)s_%(class)s_unique_design_planned_bay",
+            ),
+        ]
 
     def __str__(self):
         label = self.device or self.device_type or "?"
@@ -422,6 +474,17 @@ class DesignPlacement(NetBoxModel):
         if kind == DesignPlacementKindChoices.KIND_REMOVE:
             return  # No target for a removal.
 
+        # A bay target (blade into a chassis) is mutually exclusive with a rack
+        # slot, and short-circuits the U/face validation below.
+        if self.target_bay_id or self.parent_placement_id:
+            self._validate_bay_target()
+            return
+        if self.target_bay_name:
+            raise ValidationError({
+                "target_bay_name": "A bay name requires either a target bay or a "
+                                   "parent placement.",
+            })
+
         # add / move require a target rack; the target position is optional --
         # None means a tray (non-racked) target (spec §9.5: mount vs dismount vs
         # tray-to-tray reassociation are all distinguished by target_position
@@ -433,6 +496,89 @@ class DesignPlacement(NetBoxModel):
             return
 
         self._validate_target_slot()
+
+    def _placed_device_type(self):
+        """The DeviceType being placed: the add's own, or the moved device's."""
+        if self.device_type_id:
+            return self.device_type
+        return self.device.device_type if self.device_id else None
+
+    def _validate_bay_target(self):
+        """
+        Validate a blade placement: into a real chassis bay (``target_bay``) or
+        into a bay of a chassis planned in this same design
+        (``parent_placement`` + ``target_bay_name``).
+        """
+        if self.target_bay_id and self.parent_placement_id:
+            raise ValidationError(
+                "A placement targets either a real device bay or a planned "
+                "chassis, never both."
+            )
+        if self.target_position is not None or self.target_face:
+            raise ValidationError({
+                "target_position": "A device placed in a bay takes no rack "
+                                   "position or face -- those belong to its parent.",
+            })
+
+        device_type = self._placed_device_type()
+        if device_type is not None and not device_type.is_child_device:
+            raise ValidationError({
+                "target_bay": f"{device_type} is not a child device type, so it "
+                              f"cannot be installed in a device bay.",
+            })
+
+        if self.target_bay_id:
+            parent = self.target_bay.device
+            if self.target_rack_id and parent.rack_id != self.target_rack_id:
+                raise ValidationError({
+                    "target_rack": "Target rack must be the rack the chassis is in.",
+                })
+            if self.design_id and parent.rack_id and parent.rack.site_id != self.design.site_id:
+                raise ValidationError({
+                    "target_bay": "The chassis is not in the design's site.",
+                })
+            # The bay must be free in the design's PROJECTED world: an occupant
+            # this same design moves out or removes has already vacated it.
+            occupant_id = self.target_bay.installed_device_id
+            if occupant_id and occupant_id != self.device_id:
+                if occupant_id not in self._vacated_device_ids():
+                    raise ValidationError({
+                        "target_bay": f"Bay {self.target_bay.name} is already "
+                                      f"occupied by {self.target_bay.installed_device}.",
+                    })
+            return
+
+        # Planned chassis (case B).
+        parent_placement = self.parent_placement
+        if parent_placement.pk == self.pk:
+            raise ValidationError({"parent_placement": "A placement cannot be its own parent."})
+        if self.design_id and parent_placement.design_id != self.design_id:
+            raise ValidationError({
+                "parent_placement": "The chassis placement must belong to the same design.",
+            })
+        parent_type = parent_placement._placed_device_type()
+        if parent_type is None or not parent_type.is_parent_device:
+            raise ValidationError({
+                "parent_placement": "The referenced placement is not a parent "
+                                    "(chassis) device type.",
+            })
+        if not self.target_bay_name:
+            raise ValidationError({
+                "target_bay_name": "A bay name is required when the chassis is "
+                                   "itself planned.",
+            })
+        valid_bays = set(
+            parent_type.devicebaytemplates.values_list("name", flat=True)
+        )
+        if valid_bays and self.target_bay_name not in valid_bays:
+            raise ValidationError({
+                "target_bay_name": f"{parent_type} has no bay named "
+                                   f"{self.target_bay_name!r}.",
+            })
+        if self.target_rack_id and parent_placement.target_rack_id != self.target_rack_id:
+            raise ValidationError({
+                "target_rack": "Target rack must be the rack the planned chassis is in.",
+            })
 
     def _validate_tray_target(self):
         """
@@ -581,6 +727,54 @@ class HiddenDesignRack(models.Model):
 
     def __str__(self):
         return f"{self.user}: {self.design} hides {self.rack}"
+
+
+class HiddenDesignChassis(models.Model):
+    """
+    Per-user editor view-state for the BLADE LAYER (spec §10.3/§10.4): ``user``
+    has HIDDEN ``chassis`` while working on ``design``.
+
+    The blade layer is the rack workspace re-pointed at chassis -- a chassis IS a
+    rack there, bays in place of units -- so its visibility control mirrors
+    HiddenDesignRack exactly: HIDDEN rows are stored, so no rows means "every
+    chassis in scope is visible", and the preference is personal, never touching
+    the design's data or anyone else's view.
+
+    ``chassis`` is a dcim.Device (a parent-role one). A chassis that is itself
+    PLANNED has no device row yet and therefore cannot be hidden -- it is always
+    visible, which is also the useful behaviour: you just added it.
+    """
+
+    user = models.ForeignKey(
+        to=settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="rack_design_hidden_chassis",
+    )
+    design = models.ForeignKey(
+        to="netbox_rack_design.Design",
+        on_delete=models.CASCADE,
+        related_name="hidden_chassis_states",
+    )
+    chassis = models.ForeignKey(
+        to="dcim.Device",
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("user", "design", "chassis")
+        verbose_name = "hidden design chassis"
+        verbose_name_plural = "hidden design chassis"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "design", "chassis"),
+                name="%(app_label)s_%(class)s_unique_user_design_chassis",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user}: {self.design} hides {self.chassis}"
 
 
 class DesignPowerFeed(models.Model):

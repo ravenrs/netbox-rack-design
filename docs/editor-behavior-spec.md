@@ -441,3 +441,155 @@ the faces do.
   diff per step, homecoming contract for the return legs.
 - T-tray-6: palette add into tray; discard on release outside any legal target.
 - T-tray-7: I4 holds across a units→tray→units round-trip (single entity).
+
+---
+
+## 10. Device bays / blades (planned — 0.19.0)
+
+Status: **spec draft 2026-08-25** (user request: a chassis must be plannable —
+its bays visible, and blades addable/removable/movable like any other tile).
+
+### 10.1 What a bay represents
+
+DCIM forbids a child device a rack position **and** a face
+(`dcim.Device.clean()`), so a blade is never *at* a U — it is *in* a bay of its
+parent. A bay is therefore a **slot owned by a Device**, exactly as a Unit is a
+slot owned by a Face. That symmetry is the whole design: everything §4 says
+about validate → confirm → commit, cursor governance and homecoming applies
+unchanged; only the container differs.
+
+Two kinds of parent, both required:
+
+| Parent | Bays come from | Blade targets |
+|---|---|---|
+| a real chassis in DCIM | its `dcim.DeviceBay` rows | `target_bay` (the bay's pk) |
+| a chassis this design adds | the type's `DeviceBayTemplates` (no rows exist yet) | `parent_placement` + `target_bay_name` |
+
+### 10.2 Model
+
+- **`Bay`** — new domain object, owned by a Device (`spec §2.1` gains
+  `bays: Bay[]`, empty for a non-parent type):
+  `{ parent: Device, name, occupant: Device|null, state, el }`.
+  A Bay is the bay-side twin of `Unit` (§2.3): the thing a placement competes
+  for. Unlike a Unit it is **named, not numbered**, and there is exactly one
+  occupant — no row range, so no partial overlap and no displacement.
+- **`Device`** gains `bay: Bay|null` — the bay it occupies, null for a racked or
+  tray device. A blade has `y = rows = null` and `face = ""`.
+- A blade **claims no Units** and **casts no Shadow** (§2.2): it is inside its
+  parent's envelope, which already claims those rows. The parent's shadow covers
+  it. I1/I2 therefore exclude blades, exactly as they exclude tray devices.
+- **I5 (new):** a Bay holds at most one occupant, and a Device occupies at most
+  one Bay. Combined with I4 (§9.2) a device is in exactly one of: units, tray,
+  or a bay.
+
+### 10.3 The blade layer (how bays are edited)
+
+**Rejected: editing bays inside the chassis tile.** Tried and discarded
+2026-08-25 after seeing it live — an 8-bay chassis in a 3U tile renders six
+cramped cells with unreadable names, and it only gets worse with an 18-bay
+chassis. There is no tile size at which a rack elevation can also be a bay
+elevation.
+
+**The model instead: a chassis IS a rack.** §10.1 says a Bay is to a Device what
+a Unit is to a Face. Taken to its conclusion, a chassis renders exactly like a
+rack — bays in place of units — and then *every* rule in §4 applies verbatim:
+validate → confirm → commit, blocking claims, displacement, ghosts, homecoming,
+cursor governance. **No new gesture code exists.** The single difference is the
+step: **one bay**, where a rack steps 0.5U.
+
+- **Rack view**: a chassis is an ordinary tile. No bay strip. Its hover card
+  gains `N of M bays used` and the occupant names, so the rack view still
+  *answers* the capacity question without trying to *edit* it.
+- **Blade layer**: a view toggle, present only when the design's scope contains
+  at least one parent device. Switching to it replaces the rack elevations with
+  chassis elevations — each chassis a column, its bays numbered 1..N — and the
+  palette filters itself to child device types.
+- Entering the layer from a specific chassis (clicking its tile) scrolls to that
+  chassis; the layer always shows every chassis in scope, so a blade can be
+  dragged from one chassis to another exactly as it can be dragged between racks
+  (§4.6).
+
+Gestures are therefore NOT re-specified here: read §4. The mapping is
+`Unit -> Bay`, `Face -> the chassis's single bay column`, `Rack -> Chassis`.
+Two consequences follow from a bay being single-occupancy rather than a row
+range:
+
+- a drop onto an occupied bay is **rejected**, never displaced (§4.3 does not
+  apply — there is no partial overlap);
+- a chassis column has no opposite face, so blades cast **no shadow** (§2.2) and
+  I1/I2 exclude them, as they exclude tray devices.
+
+Not offered: **bay → rack unit** and **rack unit → bay**. A child type may not be
+racked and a non-child may not be baid; the model rejects both
+(`DesignPlacement._validate_bay_target`), so neither view ever presents the other
+as a legal target.
+
+### 10.4 Rendering
+
+**Rack view** — a chassis is a normal tile with normal state colouring. Its hover
+card adds:
+
+- `N of M bays used`;
+- the occupant names (planned ones in their §3 state styling), so the rack view
+  answers "what is in there / is there room" without becoming an editor.
+
+**Blade layer** — chassis laid out side by side, each a single column of bays
+numbered 1..N with the bay name as the row label. Tiles reuse the §3 state table
+(`existing` / `add` / `move_in` / `move_out_ghost` / `remove`) unchanged; there
+are no shadows and no full-depth hatching (a chassis column has no opposite
+face). Legend filters apply as in the rack view.
+
+The toggle is hidden entirely when the design's scope contains no parent device,
+so a deployment with no blade hardware never sees the feature.
+
+### 10.5 Power
+
+A chassis and its blades must never both be counted. Core cannot double-count
+because it only reaches a blade *through* the chassis's power port
+(`PowerPort.get_power_draw()` aggregates downstream only when the port has no
+value of its own). A plan has no cables, so the same result is derived from
+containment instead:
+
+- chassis has a resolvable draw → **it wins**; blades are annotated
+  `draw_included_in_parent` and add nothing;
+- chassis has none → **blades roll up** into the chassis's figure.
+
+A blade flagged `remove` stops drawing, as any removal does.
+
+### 10.6 Save contract
+
+Blades cannot ride a face bucket (no position, no face), so the rack payload
+gains a fourth bucket, `bays`, processed **after** `front`/`rear`/`other`:
+
+- real chassis → item carries `target_bay_id` (and `target_bay_name` is mirrored
+  from the bay server-side);
+- planned chassis → the chassis item carries a client-side `ref`, the blade item
+  carries the matching `parent_ref` plus `target_bay_name`. The view reconciles
+  the face buckets first, builds `ref → placement`, then resolves the bay items.
+  Neither `ref` nor `parent_ref` is persisted — the chassis has no placement id
+  until the same save creates it, which is the only reason they exist.
+- cancel of a planned blade deletes its placement, and must flag the write or
+  save-layout answers `304 Not Modified`.
+
+### 10.7 Tests (derive per the conformance-matrix discipline, test-first)
+
+- T-bay-1: a blade in a chassis bay never renders as a tray slot. **(done)**
+- T-bay-2: a parent Device's slot exposes its bays, occupied and empty. **(done)**
+- T-bay-3: a blade planned into a real bay renders in that bay. **(done)**
+- T-bay-4: a blade planned into a *planned* chassis renders in its templated
+  bays. **(done)**
+- T-bay-5: model validation for every rule in §10.2/§10.3. **(done)**
+- T-bay-6: save-layout round-trip for both parent kinds, incl. unknown
+  `parent_ref` and cancel. **(done)**
+- T-bay-7: power — chassis-wins, blade-roll-up, planned blade counted, removal
+  stops drawing. **(done)**
+- T-bay-8: palette -> bay commits, the rack grid never accepts a blade, and a
+  planned chassis offers its bays. **(done, in-tile; to be re-pointed at the
+  blade layer)**
+- T-bay-9..: the blade layer — the §4 scenarios (§6) re-run with `Unit -> Bay`,
+  since the pipeline is shared: add, move within a chassis, move across chassis,
+  reject onto an occupied bay, ghost + homecoming, cancel. **(outstanding)**
+- T-bay-10: the rack view's chassis hover card reports occupancy and names.
+  **(outstanding)**
+- T-bay-11: the blade-layer toggle is absent when the design has no parent
+  device in scope. **(outstanding)**

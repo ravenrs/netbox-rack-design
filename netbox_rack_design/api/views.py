@@ -2,7 +2,7 @@
 
 import logging
 
-from dcim.models import Device, DeviceRole, DeviceType, PowerFeed, Rack
+from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, PowerFeed, Rack
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from netbox.api.authentication import TokenPermissions
@@ -23,6 +23,7 @@ from ..models import (
     DesignPowerFeed,
     DesignRackPower,
     FavoriteDeviceType,
+    HiddenDesignChassis,
     HiddenDesignRack,
 )
 from .serializers import (
@@ -32,6 +33,7 @@ from .serializers import (
     DesignRackScopeSerializer,
     DesignSerializer,
     FavoriteToggleSerializer,
+    HiddenChassisToggleSerializer,
     HiddenRackShowAllSerializer,
     HiddenRackToggleSerializer,
     PlannedFeedSerializer,
@@ -866,12 +868,28 @@ class DesignViewSet(NetBoxModelViewSet):
                         for item in rack_data.get(face_key, []):
                             items.append((face_key, item))
 
+                    # ref -> placement, so a blade in the "bays" bucket below can
+                    # point at a chassis this same submit is creating (the chassis
+                    # has no placement_id until it is saved).
+                    ref_map = {}
                     for face_key, item in items:
                         device_id = item.get("device_id")
                         if device_id:
                             submitted_device_ids.add(device_id)
-                        self._reconcile_item(
+                        placement = self._reconcile_item(
                             design, rack, face_key, item, errors, desired_placement_ids
+                        )
+                        ref = item.get("ref")
+                        if ref and placement is not None:
+                            ref_map[ref] = placement
+
+                    # Blades last: they may depend on a chassis created just above.
+                    for item in rack_data.get("bays", []):
+                        device_id = item.get("device_id")
+                        if device_id:
+                            submitted_device_ids.add(device_id)
+                        self._reconcile_bay_item(
+                            design, rack, item, ref_map, errors, desired_placement_ids
                         )
 
                 if errors:
@@ -1119,6 +1137,164 @@ class DesignViewSet(NetBoxModelViewSet):
             return None
         return source_id
 
+    def _reconcile_bay_item(self, design, rack, item, ref_map, errors, desired_placement_ids):
+        """
+        Map one desired BAY item (a blade in a chassis) to its DesignPlacement.
+
+        Mirrors ``_reconcile_item`` but targets a device bay instead of a rack
+        unit: a child device may carry neither a position nor a face (core forbids
+        it), so the target is either a real ``dcim.DeviceBay`` or -- when the
+        chassis is itself planned in this submit -- the chassis's placement,
+        resolved from ``parent_ref`` through the map the caller just built.
+        """
+        kind = item["kind"]
+        placement_id = item.get("placement_id")
+        bay_id = item.get("target_bay_id")
+        parent_ref = item.get("parent_ref")
+        bay_name = item.get("target_bay_name") or ""
+
+        def fail(detail):
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": None,
+                "device_id": item.get("device_id"),
+                "detail": detail,
+            })
+
+        # An "existing" bay item is the editor re-asserting a blade that is already
+        # installed. Mirrors the face buckets' contract (the client never decides
+        # whether something moved -- the server compares against reality): if the
+        # blade is still in the bay it really occupies, this is a no-op; if it is
+        # somewhere else, it is a MOVE. Deciding client-side would register a
+        # spurious move placement for every untouched blade on every save.
+        if kind == "existing":
+            device_id = item.get("device_id")
+            if not device_id:
+                return None
+            real_bay_id = DeviceBay.objects.filter(
+                installed_device_id=device_id
+            ).values_list("pk", flat=True).first()
+            if bay_id and real_bay_id == bay_id:
+                return None                      # genuinely untouched
+            if not bay_id and not parent_ref and not item.get("parent_placement_id"):
+                return None                      # nothing to compare against
+            kind = DesignPlacementKindChoices.KIND_MOVE
+
+        # A REMOVE needs no bay target at all: it is an ordinary removal of the
+        # blade device, and the model takes no target for a removal (models.py).
+        # It rides the bays bucket only because that is where the editor's bay
+        # layer emits it from.
+        if kind == DesignPlacementKindChoices.KIND_REMOVE:
+            if not item.get("device_id"):
+                fail("A blade removal requires a device_id.")
+                return None
+            placement = DesignPlacement.objects.filter(
+                design=design, device_id=item["device_id"],
+                kind=DesignPlacementKindChoices.KIND_REMOVE,
+            ).first() or DesignPlacement(
+                design=design, kind=DesignPlacementKindChoices.KIND_REMOVE,
+                device_id=item["device_id"],
+            )
+            try:
+                placement.full_clean()
+            except ValidationError as exc:
+                detail = "; ".join(
+                    f"{k}: {' '.join(str(m) for m in v)}"
+                    for k, v in exc.message_dict.items()
+                ) if hasattr(exc, "message_dict") else str(exc)
+                fail(detail)
+                return None
+            placement.save()
+            self._made_db_change = True
+            desired_placement_ids.add(placement.pk)
+            return placement
+
+        parent_placement = None
+        target_bay = None
+        if bay_id:
+            target_bay = DeviceBay.objects.filter(pk=bay_id).select_related("device").first()
+            if target_bay is None:
+                fail("Device bay does not exist.")
+                return None
+            if not bay_name:
+                bay_name = target_bay.name
+        elif parent_ref:
+            parent_placement = ref_map.get(parent_ref)
+            if parent_placement is None:
+                fail(f"Unknown parent reference {parent_ref!r} for a bay placement.")
+                return None
+        elif item.get("parent_placement_id"):
+            parent_placement = DesignPlacement.objects.filter(
+                pk=item["parent_placement_id"], design=design
+            ).first()
+            if parent_placement is None:
+                fail("Parent chassis placement does not exist in this design.")
+                return None
+        else:
+            fail("A bay item requires a target_bay_id, a parent_ref, or a "
+                 "parent_placement_id.")
+            return None
+
+        # An existing placement being re-asserted (reposition between bays, or
+        # cancel); otherwise a brand-new one.
+        placement = None
+        if placement_id:
+            placement = DesignPlacement.objects.filter(
+                pk=placement_id, design=design
+            ).first()
+            if placement is None:
+                fail("Placement does not exist.")
+                return None
+
+        if item.get("cancel") and placement is not None:
+            placement.delete()
+            # Flag the write, or save-layout reports 304 Not Modified and the
+            # editor believes the cancellation did not take.
+            self._made_db_change = True
+            return None
+
+        if placement is None:
+            placement = DesignPlacement(design=design, kind=kind)
+
+        placement.kind = kind
+        placement.target_rack = rack
+        placement.target_position = None
+        placement.target_face = ""
+        placement.target_bay = target_bay
+        placement.parent_placement = parent_placement
+        placement.target_bay_name = bay_name
+        if kind == DesignPlacementKindChoices.KIND_ADD:
+            placement.device = None
+            if item.get("device_type_id"):
+                placement.device_type_id = item["device_type_id"]
+            ok, device_role_id, tenant_id = self._resolve_add_refs(item, rack, None, errors)
+            if not ok:
+                return None
+            placement.device_role_id = device_role_id
+            placement.tenant_id = tenant_id
+        else:
+            placement.device_id = item.get("device_id")
+            placement.device_type = None
+        if "proposed_name" in item:
+            placement.proposed_name = item.get("proposed_name") or ""
+
+        placement._projected_vacated_device_ids = getattr(
+            self, "_batch_vacated_device_ids", None
+        )
+        try:
+            placement.full_clean()
+        except ValidationError as exc:
+            detail = "; ".join(
+                f"{k}: {' '.join(str(m) for m in v)}"
+                for k, v in exc.message_dict.items()
+            ) if hasattr(exc, "message_dict") else str(exc)
+            fail(detail)
+            return None
+        placement.save()
+        self._made_db_change = True
+        desired_placement_ids.add(placement.pk)
+        return placement
+
     def _reconcile_item(self, design, rack, face_key, item, errors, desired_placement_ids):
         """
         Map one desired item to its DesignPlacement (or no placement), upserting
@@ -1133,15 +1309,18 @@ class DesignViewSet(NetBoxModelViewSet):
         u_position = None if face_key == "other" else item.get("u_position")
         face = "" if face_key == "other" else item.get("face") or ""
 
-        # Full-depth devices occupy BOTH faces; the editor renders one tile per
-        # face for the same device. Their face is meaningless for placement (the
-        # model treats a full-depth target_face as None -- models.py:295), so we
-        # normalise it to "" here. This makes the two per-face copies the editor
-        # submits reconcile to an IDENTICAL placement: a single row, idempotent on
-        # a no-op (no front/rear flip-flop or spurious move), never a duplicate.
+        # Full-depth devices occupy BOTH faces, and slot validation ignores their
+        # face entirely (models.py: rack_face is None for a full-depth type). This
+        # used to blank ``face`` for them, because the editor renders one tile per
+        # face and the two copies had to reconcile to one row.
+        #
+        # It no longer needs to: buildRackPayload skips the opposite-face copy
+        # (`if (w.opposite_face) return;`), so exactly ONE item per device is
+        # posted -- the one on the face it is actually mounted on. Blanking it
+        # threw away information API consumers legitimately need (an SDD diff
+        # matching on (device, position, face) missed every full-depth row and
+        # would delete-and-recreate them), while buying nothing.
         full_depth = self._item_is_full_depth(item)
-        if full_depth:
-            face = ""
 
         # An 'add' tile is a catalog-add placement projected into this rack. When
         # it carries a placement_id (no device_id) it re-asserts an EXISTING add:
@@ -1385,7 +1564,18 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.device_type = None
             placement.target_rack = rack
             placement.target_position = u_position
-            placement.target_face = face
+            # A full-depth device occupies BOTH faces, so a client may still POST
+            # one copy per face (the editor no longer does -- buildRackPayload
+            # skips the opposite-face tile). Both copies reconcile to the same
+            # placement, and the second must not flip the stored face: buckets are
+            # walked front -> rear, so the FIRST copy wins and the face survives.
+            already_written_this_pass = (
+                full_depth
+                and existing is not None
+                and existing.pk in desired_placement_ids
+            )
+            if not already_written_this_pass:
+                placement.target_face = face
 
         # Persist the editor-chosen proposed name when the editor sent one (the
         # §4a move dialog's keep-old / rename choice). Omitted => leave the
@@ -1439,6 +1629,8 @@ class DesignPlacementViewSet(NetBoxModelViewSet):
         "device_role",
         "tenant",
         "target_rack",
+        "target_bay",
+        "parent_placement",
     ).prefetch_related("tags")
     serializer_class = DesignPlacementSerializer
     filterset_class = filtersets.DesignPlacementFilterSet
@@ -1547,6 +1739,69 @@ class DeviceTypePowerViewSet(viewsets.ViewSet):
                 results[str(dt.pk)] = projection.device_type_power_summary(
                     dt, role=role)
         return Response({"results": results})
+
+
+class HiddenDesignChassisViewSet(viewsets.ViewSet):
+    """
+    User-scoped per-design CHASSIS visibility for the blade layer (spec §10.3).
+
+    The blade-layer twin of HiddenDesignRackViewSet, and deliberately identical in
+    shape: HIDDEN rows are stored (so an empty set means "everything visible"),
+    every query is filtered by ``request.user``, and the client never supplies a
+    user. Hiding a chassis is personal view state -- it never touches the design.
+
+    Endpoints:
+      GET  /api/plugins/rack-design/hidden-design-chassis/?design_id=<id>
+      POST /api/plugins/rack-design/hidden-design-chassis/toggle/
+           body {"design_id", "chassis_id"}
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _hidden_ids(self, user, design_id):
+        return list(
+            HiddenDesignChassis.objects.filter(user=user, design_id=design_id)
+            .values_list("chassis_id", flat=True)
+        )
+
+    def list(self, request):
+        design_id = request.query_params.get("design_id")
+        if not design_id:
+            return Response(
+                {"design_id": ["This query parameter is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({
+            "design_id": int(design_id),
+            "hidden_chassis_ids": self._hidden_ids(request.user, design_id),
+        })
+
+    @action(detail=False, methods=["post"], url_path="toggle")
+    def toggle(self, request):
+        """Hide or show one (design, chassis) for the requesting user."""
+        body = HiddenChassisToggleSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        design_id = body.validated_data["design_id"]
+        chassis_id = body.validated_data["chassis_id"]
+
+        if not Design.objects.filter(pk=design_id).exists():
+            return Response({"design_id": ["Design does not exist."]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not Device.objects.filter(pk=chassis_id).exists():
+            return Response({"chassis_id": ["Device does not exist."]},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        hidden, created = HiddenDesignChassis.objects.get_or_create(
+            user=request.user, design_id=design_id, chassis_id=chassis_id
+        )
+        if not created:
+            hidden.delete()
+        return Response({
+            "design_id": design_id,
+            "chassis_id": chassis_id,
+            "hidden": created,
+            "hidden_chassis_ids": self._hidden_ids(request.user, design_id),
+        })
 
 
 class HiddenDesignRackViewSet(viewsets.ViewSet):

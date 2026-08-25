@@ -103,12 +103,18 @@ class DesignPlacementTable(NetBoxTable):
     device = tables.Column(linkify=True)
     device_type = tables.Column(linkify=True)
     target_rack = tables.Column(linkify=True)
+    # Device-bay targeting: available as optional columns so a blade placement is
+    # readable in the list without opening it. Off by default -- most placements
+    # are rack slots and would show three empty columns.
+    target_bay = tables.Column(linkify=True)
+    parent_placement = tables.Column(linkify=True, verbose_name="Planned chassis")
 
     class Meta(NetBoxTable.Meta):
         model = DesignPlacement
         fields = (
             "pk", "id", "design", "kind", "device", "device_type", "proposed_name",
-            "target_rack", "target_position", "target_face", "actions",
+            "target_rack", "target_position", "target_face",
+            "target_bay", "parent_placement", "target_bay_name", "actions",
         )
         default_columns = (
             "design", "kind", "device", "device_type", "target_rack", "target_position", "target_face",

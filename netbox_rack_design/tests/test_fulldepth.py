@@ -275,8 +275,9 @@ class FullDepthSaveLayoutTest(APITestCase):
         self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
         self.assertEqual(placement.device_id, self.device.pk)
         self.assertEqual(float(placement.target_position), 10.0)
-        # Full-depth placement face is normalised to "" (face is meaningless).
-        self.assertEqual(placement.target_face, "")
+        # The face is PRESERVED, not blanked: both per-face copies reconcile to
+        # one placement, and the first (front) copy's face is the one kept.
+        self.assertEqual(placement.target_face, "front")
         # Re-POSTing the same move is idempotent (single placement, 304).
         again = self._post([
             {

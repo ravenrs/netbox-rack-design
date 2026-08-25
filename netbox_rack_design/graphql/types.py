@@ -11,6 +11,7 @@ from .filters import DesignFilter, DesignGroupFilter, DesignPlacementFilter
 
 if TYPE_CHECKING:
     from dcim.graphql.types import (
+        DeviceBayType,
         DeviceRoleType,
         DeviceType,
         DeviceTypeType,
@@ -69,3 +70,12 @@ class DesignPlacementType(NetBoxObjectType):
     real_power_feed: Annotated["PowerFeedType", strawberry.lazy("dcim.graphql.types")] | None
     planned_power_feed: Annotated["DesignPowerFeedType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     power_source_device: Annotated["DeviceType", strawberry.lazy("dcim.graphql.types")] | None
+    # Device-bay targeting (a blade into a chassis). Both nullable: a placement
+    # carries at most one, an ordinary rack placement neither. Declared
+    # explicitly because ``fields="__all__"`` otherwise resolves them to a bare
+    # DjangoModelType with no queryable fields, which breaks the generated
+    # GraphQL test queries.
+    target_bay: Annotated["DeviceBayType", strawberry.lazy("dcim.graphql.types")] | None
+    parent_placement: Annotated[
+        "DesignPlacementType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None

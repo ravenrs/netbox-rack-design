@@ -56,11 +56,24 @@
                     aria-controls="nbx-rd-drawer"
                     aria-expanded="false"
                     title="{% trans 'Add and manage design racks' %}">
-              <i class="mdi mdi-rack" aria-hidden="true"></i> {% trans "Racks" %}
+              <i class="mdi mdi-rack" aria-hidden="true"></i>
+              {% block rd_scope_section_label %}{% trans "Racks" %}{% endblock %}
             </button>
           </div>
           {# ONE design-level Save: editor.js collects edits from EVERY rendered #}
           {# rack block and POSTs a single multi-rack payload.                   #}
+          {% block rd_layer_switch %}
+          {# Blade layer (spec §10.3): only offered when the design's scope         #}
+          {# actually contains a chassis, so a deployment with no blade hardware    #}
+          {# never sees the feature.                                                #}
+          {% if has_chassis_in_scope %}
+          <a class="btn btn-outline-secondary btn-sm me-2" data-rd-layer-switch
+             href="{% url 'plugins:netbox_rack_design:design_blades' pk=object.pk %}"
+             title="{% trans 'Switch to the blade layer' %}">
+            <i class="mdi mdi-view-grid-outline" aria-hidden="true"></i> {% trans "Blades" %}
+          </a>
+          {% endif %}
+          {% endblock rd_layer_switch %}
           <button type="button" class="btn btn-primary btn-sm" id="rd-editor-save" disabled>
             <i class="mdi mdi-content-save" aria-hidden="true"></i> {% trans "Save" %}
           </button>
@@ -189,6 +202,10 @@
           </div>{# /section: device #}
 
           {# ===== Section: Racks (add-rack + design-racks) ===== #}
+          {# The third drawer section is the SCOPE panel. The blade layer overrides #}
+          {# it with a Chassis panel -- same show/hide behaviour, chassis instead   #}
+          {# of racks (spec §10.3).                                                 #}
+          {% block rd_scope_panel %}
           <div class="nbx-rd-drawer-section" data-rd-section="racks">
             {# ---- Add a rack to this design's scope (filtered by location) ---- #}
             {# Location + rack are API-backed DynamicModelChoiceFields scoped to    #}
@@ -261,6 +278,7 @@
               </div>
             </div>
           </div>{# /section: racks #}
+          {% endblock rd_scope_panel %}
 
           {# ===== Section: Favorites (quick access) ===== #}
           <div class="nbx-rd-drawer-section" data-rd-section="favorites">
@@ -287,6 +305,7 @@
           {#      racks) and vertically (full 42U) WITHIN this container so the    #}
           {#      page itself never grows tall. editor.js inits each block         #}
           {#      independently from its own rd-editor-data-<pk> payload. ---- #}
+          {% block rd_canvas %}
           <div class="nbx-rd-racks-scroll" id="nbx-rd-racks-scroll">
           {% for b in all_rack_blocks %}
             {% include 'netbox_rack_design/inc/rack_block.html' with b=b editable=True %}
@@ -303,6 +322,7 @@
             </div>
           {% endfor %}
           </div>{# /.nbx-rd-racks-scroll #}
+          {% endblock rd_canvas %}
         </div>{# /.nbx-rd-editor-shell #}
       </div>
     </div>

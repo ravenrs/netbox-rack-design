@@ -228,6 +228,187 @@ class TrayProjectionTestCase(TestCase):
         # face (here 'rear') carries no layout meaning off-rack.
         self.assertEqual(slot["face"], "")
 
+    def test_blade_in_a_chassis_bay_is_not_a_tray_slot(self):
+        """A child device installed in a chassis DeviceBay keeps ``rack`` set and
+        ``position`` NULL (core sets both: dcim/models/devices.py -- a child type
+        may carry neither a position nor a face). It is therefore caught by the
+        plain ``position__isnull=True`` tray query, and used to render beside the
+        rack's real 0U accessories as though it were loose hardware. It is not:
+        it lives inside its parent's bay and must be excluded from the tray."""
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBay, DeviceRole, DeviceType
+
+        role = DeviceRole.objects.first()
+        chassis_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer,
+            model="Chassis-4Bay",
+            slug="chassis-4bay",
+            u_height=4,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        blade_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer,
+            model="Blade",
+            slug="blade",
+            u_height=0,
+            subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
+        )
+        chassis = Device.objects.create(
+            name="Chassis-1", site=self.site, rack=self.racks[0], position=10,
+            face="front", device_type=chassis_type, role=role,
+        )
+        blade = Device.objects.create(
+            name="Blade-1", site=self.site, rack=self.racks[0], position=None,
+            device_type=blade_type, role=role,
+        )
+        DeviceBay.objects.create(device=chassis, name="Bay 1", installed_device=blade)
+        blade.refresh_from_db()
+        self.assertIsNotNone(blade.rack_id, "core keeps the child device on the rack")
+        self.assertIsNone(blade.position, "core forbids a position on a child device")
+
+        result = project_rack(self.design, self.racks[0])
+        tray_labels = {slot["label"] for slot in result.non_racked}
+        self.assertNotIn("Blade-1", tray_labels)
+        # the chassis itself is a normal racked device and is unaffected
+        self.assertIn("Chassis-1", {slot["label"] for slot in result.front})
+
+    def test_chassis_slot_carries_its_bays(self):
+        """A parent device's slot exposes its DeviceBays so the editor and the
+        read-only elevation can render the chassis as a container: every bay,
+        occupied or empty, in core's own ordering."""
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBay, DeviceRole, DeviceType
+
+        role = DeviceRole.objects.first()
+        chassis_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Chassis-2Bay",
+            slug="chassis-2bay", u_height=2,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        blade_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Blade-B",
+            slug="blade-b", u_height=0,
+            subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
+        )
+        chassis = Device.objects.create(
+            name="Chassis-B", site=self.site, rack=self.racks[0], position=20,
+            face="front", device_type=chassis_type, role=role,
+        )
+        blade = Device.objects.create(
+            name="Blade-B1", site=self.site, rack=self.racks[0], position=None,
+            device_type=blade_type, role=role,
+        )
+        DeviceBay.objects.create(device=chassis, name="Bay 1", installed_device=blade)
+        DeviceBay.objects.create(device=chassis, name="Bay 2")
+
+        result = project_rack(self.design, self.racks[0])
+        slot = next(s for s in result.front if s["label"] == "Chassis-B")
+        bays = slot["bays"]
+        self.assertEqual([b["name"] for b in bays], ["Bay 1", "Bay 2"])
+        self.assertTrue(bays[0]["occupied"])
+        self.assertEqual(bays[0]["device"], blade)
+        self.assertEqual(bays[0]["label"], "Blade-B1")
+        self.assertEqual(bays[0]["device_type"], blade_type)
+        self.assertFalse(bays[1]["occupied"])
+        self.assertIsNone(bays[1]["device"])
+
+    def test_non_parent_device_slot_has_no_bays(self):
+        """An ordinary device carries an empty bay list -- the key always exists
+        so consumers never have to guard on its presence."""
+        from dcim.models import Device, DeviceRole
+
+        Device.objects.create(
+            name="Plain-1", site=self.site, rack=self.racks[0], position=30,
+            face="front", device_type=self.device_type,
+            role=DeviceRole.objects.first(),
+        )
+        result = project_rack(self.design, self.racks[0])
+        slot = next(s for s in result.front if s["label"] == "Plain-1")
+        self.assertEqual(slot["bays"], [])
+
+    def test_planned_blade_shows_in_its_real_chassis_bay(self):
+        """A blade planned into a REAL chassis bay renders inside that chassis's
+        strip, in the bay it targets -- not as a loose tray slot."""
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBayTemplate, DeviceRole, DeviceType
+
+        from ..choices import DesignPlacementKindChoices
+        from ..models import DesignPlacement
+
+        role = DeviceRole.objects.first()
+        chassis_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Chassis-P",
+            slug="chassis-p", u_height=2,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        DeviceBayTemplate.objects.create(device_type=chassis_type, name="b1")
+        blade_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Blade-P",
+            slug="blade-p", u_height=0,
+            subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
+        )
+        chassis = Device.objects.create(
+            name="Chassis-P1", site=self.site, rack=self.racks[0], position=8,
+            face="front", device_type=chassis_type, role=role,
+        )
+        bay = chassis.devicebays.get(name="b1")
+        placement = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=blade_type, target_rack=self.racks[0],
+            target_bay=bay, target_bay_name="b1", proposed_name="new-blade-1",
+        )
+
+        result = project_rack(self.design, self.racks[0])
+        self.assertNotIn("new-blade-1", {s["label"] for s in result.non_racked})
+        slot = next(s for s in result.front if s["label"] == "Chassis-P1")
+        entry = next(b for b in slot["bays"] if b["name"] == "b1")
+        self.assertEqual(entry["state"], ProjectedSlotState.ADD)
+        self.assertEqual(entry["label"], "new-blade-1")
+        self.assertEqual(entry["placement"], placement)
+        self.assertTrue(entry["occupied"])
+
+    def test_planned_blade_shows_in_a_planned_chassis(self):
+        """A blade planned into a chassis that is itself an 'add' renders in the
+        planned chassis's own strip, built from the type's bay templates."""
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import DeviceBayTemplate, DeviceType
+
+        from ..choices import DesignPlacementKindChoices
+        from ..models import DesignPlacement
+
+        chassis_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Chassis-Q",
+            slug="chassis-q", u_height=2,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        DeviceBayTemplate.objects.create(device_type=chassis_type, name="q1")
+        DeviceBayTemplate.objects.create(device_type=chassis_type, name="q2")
+        blade_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Blade-Q",
+            slug="blade-q", u_height=0,
+            subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
+        )
+        chassis_p = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=chassis_type, target_rack=self.racks[0],
+            target_position=6, target_face="front", proposed_name="new-chassis",
+        )
+        DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=blade_type, target_rack=self.racks[0],
+            parent_placement=chassis_p, target_bay_name="q1",
+            proposed_name="new-blade-q1",
+        )
+
+        result = project_rack(self.design, self.racks[0])
+        slot = next(s for s in result.front if s["label"] == "new-chassis")
+        self.assertEqual([b["name"] for b in slot["bays"]], ["q1", "q2"])
+        filled = next(b for b in slot["bays"] if b["name"] == "q1")
+        self.assertEqual(filled["label"], "new-blade-q1")
+        self.assertEqual(filled["state"], ProjectedSlotState.ADD)
+        self.assertTrue(filled["occupied"])
+        self.assertFalse(next(b for b in slot["bays"] if b["name"] == "q2")["occupied"])
+
     def test_rack_without_tray_devices_has_empty_non_racked(self):
         """A rack with zero position-less devices and no design placements
         projects an empty tray (the negative case)."""

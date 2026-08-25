@@ -152,6 +152,64 @@
     })();
 
     // ========================================================================
+    // 2b. Blade layer: chassis visibility (spec §10.3)
+    // ------------------------------------------------------------------------
+    // The blade-layer twin of the Design-racks toggle below, and deliberately
+    // the same contract: HIDDEN rows are stored server-side, the response is the
+    // authority on the resulting set, and the canvas is re-synced from it with
+    // no page reload. A PLANNED chassis has no device row, so it carries no
+    // toggle at all -- it is always visible.
+    // ========================================================================
+    (function setupChassisPanel() {
+        var list = document.querySelector("[data-rd-chassis-list]");
+        if (!list) { return; }
+        var url = list.getAttribute("data-hidden-chassis-url");
+        if (!url) { return; }
+
+        function syncFromHidden(hiddenIds) {
+            var hidden = {};
+            (hiddenIds || []).forEach(function (id) { hidden[id] = true; });
+            list.querySelectorAll("[data-chassis-id]").forEach(function (row) {
+                var id = parseInt(row.getAttribute("data-chassis-id"), 10);
+                var isHidden = !!hidden[id];
+                row.classList.toggle("nbx-rd-scope-hidden", isHidden);
+                var btn = row.querySelector("[data-rd-chassis-toggle]");
+                if (btn) {
+                    btn.setAttribute("aria-pressed", isHidden ? "true" : "false");
+                    btn.setAttribute("title", isHidden ? "Show this chassis" : "Hide this chassis");
+                    var icon = btn.querySelector("i");
+                    if (icon) {
+                        icon.className = "mdi " + (isHidden ? "mdi-eye-off" : "mdi-eye");
+                    }
+                }
+                var block = document.querySelector(
+                    '.nbx-rd-chassis-block[data-chassis-id="' + id + '"]');
+                if (block) { block.classList.toggle("hidden", isHidden); }
+            });
+        }
+
+        list.addEventListener("click", function (event) {
+            var btn = event.target.closest("[data-rd-chassis-toggle]");
+            if (!btn) { return; }
+            var row = btn.closest("[data-chassis-id]");
+            if (!row) { return; }
+            event.preventDefault();
+            postJSON(url + "toggle/", {
+                design_id: designId,
+                chassis_id: parseInt(row.getAttribute("data-chassis-id"), 10),
+            }).then(function (response) {
+                if (!response.ok) {
+                    return readError(response, "Could not change visibility.")
+                        .then(function (msg) { toast("danger", "Error", msg); });
+                }
+                return response.json().then(function (data) {
+                    syncFromHidden(data.hidden_chassis_ids);
+                });
+            }).catch(function (err) { toast("danger", "Error", String(err)); });
+        });
+    })();
+
+    // ========================================================================
     // 2. Design racks panel: visibility toggle, "All", remove-from-design
     // ========================================================================
     (function setupDesignRacks() {

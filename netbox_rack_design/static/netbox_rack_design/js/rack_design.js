@@ -116,7 +116,14 @@
             var oldTenant = content.getAttribute("data-old-tenant");
             var newName = content.getAttribute("data-new-name");
             var movedTo = content.getAttribute("data-moved-to");
-            if (!name && !deviceType && !role && !tenant) { return false; }
+            // Chassis occupancy (spec §10.4): the rack view REPORTS what is in
+            // the bays -- the same data-* set inc/rack_block.html already stamps
+            // for the editor, so the read-only elevation answers "what is in
+            // there / is there room" without opening the blade layer.
+            var baysUsed = content.getAttribute("data-bays-used");
+            var baysTotal = content.getAttribute("data-bays-total");
+            var bayOccupants = content.getAttribute("data-bay-occupants");
+            if (!name && !deviceType && !role && !tenant && !baysTotal) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -132,6 +139,7 @@
                 ["Tenant", tenant],
                 ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
                 ["To", movedTo],
+                ["Bays", baysTotal ? (baysUsed + " of " + baysTotal + " used") : null],
             ].forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");
@@ -145,6 +153,16 @@
                 row.appendChild(val);
                 hcard.appendChild(row);
             });
+            // Bay occupants, one per line -- a chassis with eight blades would be
+            // unreadable squeezed onto the single "Bays" row above.
+            if (bayOccupants) {
+                bayOccupants.split(", ").forEach(function (entry) {
+                    var row = document.createElement("div");
+                    row.className = "nbx-rd-hovercard-row nbx-rd-hovercard-bay";
+                    row.textContent = entry;
+                    hcard.appendChild(row);
+                });
+            }
             return true;
         }
 

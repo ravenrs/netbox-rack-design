@@ -1,6 +1,15 @@
 """Forms for NetBox Rack Design."""
 
-from dcim.models import Device, DeviceRole, DeviceType, Location, Manufacturer, Rack, Site
+from dcim.models import (
+    Device,
+    DeviceBay,
+    DeviceRole,
+    DeviceType,
+    Location,
+    Manufacturer,
+    Rack,
+    Site,
+)
 from django import forms
 from django.utils.translation import gettext_lazy as _
 from netbox.forms import (
@@ -185,12 +194,68 @@ class DesignPlacementForm(NetBoxModelForm):
     device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all(), required=False)
     target_rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False)
 
+    # --- device-bay targeting (a blade into a chassis) ---------------------
+    # ``chassis`` is NOT a model field: it exists only to scope the bay picker.
+    # A DeviceBay list is unusable unfiltered (an instance can hold thousands of
+    # bays, most named "slot1".."slot8"), so the user picks the chassis first and
+    # ``target_bay`` chains off it via query_params.
+    chassis = DynamicModelChoiceField(
+        queryset=Device.objects.filter(device_type__subdevice_role="parent"),
+        required=False,
+        label=_("Chassis"),
+        help_text=_("Existing chassis to install this blade into. Narrows the bay list."),
+        query_params={"rack_id": "$target_rack"},
+    )
+    target_bay = DynamicModelChoiceField(
+        queryset=DeviceBay.objects.all(),
+        required=False,
+        label=_("Target bay"),
+        query_params={"device_id": "$chassis"},
+    )
+    parent_placement = DynamicModelChoiceField(
+        queryset=DesignPlacement.objects.all(),
+        required=False,
+        label=_("Planned chassis"),
+        help_text=_("Use instead of Target bay when the chassis is itself added by this design."),
+        query_params={"design_id": "$design"},
+    )
+
+    fieldsets = (
+        FieldSet("design", "kind", "device", "device_type", "proposed_name",
+                 "tags", name=_("Placement")),
+        FieldSet("target_rack", "target_position", "target_face", name=_("Rack slot")),
+        FieldSet("chassis", "target_bay", "parent_placement", "target_bay_name",
+                 name=_("Device bay")),
+    )
+
     class Meta:
         model = DesignPlacement
         fields = (
             "design", "kind", "device", "device_type", "proposed_name",
-            "target_rack", "target_position", "target_face", "tags",
+            "target_rack", "target_position", "target_face",
+            "parent_placement", "target_bay", "target_bay_name", "tags",
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Editing an existing bay placement: preselect the chassis so the bay
+        # picker shows the right list instead of coming up empty.
+        bay = self.initial.get("target_bay") or getattr(self.instance, "target_bay", None)
+        if bay is not None and not self.initial.get("chassis"):
+            self.initial["chassis"] = bay.device_id
+
+    def clean(self):
+        # NetBoxModelForm.clean() returns None, so read cleaned_data directly
+        # rather than the super() return value.
+        super().clean()
+        cleaned = self.cleaned_data
+        # Mirror the bay's name so a consumer has one field to read for "which
+        # bay", whichever of the two cases produced it (models.DesignPlacement).
+        bay = cleaned.get("target_bay")
+        if bay is not None and not cleaned.get("target_bay_name"):
+            cleaned["target_bay_name"] = bay.name
+            self.instance.target_bay_name = bay.name
+        return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -259,11 +324,20 @@ class DesignPlacementImportForm(NetBoxModelImportForm):
         help_text="Target rack (by name)",
     )
 
+    parent_placement = CSVModelChoiceField(
+        queryset=DesignPlacement.objects.all(),
+        to_field_name="proposed_name",
+        required=False,
+        help_text="Placement of the chassis this blade goes into, when the chassis "
+                  "is also planned (by proposed name)",
+    )
+
     class Meta:
         model = DesignPlacement
         fields = (
             "design", "kind", "device", "device_type", "proposed_name",
-            "target_rack", "target_position", "target_face", "tags",
+            "target_rack", "target_position", "target_face",
+            "parent_placement", "target_bay_name", "tags",
         )
 
 
@@ -294,9 +368,10 @@ class DesignBulkEditForm(NetBoxModelBulkEditForm):
 class DesignPlacementBulkEditForm(NetBoxModelBulkEditForm):
     proposed_name = forms.CharField(max_length=64, required=False)
     target_face = forms.CharField(max_length=10, required=False)
+    target_bay_name = forms.CharField(max_length=64, required=False)
 
     model = DesignPlacement
-    nullable_fields = ("proposed_name", "target_face")
+    nullable_fields = ("proposed_name", "target_face", "target_bay_name")
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +396,12 @@ class DesignPlacementFilterForm(NetBoxModelFilterSetForm):
     design_id = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False, label="Design")
     target_rack_id = DynamicModelMultipleChoiceField(queryset=Rack.objects.all(), required=False, label="Target rack")
     kind = forms.MultipleChoiceField(choices=DesignPlacementKindChoices, required=False)
+    target_bay_id = DynamicModelMultipleChoiceField(
+        queryset=DeviceBay.objects.all(), required=False, label="Target bay"
+    )
+    parent_placement_id = DynamicModelMultipleChoiceField(
+        queryset=DesignPlacement.objects.all(), required=False, label="Planned chassis"
+    )
 
 
 # ---------------------------------------------------------------------------
