@@ -4619,15 +4619,56 @@
             markDirty();
         }
 
-        function flagCancelAdd(itemEl, idx, st) {
-            st.removed = !st.removed;
-            itemEl.classList.toggle("nbx-rd-state-remove", st.removed);
-            itemEl.classList.toggle("nbx-rd-state-add", !st.removed);
-            itemEl.classList.toggle("nbx-rd-dirty", st.removed);
+        // Cancelling a SAVED planned add takes the tile away at once, exactly as
+        // cancelling an unsaved one does (user 2026-08-26: "they should just be
+        // removed, not flagged as a removal"). A plan is not hardware -- flagging
+        // it in the same red strike-through as "remove this real device" said the
+        // wrong thing about what is happening.
+        //
+        // The placement still exists server-side, so the cancel must still be
+        // POSTED. The tile is gone by then and buildRackPayload only walks live
+        // grid items, so the item is captured HERE, address and all, and replayed
+        // into the payload from pendingCancels.
+        var pendingCancels = [];
+
+        function cancelSavedAdd(itemEl, idx, st) {
+            var node = itemEl.gridstackNode;
+            var gsY = (node && node.y != null)
+                ? node.y : parseInt(itemEl.getAttribute("gs-y"), 10);
+            var gsH = (node && node.h != null)
+                ? node.h : parseInt(itemEl.getAttribute("gs-h"), 10);
+            var faceKey = faceOfItem(itemEl);
+            var item = {
+                kind: "add",
+                cancel: true,
+                device_id: null,
+                device_type_id: (st.widget.device_type_id != null)
+                    ? st.widget.device_type_id : null,
+                placement_id: st.widget.placement_id,
+                proposed_name: (st.widget.proposed_name != null)
+                    ? st.widget.proposed_name : "",
+            };
+            if (faceKey === "other") {
+                item.u_position = null;
+                item.face = "";
+            } else {
+                var address = frame.addressForSlot(
+                    frame.slotFromGeometry(gsY, gsH), faceKey);
+                Object.keys(address).forEach(function (k) { item[k] = address[k]; });
+            }
+            pendingCancels.push({ bucket: frame.bucketFor(faceKey), item: item });
+
+            // Same teardown as an unsaved add: release whatever it displaced and
+            // destroy its shadow in the SAME call, never leaving a scan to notice.
+            restoreDisplaced(idx);
             var grid = gridForItem(itemEl);
             if (grid) {
-                grid.update(itemEl, { noMove: st.removed, locked: st.removed });
+                grid.removeWidget(itemEl, true);
+            } else if (itemEl.parentNode) {
+                itemEl.parentNode.removeChild(itemEl);
             }
+            destroyShadowEl(idx);
+            state[idx] = null;
             markDirty();
         }
 
@@ -4656,7 +4697,7 @@
                 if (st.widget.placement_id == null) {
                     removeUnsavedAdd(itemEl, idx, st);
                 } else {
-                    flagCancelAdd(itemEl, idx, st);
+                    cancelSavedAdd(itemEl, idx, st);
                 }
                 return;
             }
@@ -4823,6 +4864,12 @@
             walkGrid(frontGrid, "front");
             walkGrid(rearGrid, "rear");
             walkGrid(trayGrid, "other");
+
+            // Cancelled saved adds: their tiles are gone from the grids, so they
+            // are replayed from the capture made when the user clicked x.
+            pendingCancels.forEach(function (pending) {
+                buckets[pending.bucket].push(pending.item);
+            });
 
             // Bays (spec §10.6). A blade into a chassis that is ALSO being added
             // here cannot carry a placement id -- the chassis row does not exist
