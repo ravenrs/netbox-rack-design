@@ -1313,8 +1313,9 @@ class DesignViewSet(NetBoxModelViewSet):
         target = self._resolve_target(design, rack, face_key, item, ref_map, errors)
         if target is None:
             return None
+        # Kept for the error payloads and the vacated-slot comparison; the
+        # placement's own target fields come from `target`, never from here.
         u_position = target.u_position
-        face = target.face
 
         # Full-depth devices occupy BOTH faces, and slot validation ignores their
         # face entirely (models.py: rack_face is None for a full-depth type). This
