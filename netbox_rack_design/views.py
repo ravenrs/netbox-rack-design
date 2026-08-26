@@ -160,6 +160,8 @@ class DesignElevationView(generic.ObjectView):
             "scoped_racks": scoped_racks,
             "rack_blocks": rack_blocks,
             "asset_version": _asset_version(),
+            # Gates the read-only chassis link, on the same test the editor uses.
+            "has_chassis_in_scope": projection.has_chassis_in_scope(instance),
         }
 
 
@@ -364,7 +366,7 @@ def _design_editor_context(request, design):
         "scoped_rack_rows": scoped_rack_rows,
         # Drives the empty-state markup + the drawer's default-open override.
         "has_racks": bool(all_rack_blocks),
-        # Gates the blade-layer switch (spec §10.3/§10.4): offered only when the
+        # Gates the chassis-layer switch (spec §10.3/§10.4): offered only when the
         # design's scope actually contains a chassis, so a deployment with no
         # blade hardware never sees the feature. Cheap existence check -- the full
         # chassis projection only runs inside the layer itself.
@@ -498,9 +500,9 @@ class DesignEditorDefaultView(generic.ObjectView):
 _PLANNED_CHASSIS_GRID_OFFSET = 1_000_000_000
 
 
-def _blade_layer_context(request, design):
+def _chassis_layer_context(request, design):
     """
-    Context for the BLADE LAYER (spec §10.3): the same workspace as the rack
+    Context for the CHASSIS LAYER (spec §10.3): the same workspace as the rack
     editor, re-pointed at chassis.
 
     A chassis IS a rack there -- bays in place of units -- so this mirrors
@@ -577,7 +579,7 @@ def _blade_layer_context(request, design):
 
     context = _design_editor_context(request, design)
     context.update({
-        "blade_layer": True,
+        "chassis_layer": True,
         "chassis_columns": columns,
         "chassis_rows": [
             {"key": c["key"], "label": c["label"], "rack": c["rack"],
@@ -587,7 +589,8 @@ def _blade_layer_context(request, design):
         ],
         "has_chassis": bool(columns),
         # The layer's canvas is editable; the flag is separate from the rack
-        # editor's own so a read-only blade view stays possible later.
+        # editor's own, which is what lets DesignChassisElevationView render the
+        # very same columns read-only.
         "editable_layer": True,
         # The ROUTER's path, not a per-design one: HiddenDesignChassisViewSet is
         # registered at the plugin API root and takes design_id in the body, the
@@ -597,13 +600,17 @@ def _blade_layer_context(request, design):
     return context
 
 
-@register_model_view(models.Design, "blades", path="blades")
-class DesignBladeLayerView(generic.ObjectView):
+@register_model_view(models.Design, "chassis", path="chassis")
+class DesignChassisLayerView(generic.ObjectView):
     """
-    The blade layer: every chassis in the design's scope as a column of bays.
+    The chassis layer: every chassis in the design's scope as a column of bays.
 
-    URL: /plugins/rack-design/designs/<pk>/blades/
-    Name: plugins:netbox_rack_design:design_blades  (kwargs: pk)
+    Named for the CONTAINER, not its contents: a bay holds a blade in a compute
+    chassis, but equally a module in a patch panel or a shelf insert, and the
+    layer treats them all the same (user 2026-08-26).
+
+    URL: /plugins/rack-design/designs/<pk>/chassis/
+    Name: plugins:netbox_rack_design:design_chassis  (kwargs: pk)
 
     Exists because a rack elevation cannot also be a bay elevation -- an 8-bay
     chassis in a 3U tile is unreadable (spec §10.3, rejected 2026-08-25). Here a
@@ -613,10 +620,34 @@ class DesignBladeLayerView(generic.ObjectView):
     """
 
     queryset = models.Design.objects.all()
-    template_name = "netbox_rack_design/design_blades.html"
+    template_name = "netbox_rack_design/design_chassis.html"
 
     def get_extra_context(self, request, instance):
-        return _blade_layer_context(request, instance)
+        return _chassis_layer_context(request, instance)
+
+
+@register_model_view(models.Design, "chassis_elevation", path="chassis-elevation")
+class DesignChassisElevationView(generic.ObjectView):
+    """
+    Read-only projected CHASSIS elevation -- the chassis twin of
+    :class:`DesignElevationView`.
+
+    URL: /plugins/rack-design/designs/<pk>/chassis-elevation/
+    Name: plugins:netbox_rack_design:design_chassis_elevation  (kwargs: pk)
+
+    Exists because bay occupancy is not an editing concern: someone reviewing a
+    plan needs to see what sits in which bay without holding change permission
+    or entering the editor (user 2026-08-26). Renders the SAME columns from the
+    SAME projection as the editable layer, with ``editable_layer`` False.
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_chassis_elevation.html"
+
+    def get_extra_context(self, request, instance):
+        context = _chassis_layer_context(request, instance)
+        context["editable_layer"] = False
+        return context
 
 
 @register_model_view(models.Design, "list", path="", detail=False)

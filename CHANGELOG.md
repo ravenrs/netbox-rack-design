@@ -5,7 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.0] - 2026-08-26
+
+### Release Summary
+
+A chassis and a rack become one implementation. 0.19.0 shipped the chassis layer
+by giving a chassis its own copy of the rack's add / move / remove / cancel
+logic, and every one of the bugs fixed below lived in that copy rather than in
+the behaviour it duplicated. The editor, the save view and the projection are now
+written against a **Frame** — an enclosure — and its **Containers**, addressable
+grids of slots: a rack Frame has a front and a rear container, half-unit steps and
+full-depth pairing; a chassis Frame has one bay container, whole-bay steps and no
+pairing. Nothing downstream knows which it is holding, so a fix to rack behaviour
+is now automatically a fix to chassis behaviour. Also here: the layer is renamed
+for the container rather than its contents, a chassis column is offered only for a
+device that actually has bays, and bay occupancy is finally visible without the
+editor. The abstraction is written up in `docs/editor-behavior-spec.md` §2.6.
+
+### **Breaking Changes**
+
+- The chassis layer moved from `/plugins/rack-design/designs/<pk>/blades/` to
+  `/plugins/rack-design/designs/<pk>/chassis/`. The old path is gone; update any
+  bookmark or link. Nothing stored changes — no migration, no data conversion.
+
+### Changed
+
+- **A chassis and a rack are now one implementation, not two.** The editor, the
+  save view and the projection are written against a **Frame** (an enclosure) and
+  its **Containers** (addressable grids of slots) — a rack Frame has a front and a
+  rear container, half-unit steps and full-depth pairing; a chassis Frame has one
+  bay container, whole-bay steps and no pairing. Nothing else in the pipeline
+  knows the difference. This deleted the three copies of rack logic the chassis
+  layer had accumulated (`chassisColumnPayload` in the editor, the 158-line
+  `_reconcile_bay_item` in the save view, and duplicated state/label derivation
+  in the projection), so a fix to rack behaviour is now automatically a fix to
+  chassis behaviour. Documented in `docs/editor-behavior-spec.md` §2.6.
+- **The blade layer is now the chassis layer**, named for the container rather
+  than its contents: a bay holds a blade in a compute chassis, but equally a
+  module in a patch panel or a shelf insert. The URL moves from
+  `/designs/<pk>/blades/` to `/designs/<pk>/chassis/` and the rack view's button
+  reads **Chassis**.
+- **A device earns a chassis column by HAVING A BAY**, not by carrying
+  `subdevice_role=parent`. The role is widely set on plain servers — one
+  4475-device instance had 2306 such devices with no bay at all — and each drew
+  an empty `0/0` column nothing could be dropped into. A planned chassis is
+  filtered the same way, on its type's `DeviceBayTemplate`s.
+
+### Added
+
+- **Read-only chassis elevation** at `/designs/<pk>/chassis-elevation/`, linked
+  from the rack elevation. Bay occupancy is not an editing concern: reviewing a
+  plan should not require change permission or the editor. It renders the same
+  columns from the same projection as the editable layer, via a shared
+  `inc/chassis_column.html`.
+
+### Fixed
+
+- **A blade could not be moved between bays.** GridStack asks the destination
+  grid whether it accepts a tile before it will hand it over, and that gate
+  identified a blade by a DOM marker only the palette stamps — so a rendered
+  blade tile answered "not a blade" and every chassis column refused its own
+  kind. The tile snapped back, Save stayed disabled and nothing was logged.
+  Containment decides now.
+- **A blade removed from a bay rendered as nothing at all.** The removal was
+  saved correctly but the chassis projection looked for blades only by their
+  planned target, which a removal does not have, so the bay came back empty and
+  the removal looked discarded. It is found through the device's own bay now.
+- **A bay freed by a removal stayed blocked** for the rest of the session: the
+  vacated-device set the editor is given skipped bay items entirely, and that set
+  overrides the model's own fallback, so even an already-saved removal did not
+  free its bay.
+- **Cancelling an already-saved planned blade is no longer silently dropped.**
+  The cancel now carries its own bay address, so it reaches the server instead of
+  being discarded while Save reported success.
+- **Moving a blade between two bays of one chassis is no longer reported as "no
+  change".** The idempotency snapshot did not include the bay fields, so the two
+  positions hashed identically; a round-trip that changes nothing still answers
+  `304`, and one that moves a blade no longer can.
 
 ## [0.19.0] - 2026-08-25
 

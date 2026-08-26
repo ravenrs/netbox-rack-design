@@ -1,0 +1,92 @@
+{% load i18n %}
+{% load rack_design %}
+
+{# ------------------------------------------------------------------------- #}
+{# ONE chassis column, shared by the editable chassis layer and the read-only #}
+{# chassis elevation -- the same split rack_block.html makes for racks, and   #}
+{# for the same reason: the two pages must never drift apart in what they     #}
+{# draw, only in what they let you do.                                        #}
+{#                                                                            #}
+{# Caller supplies:                                                           #}
+{#   col       one entry of views._chassis_layer_context's chassis_columns    #}
+{#   editable  True in the editor: adds the drag class, the x remove button    #}
+{#             and the widget JSON editor.js parses. False renders the same    #}
+{#             columns as static, read-only elevation.                         #}
+{# ------------------------------------------------------------------------- #}
+  {# ------------------------------------------------------------------------ #}
+  {# A chassis column is a DEGENERATE RACK, deliberately satisfying the exact   #}
+  {# DOM contract initRack() already consumes, so the editor drives it with NO  #}
+  {# changes at all (spec §10.3: a chassis IS a rack).                          #}
+  {#                                                                            #}
+  {#   .nbx-rd-rack-block  + data-rack-id   -> a synthetic per-column id        #}
+  {#   data-u-height        = bay count      (one grid row per bay)             #}
+  {#   data-desc-units="true" so gsYToUPosition() returns gsY+1 -- i.e. the     #}
+  {#     1-based BAY INDEX -- with no arithmetic of its own                     #}
+  {#   one data-face="front" grid; no rear, no tray (a chassis has neither)     #}
+  {#   #rd-editor-data-<id> the widget JSON, same shape as a rack's             #}
+  {#                                                                            #}
+  {# The rack-only machinery (full-depth shadows, opposite-face hatches, the    #}
+  {# tray) never fires here: no bay occupant is full-depth and there is no      #}
+{# second                                                                     #}
+  {# face for a shadow to land on. data-real-rack-id / data-chassis-* carry     #}
+  {# what buildLayoutPayload needs to translate this column's items into the    #}
+  {# `bays` bucket the save contract expects (§10.6).                           #}
+  {# ------------------------------------------------------------------------ #}
+  <div class="nbx-rd-rack-block nbx-rd-chassis-block{% if col.hidden %} hidden{% endif %}"
+       id="rd-rack-{{ col.grid_id }}"
+       data-rack-id="{{ col.grid_id }}"
+       data-u-height="{{ col.bay_count }}"
+       data-desc-units="true"
+       data-chassis-key="{{ col.key }}"
+       data-real-rack-id="{{ col.rack.pk }}"
+       data-bay-names="{{ col.bay_names_json }}"
+       data-bay-ids="{{ col.bay_ids_json }}"
+       {% if col.device %}data-chassis-id="{{ col.device.pk }}"{% endif %}
+       {% if col.placement %}data-chassis-placement="{{ col.placement.pk }}"{% endif %}>
+    <div class="nbx-rd-rack-block-header">
+      {# Two short lines rather than one long one: the header must never be what #}
+      {# decides the column's width. Rack and type live in the tooltip.           #}
+      <div class="nbx-rd-rack-block-title" title="{{ col.rack }} · {{ col.device_type.model }}">
+        {% if col.device %}<a href="{{ col.device.get_absolute_url }}">{{ col.label }}</a>
+        {% else %}{{ col.label }} <span class="badge text-bg-blue">{% trans "planned" %}</span>{% endif %}
+      </div>
+      <div class="text-muted small" title="{{ col.rack }} · {{ col.device_type.model }}">
+        {{ col.used }}/{{ col.bay_count }} {% trans "used" %} · {{ col.rack }}
+      </div>
+    </div>
+
+    <div class="nbx-rd-chassis-body">
+      <ul class="nbx-rd-unit-numbers nbx-rd-chassis-numbers" aria-hidden="true">
+        {% for slot in col.slots %}<li title="{{ slot.name }}">{{ slot.index }}</li>{% endfor %}
+      </ul>
+      <div class="nbx-rd-grid-wrap">
+        <div class="grid-stack nbx-rd-rack nbx-rd-chassis-grid{% if editable %} nbx-rd-editable{% endif %}"
+             id="nbx-rd-grid-front-{{ col.grid_id }}"
+             data-rack-id="{{ col.grid_id }}"
+             data-face="front"
+             gs-column="1"
+             gs-max-row="{{ col.bay_count|mul2 }}"
+             gs-min-row="{{ col.bay_count|mul2 }}">
+          {% for slot in col.slots %}{% if slot.label %}
+          <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+               gs-w="1" gs-h="2" gs-x="0" gs-y="{{ slot.gs_y }}"
+               gs-id="w-{{ col.grid_id }}-{{ forloop.counter0 }}"
+               data-widget-index="{{ slot.widget_index }}">
+            <div class="grid-stack-item-content"
+                 data-name="{{ slot.label }}"
+                 data-bay-name="{{ slot.name }}"
+                 {% if slot.bay %}data-bay-id="{{ slot.bay.pk }}"{% endif %}
+                 {% if slot.device_type %}data-device-type-name="{{ slot.device_type }}"{% endif %}
+                 title="{% blocktrans with n=slot.index %}Bay {{ n }}{% endblocktrans %} ({{ slot.name }}) · {{ slot.label }}">
+              {% if editable %}<button type="button" class="nbx-rd-remove-btn"
+                      title="{% trans 'Flag for removal' %}"
+                      aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
+              <span class="nbx-rd-label">{{ slot.label }}</span>
+            </div>
+          </div>
+          {% endif %}{% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% if editable %}{% with eid="rd-editor-data-"|add:col.grid_id_str %}{{ col.widgets|json_script:eid }}{% endwith %}{% endif %}

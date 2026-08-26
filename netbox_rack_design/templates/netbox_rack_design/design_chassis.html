@@ -1,0 +1,93 @@
+{% extends 'netbox_rack_design/design_editor.html' %}
+{% load i18n %}
+{% load rack_design %}
+
+{# ------------------------------------------------------------------------- #}
+{# The CHASSIS LAYER (spec §10.3).                                            #}
+{#                                                                            #}
+{# Deliberately EXTENDS the rack editor rather than forking it: the drawer,   #}
+{# the legend/role/tenant toolbar and Save are identical, because a chassis   #}
+{# IS a rack here -- bays in place of units. Only three things differ, and    #}
+{# each is an override block on the parent template:                          #}
+{#                                                                            #}
+{#   rd_canvas       chassis columns instead of rack blocks                   #}
+{#   rd_scope_panel  a Chassis panel instead of the Racks panel               #}
+{#   rd_layer_switch a way back to the rack view                              #}
+{#                                                                            #}
+{# The palette itself is filtered to child device types by editor.js, which   #}
+{# reads data-rd-chassis-layer on the root -- so a non-child type can never be  #}
+{# offered as a bay occupant in the first place.                              #}
+{# ------------------------------------------------------------------------- #}
+
+{# The drawer's third section holds chassis here, not racks. #}
+{% block rd_scope_section_label %}{% trans "Chassis" %}{% endblock %}
+
+{% block rd_layer_switch %}
+  {# Not labelled "Racks": the drawer already has a Racks/Chassis section toggle #}
+  {# and two identical labels in one button row is unreadable.                   #}
+  <a class="btn btn-outline-secondary btn-sm me-2" data-rd-layer-switch
+     href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=object.pk %}"
+     title="{% trans 'Back to the rack view' %}">
+    <i class="mdi mdi-arrow-left" aria-hidden="true"></i> {% trans "Rack view" %}
+  </a>
+{% endblock rd_layer_switch %}
+
+{% block rd_scope_panel %}
+<div class="nbx-rd-drawer-section" data-rd-section="racks">
+  <div class="card nbx-rd-panel-card">
+    <div class="card-header">
+      <h3 class="card-title">{% trans "Chassis" %}</h3>
+    </div>
+    {# Same show/hide contract as the Racks panel: HIDDEN state is stored, so a #}
+    {# chassis with no row is visible. Toggling never touches the design.       #}
+    <div class="list-group list-group-flush nbx-rd-scope-list"
+         data-rd-chassis-list
+         data-hidden-chassis-url="{{ hidden_chassis_url }}">
+      {% for row in chassis_rows %}
+      <div class="list-group-item d-flex align-items-center justify-content-between{% if row.hidden %} nbx-rd-scope-hidden{% endif %}"
+           data-chassis-key="{{ row.key }}"
+           {% if row.device %}data-chassis-id="{{ row.device.pk }}"{% endif %}>
+        <div class="text-truncate">
+          <div class="text-truncate">{{ row.label }}</div>
+          <div class="text-muted small">
+            {{ row.rack }} · {{ row.used }}/{{ row.bay_count }} {% trans "bays used" %}
+            {% if not row.device %}· <span class="badge text-bg-blue">{% trans "planned" %}</span>{% endif %}
+          </div>
+        </div>
+        {# A PLANNED chassis has no device row, so there is nothing to persist a #}
+        {# hidden state against -- and hiding what you just added would be       #}
+        {# unhelpful anyway. It is always visible.                               #}
+        {% if row.device %}
+        <button type="button" class="btn btn-ghost-secondary btn-sm"
+                data-rd-chassis-toggle
+                aria-pressed="{{ row.hidden|yesno:'true,false' }}"
+                title="{% if row.hidden %}{% trans 'Show this chassis' %}{% else %}{% trans 'Hide this chassis' %}{% endif %}">
+          <i class="mdi {% if row.hidden %}mdi-eye-off{% else %}mdi-eye{% endif %}" aria-hidden="true"></i>
+        </button>
+        {% endif %}
+      </div>
+      {% empty %}
+      <div class="list-group-item text-muted small">
+        {% trans "No chassis in this design's scope." %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock rd_scope_panel %}
+
+{% block rd_canvas %}
+<div class="nbx-rd-racks-scroll nbx-rd-chassis-scroll" id="nbx-rd-racks-scroll"
+     data-rd-chassis-layer="true">
+  {% for col in chassis_columns %}
+  {% include 'netbox_rack_design/inc/chassis_column.html' with col=col editable=editable_layer %}
+  {% empty %}
+  <div class="nbx-rd-empty-state text-center text-muted p-5">
+    <i class="mdi mdi-view-grid-outline mdi-48px d-block mb-2" aria-hidden="true"></i>
+    <p class="mb-0">
+      {% trans "No chassis in this design's scope — add a parent device in the rack view first." %}
+    </p>
+  </div>
+  {% endfor %}
+</div>
+{% endblock rd_canvas %}

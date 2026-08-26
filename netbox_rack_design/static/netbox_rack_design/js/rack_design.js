@@ -119,7 +119,7 @@
             // Chassis occupancy (spec §10.4): the rack view REPORTS what is in
             // the bays -- the same data-* set inc/rack_block.html already stamps
             // for the editor, so the read-only elevation answers "what is in
-            // there / is there room" without opening the blade layer.
+            // there / is there room" without opening the chassis layer.
             var baysUsed = content.getAttribute("data-bays-used");
             var baysTotal = content.getAttribute("data-bays-total");
             var bayOccupants = content.getAttribute("data-bay-occupants");

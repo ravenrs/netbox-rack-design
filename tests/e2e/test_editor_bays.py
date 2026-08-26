@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Playwright end-to-end coverage for device bays / blades (spec §10).
+"""Playwright end-to-end coverage for device bays / the chassis layer (spec §10).
 
 Run via ``dev/e2e.sh`` like the other editor e2e suites.
 
 What this locks in, none of which a Django test can reach: the rack view REPORTS
-bay occupancy without trying to edit it (§10.4); the BLADE LAYER renders each
+bay occupancy without trying to edit it (§10.4); the CHASSIS LAYER renders each
 chassis as a degenerate rack and drives it with the unmodified rack editor
 (§10.3); the palette there is filtered to child device types so a rack-mountable
-device can never be offered as a blade; and switching layers with unsaved work
+device can never be offered as a bay occupant; and switching layers with unsaved work
 asks rather than discards.
 
 SELF-PROVISIONING, like the sibling suites: the rack is DISCOVERED via the API
 (a rack holding a parent device with a free bay), never hardcoded, so a
-deployment without blade hardware SKIPS cleanly. Save is intercepted and
+deployment without chassis hardware SKIPS cleanly. Save is intercepted and
 answered locally, so the only writes are the design create/delete.
 """
 import json
@@ -59,7 +59,7 @@ _PREREQ_OK, _PREREQ_REASON = _check_prereqs()
 
 @unittest.skipUnless(_PREREQ_OK, _PREREQ_REASON)
 class EditorBayE2ETestCase(unittest.TestCase):
-    """§10.3/§10.4 — the rack view reports, the blade layer edits."""
+    """§10.3/§10.4 — the rack view reports, the chassis layer edits."""
 
     @classmethod
     def setUpClass(cls):
@@ -124,6 +124,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
         blades = cls._api("GET", "/api/dcim/device-types/?subdevice_role=child&limit=1")
         if not blades.get("results"):
             raise unittest.SkipTest("no child (blade) device type in this data")
+        cls.blade_type_id = blades["results"][0]["id"]
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-bays-{uuid.uuid4().hex[:8]}",
@@ -134,7 +135,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
         cls._design_id = design["id"]
         cls.rack_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{cls.rack_pk}/")
-        cls.blade_url = f"{BASE}/plugins/rack-design/designs/{cls._design_id}/blades/"
+        cls.chassis_url = f"{BASE}/plugins/rack-design/designs/{cls._design_id}/chassis/"
 
     @classmethod
     def _cleanup_class(cls):
@@ -191,6 +192,27 @@ class EditorBayE2ETestCase(unittest.TestCase):
             "  const d = document.getElementById(id);"
             "  if (d) { d.style.display = 'none'; d.style.pointerEvents = 'none'; }"
             "})")
+
+    def _plan_a_blade_in_a_free_bay(self):
+        """Create a SAVED planned blade (kind=add with a placement id) in the
+        provisioned free bay, and remove it again afterwards.
+
+        Done through the API rather than by dropping and saving in the browser:
+        the suite intercepts save-layout, so the editor can never leave a
+        placement behind, and a test that skips when the data happens not to
+        contain one guards nothing.
+        """
+        placement = self._api("POST", "/api/plugins/rack-design/placements/", {
+            "design": self._design_id,
+            "kind": "add",
+            "device_type": self.blade_type_id,
+            "target_bay": self.bay_id,
+            "proposed_name": f"e2e-blade-{uuid.uuid4().hex[:6]}",
+        })
+        self.addCleanup(
+            lambda: self._api(
+                "DELETE", f"/api/plugins/rack-design/placements/{placement['id']}/"))
+        return placement
 
     def _open_palette(self):
         box = self.page.query_selector("#nbx-rd-palette-search")
@@ -264,16 +286,16 @@ class EditorBayE2ETestCase(unittest.TestCase):
         self.assertIsNotNone(tile, "a chassis tile must report its bay occupancy")
         self.assertIsNotNone(tile.get_attribute("data-bays-used"))
 
-    def test_rack_view_offers_the_blade_layer(self):
+    def test_rack_view_offers_the_chassis_layer(self):
         self._open(self.rack_url)
         self.assertIsNotNone(
             self.page.query_selector("[data-rd-layer-switch]"),
-            "a design with a chassis in scope must offer the blade layer")
+            "a design with a chassis in scope must offer the chassis layer")
 
-    # -- blade layer (§10.3) -------------------------------------------------
+    # -- chassis layer (§10.3) -------------------------------------------------
 
     def test_layer_renders_each_chassis_as_a_column_of_bays(self):
-        self._open(self.blade_url)
+        self._open(self.chassis_url)
         self.assertGreater(
             self.page.eval_on_selector_all(".nbx-rd-chassis-block", "e => e.length"), 0,
             "no chassis columns rendered")
@@ -290,18 +312,18 @@ class EditorBayE2ETestCase(unittest.TestCase):
         self.assertEqual(geometry["maxRow"], geometry["bays"] * 2)
 
     def test_layer_palette_offers_only_child_device_types(self):
-        self._open(self.blade_url)
+        self._open(self.chassis_url)
         self._open_palette()
         roles = self.page.eval_on_selector_all(
             "#nbx-rd-palette-list .nbx-rd-palette-item",
             "els => els.map(e => e.getAttribute('data-subdevice-role'))")
         self.assertGreater(len(roles), 0, "palette returned nothing")
         self.assertEqual(set(roles), {"child"},
-                         "a non-child type must never be offered as a blade")
+                         "a non-child type must never be offered as a bay occupant")
 
     def test_dropping_a_blade_names_it_and_saves_it_as_a_bay_item(self):
         """The §10.3 gesture end to end, plus §10.6's payload contract."""
-        self._open(self.blade_url)
+        self._open(self.chassis_url)
         self._open_palette()
         gid, offset = self._free_bay_target()
         if not gid:
@@ -327,10 +349,89 @@ class EditorBayE2ETestCase(unittest.TestCase):
             "a bay item must address a real bay or a planned chassis")
         self.assertIsNone(added[0].get("u_position"), "a blade takes no rack position")
 
+    def test_cancelling_a_saved_planned_blade_reaches_the_payload(self):
+        """REGRESSION (user 2026-08-26): clicking x on an ALREADY SAVED planned
+        blade flagged the tile red, Save reported success -- and the blade was
+        still there on reload. buildRackPayload returns a cancelled add with
+        u_position null, and chassisColumnPayload resolves a bay item's bay FROM
+        that position, so the cancel was silently dropped before it was ever
+        posted. The cancel must reach the server, carrying its bay target."""
+        self._plan_a_blade_in_a_free_bay()
+        self._open(self.chassis_url)
+        target = self.page.evaluate("""() => {
+          for (const blk of document.querySelectorAll('.nbx-rd-chassis-block')) {
+            const rid = blk.getAttribute('data-rack-id');
+            const el = document.getElementById('rd-editor-data-' + rid);
+            if (!el) { continue; }
+            const ws = JSON.parse(el.textContent || '[]');
+            for (const t of blk.querySelectorAll('.grid-stack-item')) {
+              const i = parseInt(t.getAttribute('data-widget-index'), 10);
+              const w = ws[i];
+              if (w && w.kind === 'add' && w.placement_id != null) {
+                return {rackId: rid, idx: i, placementId: w.placement_id};
+              }
+            }
+          }
+          return null;
+        }""")
+        self.assertIsNotNone(
+            target, "the provisioned planned blade must render as a saved add")
+
+        self.page.click(
+            f'.nbx-rd-chassis-block[data-rack-id="{target["rackId"]}"]'
+            f' .grid-stack-item[data-widget-index="{target["idx"]}"] .nbx-rd-remove-btn')
+        self.page.wait_for_timeout(400)
+
+        payload = self._capture_save()
+        bays = [b for r in payload.get("racks", []) for b in (r.get("bays") or [])]
+        cancels = [b for b in bays if b.get("cancel")]
+        self.assertEqual(
+            [c.get("placement_id") for c in cancels], [target["placementId"]],
+            f"the cancelled add must be posted exactly once, got {bays}")
+        self.assertTrue(
+            cancels[0].get("target_bay_id") or cancels[0].get("parent_placement_id"),
+            "a cancelled bay item still addresses its chassis")
+
+    def test_a_chassis_grid_accepts_a_rendered_blade_tile(self):
+        """REGRESSION (user 2026-08-26): "move doesn't work".
+
+        GridStack asks the DESTINATION grid's acceptWidgets before it will hand a
+        tile over. That gate called rdIsChildEl(), which reads
+        data-subdevice-role -- an attribute the PALETTE stamps and the SERVER
+        does not. So a rendered blade tile answered "not a blade", every chassis
+        column refused its own kind, the handover never fired and the tile
+        snapped back with Save unarmed. Nothing threw; nothing was logged.
+
+        Asserted at the gate rather than through a drag on purpose: a drag needs
+        two chassis columns side by side on screen, which the provisioned design
+        cannot guarantee, and a test that skips itself is not a guard. The
+        cross-rack coverage elsewhere goes through a JS shim that bypasses this
+        gate entirely, which is exactly why the bug survived.
+        """
+        self._open(self.chassis_url)
+        verdicts = self.page.evaluate("""() => {
+          const out = [];
+          const tiles = [...document.querySelectorAll('.nbx-rd-chassis-block .grid-stack-item')];
+          if (!tiles.length) { return null; }
+          for (const grid of document.querySelectorAll('.nbx-rd-chassis-block .grid-stack')) {
+            const gs = grid.gridstack;
+            const accept = gs && gs.opts && gs.opts.acceptWidgets;
+            if (typeof accept !== 'function') { continue; }
+            out.push({grid: grid.id, accepts: accept(tiles[0]) === true});
+          }
+          return out;
+        }""")
+        if not verdicts:
+            self.skipTest("no blade tiles rendered in this data")
+        self.assertTrue(
+            all(v["accepts"] for v in verdicts),
+            "every chassis grid must accept a rendered blade tile -- one that "
+            f"refuses it makes the blade unmovable: {verdicts}")
+
     def test_a_clean_load_posts_nothing(self):
         """Untouched blades must not be re-sent as edits: Save stays disabled, so
         loading and clicking it produces no request at all."""
-        self._open(self.blade_url)
+        self._open(self.chassis_url)
         self.assertTrue(
             self.page.evaluate(
                 "() => document.getElementById('rd-editor-save').hasAttribute('disabled')"),
@@ -340,7 +441,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
     # -- layer switching -----------------------------------------------------
 
     def test_switching_with_unsaved_work_asks_first(self):
-        self._open(self.blade_url)
+        self._open(self.chassis_url)
         self._open_palette()
         gid, offset = self._free_bay_target()
         if not gid:
@@ -358,14 +459,14 @@ class EditorBayE2ETestCase(unittest.TestCase):
         modal = self.page.query_selector(".nbx-rd-switch-modal")
         self.assertIsNotNone(modal, "switching with unsaved work must ask first")
         self.assertIn("unsaved", modal.inner_text().lower())
-        self.assertIn("/blades/", self.page.url, "must not navigate until answered")
+        self.assertIn("/chassis/", self.page.url, "must not navigate until answered")
 
         self.page.click(".nbx-rd-switch-modal [data-bs-dismiss=modal]")
         self.page.wait_for_timeout(700)
-        self.assertIn("/blades/", self.page.url, "Cancel must keep us where we are")
+        self.assertIn("/chassis/", self.page.url, "Cancel must keep us where we are")
 
     def test_switching_with_no_changes_goes_straight_through(self):
-        self._open(self.blade_url)
+        self._open(self.chassis_url)
         self.page.click("[data-rd-layer-switch]")
         self.page.wait_for_load_state("networkidle")
         self.assertIn("/editor", self.page.url)

@@ -20,7 +20,13 @@ from utilities.testing import create_test_device
 
 from ..choices import DesignPlacementKindChoices
 from ..models import Design, DesignPlacement
-from ..projection import ProjectedSlotState, project_rack
+from ..projection import (
+    ProjectedSlotState,
+    chassis_in_scope,
+    has_chassis_in_scope,
+    project_chassis,
+    project_rack,
+)
 from .utils import create_dcim_environment
 
 
@@ -311,6 +317,110 @@ class TrayProjectionTestCase(TestCase):
         self.assertEqual(bays[0]["device_type"], blade_type)
         self.assertFalse(bays[1]["occupied"])
         self.assertIsNone(bays[1]["device"])
+
+    def test_a_removed_blade_still_renders_in_its_bay(self):
+        """REGRESSION (user 2026-08-26): "Save throws away what I flagged for
+        removal".
+
+        It never did -- the removal was stored and then rendered as NOTHING. A
+        removal takes no target (the model forbids one), so matching a chassis's
+        blades solely on target_bay/parent_placement could not find it, and the
+        blade reappeared looking untouched on the next load.
+        """
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBay, DeviceRole, DeviceType
+
+        self.design.racks.add(self.racks[0])
+        role = DeviceRole.objects.first()
+        chassis_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="RM-Chassis",
+            slug="rm-chassis", u_height=2,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        blade_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="RM-Blade",
+            slug="rm-blade", u_height=0,
+            subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
+        )
+        chassis = Device.objects.create(
+            name="RM-Chassis-1", site=self.site, rack=self.racks[0], position=12,
+            face="front", device_type=chassis_type, role=role,
+        )
+        blade = Device.objects.create(
+            name="RM-Blade-1", site=self.site, rack=self.racks[0], position=None,
+            device_type=blade_type, role=role,
+        )
+        DeviceBay.objects.create(device=chassis, name="b1", installed_device=blade)
+        DeviceBay.objects.create(device=chassis, name="b2")
+        DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=blade,
+        )
+
+        entry = next(e for e in chassis_in_scope(self.design) if e["device"] == chassis)
+        column = project_chassis(self.design, entry)
+        slot = next(s for s in column["slots"] if s["name"] == "b1")
+        self.assertEqual(slot["state"], ProjectedSlotState.REMOVE)
+        self.assertEqual(slot["label"], "RM-Blade-1")
+        # A vacating blade does not count against the chassis's capacity.
+        self.assertEqual(column["used"], 0)
+
+    def test_bayless_parent_device_is_not_a_chassis(self):
+        """``subdevice_role=parent`` alone does NOT make a chassis: the role is
+        widely set on plain servers (one 4475-device instance had 2306 such
+        devices with no bay at all), and each would draw an empty 0/0 column in
+        the chassis layer that nothing can ever be dropped into. A device earns
+        a column by HAVING A BAY (user 2026-08-26)."""
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import Device, DeviceBay, DeviceRole, DeviceType
+
+        self.design.racks.add(self.racks[0])
+        role = DeviceRole.objects.first()
+        parent_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Server-sff8",
+            slug="server-sff8", u_height=1,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        Device.objects.create(
+            name="Bayless-1", site=self.site, rack=self.racks[0], position=30,
+            face="front", device_type=parent_type, role=role,
+        )
+        self.assertFalse(has_chassis_in_scope(self.design))
+        self.assertEqual(chassis_in_scope(self.design), [])
+
+        # Give it one bay and it becomes a chassis, listed exactly once.
+        real = Device.objects.get(name="Bayless-1")
+        DeviceBay.objects.create(device=real, name="Bay 1")
+        DeviceBay.objects.create(device=real, name="Bay 2")
+        self.assertTrue(has_chassis_in_scope(self.design))
+        entries = chassis_in_scope(self.design)
+        self.assertEqual([e["key"] for e in entries], [f"dev-{real.pk}"])
+
+    def test_planned_chassis_without_bay_templates_is_not_a_chassis(self):
+        """Same rule for a PLANNED chassis, read off its type: with no
+        DeviceBayTemplate no bay will exist once the design is applied, so there
+        is nothing to plan into."""
+        from dcim.choices import SubdeviceRoleChoices
+        from dcim.models import DeviceBayTemplate, DeviceType
+
+        self.design.racks.add(self.racks[0])
+        parent_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="Planned-sff10",
+            slug="planned-sff10", u_height=1,
+            subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        )
+        placement = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=parent_type, target_rack=self.racks[0],
+            target_position=35, target_face="front",
+        )
+        self.assertFalse(has_chassis_in_scope(self.design))
+        self.assertEqual(chassis_in_scope(self.design), [])
+
+        DeviceBayTemplate.objects.create(device_type=parent_type, name="Bay 1")
+        self.assertTrue(has_chassis_in_scope(self.design))
+        entries = chassis_in_scope(self.design)
+        self.assertEqual([e["key"] for e in entries], [f"pl-{placement.pk}"])
 
     def test_non_parent_device_slot_has_no_bays(self):
         """An ordinary device carries an empty bay list -- the key always exists

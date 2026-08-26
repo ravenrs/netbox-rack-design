@@ -141,6 +141,39 @@ class ProjectedElevation:
     power: dict = field(default_factory=dict)
 
 
+# The two things EVERY container's projection derives the same way, whatever its
+# slots are (spec §2). They were copied verbatim into the rack overlay and the
+# chassis one; a state or label rule fixed in one silently left the other wrong.
+_PLACEMENT_STATE = {
+    DesignPlacementKindChoices.KIND_ADD: ProjectedSlotState.ADD,
+    DesignPlacementKindChoices.KIND_MOVE: ProjectedSlotState.MOVE_IN,
+    DesignPlacementKindChoices.KIND_REMOVE: ProjectedSlotState.REMOVE,
+}
+
+
+def _placement_state(placement):
+    """The §3 slot state a placement projects to."""
+    return _PLACEMENT_STATE.get(placement.kind, ProjectedSlotState.ADD)
+
+
+def _placement_label(placement, device_type=None):
+    """What a placement is CALLED on a tile.
+
+    The editor's chosen name wins; then the real device's; then the catalog
+    model for a planned add that has no name yet. "?" only when a placement
+    names nothing at all, which the model should already prevent.
+    """
+    if device_type is None:
+        device_type = placement.device_type or (
+            placement.device.device_type if placement.device_id else None
+        )
+    if placement.proposed_name:
+        return placement.proposed_name
+    if placement.device_id:
+        return placement.device.name or str(placement.device)
+    return device_type.model if device_type else "?"
+
+
 def _slot(
     *,
     u_position,
@@ -399,26 +432,16 @@ def _overlay_planned_blades(design, slots_lists):
         elif placement.parent_placement_id:
             by_planned[(placement.parent_placement_id, placement.target_bay_name)] = placement
 
-    state_for = {
-        DesignPlacementKindChoices.KIND_ADD: ProjectedSlotState.ADD,
-        DesignPlacementKindChoices.KIND_MOVE: ProjectedSlotState.MOVE_IN,
-        DesignPlacementKindChoices.KIND_REMOVE: ProjectedSlotState.REMOVE,
-    }
-
     def _apply(entry, placement):
         device_type = _device_type_of(placement) if placement.device_type_id else (
             placement.device.device_type if placement.device_id else None
         )
-        label = placement.proposed_name or (
-            (placement.device.name or str(placement.device)) if placement.device_id
-            else (device_type.model if device_type else "?")
-        )
         entry.update({
             "device": placement.device,
             "device_type": device_type,
-            "label": label,
+            "label": _placement_label(placement, device_type),
             "occupied": placement.kind != DesignPlacementKindChoices.KIND_REMOVE,
-            "state": state_for.get(placement.kind, ProjectedSlotState.ADD),
+            "state": _placement_state(placement),
             "placement": placement,
         })
 
@@ -876,27 +899,31 @@ def _natural_bay_key(name):
 
 def has_chassis_in_scope(design):
     """
-    Cheap "does the blade layer apply to this design at all" test.
+    Cheap "does the chassis layer apply to this design at all" test.
 
     Exists so the rack editor can gate the layer switch without paying for the
-    full :func:`chassis_in_scope` projection on every page load.
+    full :func:`chassis_in_scope` projection on every page load. Applies the
+    SAME has-bays rule as chassis_in_scope, or the button would offer a layer
+    that then renders nothing.
     """
     from dcim.models import Device
 
     if Device.objects.filter(
         rack__in=design.racks.all(),
         device_type__subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        devicebays__isnull=False,
     ).exists():
         return True
     return design.placements.filter(
         kind=DesignPlacementKindChoices.KIND_ADD,
         device_type__subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+        device_type__devicebaytemplates__isnull=False,
     ).exists()
 
 
 def chassis_in_scope(design):
     """
-    Every chassis the blade layer should show for ``design`` (spec §10.3).
+    Every chassis the chassis layer should show for ``design`` (spec §10.3).
 
     Two sources, mirroring the two parent kinds a blade can target:
 
@@ -918,10 +945,18 @@ def chassis_in_scope(design):
     racks = list(design.racks.all())
     out = []
 
+    # A BAY IS THE ONLY THING THAT MAKES A CHASSIS A CHASSIS here. Matching on
+    # subdevice_role alone is not enough: the role is routinely set on plain
+    # servers (a 4475-device instance had 2306 of them with no bay at all --
+    # "sff8"/"lff4" drive-slot models flagged parent by hand), and each one
+    # would draw an empty 0/0 column nothing can ever be dropped into.
     reals = (
         Device.objects.filter(
-            rack__in=racks, device_type__subdevice_role=SubdeviceRoleChoices.ROLE_PARENT
+            rack__in=racks,
+            device_type__subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+            devicebays__isnull=False,
         )
+        .distinct()
         .select_related("device_type", "rack")
         .order_by("rack__name", "name", "pk")
     )
@@ -938,11 +973,15 @@ def chassis_in_scope(design):
             ),
         })
 
+    # Same rule for a PLANNED chassis, read off the type: no bay template means
+    # no bay will exist once it is applied, so there is nothing to plan into.
     planned = (
         design.placements.filter(
             kind=DesignPlacementKindChoices.KIND_ADD,
             device_type__subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
+            device_type__devicebaytemplates__isnull=False,
         )
+        .distinct()
         .select_related("device_type", "target_rack")
         .order_by("target_rack__name", "proposed_name", "pk")
     )
@@ -969,7 +1008,7 @@ def chassis_in_scope(design):
 
 def project_chassis(design, entry):
     """
-    Project ONE chassis as a column of bays -- the blade layer's answer to
+    Project ONE chassis as a column of bays -- the chassis layer's answer to
     ``project_rack`` (spec §10.3: a chassis IS a rack, bays in place of units).
 
     ``entry`` is one row of :func:`chassis_in_scope`. The returned bays reuse the
@@ -993,23 +1032,31 @@ def project_chassis(design, entry):
                 "installed_device", "installed_device__device_type"):
             real_bays[bay.name] = bay
 
+    # A REMOVE takes no target at all (the model forbids one), so it can only be
+    # found through the DEVICE -- via the real bay that device sits in. Matching
+    # solely on target_bay/parent_placement made a saved blade removal invisible:
+    # it was stored correctly, rendered as nothing, and read to the user as
+    # "Save threw my removal away" (user 2026-08-26).
+    if device is not None:
+        blade_query = Q(target_bay__device=device) | Q(device__parent_bay__device=device)
+    else:
+        blade_query = Q(parent_placement=placement)
     blades = list(
-        design.placements.filter(
-            Q(target_bay__device=device) if device is not None
-            else Q(parent_placement=placement)
-        ).select_related("device", "device__device_type", "device_type", "target_bay")
+        design.placements.filter(blade_query).select_related(
+            "device", "device__device_type", "device_type", "target_bay")
     ) if (device is not None or placement is not None) else []
     by_name = {}
     for blade in blades:
-        name = blade.target_bay.name if blade.target_bay_id else blade.target_bay_name
+        if blade.target_bay_id:
+            name = blade.target_bay.name
+        elif blade.target_bay_name:
+            name = blade.target_bay_name
+        else:
+            # A removal: the bay it is being emptied OUT of.
+            real_bay = getattr(blade.device, "parent_bay", None) if blade.device_id else None
+            name = real_bay.name if real_bay is not None else ""
         if name:
             by_name[name] = blade
-
-    state_for = {
-        DesignPlacementKindChoices.KIND_ADD: ProjectedSlotState.ADD,
-        DesignPlacementKindChoices.KIND_MOVE: ProjectedSlotState.MOVE_IN,
-        DesignPlacementKindChoices.KIND_REMOVE: ProjectedSlotState.REMOVE,
-    }
 
     slots = []
     for index, name in enumerate(bay_names, start=1):
@@ -1034,10 +1081,8 @@ def project_chassis(design, entry):
             slot.update({
                 "device": blade.device,
                 "device_type": blade_type,
-                "label": blade.proposed_name or (
-                    (blade.device.name or str(blade.device)) if blade.device_id
-                    else (blade_type.model if blade_type else "?")),
-                "state": state_for.get(blade.kind, ProjectedSlotState.ADD),
+                "label": _placement_label(blade, blade_type),
+                "state": _placement_state(blade),
                 "placement": blade,
             })
         slots.append(slot)

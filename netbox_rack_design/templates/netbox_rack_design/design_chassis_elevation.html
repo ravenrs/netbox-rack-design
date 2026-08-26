@@ -1,0 +1,76 @@
+{% extends 'generic/object.html' %}
+{% load static %}
+{% load i18n %}
+{% load rack_design %}
+
+{# Read-only projected CHASSIS elevation: every chassis in the design's scope  #}
+{# as a column of bays, rendered from the SAME inc/chassis_column.html the     #}
+{# editable layer uses (editable=False) and the SAME projection helper, so the #}
+{# two can never disagree about what is in a bay.                              #}
+{#                                                                            #}
+{# It is the chassis twin of design_elevation.html: same shell, same legend    #}
+{# filter, same hover card, no edit affordances anywhere.                      #}
+
+{% block head %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/gridstack.min.css' %}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/rack_design.css' %}?v={{ asset_version }}">
+  <link rel="stylesheet" href="{% static 'netbox_rack_design/css/editor.css' %}?v={{ asset_version }}">
+{% endblock head %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">
+        {% blocktrans with design=object.title %}Projected chassis: {{ design }}{% endblocktrans %}
+        <div class="card-actions">
+          <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=object.pk %}"
+             class="btn btn-outline-secondary btn-sm me-2"
+             title="{% trans 'Back to the rack elevation' %}">
+            <i class="mdi mdi-arrow-left" aria-hidden="true"></i> {% trans "Rack elevation" %}
+          </a>
+          {% if perms.netbox_rack_design.change_design %}
+          <a href="{% url 'plugins:netbox_rack_design:design_chassis' pk=object.pk %}"
+             class="btn btn-sm btn-warning">
+            <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Open editor" %}
+          </a>
+          {% endif %}
+        </div>
+      </h2>
+
+      {# Read-only root: scopes the static-grid init and the hover card. #}
+      <div class="card-body" id="rd-elevation">
+
+        <div class="nbx-rd-toolbar mb-3 d-flex flex-wrap align-items-center gap-3" data-rd-toolbar>
+          <div class="nbx-rd-legend" data-rd-legend>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="existing"><span class="nbx-rd-swatch nbx-rd-state-existing"></span>{% trans "Existing" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="add"><span class="nbx-rd-swatch nbx-rd-state-add"></span>{% trans "Add" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
+            <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+          </div>
+        </div>
+
+        {% if chassis_columns %}
+        <div class="nbx-rd-racks-scroll nbx-rd-chassis-scroll" id="nbx-rd-racks-scroll">
+        {% for col in chassis_columns %}
+          {% include 'netbox_rack_design/inc/chassis_column.html' with col=col editable=False %}
+        {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-muted mb-0">{% trans "This design has no chassis with bays in scope." %}</p>
+        {% endif %}
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock content %}
+
+{% block javascript %}
+  {{ block.super }}
+  <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
+  <script src="{% static 'netbox_rack_design/js/rack_design.js' %}?v={{ asset_version }}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
+{% endblock javascript %}
