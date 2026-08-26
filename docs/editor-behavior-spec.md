@@ -125,6 +125,44 @@ Therefore a Ghost is *plannable-over* (it does not block placement) but *visible
 GridStack instance purely as a view. All validation questions go through
 `Rack`/`Unit`, never through `grid.getGridItems()` inspection at decision time.
 
+### 2.6 `Frame` / `Container` (the generalisation — 0.20.0)
+
+A rack is not the only enclosure with slots: a chassis holds blades in bays, and
+a patch-panel frame holds modules in the same way. `Rack`/`Face` is therefore the
+*rack instance* of a two-level abstraction, and the editor, the save view and the
+projection are written against that abstraction rather than against units:
+
+```
+Frame          one enclosure         owns Containers, and everything that spans them
+Container      one addressable grid of slots
+```
+
+| | rack Frame | chassis Frame |
+|---|---|---|
+| containers | `front`, `rear` | `bays` — exactly one |
+| tray (§9.2) | yes | none |
+| pairing rule | a full-depth device claims the same slot in **both** containers | none — one container has no opposite |
+| step | 0.5U | one bay |
+| address | `{u_position, face}` | `{target_bay_id}`, or `{target_bay_name, parent_placement_id\|parent_ref}` |
+
+A Container answers exactly three questions, and nothing else in the pipeline is
+allowed to ask them another way:
+
+- `slotFromGeometry(y, h)` / `slotToGeometry(slot)` — grid geometry ↔ slot index,
+  which is where the 0.5U-vs-one-bay step lives;
+- `addressForSlot(slot)` — the save address for that slot;
+- `accepts(el)` — the drop gate (rack-mountable vs child).
+
+**Why this is a rule and not a refactoring note.** The chassis layer previously
+translated a bay payload back out of `u_position` after the payload was built. A
+translation pass can *discard* an item it cannot resolve, and it did: a cancelled
+planned blade carried no position, so its cancel never reached the server while
+Save reported success. The rule that prevents the whole class of bug: **an item
+is addressed once, by its own Container, when it is built** — there is no later
+pass that could drop it. A chassis Frame declares one container and no pairing
+rule, so the rack-only machinery is *absent* rather than suppressed, and the two
+layers cannot drift.
+
 ---
 
 ## 3. Rendering table (state × part)
@@ -444,10 +482,13 @@ the faces do.
 
 ---
 
-## 10. Device bays / blades (planned — 0.19.0)
+## 10. Device bays / chassis (shipped — 0.19.0, unified 0.20.0)
 
-Status: **spec draft 2026-08-25** (user request: a chassis must be plannable —
-its bays visible, and blades addable/removable/movable like any other tile).
+Status: **shipped**. 0.19.0 delivered the chassis layer alongside the rack
+editor; 0.20.0 made it the *same* code — a chassis is a Frame with one Container
+(§2.6), so it is not a rack-shaped special case with a translation layer but the
+degenerate case of the general one. Read §2.6 first; this section then says only
+what is bay-specific.
 
 ### 10.1 What a bay represents
 
@@ -482,7 +523,7 @@ Two kinds of parent, both required:
   one Bay. Combined with I4 (§9.2) a device is in exactly one of: units, tray,
   or a bay.
 
-### 10.3 The blade layer (how bays are edited)
+### 10.3 The chassis layer (how bays are edited)
 
 **Rejected: editing bays inside the chassis tile.** Tried and discarded
 2026-08-25 after seeing it live — an 8-bay chassis in a 3U tile renders six
@@ -490,17 +531,18 @@ cramped cells with unreadable names, and it only gets worse with an 18-bay
 chassis. There is no tile size at which a rack elevation can also be a bay
 elevation.
 
-**The model instead: a chassis IS a rack.** §10.1 says a Bay is to a Device what
-a Unit is to a Face. Taken to its conclusion, a chassis renders exactly like a
-rack — bays in place of units — and then *every* rule in §4 applies verbatim:
-validate → confirm → commit, blocking claims, displacement, ghosts, homecoming,
-cursor governance. **No new gesture code exists.** The single difference is the
-step: **one bay**, where a rack steps 0.5U.
+**The model instead: a chassis is a Frame with one Container** (§2.6). §10.1 says
+a Bay is to a Device what a Unit is to a Face; §2.6 is that symmetry made
+literal, so *every* rule in §4 applies verbatim — validate → confirm → commit,
+blocking claims, displacement, ghosts, homecoming, cursor governance. **No new
+gesture code exists**, and none may be added: a difference between the two layers
+belongs in the Container's three answers (step, address, accept gate) or it is a
+bug. Every property that separates them is in the §2.6 table.
 
 - **Rack view**: a chassis is an ordinary tile. No bay strip. Its hover card
   gains `N of M bays used` and the occupant names, so the rack view still
   *answers* the capacity question without trying to *edit* it.
-- **Blade layer**: a view toggle, present only when the design's scope contains
+- **Chassis layer**: a view toggle, present only when the design's scope contains
   at least one parent device. Switching to it replaces the rack elevations with
   chassis elevations — each chassis a column, its bays numbered 1..N — and the
   palette filters itself to child device types.
@@ -533,7 +575,7 @@ card adds:
 - the occupant names (planned ones in their §3 state styling), so the rack view
   answers "what is in there / is there room" without becoming an editor.
 
-**Blade layer** — chassis laid out side by side, each a single column of bays
+**Chassis layer** — chassis laid out side by side, each a single column of bays
 numbered 1..N with the bay name as the row label. Tiles reuse the §3 state table
 (`existing` / `add` / `move_in` / `move_out_ghost` / `remove`) unchanged; there
 are no shadows and no full-depth hatching (a chassis column has no opposite
@@ -584,12 +626,23 @@ gains a fourth bucket, `bays`, processed **after** `front`/`rear`/`other`:
 - T-bay-7: power — chassis-wins, blade-roll-up, planned blade counted, removal
   stops drawing. **(done)**
 - T-bay-8: palette -> bay commits, the rack grid never accepts a blade, and a
-  planned chassis offers its bays. **(done, in-tile; to be re-pointed at the
-  blade layer)**
-- T-bay-9..: the blade layer — the §4 scenarios (§6) re-run with `Unit -> Bay`,
-  since the pipeline is shared: add, move within a chassis, move across chassis,
-  reject onto an occupied bay, ghost + homecoming, cancel. **(outstanding)**
-- T-bay-10: the rack view's chassis hover card reports occupancy and names.
-  **(outstanding)**
-- T-bay-11: the blade-layer toggle is absent when the design has no parent
-  device in scope. **(outstanding)**
+  planned chassis offers its bays. **(done)**
+- T-bay-9..: the chassis layer — the §4 scenarios re-run with `Unit -> Bay`:
+  add, cancel of a saved planned blade, move between bays (idempotency snapshot),
+  a freed bay accepting a replacement. **(done)**. Ghost + homecoming for blades
+  is still out of scope (§10.8).
+- T-bay-10: the rack view's chassis hover card reports occupancy and names, and
+  the read-only elevation reports them too. **(done)**
+- T-bay-11: the chassis-layer toggle is absent when the design has no parent
+  device in scope, and a parent type with **no bays at all** is not offered as a
+  chassis. **(done)**
+- T-bay-12: every chassis grid accepts a *rendered* blade tile — the drop gate
+  must decide by containment, not by a palette-only DOM marker. The cross-frame
+  e2e coverage drives moves through a JS shim that bypasses `acceptWidgets`
+  entirely, so this is asserted at the gate itself. **(done)**
+
+### 10.8 Still out of scope
+
+Blade homecoming, bay → bay reseat across *different* chassis, and the blade
+rename field. All three are cheaper after §2.6 than before it, which was part of
+the point.

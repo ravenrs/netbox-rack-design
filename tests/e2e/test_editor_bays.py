@@ -124,6 +124,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
         blades = cls._api("GET", "/api/dcim/device-types/?subdevice_role=child&limit=1")
         if not blades.get("results"):
             raise unittest.SkipTest("no child (blade) device type in this data")
+        cls.blade_type_id = blades["results"][0]["id"]
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-bays-{uuid.uuid4().hex[:8]}",
@@ -191,6 +192,27 @@ class EditorBayE2ETestCase(unittest.TestCase):
             "  const d = document.getElementById(id);"
             "  if (d) { d.style.display = 'none'; d.style.pointerEvents = 'none'; }"
             "})")
+
+    def _plan_a_blade_in_a_free_bay(self):
+        """Create a SAVED planned blade (kind=add with a placement id) in the
+        provisioned free bay, and remove it again afterwards.
+
+        Done through the API rather than by dropping and saving in the browser:
+        the suite intercepts save-layout, so the editor can never leave a
+        placement behind, and a test that skips when the data happens not to
+        contain one guards nothing.
+        """
+        placement = self._api("POST", "/api/plugins/rack-design/placements/", {
+            "design": self._design_id,
+            "kind": "add",
+            "device_type": self.blade_type_id,
+            "target_bay": self.bay_id,
+            "proposed_name": f"e2e-blade-{uuid.uuid4().hex[:6]}",
+        })
+        self.addCleanup(
+            lambda: self._api(
+                "DELETE", f"/api/plugins/rack-design/placements/{placement['id']}/"))
+        return placement
 
     def _open_palette(self):
         box = self.page.query_selector("#nbx-rd-palette-search")
@@ -334,6 +356,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
         u_position null, and chassisColumnPayload resolves a bay item's bay FROM
         that position, so the cancel was silently dropped before it was ever
         posted. The cancel must reach the server, carrying its bay target."""
+        self._plan_a_blade_in_a_free_bay()
         self._open(self.chassis_url)
         target = self.page.evaluate("""() => {
           for (const blk of document.querySelectorAll('.nbx-rd-chassis-block')) {
@@ -351,8 +374,8 @@ class EditorBayE2ETestCase(unittest.TestCase):
           }
           return null;
         }""")
-        if not target:
-            self.skipTest("no saved planned blade in this data")
+        self.assertIsNotNone(
+            target, "the provisioned planned blade must render as a saved add")
 
         self.page.click(
             f'.nbx-rd-chassis-block[data-rack-id="{target["rackId"]}"]'
