@@ -1032,15 +1032,29 @@ def project_chassis(design, entry):
                 "installed_device", "installed_device__device_type"):
             real_bays[bay.name] = bay
 
+    # A REMOVE takes no target at all (the model forbids one), so it can only be
+    # found through the DEVICE -- via the real bay that device sits in. Matching
+    # solely on target_bay/parent_placement made a saved blade removal invisible:
+    # it was stored correctly, rendered as nothing, and read to the user as
+    # "Save threw my removal away" (user 2026-08-26).
+    if device is not None:
+        blade_query = Q(target_bay__device=device) | Q(device__parent_bay__device=device)
+    else:
+        blade_query = Q(parent_placement=placement)
     blades = list(
-        design.placements.filter(
-            Q(target_bay__device=device) if device is not None
-            else Q(parent_placement=placement)
-        ).select_related("device", "device__device_type", "device_type", "target_bay")
+        design.placements.filter(blade_query).select_related(
+            "device", "device__device_type", "device_type", "target_bay")
     ) if (device is not None or placement is not None) else []
     by_name = {}
     for blade in blades:
-        name = blade.target_bay.name if blade.target_bay_id else blade.target_bay_name
+        if blade.target_bay_id:
+            name = blade.target_bay.name
+        elif blade.target_bay_name:
+            name = blade.target_bay_name
+        else:
+            # A removal: the bay it is being emptied OUT of.
+            real_bay = getattr(blade.device, "parent_bay", None) if blade.device_id else None
+            name = real_bay.name if real_bay is not None else ""
         if name:
             by_name[name] = blade
 

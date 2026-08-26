@@ -2017,7 +2017,16 @@
             // rack. Core forbids a child device a position and a face, and
             // forbids a non-child a device bay, so each is illegal in the other.
             accepts: function (el) {
-                return rdIsChildEl(el) === isChassis;
+                // A tile that ALREADY LIVES in a chassis column is a bay occupant,
+                // whatever markers it carries: containment is the fact, and
+                // data-subdevice-role is only the hint the palette stamps on rows
+                // that live nowhere yet. Judging a placed tile by that marker made
+                // every real blade unmovable -- the server renders no such
+                // attribute on a tile, so the destination column refused its own
+                // kind and the drag silently did nothing (user 2026-08-26).
+                var placed = el.closest && el.closest(".nbx-rd-chassis-block");
+                var isChild = placed ? true : rdIsChildEl(el);
+                return isChild === isChassis;
             },
 
             // ---- the save address -------------------------------------------

@@ -63,14 +63,14 @@
           {# ONE design-level Save: editor.js collects edits from EVERY rendered #}
           {# rack block and POSTs a single multi-rack payload.                   #}
           {% block rd_layer_switch %}
-          {# Blade layer (spec §10.3): only offered when the design's scope         #}
-          {# actually contains a chassis, so a deployment with no blade hardware    #}
+          {# Chassis layer (spec §10.3): only offered when the design's scope        #}
+          {# actually contains a chassis WITH BAYS, so a deployment with no such   #}
           {# never sees the feature.                                                #}
           {% if has_chassis_in_scope %}
           <a class="btn btn-outline-secondary btn-sm me-2" data-rd-layer-switch
-             href="{% url 'plugins:netbox_rack_design:design_blades' pk=object.pk %}"
-             title="{% trans 'Switch to the blade layer' %}">
-            <i class="mdi mdi-view-grid-outline" aria-hidden="true"></i> {% trans "Blades" %}
+             href="{% url 'plugins:netbox_rack_design:design_chassis' pk=object.pk %}"
+             title="{% trans 'Switch to the chassis layer' %}">
+            <i class="mdi mdi-view-grid-outline" aria-hidden="true"></i> {% trans "Chassis" %}
           </a>
           {% endif %}
           {% endblock rd_layer_switch %}
@@ -202,7 +202,8 @@
           </div>{# /section: device #}
 
           {# ===== Section: Racks (add-rack + design-racks) ===== #}
-          {# The third drawer section is the SCOPE panel. The blade layer overrides #}
+          {# The third drawer section is the SCOPE panel. The chassis layer         #}
+          {# overrides                                                             #}
           {# it with a Chassis panel -- same show/hide behaviour, chassis instead   #}
           {# of racks (spec §10.3).                                                 #}
           {% block rd_scope_panel %}

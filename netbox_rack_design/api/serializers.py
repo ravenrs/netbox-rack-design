@@ -209,7 +209,7 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     # ``parent_ref`` on the bay items. Neither is persisted.
     ref = serializers.CharField(required=False, allow_blank=True, max_length=64)
     parent_ref = serializers.CharField(required=False, allow_blank=True, max_length=64)
-    # The chassis placement when it ALREADY EXISTS (the blade layer only renders
+    # The chassis placement when it ALREADY EXISTS (the chassis layer only renders
     # chassis the design has saved, so it addresses them by pk rather than by a
     # client ref -- ``parent_ref`` is only needed for a chassis being created by
     # the very same submit).
@@ -346,7 +346,7 @@ class HiddenRackShowAllSerializer(serializers.Serializer):
 
 
 class HiddenChassisToggleSerializer(serializers.Serializer):
-    """Body for POST .../hidden-design-chassis/toggle/ (blade layer view state)."""
+    """Body for POST .../hidden-design-chassis/toggle/ (chassis layer view state)."""
 
     design_id = serializers.IntegerField()
     chassis_id = serializers.IntegerField()

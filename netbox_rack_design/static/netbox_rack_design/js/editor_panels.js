@@ -152,9 +152,9 @@
     })();
 
     // ========================================================================
-    // 2b. Blade layer: chassis visibility (spec §10.3)
+    // 2b. Chassis layer: chassis visibility (spec §10.3)
     // ------------------------------------------------------------------------
-    // The blade-layer twin of the Design-racks toggle below, and deliberately
+    // The chassis-layer twin of the Design-racks toggle below, and deliberately
     // the same contract: HIDDEN rows are stored server-side, the response is the
     // authority on the resulting set, and the canvas is re-synced from it with
     // no page reload. A PLANNED chassis has no device row, so it carries no

@@ -142,7 +142,7 @@
     opacity: 1;
 }
 
-/* ---- Blade layer (spec §10.3/§10.4) -------------------------------------- */
+/* ---- Chassis layer (spec §10.3/§10.4) -------------------------------------- */
 /* A chassis is rendered AS a rack: a labelled column of bays. Sized so a bay row
    is comfortably readable -- the whole point of moving bays out of the rack tile
    is that an 8- or 18-bay chassis has room for names here. */
@@ -244,13 +244,13 @@
     border-radius: 3px;
     background: var(--nbx-rack-slot-bg);
 }
-/* The blade layer's canvas needs a FLOOR, not just its content height.
+/* The chassis layer's canvas needs a FLOOR, not just its content height.
    A 4-bay chassis is only 88px tall, so without this the whole editor shell
    collapses to that -- and the drawer beside it (manufacturer select, search
    box, results list) is clipped to a sliver, which is exactly what a 4-bay
    design looked like. 16 bays is the floor: enough room for the palette to be
    usable no matter how small the chassis in scope are. */
-.nbx-rd-blade-scroll {
+.nbx-rd-chassis-scroll {
     align-items: flex-start;
     min-height: calc(16 * 22px + 44px);
     gap: 0.75rem;
@@ -288,7 +288,7 @@
 }
 /* A blade row in the palette: it cannot be racked, so it reads differently from
    the rack-mountable types it sits beside. */
-.nbx-rd-palette-blade .nbx-rd-palette-meta {
+.nbx-rd-palette-child .nbx-rd-palette-meta {
     font-style: italic;
 }
 

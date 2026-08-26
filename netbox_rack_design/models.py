@@ -731,10 +731,10 @@ class HiddenDesignRack(models.Model):
 
 class HiddenDesignChassis(models.Model):
     """
-    Per-user editor view-state for the BLADE LAYER (spec §10.3/§10.4): ``user``
+    Per-user editor view-state for the CHASSIS LAYER (spec §10.3/§10.4): ``user``
     has HIDDEN ``chassis`` while working on ``design``.
 
-    The blade layer is the rack workspace re-pointed at chassis -- a chassis IS a
+    The chassis layer is the rack workspace re-pointed at chassis -- a chassis IS a
     rack there, bays in place of units -- so its visibility control mirrors
     HiddenDesignRack exactly: HIDDEN rows are stored, so no rows means "every
     chassis in scope is visible", and the preference is personal, never touching

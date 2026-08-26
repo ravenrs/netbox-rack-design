@@ -2958,6 +2958,50 @@ class SaveLayoutBayTest(APITestCase):
         self.assertIsNone(p.target_position)
         self.assertEqual(p.target_face, "")
 
+    def test_a_blade_removed_in_the_same_submit_frees_its_bay(self):
+        """REGRESSION (user 2026-08-26): "putting one where a removed one was
+        doesn't work".
+
+        A blade the submit removes has vacated its bay, so a replacement may take
+        it -- exactly the rack rule. _compute_vacated_device_ids read only the
+        face buckets, so a bay freed in the same save still counted as occupied.
+        Worse, the set it produces is INJECTED into validation and wins over the
+        model's own fallback, so an already-saved removal was ignored too.
+        """
+        from dcim.models import Device
+
+        self._grant_all()
+        blade = Device.objects.create(
+            name="sitting-tenant", site=self.site, rack=self.racks[0], position=None,
+            device_type=self.blade_type, role=self.role,
+        )
+        self.bay.installed_device = blade
+        self.bay.save()
+
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [
+                {"kind": "remove", "device_id": blade.pk},
+                {"kind": "add", "device_type_id": self.blade_type.pk,
+                 "target_bay_id": self.bay.pk, "target_bay_name": "s1",
+                 "proposed_name": "replacement"},
+            ],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        self.assertTrue(
+            DesignPlacement.objects.filter(
+                design=self.design, kind=DesignPlacementKindChoices.KIND_REMOVE,
+                device=blade,
+            ).exists(),
+            "the removal must be recorded")
+        self.assertTrue(
+            DesignPlacement.objects.filter(
+                design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+                target_bay=self.bay, proposed_name="replacement",
+            ).exists(),
+            "the replacement must be allowed into the freed bay")
+
     def test_cancelling_a_planned_blade_deletes_it(self):
         self._grant_all()
         placement = DesignPlacement.objects.create(

@@ -166,7 +166,7 @@ def bay_occupants(bays):
     the name -- the planned state is NOT appended: it read as "(add)" noise
     after every planned blade and told the reader nothing the tile's own colour
     does not (user 2026-08-25). The rack view reports this; editing happens in
-    the blade layer.
+    the chassis layer.
     """
     out = []
     for index, bay in enumerate(bays or (), start=1):
@@ -176,6 +176,6 @@ def bay_occupants(bays):
         # Numbered like a rack unit, not named: bay names in the wild are a mix
         # of "slot3", "top-left" and "pci9", so the NUMBER is the only stable
         # identifier a reader can use. The real name stays on the bay row in the
-        # blade layer, where there is room for it.
+        # chassis layer, where there is room for it.
         out.append(f"Bay {index}: {label}")
     return ", ".join(out)

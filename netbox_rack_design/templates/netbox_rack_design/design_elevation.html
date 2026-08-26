@@ -28,14 +28,23 @@
     <div class="card">
       <h2 class="card-header">
         {% blocktrans with design=object.title %}Projected elevation: {{ design }}{% endblocktrans %}
-        {% if perms.netbox_rack_design.change_design %}
         <div class="card-actions">
+          {# Chassis elevation: offered on the same has-bays test the editor uses, #}
+          {# and to EVERYONE -- reading what sits in a bay needs no permission.    #}
+          {% if has_chassis_in_scope %}
+          <a href="{% url 'plugins:netbox_rack_design:design_chassis_elevation' pk=object.pk %}"
+             class="btn btn-outline-secondary btn-sm me-2"
+             title="{% trans 'Show the chassis bays' %}">
+            <i class="mdi mdi-view-grid-outline" aria-hidden="true"></i> {% trans "Chassis" %}
+          </a>
+          {% endif %}
+          {% if perms.netbox_rack_design.change_design %}
           <a href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=object.pk %}"
              class="btn btn-sm btn-warning">
             <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Open editor" %}
           </a>
+          {% endif %}
         </div>
-        {% endif %}
       </h2>
 
       {# Read-only root: scopes the static-grid init, the per-rack face toggles #}

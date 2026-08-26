@@ -1074,8 +1074,17 @@ class DesignViewSet(NetBoxModelViewSet):
         candidate_ids = set()
         # (device_id -> (u_position, face)) the payload asserts as "existing".
         existing_targets = {}
+        # (device_id -> bay pk) the payload asserts as "existing" in a bay.
+        existing_bays = {}
         for rack_data in data["racks"]:
-            for face_key in ("front", "rear", "other"):
+            # "bays" belongs here as much as the rack buckets: a blade the submit
+            # removes has vacated its bay, so another blade may take it. Leaving
+            # it out meant a bay freed in the SAME save still read as occupied and
+            # the replacement was rejected -- and because this injected set wins
+            # over the model's own fallback, an ALREADY SAVED removal was ignored
+            # too, so dropping into a freed bay never worked at all
+            # (user 2026-08-26).
+            for face_key in ("front", "rear", "other", "bays"):
                 for item in rack_data.get(face_key, []):
                     device_id = item.get("device_id")
                     if not device_id:
@@ -1083,6 +1092,9 @@ class DesignViewSet(NetBoxModelViewSet):
                     kind = item.get("kind")
                     if kind in ("move", "remove"):
                         candidate_ids.add(device_id)
+                    elif kind == "existing" and face_key == "bays":
+                        if item.get("target_bay_id"):
+                            existing_bays[device_id] = item["target_bay_id"]
                     elif kind == "existing":
                         pos = item.get("u_position")
                         face = "" if face_key == "other" else (item.get("face") or "")
@@ -1099,6 +1111,16 @@ class DesignViewSet(NetBoxModelViewSet):
                 real = (_norm_pos(dev.position), dev.face or "", dev.rack_id)
                 if (target_pos, target_face, target_rack_id) != real:
                     candidate_ids.add(dev.pk)
+        # The bay equivalent: a blade the payload asserts in a bay other than the
+        # one it physically sits in has vacated that one.
+        if existing_bays:
+            real_bay_by_device = dict(
+                DeviceBay.objects.filter(installed_device_id__in=existing_bays)
+                .values_list("installed_device_id", "pk")
+            )
+            for device_id, target_bay_id in existing_bays.items():
+                if real_bay_by_device.get(device_id) != target_bay_id:
+                    candidate_ids.add(device_id)
         return candidate_ids
 
     @staticmethod
