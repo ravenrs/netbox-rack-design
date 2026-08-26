@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.0] - 2026-08-26
+
+### Release Summary
+
+A chassis and a rack become one implementation. 0.19.0 shipped the chassis layer
+by giving a chassis its own copy of the rack's add / move / remove / cancel
+logic, and every one of the bugs fixed below lived in that copy rather than in
+the behaviour it duplicated. The editor, the save view and the projection are now
+written against a **Frame** — an enclosure — and its **Containers**, addressable
+grids of slots: a rack Frame has a front and a rear container, half-unit steps and
+full-depth pairing; a chassis Frame has one bay container, whole-bay steps and no
+pairing. Nothing downstream knows which it is holding, so a fix to rack behaviour
+is now automatically a fix to chassis behaviour. Also here: the layer is renamed
+for the container rather than its contents, a chassis column is offered only for a
+device that actually has bays, and bay occupancy is finally visible without the
+editor. The abstraction is written up in `docs/editor-behavior-spec.md` §2.6.
+
+### **Breaking Changes**
+
+- The chassis layer moved from `/plugins/rack-design/designs/<pk>/blades/` to
+  `/plugins/rack-design/designs/<pk>/chassis/`. The old path is gone; update any
+  bookmark or link. Nothing stored changes — no migration, no data conversion.
 
 ### Changed
 
