@@ -2881,6 +2881,83 @@ class SaveLayoutBayTest(APITestCase):
         self.client.post(self._url(), payload, format="json", **self.header)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
 
+    def test_moving_a_blade_between_bays_is_a_change_then_idempotent(self):
+        """A blade moved from bay s1 to bay s2 of the SAME chassis must persist,
+        and re-posting the result must report 304.
+
+        Both halves are guards on the container merge. A bay placement differs
+        from a rack one ONLY in its bay target -- kind, device, rack,
+        target_position (None) and target_face ("") are all identical either
+        side of the move -- so an idempotency snapshot that omits the bay fields
+        reads a real move as a no-op and silently keeps the old bay. And the bay
+        path historically had no snapshot at all, so an untouched round-trip
+        always reported "modified"; the merged path must return 304 like a rack.
+        """
+        self._grant_all()
+        bay2 = self.chassis.devicebays.get(name="s2")
+        placement = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.blade_type, target_rack=self.racks[0],
+            target_bay=self.bay, target_bay_name="s1", proposed_name="wanderer",
+        )
+
+        def post(bay):
+            return self.client.post(self._url(), {
+                "design_id": self.design.pk,
+                "racks": [{
+                    "rack_id": self.racks[0].pk,
+                    "bays": [{
+                        "kind": "add",
+                        "placement_id": placement.pk,
+                        "device_type_id": self.blade_type.pk,
+                        "target_bay_id": bay.pk,
+                        "target_bay_name": bay.name,
+                        "proposed_name": "wanderer",
+                    }],
+                }],
+            }, format="json", **self.header)
+
+        moved = post(bay2)
+        self.assertHttpStatus(moved, status.HTTP_200_OK)
+        placement.refresh_from_db()
+        self.assertEqual(placement.target_bay, bay2)
+        self.assertEqual(placement.target_bay_name, "s2")
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
+
+        again = post(bay2)
+        self.assertHttpStatus(again, status.HTTP_304_NOT_MODIFIED)
+
+    def test_the_0_19_0_bays_bucket_payload_still_works(self):
+        """The published REST contract must survive the container merge.
+
+        0.19.0 documented a per-rack ``bays`` bucket whose items address a bay by
+        target_bay_id / parent_placement_id. Internally those items now flow
+        through the same _reconcile_item as every rack item, so this posts the
+        LITERAL 0.19.0 shape -- no client should have to change.
+        """
+        self._grant_all()
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "front": [],
+            "rear": [],
+            "other": [],
+            "bays": [{
+                "kind": "add",
+                "device_type_id": self.blade_type.pk,
+                "target_bay_id": self.bay.pk,
+                "target_bay_name": "s1",
+                "proposed_name": "legacy-shape",
+            }],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        p = DesignPlacement.objects.get(design=self.design, proposed_name="legacy-shape")
+        self.assertEqual(p.kind, DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(p.target_bay, self.bay)
+        self.assertEqual(p.target_bay_name, "s1")
+        self.assertIsNone(p.target_position)
+        self.assertEqual(p.target_face, "")
+
     def test_cancelling_a_planned_blade_deletes_it(self):
         self._grant_all()
         placement = DesignPlacement.objects.create(

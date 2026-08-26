@@ -66,6 +66,79 @@ def _norm_pos(value):
     return None if value is None else float(value)
 
 
+class _RackSlotTarget:
+    """A slot on a rack face: the classic target (spec §2 RackFaceContainer)."""
+
+    is_bay = False
+
+    def __init__(self, rack, u_position, face):
+        self.rack = rack
+        self.u_position = u_position
+        self.face = face
+        self.fields = {
+            "target_rack": rack,
+            "target_position": u_position,
+            "target_face": face,
+            # A rack slot is not a bay: clear any bay target a matched placement
+            # still carries, or the row claims both and fails validation.
+            "target_bay": None,
+            "parent_placement": None,
+            "target_bay_name": "",
+        }
+
+    def at_rest(self, device, full_depth=False):
+        """The device already physically sits exactly here."""
+        if device is None or device.rack_id != self.rack.pk:
+            return False
+        if _norm_pos(device.position) != _norm_pos(self.u_position):
+            return False
+        # A tray target (u_position None) carries no face, and a full-depth
+        # device occupies both -- in neither case does the face decide.
+        if full_depth or self.u_position is None:
+            return True
+        return (device.face or "") == self.face
+
+
+class _BayTarget:
+    """A device bay: the chassis target (spec §2 ChassisContainer).
+
+    A child device may carry neither a rack position nor a face (core forbids
+    both), so the target is a real ``dcim.DeviceBay`` or -- when the chassis is
+    itself planned -- the chassis's own placement.
+    """
+
+    is_bay = True
+
+    def __init__(self, rack, target_bay, parent_placement, bay_name):
+        self.rack = rack
+        self.target_bay = target_bay
+        self.parent_placement = parent_placement
+        self.u_position = None
+        self.face = ""
+        self.fields = {
+            "target_rack": rack,
+            "target_position": None,
+            "target_face": "",
+            "target_bay": target_bay,
+            "parent_placement": parent_placement,
+            "target_bay_name": bay_name,
+        }
+
+    def at_rest(self, device, full_depth=False):
+        if device is None:
+            return False
+        if self.target_bay is None:
+            # A planned chassis has no real bays yet, so nothing can be at rest
+            # in one.
+            return False
+        from dcim.models import DeviceBay
+
+        real_bay_id = DeviceBay.objects.filter(
+            installed_device_id=device.pk
+        ).values_list("pk", flat=True).first()
+        return real_bay_id == self.target_bay.pk
+
+
 def _feed_dict(feed, source):
     """
     The uniform feed contract shared by the bind-to-feed picker
@@ -883,13 +956,16 @@ class DesignViewSet(NetBoxModelViewSet):
                         if ref and placement is not None:
                             ref_map[ref] = placement
 
-                    # Blades last: they may depend on a chassis created just above.
+                    # Bay items last: they may depend on a chassis created just
+                    # above. Same method as every other item -- only the TARGET
+                    # differs, and _resolve_target owns that difference.
                     for item in rack_data.get("bays", []):
                         device_id = item.get("device_id")
                         if device_id:
                             submitted_device_ids.add(device_id)
-                        self._reconcile_bay_item(
-                            design, rack, item, ref_map, errors, desired_placement_ids
+                        self._reconcile_item(
+                            design, rack, "bays", item, errors,
+                            desired_placement_ids, ref_map=ref_map,
                         )
 
                 if errors:
@@ -957,7 +1033,14 @@ class DesignViewSet(NetBoxModelViewSet):
 
     @staticmethod
     def _snapshot(placement):
-        """A comparable tuple of a placement's meaningful (mutable) fields."""
+        """A comparable tuple of a placement's meaningful (mutable) fields.
+
+        The BAY target belongs here as much as the rack one. Without it, a blade
+        moved from bay A to bay B of the same chassis snapshots identically --
+        same kind, device, rack, target_position None, target_face "" -- so the
+        idempotency guard would read a real move as a no-op, skip the write and
+        leave the placement pointing at the old bay.
+        """
         return (
             placement.kind,
             placement.device_id,
@@ -965,6 +1048,9 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.target_rack_id,
             _norm_pos(placement.target_position),
             placement.target_face or "",
+            placement.target_bay_id,
+            placement.parent_placement_id,
+            placement.target_bay_name or "",
             placement.device_role_id,
             placement.tenant_id,
             placement.proposed_name or "",
@@ -1137,80 +1223,42 @@ class DesignViewSet(NetBoxModelViewSet):
             return None
         return source_id
 
-    def _reconcile_bay_item(self, design, rack, item, ref_map, errors, desired_placement_ids):
+    def _resolve_target(self, design, rack, face_key, item, ref_map, errors):
         """
-        Map one desired BAY item (a blade in a chassis) to its DesignPlacement.
+        Where one item's placement POINTS -- the only thing that differs between
+        a rack slot and a device bay (spec §2: a Frame's containers).
 
-        Mirrors ``_reconcile_item`` but targets a device bay instead of a rack
-        unit: a child device may carry neither a position nor a face (core forbids
-        it), so the target is either a real ``dcim.DeviceBay`` or -- when the
-        chassis is itself planned in this submit -- the chassis's placement,
-        resolved from ``parent_ref`` through the map the caller just built.
+        Returns a target descriptor, or None with the error already appended:
+
+            fields      the model attributes to write onto the placement
+            at_rest(d)  True when device ``d`` already sits exactly here, so the
+                        design needs no placement for it at all
+
+        Everything else about reconciling an item -- add / move / remove /
+        existing / cancel, validation, the idempotency guard -- is shared, and
+        must stay that way: the two used to be separate methods and every rack
+        fix had to be re-proved against bays by hand.
         """
-        kind = item["kind"]
-        placement_id = item.get("placement_id")
-        bay_id = item.get("target_bay_id")
-        parent_ref = item.get("parent_ref")
-        bay_name = item.get("target_bay_name") or ""
-
-        def fail(detail):
+        def fail(detail, u_position=None):
             errors.append({
                 "rack_id": rack.pk,
-                "u_position": None,
+                "u_position": u_position,
                 "device_id": item.get("device_id"),
                 "detail": detail,
             })
 
-        # An "existing" bay item is the editor re-asserting a blade that is already
-        # installed. Mirrors the face buckets' contract (the client never decides
-        # whether something moved -- the server compares against reality): if the
-        # blade is still in the bay it really occupies, this is a no-op; if it is
-        # somewhere else, it is a MOVE. Deciding client-side would register a
-        # spurious move placement for every untouched blade on every save.
-        if kind == "existing":
-            device_id = item.get("device_id")
-            if not device_id:
-                return None
-            real_bay_id = DeviceBay.objects.filter(
-                installed_device_id=device_id
-            ).values_list("pk", flat=True).first()
-            if bay_id and real_bay_id == bay_id:
-                return None                      # genuinely untouched
-            if not bay_id and not parent_ref and not item.get("parent_placement_id"):
-                return None                      # nothing to compare against
-            kind = DesignPlacementKindChoices.KIND_MOVE
+        if face_key != "bays":
+            u_position = None if face_key == "other" else item.get("u_position")
+            face = "" if face_key == "other" else (item.get("face") or "")
+            return _RackSlotTarget(rack, u_position, face)
 
-        # A REMOVE needs no bay target at all: it is an ordinary removal of the
-        # blade device, and the model takes no target for a removal (models.py).
-        # It rides the bays bucket only because that is where the editor's bay
-        # layer emits it from.
-        if kind == DesignPlacementKindChoices.KIND_REMOVE:
-            if not item.get("device_id"):
-                fail("A blade removal requires a device_id.")
-                return None
-            placement = DesignPlacement.objects.filter(
-                design=design, device_id=item["device_id"],
-                kind=DesignPlacementKindChoices.KIND_REMOVE,
-            ).first() or DesignPlacement(
-                design=design, kind=DesignPlacementKindChoices.KIND_REMOVE,
-                device_id=item["device_id"],
-            )
-            try:
-                placement.full_clean()
-            except ValidationError as exc:
-                detail = "; ".join(
-                    f"{k}: {' '.join(str(m) for m in v)}"
-                    for k, v in exc.message_dict.items()
-                ) if hasattr(exc, "message_dict") else str(exc)
-                fail(detail)
-                return None
-            placement.save()
-            self._made_db_change = True
-            desired_placement_ids.add(placement.pk)
-            return placement
-
-        parent_placement = None
+        # ---- a bay: a real dcim.DeviceBay, or a chassis planned in THIS submit
+        bay_id = item.get("target_bay_id")
+        parent_ref = item.get("parent_ref")
+        bay_name = item.get("target_bay_name") or ""
         target_bay = None
+        parent_placement = None
+
         if bay_id:
             target_bay = DeviceBay.objects.filter(pk=bay_id).select_related("device").first()
             if target_bay is None:
@@ -1219,7 +1267,7 @@ class DesignViewSet(NetBoxModelViewSet):
             if not bay_name:
                 bay_name = target_bay.name
         elif parent_ref:
-            parent_placement = ref_map.get(parent_ref)
+            parent_placement = (ref_map or {}).get(parent_ref)
             if parent_placement is None:
                 fail(f"Unknown parent reference {parent_ref!r} for a bay placement.")
                 return None
@@ -1230,84 +1278,43 @@ class DesignViewSet(NetBoxModelViewSet):
             if parent_placement is None:
                 fail("Parent chassis placement does not exist in this design.")
                 return None
+        elif item.get("cancel") or item.get("kind") == DesignPlacementKindChoices.KIND_REMOVE:
+            # Neither needs a target. A cancel deletes by placement_id; a removal
+            # addresses the DEVICE, and the model takes no target for one at all
+            # -- it rides the bays bucket only because that is where the chassis
+            # layer emits it from.
+            return _BayTarget(rack, None, None, bay_name)
         else:
             fail("A bay item requires a target_bay_id, a parent_ref, or a "
                  "parent_placement_id.")
             return None
 
-        # An existing placement being re-asserted (reposition between bays, or
-        # cancel); otherwise a brand-new one.
-        placement = None
-        if placement_id:
-            placement = DesignPlacement.objects.filter(
-                pk=placement_id, design=design
-            ).first()
-            if placement is None:
-                fail("Placement does not exist.")
-                return None
+        return _BayTarget(rack, target_bay, parent_placement, bay_name)
 
-        if item.get("cancel") and placement is not None:
-            placement.delete()
-            # Flag the write, or save-layout reports 304 Not Modified and the
-            # editor believes the cancellation did not take.
-            self._made_db_change = True
-            return None
-
-        if placement is None:
-            placement = DesignPlacement(design=design, kind=kind)
-
-        placement.kind = kind
-        placement.target_rack = rack
-        placement.target_position = None
-        placement.target_face = ""
-        placement.target_bay = target_bay
-        placement.parent_placement = parent_placement
-        placement.target_bay_name = bay_name
-        if kind == DesignPlacementKindChoices.KIND_ADD:
-            placement.device = None
-            if item.get("device_type_id"):
-                placement.device_type_id = item["device_type_id"]
-            ok, device_role_id, tenant_id = self._resolve_add_refs(item, rack, None, errors)
-            if not ok:
-                return None
-            placement.device_role_id = device_role_id
-            placement.tenant_id = tenant_id
-        else:
-            placement.device_id = item.get("device_id")
-            placement.device_type = None
-        if "proposed_name" in item:
-            placement.proposed_name = item.get("proposed_name") or ""
-
-        placement._projected_vacated_device_ids = getattr(
-            self, "_batch_vacated_device_ids", None
-        )
-        try:
-            placement.full_clean()
-        except ValidationError as exc:
-            detail = "; ".join(
-                f"{k}: {' '.join(str(m) for m in v)}"
-                for k, v in exc.message_dict.items()
-            ) if hasattr(exc, "message_dict") else str(exc)
-            fail(detail)
-            return None
-        placement.save()
-        self._made_db_change = True
-        desired_placement_ids.add(placement.pk)
-        return placement
-
-    def _reconcile_item(self, design, rack, face_key, item, errors, desired_placement_ids):
+    def _reconcile_item(self, design, rack, face_key, item, errors,
+                        desired_placement_ids, ref_map=None):
         """
         Map one desired item to its DesignPlacement (or no placement), upserting
         and full_clean()-validating as needed. Appends to ``errors`` on failure
         and returns the placement (or None when no placement is needed).
+
+        ONE path for every container (spec §2). ``face_key`` says which:
+        "front"/"rear" are slots on a rack face, "other" is the tray, "bays" is a
+        device bay in a chassis. Only the TARGET differs -- resolved once by
+        _resolve_target -- and add/move/remove/existing/cancel, validation and
+        the idempotency guard are shared. They used to be two methods, and every
+        rack fix had to be re-proved against bays by hand.
         """
         kind = item["kind"]
         device_id = item.get("device_id")
         device_type_id = item.get("device_type_id")
         placement_id = item.get("placement_id")
-        # 'other' bucket means off-rack: no target position.
-        u_position = None if face_key == "other" else item.get("u_position")
-        face = "" if face_key == "other" else item.get("face") or ""
+
+        target = self._resolve_target(design, rack, face_key, item, ref_map, errors)
+        if target is None:
+            return None
+        u_position = target.u_position
+        face = target.face
 
         # Full-depth devices occupy BOTH faces, and slot validation ignores their
         # face entirely (models.py: rack_face is None for a full-depth type). This
@@ -1356,9 +1363,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     device_type=dt,
                     device_role_id=device_role_id,
                     tenant_id=tenant_id,
-                    target_rack=rack,
-                    target_position=u_position,
-                    target_face=face,
+                    **target.fields,
                     # Editor-chosen name (auto-filled from the naming engine and/or
                     # user-edited). Absent => "" (the model field is blank=True).
                     proposed_name=(item.get("proposed_name") or ""),
@@ -1436,9 +1441,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 if not ok:
                     return None
             before = self._snapshot(add)
-            add.target_rack = rack
-            add.target_position = u_position
-            add.target_face = face
+            for attr, value in target.fields.items():
+                setattr(add, attr, value)
             # Only overwrite role/tenant/name when the editor actually sent them,
             # so a plain reposition that omits the keys preserves the existing
             # values (and stays idempotent).
@@ -1533,14 +1537,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # device occupies both faces, so we ignore the face here — otherwise
             # its rear (or front) per-face copy would look "moved" and spawn a
             # spurious move placement on an untouched save.
-            at_real = (
-                device is not None
-                and device.rack_id == rack.pk
-                and _norm_pos(device.position) == _norm_pos(u_position)
-                # A tray target (u_position None) carries no face -- the real
-                # device's face (front/rear/blank) is irrelevant off-rack (§9.5).
-                and (full_depth or u_position is None or (device.face or "") == face)
-            )
+            at_real = target.at_rest(device, full_depth)
             if at_real:
                 if existing is not None:
                     existing.delete()
@@ -1550,6 +1547,8 @@ class DesignViewSet(NetBoxModelViewSet):
             kind = "move"
 
         if kind == "remove":
+            # A removal addresses the DEVICE: the model takes no target for one
+            # at all, in a rack or a bay alike.
             placement = existing or DesignPlacement(design=design)
             placement.kind = DesignPlacementKindChoices.KIND_REMOVE
             placement.device = device
@@ -1557,25 +1556,32 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.target_rack = None
             placement.target_position = None
             placement.target_face = ""
+            placement.target_bay = None
+            placement.parent_placement = None
+            placement.target_bay_name = ""
         else:  # move
             placement = existing or DesignPlacement(design=design)
             placement.kind = DesignPlacementKindChoices.KIND_MOVE
             placement.device = device
             placement.device_type = None
-            placement.target_rack = rack
-            placement.target_position = u_position
             # A full-depth device occupies BOTH faces, so a client may still POST
             # one copy per face (the editor no longer does -- buildRackPayload
             # skips the opposite-face tile). Both copies reconcile to the same
             # placement, and the second must not flip the stored face: buckets are
             # walked front -> rear, so the FIRST copy wins and the face survives.
+            # Captured BEFORE the target is applied, which writes the face too.
             already_written_this_pass = (
                 full_depth
                 and existing is not None
                 and existing.pk in desired_placement_ids
             )
-            if not already_written_this_pass:
-                placement.target_face = face
+            face_already_chosen = (
+                existing.target_face if already_written_this_pass else None
+            )
+            for attr, value in target.fields.items():
+                setattr(placement, attr, value)
+            if face_already_chosen is not None:
+                placement.target_face = face_already_chosen
 
         # Persist the editor-chosen proposed name when the editor sent one (the
         # §4a move dialog's keep-old / rename choice). Omitted => leave the
@@ -1743,9 +1749,9 @@ class DeviceTypePowerViewSet(viewsets.ViewSet):
 
 class HiddenDesignChassisViewSet(viewsets.ViewSet):
     """
-    User-scoped per-design CHASSIS visibility for the blade layer (spec §10.3).
+    User-scoped per-design CHASSIS visibility for the chassis layer (spec §10.3).
 
-    The blade-layer twin of HiddenDesignRackViewSet, and deliberately identical in
+    The chassis-layer twin of HiddenDesignRackViewSet, and deliberately identical in
     shape: HIDDEN rows are stored (so an empty set means "everything visible"),
     every query is filtered by ``request.user``, and the client never supplies a
     user. Hiding a chassis is personal view state -- it never touches the design.
