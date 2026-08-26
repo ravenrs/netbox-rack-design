@@ -191,10 +191,10 @@
         return;
     }
 
-    // The BLADE LAYER renders chassis as degenerate racks (spec §10.3). The
+    // The CHASSIS LAYER renders chassis as degenerate racks (spec §10.3). The
     // editor is otherwise identical, so this single flag carries the difference:
     // which device types the grids accept, and which the palette offers.
-    var isBladeLayer = !!root.querySelector('[data-rd-blade-layer="true"]');
+    var isChassisLayer = !!root.querySelector('[data-rd-chassis-layer="true"]');
 
     // ---- Shared context from the template ----------------------------------
     var saveUrl = root.getAttribute("data-save-url");
@@ -1533,11 +1533,11 @@
 
     // True when this element represents a CHILD device type -- a blade. Read from
     // the palette row's stamp, or from a placed tile's own marker.
-    function rdIsBladeEl(el) {
+    function rdIsChildEl(el) {
         if (!el) { return false; }
         return el.getAttribute("data-subdevice-role") === "child"
-            || el.classList.contains("nbx-rd-palette-blade")
-            || el.classList.contains("nbx-rd-blade");
+            || el.classList.contains("nbx-rd-palette-child")
+            || el.classList.contains("nbx-rd-child-device");
     }
 
     function rdMaxRow(host) {
@@ -1948,20 +1948,122 @@
     // hatch, face toggles, palette drops). Returns a small controller the shared
     // Save uses to build that rack's slice of the multi-rack payload.
     // ========================================================================
+    // ========================================================================
+    // Frame / Container (spec §2, §10.3) -- the ONE place that knows how a
+    // physical enclosure differs from another.
+    // ------------------------------------------------------------------------
+    // A FRAME is one enclosure. It owns one or more CONTAINERS (addressable
+    // grids of slots) and, for a rack, a tray:
+    //
+    //   rack     containers [front, rear]   tray yes   pairing yes (full-depth)
+    //   chassis  containers [bays]          tray no    pairing no
+    //
+    // Everything above this object -- add, move, remove, cancel, ghosts,
+    // blocking, homecoming -- is written against SLOTS and ADDRESSES and never
+    // against units or bays. That is the whole point: a rack fix is a chassis
+    // fix, because there is only one implementation.
+    //
+    // Before this existed, a chassis was a rack whose payload got TRANSLATED
+    // afterwards (chassisColumnPayload), and the translation re-derived a bay
+    // from u_position -- so an item with no position, i.e. a cancel, was
+    // silently dropped and the user's edit never reached the server
+    // (user 2026-08-26). An address is now produced ONCE, by whoever owns the
+    // slot, and can never go missing on the way out.
+    // ========================================================================
+    function makeFrame(block) {
+        var isChassis = !!block.getAttribute("data-chassis-key");
+        var uHeight = parseInt(block.getAttribute("data-u-height"), 10);
+        // Ascending slot numbering (bay 1 at the top). A rack numbers its units
+        // the other way up, from the floor.
+        var ascending = block.getAttribute("data-desc-units") === "true";
+        // The pk the SERVER must see. A chassis column's own id is synthetic
+        // (spec §10.3); the real rack is on data-real-rack-id.
+        var realRackId = parseInt(block.getAttribute("data-real-rack-id"), 10);
+        var chassisId = parseInt(block.getAttribute("data-chassis-id"), 10);
+        var chassisPlacement = parseInt(block.getAttribute("data-chassis-placement"), 10);
+        var bayNames = [];
+        var bayIds = [];
+        try { bayNames = JSON.parse(block.getAttribute("data-bay-names") || "[]"); }
+        catch (e) { bayNames = []; }
+        try { bayIds = JSON.parse(block.getAttribute("data-bay-ids") || "[]"); }
+        catch (e) { bayIds = []; }
+
+        return {
+            isChassis: isChassis,
+            // A frame with no pairing rule has no opposite face, so no full-depth
+            // shadow and no hatch can exist in it -- absent, not suppressed.
+            hasPairing: !isChassis,
+            hasTray: !isChassis,
+            serverRackId: !isNaN(realRackId) ? realRackId : parseInt(
+                block.getAttribute("data-rack-id"), 10),
+
+            // ---- geometry <-> slot (inverse of templatetags.slot_gs_y) ------
+            slotFromGeometry: function (gsY, gsH) {
+                var y = gsY / 2;
+                var h = gsH / 2;
+                if (ascending) { return y + 1; }
+                if (h > 1) { return uHeight - y - h + 1; }
+                return uHeight - y;
+            },
+            slotToGeometry: function (slot, gsH) {
+                if (ascending) { return slot * 2 - 2; }
+                if (gsH > 2) { return uHeight * 2 - slot * 2 - gsH + 2; }
+                return uHeight * 2 - slot * 2;
+            },
+
+            // ---- the drop gate (spec §10.3) ---------------------------------
+            // Container/type agreement, enforced BEFORE the gesture completes: a
+            // child type may only land in a chassis, a rack-mountable only in a
+            // rack. Core forbids a child device a position and a face, and
+            // forbids a non-child a device bay, so each is illegal in the other.
+            accepts: function (el) {
+                return rdIsChildEl(el) === isChassis;
+            },
+
+            // ---- the save address -------------------------------------------
+            // Which payload bucket this container's items belong to, and how one
+            // slot in it is addressed. These two are the ONLY things the save
+            // path needs to know about the difference between a rack and a
+            // chassis.
+            bucketFor: function (faceKey) {
+                return isChassis ? "bays" : faceKey;
+            },
+            addressForSlot: function (slot, faceKey) {
+                if (!isChassis) {
+                    // A rack slot is a unit on a face.
+                    return { u_position: slot, face: faceKey };
+                }
+                // A chassis slot is a bay. It carries NO face: a chassis has one
+                // container, and the server stores "" for a bay placement anyway.
+                var address = { target_bay_name: bayNames[slot - 1] || "" };
+                if (!isNaN(chassisId)) {
+                    // Real chassis: address the bay by its dcim pk.
+                    var bayId = bayIds[slot - 1];
+                    if (bayId) { address.target_bay_id = bayId; }
+                } else if (!isNaN(chassisPlacement)) {
+                    // Planned chassis: it is already a saved placement (the layer
+                    // only renders chassis the design has saved), so point at it.
+                    address.parent_placement_id = chassisPlacement;
+                }
+                return address;
+            },
+        };
+    }
+
     function initRack(block) {
         var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
-        var rackUHeight = parseInt(block.getAttribute("data-u-height"), 10);
-        var descUnits = block.getAttribute("data-desc-units") === "true";
+        // The one object that knows how THIS enclosure differs from another:
+        // slot geometry, what it accepts, and how a slot is addressed on save.
+        var frame = makeFrame(block);
 
         // ---- Hydrate this rack's widget payload (index -> widget) ----------
         var widgets = [];
-        // In the BLADE LAYER a "rack" is a chassis column whose id is synthetic
+        // In the CHASSIS LAYER a "rack" is a chassis column whose id is synthetic
         // (spec §10.3) -- the real rack lives on data-real-rack-id. Anything sent
         // to the SERVER must use the real one: the naming engine resolves a
         // dcim.Rack, and a chassis device pk is not one (which silently produced
         // unnamed blades -- the preview simply never resolved).
-        var realRackId = parseInt(block.getAttribute("data-real-rack-id"), 10);
-        var serverRackId = !isNaN(realRackId) ? realRackId : rackId;
+        var serverRackId = frame.serverRackId;
 
         var dataEl = document.getElementById("rd-editor-data-" + rackId);
         try {
@@ -2058,24 +2160,10 @@
 
         // ---- gs-y <-> u_position (inverse of templatetags/rack_design.slot_gs_y)
         function gsYToUPosition(gsY, gsH) {
-            var y = gsY / 2;
-            var uHeight = gsH / 2;
-            if (descUnits) {
-                return y + 1;
-            }
-            if (uHeight > 1) {
-                return rackUHeight - y - uHeight + 1;
-            }
-            return rackUHeight - y;
+            return frame.slotFromGeometry(gsY, gsH);
         }
         function uPositionToGsY(uPosition, gsH) {
-            if (descUnits) {
-                return uPosition * 2 - 2;
-            }
-            if (gsH > 2) {
-                return rackUHeight * 2 - uPosition * 2 - gsH + 2;
-            }
-            return rackUHeight * 2 - uPosition * 2;
+            return frame.slotToGeometry(uPosition, gsH);
         }
 
         // ---- Resolve this rack's three grid hosts --------------------------
@@ -2117,7 +2205,7 @@
                 // forbids a child device a rack position and a face, and forbids a
                 // non-child a device bay, so neither is a legal target for the
                 // other and the editor must never let the gesture complete.
-                if (rdIsBladeEl(el) !== isBladeLayer) { return false; }
+                if (!frame.accepts(el)) { return false; }
                 if (el.getAttribute && el.getAttribute("data-device-type-id") != null) {
                     return true;
                 }
@@ -4599,7 +4687,7 @@
 
         // ---- Build this rack's save payload --------------------------------
         function buildRackPayload() {
-            var buckets = { front: [], rear: [], other: [] };
+            var buckets = { front: [], rear: [], other: [], bays: [] };
             var seenPlacement = {};
 
             function pushItem(itemEl, faceKey) {
@@ -4619,13 +4707,14 @@
                 }
 
                 var isAdd = w.kind === "add";
+                // No u_position/face here: the ADDRESS is the frame's business,
+                // and a chassis item has neither. withAddress() below fills in
+                // whatever this frame's slots are addressed by.
                 var item = {
                     kind: null,
                     device_id: (w.device_id != null) ? w.device_id : null,
                     device_type_id: (w.device_type_id != null) ? w.device_type_id : null,
                     placement_id: placementId,
-                    u_position: null,
-                    face: "",
                 };
                 if (isAdd) {
                     if (w.device_role_id != null) { item.device_role_id = w.device_role_id; }
@@ -4666,16 +4755,44 @@
                     item.proposed_name = w.proposed_name;
                 }
 
+                // The slot this tile occupies, addressed by the frame -- a unit
+                // on a face for a rack, a bay for a chassis. Computed ONCE here
+                // and carried by every branch below, so no branch can emit an
+                // item the payload cannot place (that is what dropped cancelled
+                // bay adds before the Frame existed -- user 2026-08-26).
+                function withAddress(target) {
+                    if (faceKey === "other") {
+                        // The tray is a LIST, not a grid (spec §9.2): no slot, and
+                        // a rack item still says so explicitly.
+                        target.u_position = null;
+                        target.face = "";
+                        return target;
+                    }
+                    var gnode = itemEl.gridstackNode;
+                    var gY = (gnode && gnode.y != null)
+                        ? gnode.y : parseInt(itemEl.getAttribute("gs-y"), 10);
+                    var gH = (gnode && gnode.h != null)
+                        ? gnode.h : parseInt(itemEl.getAttribute("gs-h"), 10);
+                    var address = frame.addressForSlot(
+                        frame.slotFromGeometry(gY, gH), faceKey);
+                    Object.keys(address).forEach(function (k) { target[k] = address[k]; });
+                    return target;
+                }
+
                 if (st.removed && isAdd) {
                     item.kind = "add";
                     item.cancel = true;
-                    buckets[faceKey].push(item);
+                    buckets[frame.bucketFor(faceKey)].push(withAddress(item));
                     return;
                 }
 
                 if (st.removed && item.device_id != null) {
+                    // A removal addresses the DEVICE, not a slot: the model takes
+                    // no target for a removal at all, so it carries no address.
                     item.kind = "remove";
-                    buckets[faceKey].push(item);
+                    item.u_position = null;
+                    item.face = "";
+                    buckets[frame.bucketFor(faceKey)].push(item);
                     return;
                 }
 
@@ -4688,18 +4805,12 @@
                     // "move" here, or a real, never-touched tray device would
                     // register a spurious move placement on every save.
                     item.kind = isAdd ? "add" : "existing";
-                    buckets.other.push(item);
+                    buckets.other.push(withAddress(item));
                     return;
                 }
 
-                var node = itemEl.gridstackNode;
-                var gsY = (node && node.y != null) ? node.y : parseInt(itemEl.getAttribute("gs-y"), 10);
-                var gsH = (node && node.h != null) ? node.h : parseInt(itemEl.getAttribute("gs-h"), 10);
-                item.u_position = gsYToUPosition(gsY, gsH);
-                item.face = faceKey;
-
                 item.kind = isAdd ? "add" : "existing";
-                buckets[faceKey].push(item);
+                buckets[frame.bucketFor(faceKey)].push(withAddress(item));
             }
 
             function walkGrid(grid, faceKey) {
@@ -4745,12 +4856,16 @@
                 return target.ref;
             }
 
+            // rack_id is the SERVER's rack: for a chassis frame the block's own
+            // id is synthetic (spec §10.3). Previously this returned the synthetic
+            // id and a separate translation pass swapped it -- one more thing that
+            // could disagree with itself.
             return {
-                rack_id: rackId,
+                rack_id: frame.serverRackId,
                 front: buckets.front,
                 rear: buckets.rear,
                 other: buckets.other,
-                bays: rdBayItemsForRack(rackId, refForWidgetIndex),
+                bays: buckets.bays.concat(rdBayItemsForRack(rackId, refForWidgetIndex)),
             };
         }
 
@@ -5421,65 +5536,13 @@
     // one whole "U"). Everything else the server needs -- which real bay, or
     // which planned chassis -- is stamped on the block, so the translation is
     // pure lookup and initRack itself stays untouched.
-    function bladeColumnPayload(block, rackPayload) {
-        var bayNames = [];
-        try {
-            bayNames = JSON.parse(block.getAttribute("data-bay-names") || "[]");
-        } catch (e) { bayNames = []; }
-        var realRackId = parseInt(block.getAttribute("data-real-rack-id"), 10);
-        var chassisId = parseInt(block.getAttribute("data-chassis-id"), 10);
-        var chassisPlacement = parseInt(block.getAttribute("data-chassis-placement"), 10);
-        // Bay ids come from the BLOCK, parallel to the names: an empty bay renders
-        // no element (the striped enclosure behind the grid IS the empty slot), so
-        // a drop into one has nothing of its own to read an id from.
-        var bayIds = [];
-        try {
-            bayIds = JSON.parse(block.getAttribute("data-bay-ids") || "[]");
-        } catch (e) { bayIds = []; }
-
-        var bays = [];
-        (rackPayload.front || []).forEach(function (item) {
-            var index = Math.round(parseFloat(item.u_position));
-            var name = bayNames[index - 1];
-            if (!name) { return; }               // dropped outside the bay range
-            var out = {
-                kind: item.kind,
-                device_id: item.device_id,
-                device_type_id: item.device_type_id,
-                placement_id: item.placement_id,
-                target_bay_name: name,
-            };
-            if (item.proposed_name !== undefined) { out.proposed_name = item.proposed_name; }
-            if (item.cancel) { out.cancel = true; }
-            if (item.device_role_id != null) { out.device_role_id = item.device_role_id; }
-            if (item.tenant_id != null) { out.tenant_id = item.tenant_id; }
-            if (!isNaN(chassisId)) {
-                // Real chassis: address the bay by its dcim pk, looked up by the
-                // same index the tile landed on.
-                var bayId = bayIds[index - 1];
-                if (bayId) { out.target_bay_id = bayId; }
-            } else if (!isNaN(chassisPlacement)) {
-                // Planned chassis: it exists as a placement already (the layer only
-                // renders chassis the design has saved), so point at it directly --
-                // no client ref needed here, unlike a same-submit chassis add.
-                out.parent_placement_id = chassisPlacement;
-            }
-            bays.push(out);
-        });
-        return { rack_id: realRackId, bays: bays };
-    }
-
     function buildLayoutPayload() {
         var m = saveUrl ? saveUrl.match(/designs\/(\d+)\//) : null;
         var racks = [];
+        // No per-layer branch: every controller returns an already-addressed
+        // payload, because its Frame produced the addresses (spec §2).
         rackControllers.forEach(function (c) {
-            var payload = c.buildRackPayload();
-            var block = document.getElementById("rd-rack-" + payload.rack_id);
-            if (block && block.getAttribute("data-chassis-key")) {
-                racks.push(bladeColumnPayload(block, payload));
-                return;
-            }
-            racks.push(payload);
+            racks.push(c.buildRackPayload());
         });
         return { design_id: m ? parseInt(m[1], 10) : null, racks: racks };
     }
@@ -5601,10 +5664,10 @@
     // placement on that rack (the drop handler is wired per-rack in initRack).
     // No dcim.Device is ever created.
     (function setupPalette() {
-        // The BLADE LAYER (spec §10.3) filters the whole catalog to CHILD device
+        // The CHASSIS LAYER (spec §10.3) filters the whole catalog to CHILD device
         // types. Not a validation -- a filter: a rack-mountable type is never
         // offered as a blade in the first place, so the mistake cannot be made.
-        var subdeviceFilter = isBladeLayer ? "&subdevice_role=child" : "";
+        var subdeviceFilter = isChassisLayer ? "&subdevice_role=child" : "";
 
         var paletteEl = document.getElementById("nbx-rd-palette");
         var searchEl = document.getElementById("nbx-rd-palette-search");
@@ -5641,7 +5704,7 @@
                 subrole = dt.subdevice_role.value || dt.subdevice_role || "";
             }
             li.setAttribute("data-subdevice-role", subrole);
-            if (subrole === "child") { li.classList.add("nbx-rd-palette-blade"); }
+            if (subrole === "child") { li.classList.add("nbx-rd-palette-child"); }
             var manuf = (dt.manufacturer && (dt.manufacturer.name || dt.manufacturer.display)) || "";
             var model = dt.model || dt.display || ("type " + dt.id);
             var label = (manuf ? manuf + " " : "") + model;
@@ -5657,7 +5720,7 @@
             var meta = document.createElement("div");
             meta.className = "nbx-rd-palette-meta";
             meta.textContent = (manuf ? manuf + " · " : "")
-                + (subrole === "child" ? "blade · fits a device bay"
+                + (subrole === "child" ? "child · fits a device bay"
                    : (uHeight + "U" + (dt.is_full_depth ? " · full-depth" : "")
                       + (subrole === "parent" ? " · chassis" : "")));
             content.appendChild(model);
@@ -6831,7 +6894,7 @@
     };
 
     // ---- Layer switch with unsaved changes (spec §10.3) --------------------
-    // The rack view and the blade layer are separate pages, so switching is a
+    // The rack view and the chassis layer are separate pages, so switching is a
     // navigation and would drop unsaved edits. The browser's beforeunload guard
     // below catches that, but a bare "leave site?" is a poor answer when the
     // user's actual intent is "keep my work". Offer the three real choices.
