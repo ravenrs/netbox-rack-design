@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.2] - 2026-08-27
+
+### Release Summary
+
+A one-fix patch: a planned device could not be dragged into another rack. The
+gesture was refused at the destination's drop gate, which admitted only tiles
+carrying a real device — so the tile snapped back, silently, while the same drag
+inside its own rack worked.
+
+### Fixed
+
+- **A planned device can be moved into another rack.** Dragging a newly added
+  tile to a different rack did nothing: the destination rack's drop gate admits
+  only tiles carrying a real device, so a planned add was refused, snapped back,
+  and left no trace in the console or the payload — while moving it inside its
+  own rack worked, which made the failure look arbitrary. A planned add is now
+  adopted like any other tile, and it is the simplest cross-rack case there is:
+  nothing physical stays behind, so there is no origin ghost, no homecoming and
+  no rename prompt, and the placement keeps its role, tenant, full-depth flag and
+  the name it was given. The same gesture works one layer down: a planned blade
+  now moves between chassis columns, with its bay re-addressed by the destination
+  column.
+
 ## [0.20.1] - 2026-08-27
 
 ### Release Summary
