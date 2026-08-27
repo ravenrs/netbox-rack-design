@@ -2184,7 +2184,7 @@
         // rack block: the basis of a cross-rack move. Passive tiles are never
         // adopted — move-out ghosts, the full-depth opposite-face hatch, tiles
         // flagged for removal, and temp ghosts all stay put on their own rack.
-        function isForeignRealTile(el) {
+        function isForeignMovableTile(el) {
             if (!el || !el.classList) { return false; }
             if (!el.closest || !el.closest(".nbx-rd-rack-block")) { return false; }
             if (el.closest(".nbx-rd-rack-block") === block) { return false; }
@@ -2192,8 +2192,15 @@
             if (el.classList.contains("nbx-rd-state-move_out_ghost")) { return false; }
             if (el.classList.contains("nbx-rd-opposite")) { return false; }
             if (el.classList.contains("nbx-rd-state-remove")) { return false; }
+            // A PLANNED add travels between racks too (user 2026-08-27: "I just
+            // cannot move a new device into another rack"). It is the simplest
+            // cross-rack case there is -- nothing physical stays behind, so there
+            // is no origin ghost, no homecoming and no rename dialog; the planned
+            // placement simply names a different rack. Refusing it here was the
+            // whole reason the gesture died silently at the destination's gate.
             return el.classList.contains("nbx-rd-state-existing")
-                || el.classList.contains("nbx-rd-state-move_in");
+                || el.classList.contains("nbx-rd-state-move_in")
+                || el.classList.contains("nbx-rd-state-add");
         }
 
         // Accept drops onto THIS rack's grids: a palette/quick-access drag source
@@ -2224,7 +2231,7 @@
                 if (el.closest && el.closest(".nbx-rd-rack-block") === block) {
                     return true;
                 }
-                return isForeignRealTile(el);
+                return isForeignMovableTile(el);
             };
         }
 
@@ -3568,9 +3575,16 @@
             // origin ghost). A non-eligible drag clears it. The descriptor records
             // the device's identity and its ORIGINAL (this-rack) U/face.
             var st = state[idx];
-            if (st && st.widget && st.widget.device_id != null
-                && !st.widget.opposite_face && !st.removed
-                && (st.widget.kind === "existing" || st.widget.kind === "move_in")) {
+            // A planned add carries no device, so none of the identity-based
+            // machinery below (origin ghost, homecoming, multi-hop chain) applies
+            // to it -- but it is still a tile the user may carry into another
+            // rack, and without a descriptor the destination has nothing to adopt.
+            var plannedAdd = !!(st && st.widget && st.widget.kind === "add"
+                && st.widget.device_id == null
+                && !st.widget.opposite_face && !st.removed);
+            if (st && st.widget && !st.widget.opposite_face && !st.removed
+                && (plannedAdd || (st.widget.device_id != null
+                    && (st.widget.kind === "existing" || st.widget.kind === "move_in")))) {
                 var w = st.widget;
                 // The TRUE origin (home rack + real slot) the device should snap
                 // back to on cancel.
@@ -3605,7 +3619,12 @@
                 tileInFlight = {
                     sourceRackId: rackId,
                     widgetIndex: idx,
-                    device_id: w.device_id,
+                    // The source widget itself, so an adopted PLANNED add keeps
+                    // every field it was created with (role, tenant, full depth,
+                    // the name the user typed) instead of a hand-copied subset
+                    // that silently drifts as the add gains fields.
+                    srcWidget: w,
+                    device_id: (w.device_id != null) ? w.device_id : null,
                     placement_id: (w.placement_id != null) ? w.placement_id : null,
                     device_type_id: (w.device_type_id != null) ? w.device_type_id : null,
                     kind: w.kind,
@@ -3690,9 +3709,11 @@
                 // every homeInto (see restoreTile/restoreFromGhost), so this is the
                 // precise gate for "this addition is ours, not the user's".
                 if (refreshing) { return; }
-                // A foreign real-device tile just landed here = a cross-rack move.
-                if (!tileInFlight || tileInFlight.sourceRackId === rackId
-                    || tileInFlight.device_id == null) { return; }
+                // A foreign tile just landed here = a cross-rack move. A planned
+                // add has no device_id and is adopted all the same (see
+                // isForeignMovableTile); anything else without one is not ours.
+                if (!tileInFlight || tileInFlight.sourceRackId === rackId) { return; }
+                if (tileInFlight.device_id == null && tileInFlight.kind !== "add") { return; }
                 (items || []).forEach(function (node) {
                     var el = node && node.el;
                     if (!el) { return; }
@@ -3876,6 +3897,39 @@
             if (!d) { return; }
             var face = faceOfItem(el);   // 'front' | 'rear' ('' tray never adopts)
             var newIdx = state.length;
+            // A PLANNED add changing racks is not a move of anything real: no
+            // device exists to leave a ghost behind, there is no home to come
+            // back to, and the §4a rename dialog has nothing to ask about (the
+            // name is the one the user is still editing). So the entry arrives
+            // as the same `add` it was, carrying every field the source built,
+            // and only its face changes.
+            if (d.kind === "add") {
+                var addWidget = {};
+                Object.keys(d.srcWidget || {}).forEach(function (k) {
+                    addWidget[k] = d.srcWidget[k];
+                });
+                addWidget.face = face;
+                state.push({
+                    widget: addWidget,
+                    origUPosition: null,
+                    origFace: face,
+                    removed: false,
+                    shadowEl: null,
+                    crossRack: true,
+                    srcRackId: d.sourceRackId,
+                    srcPreDragGsY: d.preDragGsY,
+                    srcPreDragFace: d.preDragFace,
+                    displaces: [],
+                });
+                el.setAttribute("data-widget-index", newIdx);
+                el.classList.add("nbx-rd-dirty");
+                markDirty();
+                rdTrace("adopt.add", {
+                    label: addWidget.label, newIdx: newIdx, destRackId: rackId,
+                    face: face, srcRackId: d.sourceRackId,
+                });
+                return;
+            }
             var widget = {
                 kind: "move_in",
                 device_id: d.device_id,
@@ -4105,11 +4159,20 @@
                     if (el.getAttribute("data-rd-temp-ghost")) { return; }
                     if (el.getAttribute("data-rd-derived-opp")) { return; }
                     if (el.classList.contains("nbx-rd-state-move_out_ghost")) { return; }
-                    var s = state[parseInt(el.getAttribute("data-widget-index"), 10)];
-                    if (s && s.widget && !s.widget.opposite_face
-                        && s.widget.device_id === d.device_id) {
-                        stillHere = true;
+                    var elIdx = parseInt(el.getAttribute("data-widget-index"), 10);
+                    var s = state[elIdx];
+                    if (!s || !s.widget || s.widget.opposite_face) { return; }
+                    // Departure is normally decided by DEVICE IDENTITY. A planned
+                    // add has no device, and `null === null` would make every
+                    // OTHER planned add in this rack answer "still here" -- so the
+                    // rack would keep a state entry for a tile that left, and the
+                    // save would post it from both racks. For a device-less tile
+                    // the entry itself is the identity.
+                    if (d.device_id == null) {
+                        if (elIdx === d.widgetIndex) { stillHere = true; }
+                        return;
                     }
+                    if (s.widget.device_id === d.device_id) { stillHere = true; }
                 });
                 if (stillHere) { return; }   // within-rack move: refreshGhosts owns it
                 // The device's body genuinely left this rack (for another

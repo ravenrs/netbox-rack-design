@@ -1024,6 +1024,44 @@ class SaveLayoutTest(APITestCase):
         self.assertEqual(self.devices[0].rack_id, rack_a.pk)
         self.assertEqual(float(self.devices[0].position), 1.0)
 
+    def test_a_saved_planned_add_can_change_racks(self):
+        """The server half of "move a new device to another rack" (spec §4.6).
+
+        Once saved, a planned add has a placement id, and carrying its tile into
+        another rack re-posts that same item under the OTHER rack. It must
+        retarget the existing placement rather than leave one behind in the old
+        rack or create a second one -- there is no device to move, so the plan
+        simply names a different rack now.
+        """
+        self._grant_all()
+        rack_a, rack_b = self.racks[0], self.racks[1]
+        add = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=rack_a,
+            target_position=Decimal("5.0"), target_face="front",
+            proposed_name="planned-1",
+        )
+        payload = {"design_id": self.design.pk, "racks": [
+            {"rack_id": rack_a.pk, "front": [], "rear": [], "other": []},
+            {"rack_id": rack_b.pk, "front": [{
+                "kind": "add", "placement_id": add.pk,
+                "device_type_id": self.device_type.pk,
+                "u_position": "12.0", "face": "front",
+                "proposed_name": "planned-1",
+            }], "rear": [], "other": []},
+        ]}
+        r = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+
+        self.assertEqual(
+            DesignPlacement.objects.filter(
+                design=self.design, kind=DesignPlacementKindChoices.KIND_ADD).count(),
+            1, "the add must be retargeted, not duplicated")
+        add.refresh_from_db()
+        self.assertEqual(add.target_rack_id, rack_b.pk)
+        self.assertEqual(float(add.target_position), 12.0)
+        self.assertEqual(add.target_face, "front")
+
     def test_multi_rack_save_is_idempotent_on_resubmit(self):
         """Re-POSTing the same two-rack layout makes no duplicate / spurious change."""
         self._grant_all()

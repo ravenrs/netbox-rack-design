@@ -319,6 +319,14 @@ Expected outcome:
 ### 4.6 Cross-rack move
 
 - Same as 4.4/4.5 but origin Rack keeps the Ghost, destination Rack gains D.
+- **A PLANNED ADD crosses Frames too**, and is the simplest case there is: no
+  hardware stays behind, so there is no Ghost, no homecoming and no §4a rename —
+  the planned placement simply names a different Frame, keeping the role, tenant,
+  full-depth flag and the name the user typed. It is one gesture at both levels
+  (§2.6): rack → rack, and chassis column → chassis column for a planned blade,
+  whose address is re-derived by the DESTINATION Container. Refusing a
+  device-less tile at the destination's drop gate is what made this look broken —
+  the tile snapped back with nothing logged (user 2026-08-27).
 - Moving D back to its origin rack+units later must fully clear the Ghost and restore
   the original name/state — no stale "wrong name" shadow (bug #11). This falls out of
   ownership: the Ghost is D's `originGhost`, so when D returns, D destroys it. There
@@ -643,6 +651,9 @@ gains a fourth bucket, `bays`, processed **after** `front`/`rear`/`other`:
 
 ### 10.8 Still out of scope
 
-Blade homecoming, bay → bay reseat across *different* chassis, and the blade
-rename field. All three are cheaper after §2.6 than before it, which was part of
-the point.
+Blade homecoming and the blade rename field. Bay → bay reseat across different
+chassis left this list on 2026-08-27 for a PLANNED blade, which now travels
+between columns like any other planned add (§4.6); moving a REAL blade between
+chassis still is not offered, because that needs the ghost/homecoming machinery
+a device-less tile does without. Both remaining items are cheaper after §2.6 than
+before it, which was part of the point.
