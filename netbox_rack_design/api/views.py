@@ -940,6 +940,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     for face_key in ("front", "rear", "other"):
                         for item in rack_data.get(face_key, []):
                             items.append((face_key, item))
+                    items = self._frees_first(items)
 
                     # ref -> placement, so a blade in the "bays" bucket below can
                     # point at a chassis this same submit is creating (the chassis
@@ -959,7 +960,9 @@ class DesignViewSet(NetBoxModelViewSet):
                     # Bay items last: they may depend on a chassis created just
                     # above. Same method as every other item -- only the TARGET
                     # differs, and _resolve_target owns that difference.
-                    for item in rack_data.get("bays", []):
+                    for _, item in self._frees_first(
+                        [("bays", it) for it in rack_data.get("bays", [])]
+                    ):
                         device_id = item.get("device_id")
                         if device_id:
                             submitted_device_ids.add(device_id)
@@ -1059,6 +1062,28 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.planned_power_feed_id,
             placement.power_source_device_id,
         )
+
+    @staticmethod
+    @staticmethod
+    def _frees_first(items):
+        """Order a rack's items so the ones that FREE a slot are written first.
+
+        A cancel deletes its placement; every other kind writes one. The editor
+        replays cancelled adds at the END of their bucket (their tiles are gone
+        from the grid, so they are appended from a capture), which means a bay
+        re-filled in the same submit was written while the cancelled placement
+        still held it -- and a device bay is the one target with a UNIQUE
+        constraint per design, so the save died on
+        ``unique_design_target_bay`` / ``unique_design_planned_bay`` instead of
+        simply replacing the occupant.
+
+        Ordering here rather than in the editor on purpose: the constraint is
+        the server's, the payload order is a client detail no contract promises,
+        and this way ANY client that cancels and re-fills in one submit is
+        correct. Stable, so items that neither free nor compete keep the order
+        they arrived in.
+        """
+        return sorted(items, key=lambda pair: 0 if pair[1].get("cancel") else 1)
 
     @staticmethod
     def _compute_vacated_device_ids(data):
