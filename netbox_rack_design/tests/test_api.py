@@ -1,5 +1,7 @@
 """REST API tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
+from decimal import Decimal
+
 from dcim.choices import PowerFeedPhaseChoices
 from dcim.models import (
     Cable,
@@ -3001,6 +3003,86 @@ class SaveLayoutBayTest(APITestCase):
                 target_bay=self.bay, proposed_name="replacement",
             ).exists(),
             "the replacement must be allowed into the freed bay")
+
+    def test_refilling_a_bay_cancelled_in_the_same_submit(self):
+        """REGRESSION (user 2026-08-27, staging): removing planned blades and
+        dropping new ones into the same bays answered 400 with
+        "unique_design_planned_bay is violated".
+
+        A device bay is the one target with a UNIQUE constraint per design, and
+        the editor replays a cancelled add at the END of its bucket -- the tile
+        is gone from the grid, so it is appended from the capture taken when the
+        user clicked x. The replacement was therefore written while the
+        cancelled placement still claimed the bay. Order is decided server-side
+        now: whatever frees a slot is written first.
+
+        Posted in the order the EDITOR posts it (add first, cancel last), or the
+        test proves nothing.
+        """
+        self._grant_all()
+        doomed = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.blade_type, target_rack=self.racks[0],
+            target_bay=self.bay, target_bay_name="s1", proposed_name="old-blade",
+        )
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [
+                {"kind": "add", "device_type_id": self.blade_type.pk,
+                 "target_bay_id": self.bay.pk, "target_bay_name": "s1",
+                 "proposed_name": "new-blade"},
+                {"kind": "add", "placement_id": doomed.pk,
+                 "target_bay_id": self.bay.pk, "cancel": True},
+            ],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        self.assertFalse(
+            DesignPlacement.objects.filter(pk=doomed.pk).exists(),
+            "the cancelled blade must be gone")
+        self.assertEqual(
+            list(DesignPlacement.objects.filter(
+                design=self.design, target_bay=self.bay,
+            ).values_list("proposed_name", flat=True)),
+            ["new-blade"],
+            "the bay must hold exactly the replacement")
+
+    def test_refilling_a_planned_chassis_bay_cancelled_in_the_same_submit(self):
+        """The same collision on the OTHER bay constraint: a chassis planned by
+        an earlier save, whose bays are addressed by name through
+        ``parent_placement`` rather than by a real bay id."""
+        self._grant_all()
+        chassis = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.chassis_type, target_rack=self.racks[0],
+            target_position=Decimal("10.0"), target_face="front",
+            proposed_name="planned-chassis",
+        )
+        doomed = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.blade_type, target_rack=self.racks[0],
+            parent_placement=chassis, target_bay_name="s1",
+            proposed_name="old-blade",
+        )
+        payload = {"design_id": self.design.pk, "racks": [{
+            "rack_id": self.racks[0].pk,
+            "bays": [
+                {"kind": "add", "device_type_id": self.blade_type.pk,
+                 "parent_placement_id": chassis.pk, "target_bay_name": "s1",
+                 "proposed_name": "new-blade"},
+                {"kind": "add", "placement_id": doomed.pk,
+                 "parent_placement_id": chassis.pk, "target_bay_name": "s1",
+                 "cancel": True},
+            ],
+        }]}
+        r = self.client.post(self._url(), payload, format="json", **self.header)
+        self.assertHttpStatus(r, status.HTTP_200_OK)
+        self.assertFalse(DesignPlacement.objects.filter(pk=doomed.pk).exists())
+        self.assertEqual(
+            list(DesignPlacement.objects.filter(
+                design=self.design, parent_placement=chassis, target_bay_name="s1",
+            ).values_list("proposed_name", flat=True)),
+            ["new-blade"])
 
     def test_cancelling_a_planned_blade_deletes_it(self):
         self._grant_all()
