@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-08-27
+
+### Release Summary
+
+A one-fix patch for a save that could not complete. Removing planned blades and
+dropping new ones into the same bays was rejected with
+`unique_design_planned_bay is violated`, because the replacement was written
+before the cancelled occupant was deleted.
+
+### Fixed
+
+- **Re-filling a bay freed in the same save no longer fails with a constraint
+  violation.** A device bay is the only placement target carrying a per-design
+  UNIQUE constraint, and the editor replays a cancelled add at the end of its
+  bucket — the tile is gone from the grid, so it is appended from the capture
+  taken when the × was clicked. The replacement therefore reached the database
+  while the cancelled placement still claimed the bay, and the whole save was
+  rejected instead of the bay changing hands. Items that free a slot are now
+  written before items that claim one, decided server-side so that any client
+  cancelling and re-filling in one submit is correct, and applied to every
+  bucket rather than as a bay special case.
+
 ## [0.20.0] - 2026-08-26
 
 ### Release Summary
