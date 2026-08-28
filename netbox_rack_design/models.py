@@ -26,6 +26,7 @@ __all__ = (
     "DesignPowerFeed",
     "DesignRackPower",
     "FavoriteDeviceType",
+    "FavoriteSet",
     "HiddenDesignRack",
     "HiddenDesignChassis",
 )
@@ -644,10 +645,79 @@ class DesignPlacement(NetBoxModel):
         )
 
 
+class FavoriteSet(models.Model):
+    """
+    A NAMED set of starred device types belonging to one user.
+
+    One flat favorites list served a single way of working; people plan racks in
+    modes -- a server build pulls different types than a network build -- and
+    kept re-starring (user request 2026-08-28). A user has as many sets as they
+    like ("Default", "for server", "for network"), each with its own membership,
+    and the editor works within one selected set at a time.
+
+    ``DEFAULT_NAME`` is the set every user starts with. It is not privileged:
+    it can be renamed or deleted like any other, and is simply re-created empty
+    if a user ends up with no sets at all.
+
+    Deliberately a plain ``django.db.models.Model`` (NOT a NetBoxModel), for the
+    same reason as the favorites it holds: a personal UI preference must not
+    write ObjectChange rows, index for search, or carry custom fields/tags.
+    """
+
+    DEFAULT_NAME = "Default"
+
+    user = models.ForeignKey(
+        to=settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="rack_design_favorite_sets",
+    )
+    name = models.CharField(max_length=100)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("user", "name")
+        verbose_name = "favorite set"
+        verbose_name_plural = "favorite sets"
+        constraints = [
+            # Names are the user's handle on their sets, so they must be unique
+            # per user -- and only per user: two people may both have "Default".
+            models.UniqueConstraint(
+                fields=("user", "name"),
+                name="%(app_label)s_%(class)s_unique_user_name",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user}: {self.name}"
+
+    @classmethod
+    def default_for(cls, user):
+        """The user's default set, created on first use.
+
+        Every entry point needs "the set to work in when none was chosen", and a
+        user who has never starred anything has no rows at all -- so this both
+        picks and provisions. An existing set named ``DEFAULT_NAME`` wins;
+        otherwise the user's first set by name; otherwise a fresh one.
+        """
+        existing = cls.objects.filter(user=user, name=cls.DEFAULT_NAME).first()
+        if existing is not None:
+            return existing
+        first = cls.objects.filter(user=user).order_by("name").first()
+        if first is not None:
+            return first
+        return cls.objects.create(user=user, name=cls.DEFAULT_NAME)
+
+
 class FavoriteDeviceType(models.Model):
     """
     A per-user UI preference: a device type the user has "starred" in the
     catalog palette, surfaced for quick access.
+
+    Membership is per SET (:class:`FavoriteSet`), so the same device type can be
+    starred in "for server" and "for network" at once -- which is why the
+    uniqueness is (set, device_type) and not (user, device_type). ``user`` is
+    kept alongside the set so every query in the user-scoped API can filter on
+    the requesting user directly, without joining.
 
     Deliberately a plain ``django.db.models.Model`` (NOT a NetBoxModel): starring
     is a transient personal preference, so it must NOT carry change logging,
@@ -660,6 +730,11 @@ class FavoriteDeviceType(models.Model):
         on_delete=models.CASCADE,
         related_name="rack_design_favorite_device_types",
     )
+    favorite_set = models.ForeignKey(
+        to="netbox_rack_design.FavoriteSet",
+        on_delete=models.CASCADE,
+        related_name="favorites",
+    )
     device_type = models.ForeignKey(
         to="dcim.DeviceType",
         on_delete=models.CASCADE,
@@ -668,18 +743,18 @@ class FavoriteDeviceType(models.Model):
     created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ("user", "device_type")
+        ordering = ("user", "favorite_set", "device_type")
         verbose_name = "favorite device type"
         verbose_name_plural = "favorite device types"
         constraints = [
             models.UniqueConstraint(
-                fields=("user", "device_type"),
-                name="%(app_label)s_%(class)s_unique_user_device_type",
+                fields=("favorite_set", "device_type"),
+                name="%(app_label)s_%(class)s_unique_set_device_type",
             ),
         ]
 
     def __str__(self):
-        return f"{self.user}: {self.device_type}"
+        return f"{self.user}: {self.device_type} ({self.favorite_set.name})"
 
 
 class HiddenDesignRack(models.Model):
@@ -777,7 +852,7 @@ class HiddenDesignChassis(models.Model):
         return f"{self.user}: {self.design} hides {self.chassis}"
 
 
-class DesignPowerFeed(models.Model):
+class DesignPowerFeed(NetBoxModel):
     """
     A PLANNED power feed for one rack in one design
     (docs/pdu-distribution-spec.md §6.1). A real PDU sizes its breaker from the
@@ -788,10 +863,14 @@ class DesignPowerFeed(models.Model):
     planned feed through the same attributes -- the distribution engine never
     branches on real-vs-planned.
 
-    Plain ``models.Model`` (like DesignRackPower): planning scratch data, not a
-    change-logged/searchable object. Read-only w.r.t. dcim; nothing is written to
-    a real ``PowerFeed``.
+    A ``NetBoxModel`` (unlike DesignRackPower): a planned feed is design data a
+    team reads, edits and deletes on its own -- it needed a list view, a detail
+    page and a delete button of its own (user 2026-08-28), which is exactly what
+    the generic views give a NetBoxModel. Read-only w.r.t. dcim; nothing is ever
+    written to a real ``PowerFeed``.
     """
+
+    clone_fields = ("design", "rack", "voltage", "amperage", "phase", "supply")
 
     design = models.ForeignKey(
         to="netbox_rack_design.Design",
@@ -820,8 +899,8 @@ class DesignPowerFeed(models.Model):
 
     class Meta:
         ordering = ("design", "rack", "name")
-        verbose_name = "design power feed"
-        verbose_name_plural = "design power feeds"
+        verbose_name = "planned power feed"
+        verbose_name_plural = "planned power feeds"
         constraints = [
             models.UniqueConstraint(
                 fields=("design", "rack", "name"),
@@ -830,7 +909,39 @@ class DesignPowerFeed(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.design}: {self.name} ({self.rack})"
+        # Deliberately FK-free: GraphQL (and any partial-field fetch) builds
+        # instances without the related columns loaded, and reaching for
+        # ``self.design`` there raises instead of rendering a label. The design
+        # and rack are separate columns everywhere this string is shown.
+        return self.name or f"Planned feed {self.pk}"
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_rack_design:designpowerfeed", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
+
+    @property
+    def derated_watts(self):
+        """The usable watts this feed contributes to its rack's capacity.
+
+        Delegates to the SAME helpers the projection uses -- ``breaker_watts``
+        for the phase-aware breaker size, and the instance's live
+        ``POWERFEED_DEFAULT_MAX_UTILIZATION`` for the derating NetBox stamps into
+        a real feed's ``available_power`` -- so a feed never reports one figure
+        in the list and another in the rack's capacity bar. Imported locally:
+        the projection imports models, not the other way round.
+        """
+        from netbox.config import get_config
+
+        from .distribution import breaker_watts
+
+        watts = breaker_watts(self) or 0
+        if not watts:
+            return 0
+        max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
+        return int(round(watts * max_util / 100.0))
 
 
 class DesignRackPower(models.Model):

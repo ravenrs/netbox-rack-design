@@ -6,9 +6,15 @@ from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 from netbox.tables import NetBoxTable, columns
 
-from .models import Design, DesignGroup, DesignPlacement
+from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 
-__all__ = ("DesignGroupTable", "DesignTable", "DesignPlacementTable", "ElevationTable")
+__all__ = (
+    "DesignGroupTable",
+    "DesignTable",
+    "DesignPlacementTable",
+    "DesignPowerFeedTable",
+    "ElevationTable",
+)
 
 
 class DesignGroupTable(NetBoxTable):
@@ -118,4 +124,40 @@ class DesignPlacementTable(NetBoxTable):
         )
         default_columns = (
             "design", "kind", "device", "device_type", "target_rack", "target_position", "target_face",
+        )
+
+
+class DesignPowerFeedTable(NetBoxTable):
+    """The design's PLANNED power feeds.
+
+    ``derated_watts`` is what the feed actually contributes to its rack's
+    capacity bar (breaker size × the instance's max-utilization), which is the
+    number people are really asking about when they open this list -- a stray
+    feed silently inflates a greenfield rack's capacity.
+    """
+
+    design = tables.Column(linkify=True)
+    rack = tables.Column(linkify=True)
+    name = tables.Column(linkify=True)
+    phase = columns.ChoiceFieldColumn()
+    supply = columns.ChoiceFieldColumn()
+    derated_watts = tables.Column(
+        verbose_name=_("Derated"), orderable=False,
+        accessor="derated_watts",
+    )
+    bound_count = columns.ManyToManyColumn(
+        accessor="bound_placements", linkify_item=True,
+        verbose_name=_("Bound PDUs"), orderable=False,
+    )
+
+    class Meta(NetBoxTable.Meta):
+        model = DesignPowerFeed
+        fields = (
+            "pk", "id", "design", "rack", "name", "voltage", "amperage",
+            "phase", "supply", "derated_watts", "bound_count",
+            "created", "last_updated", "actions",
+        )
+        default_columns = (
+            "design", "rack", "name", "voltage", "amperage", "phase",
+            "derated_watts", "bound_count",
         )

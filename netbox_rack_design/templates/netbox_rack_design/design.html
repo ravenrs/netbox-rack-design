@@ -206,13 +206,14 @@
             <th>{% trans "Supply" %}</th>
             <th class="text-end">{% trans "Capacity" %}</th>
             <th>{% trans "Bound PDUs" %}</th>
+            <th class="text-end">{% trans "Actions" %}</th>
           </tr>
         </thead>
         <tbody>
           {% for row in planned_feeds %}
             <tr>
               <td>{{ row.rack|linkify }}</td>
-              <td>{{ row.feed.name }}</td>
+              <td>{{ row.feed|linkify }}</td>
               <td class="text-muted">
                 {{ row.feed.voltage }} V · {{ row.feed.amperage }} A ·
                 {{ row.feed.get_phase_display }} · {{ row.feed.get_supply_display }}
@@ -225,10 +226,26 @@
                   <span class="text-muted">{% trans "none" %}</span>
                 {% endfor %}
               </td>
+              {# A planned feed is now an object of its own, so it can be #}
+              {# corrected or removed without hunting through the editor. #}
+              <td class="text-end text-nowrap">
+                {% if perms.netbox_rack_design.change_designpowerfeed %}
+                  <a href="{% url 'plugins:netbox_rack_design:designpowerfeed_edit' pk=row.feed.pk %}?return_url={{ object.get_absolute_url }}"
+                     class="btn btn-sm btn-ghost-secondary" title="{% trans 'Edit' %}">
+                    <i class="mdi mdi-pencil" aria-hidden="true"></i>
+                  </a>
+                {% endif %}
+                {% if perms.netbox_rack_design.delete_designpowerfeed %}
+                  <a href="{% url 'plugins:netbox_rack_design:designpowerfeed_delete' pk=row.feed.pk %}?return_url={{ object.get_absolute_url }}"
+                     class="btn btn-sm btn-ghost-danger" title="{% trans 'Delete' %}">
+                    <i class="mdi mdi-trash-can-outline" aria-hidden="true"></i>
+                  </a>
+                {% endif %}
+              </td>
             </tr>
           {% empty %}
             <tr>
-              <td colspan="5" class="text-muted">
+              <td colspan="6" class="text-muted">
                 {% trans "No planned feeds — this design's racks are sized from their real feeds." %}
               </td>
             </tr>
@@ -236,7 +253,7 @@
         </tbody>
       </table>
       <div class="card-footer text-muted small">
-        {% trans "Planned feeds exist only inside this design; no dcim.PowerFeed is ever written. Capacity is the breaker's watts derated by POWERFEED_DEFAULT_MAX_UTILIZATION, exactly as NetBox derates a real feed. Add, replace or remove them from a rack's power dialog in the editor." %}
+        {% trans "Planned feeds exist only inside this design; no dcim.PowerFeed is ever written. Capacity is the breaker's watts derated by POWERFEED_DEFAULT_MAX_UTILIZATION, exactly as NetBox derates a real feed. Create them from a rack's power dialog in the editor, or manage them here and under Rack Design → Planned Power Feeds." %}
       </div>
     </div>
   </div>

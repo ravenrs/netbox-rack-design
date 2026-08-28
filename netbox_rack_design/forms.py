@@ -1,5 +1,6 @@
 """Forms for NetBox Rack Design."""
 
+from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import (
     Device,
     DeviceBay,
@@ -28,21 +29,25 @@ from utilities.forms.fields import (
 from utilities.forms.rendering import FieldSet
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import Design, DesignGroup, DesignPlacement
+from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 
 __all__ = (
     "DesignGroupForm",
     "DesignForm",
     "DesignPlacementForm",
+    "DesignPowerFeedForm",
     "DesignGroupImportForm",
     "DesignImportForm",
     "DesignPlacementImportForm",
+    "DesignPowerFeedImportForm",
     "DesignGroupBulkEditForm",
     "DesignBulkEditForm",
     "DesignPlacementBulkEditForm",
+    "DesignPowerFeedBulkEditForm",
     "DesignGroupFilterForm",
     "DesignFilterForm",
     "DesignPlacementFilterForm",
+    "DesignPowerFeedFilterForm",
     "ElevationBrowserFilterForm",
     "DesignEditorPaletteForm",
     "DesignEditorAddRackForm",
@@ -467,3 +472,74 @@ class ElevationBrowserFilterForm(forms.Form):
             self.fields["site"].queryset = site_qs
         if status_choices is not None:
             self.fields["status"].choices = status_choices
+
+
+# ---------------------------------------------------------------------------
+# Planned power feeds (docs/pdu-distribution-spec.md §6.1)
+#
+# The editor writes these from the rack-power and PDU-bind dialogs; these forms
+# are the way to inspect, correct and delete one outside the editor.
+# ---------------------------------------------------------------------------
+
+
+class DesignPowerFeedForm(NetBoxModelForm):
+    design = DynamicModelChoiceField(queryset=Design.objects.all())
+    rack = DynamicModelChoiceField(
+        queryset=Rack.objects.all(),
+        help_text=_("The rack this planned feed supplies."),
+    )
+
+    fieldsets = (
+        FieldSet("design", "rack", "name", "tags", name=_("Feed")),
+        FieldSet("voltage", "amperage", "phase", "supply", name=_("Electrical")),
+    )
+
+    class Meta:
+        model = DesignPowerFeed
+        fields = (
+            "design", "rack", "name", "voltage", "amperage", "phase", "supply",
+            "tags",
+        )
+
+
+class DesignPowerFeedImportForm(NetBoxModelImportForm):
+    design = CSVModelChoiceField(
+        queryset=Design.objects.all(), to_field_name="title",
+        help_text=_("Design (by title)"),
+    )
+    rack = CSVModelChoiceField(
+        queryset=Rack.objects.all(), to_field_name="name",
+        help_text=_("Rack (by name)"),
+    )
+
+    class Meta:
+        model = DesignPowerFeed
+        fields = (
+            "design", "rack", "name", "voltage", "amperage", "phase", "supply",
+            "tags",
+        )
+
+
+class DesignPowerFeedBulkEditForm(NetBoxModelBulkEditForm):
+    rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False)
+    voltage = forms.IntegerField(required=False, min_value=1)
+    amperage = forms.IntegerField(required=False, min_value=1)
+    phase = forms.ChoiceField(choices=PowerFeedPhaseChoices, required=False)
+    supply = forms.ChoiceField(choices=PowerFeedSupplyChoices, required=False)
+
+    model = DesignPowerFeed
+    fieldsets = (
+        FieldSet("rack", name=_("Feed")),
+        FieldSet("voltage", "amperage", "phase", "supply", name=_("Electrical")),
+    )
+    nullable_fields = ()
+
+
+class DesignPowerFeedFilterForm(NetBoxModelFilterSetForm):
+    model = DesignPowerFeed
+    design_id = DynamicModelMultipleChoiceField(
+        queryset=Design.objects.all(), required=False, label="Design")
+    rack_id = DynamicModelMultipleChoiceField(
+        queryset=Rack.objects.all(), required=False, label="Rack")
+    phase = forms.MultipleChoiceField(choices=PowerFeedPhaseChoices, required=False)
+    supply = forms.MultipleChoiceField(choices=PowerFeedSupplyChoices, required=False)

@@ -6,9 +6,14 @@ from django.db.models import Q
 from netbox.filtersets import NetBoxModelFilterSet
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import Design, DesignGroup, DesignPlacement
+from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 
-__all__ = ("DesignGroupFilterSet", "DesignFilterSet", "DesignPlacementFilterSet")
+__all__ = (
+    "DesignGroupFilterSet",
+    "DesignFilterSet",
+    "DesignPlacementFilterSet",
+    "DesignPowerFeedFilterSet",
+)
 
 
 class DesignGroupFilterSet(NetBoxModelFilterSet):
@@ -87,3 +92,21 @@ class DesignPlacementFilterSet(NetBoxModelFilterSet):
         if not value.strip():
             return queryset
         return queryset.filter(Q(proposed_name__icontains=value))
+
+
+class DesignPowerFeedFilterSet(NetBoxModelFilterSet):
+    design_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Design.objects.all(), label="Design (ID)"
+    )
+    rack_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Rack.objects.all(), label="Rack (ID)"
+    )
+
+    class Meta:
+        model = DesignPowerFeed
+        fields = ("id", "name", "voltage", "amperage", "phase", "supply")
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(Q(name__icontains=value) | Q(rack__name__icontains=value))

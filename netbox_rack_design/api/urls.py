@@ -5,9 +5,11 @@ from netbox.api.routers import NetBoxRouter
 from .views import (
     DesignGroupViewSet,
     DesignPlacementViewSet,
+    DesignPowerFeedViewSet,
     DesignViewSet,
     DeviceTypePowerViewSet,
     FavoriteDeviceTypeViewSet,
+    FavoriteSetViewSet,
     HiddenDesignChassisViewSet,
     HiddenDesignRackViewSet,
 )
@@ -18,10 +20,16 @@ router = NetBoxRouter()
 router.register("design-groups", DesignGroupViewSet)
 router.register("designs", DesignViewSet)
 router.register("placements", DesignPlacementViewSet)
+router.register("planned-power-feeds", DesignPowerFeedViewSet)
 router.register(
     "favorite-device-types",
     FavoriteDeviceTypeViewSet,
     basename="favoritedevicetype",
+)
+router.register(
+    "favorite-sets",
+    FavoriteSetViewSet,
+    basename="favoriteset",
 )
 router.register(
     "hidden-design-chassis",

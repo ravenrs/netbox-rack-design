@@ -669,10 +669,70 @@
     flex: 1 1 auto;
     height: auto;
     max-height: var(--nbx-rd-workspace-h);
+    /* Floor under `height:auto`: with no rack content (a design with zero racks,
+       or every rack hidden by the Design-racks panel / legend filter) the region
+       collapsed to the height of whatever was left -- a thin strip -- and since
+       the drawer columns STRETCH to the shell, the Add-rack panel collapsed with
+       it and adding the first rack became a fight (user 2026-08-28). Keep a
+       workspace-sized floor, never taller than the cap above. */
+    min-height: min(32rem, var(--nbx-rd-workspace-h, calc(100vh - 13rem)));
 }
 
 /* Quick-access card: its favorites list scrolls within a capped height so the
    drawer stays usable with many entries. */
+/* Quick-access header: TWO rows -- the panel title, then the favorite-set
+   controls (selector + new/rename/delete). The drawer column is 300px, so a
+   single row turned both the title and the set name into ellipses; two tight
+   rows keep every label readable and still start the list higher than the
+   wrapped title did (user 2026-08-28). */
+.nbx-rd-quick-card > .card-header {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.3rem;
+    padding-top: 0.4rem;
+    padding-bottom: 0.4rem;
+    min-height: 0;
+}
+
+.nbx-rd-quick-card > .card-header .card-title {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0;
+    white-space: nowrap;
+    line-height: 1.1;
+}
+
+.nbx-rd-quick-card > .card-header .card-title .mdi {
+    color: var(--tblr-yellow, #f59f00);
+}
+
+.nbx-rd-favset-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    min-width: 0;
+    margin: 0;
+}
+
+.nbx-rd-favset-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-top: 0.1rem;
+    padding-bottom: 0.1rem;
+}
+
+.nbx-rd-favset-btn {
+    flex: 0 0 auto;
+    padding: 0 0.3rem;
+    line-height: 1.3;
+}
+
+.nbx-rd-favset-btn .mdi {
+    font-size: 1rem;
+}
+
 .nbx-rd-quick-card {
     display: flex;
     flex-direction: column;
@@ -731,6 +791,16 @@
     height: var(--nbx-rd-workspace-h, calc(100vh - 13rem));
     overflow: auto;
     padding-bottom: 0.5rem;
+}
+
+/* Racks of DIFFERENT heights hang from a common FLOOR, not a common ceiling: a
+   47U rack must read as taller than the 42U beside it, and comparing two racks
+   means comparing the same U across both. Bottom-aligning the blocks themselves
+   would align the trays under them instead (their height varies with content),
+   so the alignment is a top pad on each face row -- computed per block by
+   rack_layout.js, which measures the tallest visible rack and pads the rest. */
+.nbx-rd-face-row {
+    padding-top: var(--nbx-rd-floor-pad, 0px);
 }
 
 /* One rack block: its own header (name + face toggles), Front/Rear faces and a

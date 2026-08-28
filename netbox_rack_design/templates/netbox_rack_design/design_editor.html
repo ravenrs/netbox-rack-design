@@ -89,6 +89,7 @@
            data-preview-name-url="{{ preview_name_url }}"
            data-save-url="{{ save_url }}"
            data-favorites-url="{{ favorites_url }}"
+           data-favorite-sets-url="{{ favorite_sets_url }}"
            data-csrf-token="{{ csrf_token }}">
 
         {# Custom-field bridge schema (docs/pdu-distribution-spec.md §5): read #}
@@ -290,7 +291,43 @@
             {# unpin. ---- #}
             <div class="card nbx-rd-quick-card" id="nbx-rd-quick" data-rd-quick>
               <div class="card-header">
-                <h3 class="card-title">{% trans "Quick access" %}</h3>
+                {# Two deliberate rows: the title, then the set controls. The #}
+                {# drawer column is 300px, so squeezing both onto one line left #}
+                {# the title and the set name as ellipses -- and it was the     #}
+                {# title WRAPPING that wasted the space in the first place.     #}
+                <h3 class="card-title nbx-rd-quick-title">
+                  <i class="mdi mdi-star" aria-hidden="true"></i>
+                  <span>{% trans "Quick access" %}</span>
+                </h3>
+                {# Named favorite SETS: one starred list per way of working    #}
+                {# ("Default", "for server", "for network"). The select drives #}
+                {# which set the stars read and write; the buttons create,     #}
+                {# rename and delete the user's own sets. Populated by         #}
+                {# editor.js from the favorite-sets endpoint. #}
+                <div class="card-actions nbx-rd-favset-controls">
+                  {# `no-ts` opts out of NetBox's TomSelect enhancement: the #}
+                  {# options are (re)built by editor.js after every set change, #}
+                  {# which a TomSelect wrapper would not pick up. #}
+                  <select class="form-select form-select-sm no-ts nbx-rd-favset-select"
+                          id="nbx-rd-favset-select"
+                          aria-label="{% trans 'Favorite set' %}"
+                          title="{% trans 'Favorite set' %}"></select>
+                  <button type="button" class="btn btn-ghost-secondary btn-sm nbx-rd-favset-btn"
+                          id="nbx-rd-favset-new" title="{% trans 'New favorite set' %}"
+                          aria-label="{% trans 'New favorite set' %}">
+                    <i class="mdi mdi-plus-thick" aria-hidden="true"></i>
+                  </button>
+                  <button type="button" class="btn btn-ghost-secondary btn-sm nbx-rd-favset-btn"
+                          id="nbx-rd-favset-rename" title="{% trans 'Rename this set' %}"
+                          aria-label="{% trans 'Rename this set' %}">
+                    <i class="mdi mdi-pencil" aria-hidden="true"></i>
+                  </button>
+                  <button type="button" class="btn btn-ghost-danger btn-sm nbx-rd-favset-btn"
+                          id="nbx-rd-favset-delete" title="{% trans 'Delete this set' %}"
+                          aria-label="{% trans 'Delete this set' %}">
+                    <i class="mdi mdi-trash-can-outline" aria-hidden="true"></i>
+                  </button>
+                </div>
               </div>
               {# This list scrolls if many favorites; populated by editor.js. #}
               <div class="list-group list-group-flush nbx-rd-quick-list" id="nbx-rd-quick-list"></div>
@@ -348,4 +385,5 @@
   <script src="{% static 'netbox_rack_design/js/editor_panels.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/power_heatmap.js' %}?v={{ asset_version }}" defer></script>
+<script src="{% static 'netbox_rack_design/js/rack_layout.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}

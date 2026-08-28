@@ -413,6 +413,9 @@ def _design_editor_context(request, design):
         "preview_name_url": f"/api/plugins/rack-design/designs/{design.pk}/preview-name/",
         # User-scoped favorite device types (the catalog palette's stars).
         "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
+        # The user's NAMED favorite sets ("Default", "for server", ...), which
+        # the palette's stars read from and write into.
+        "favorite_sets_url": "/api/plugins/rack-design/favorite-sets/",
         "asset_version": _asset_version(),
         # Developer-mode flag: gates the editor JS's opt-in drag-lifecycle
         # tracer (window.__rdDragTrace). True only on a dev build -- DEBUG on,
@@ -927,3 +930,61 @@ class DesignPlacementBulkDeleteView(generic.BulkDeleteView):
     queryset = models.DesignPlacement.objects.all()
     filterset = filtersets.DesignPlacementFilterSet
     table = tables.DesignPlacementTable
+
+
+# ---------------------------------------------------------------------------
+# DesignPowerFeed (planned power feeds)
+#
+# The editor writes planned feeds from the rack-power and PDU-bind dialogs, and
+# for a long time there was no UI route to see or remove one (user 2026-08-28:
+# "I don't see any way to delete feeds -- make a separate view like placements").
+# A stray feed silently inflates a greenfield rack's capacity bar, so the plan
+# has to be able to show and unmake them. Same generic-view set as placements.
+# ---------------------------------------------------------------------------
+
+
+@register_model_view(models.DesignPowerFeed)
+class DesignPowerFeedView(generic.ObjectView):
+    queryset = models.DesignPowerFeed.objects.select_related("design", "rack")
+
+
+@register_model_view(models.DesignPowerFeed, "list", path="", detail=False)
+class DesignPowerFeedListView(generic.ObjectListView):
+    queryset = models.DesignPowerFeed.objects.select_related(
+        "design", "rack").prefetch_related("bound_placements")
+    table = tables.DesignPowerFeedTable
+    filterset = filtersets.DesignPowerFeedFilterSet
+    filterset_form = forms.DesignPowerFeedFilterForm
+
+
+@register_model_view(models.DesignPowerFeed, "add", detail=False)
+@register_model_view(models.DesignPowerFeed, "edit")
+class DesignPowerFeedEditView(generic.ObjectEditView):
+    queryset = models.DesignPowerFeed.objects.all()
+    form = forms.DesignPowerFeedForm
+
+
+@register_model_view(models.DesignPowerFeed, "delete")
+class DesignPowerFeedDeleteView(generic.ObjectDeleteView):
+    queryset = models.DesignPowerFeed.objects.all()
+
+
+@register_model_view(models.DesignPowerFeed, "bulk_import", detail=False)
+class DesignPowerFeedBulkImportView(generic.BulkImportView):
+    queryset = models.DesignPowerFeed.objects.all()
+    model_form = forms.DesignPowerFeedImportForm
+
+
+@register_model_view(models.DesignPowerFeed, "bulk_edit", path="edit", detail=False)
+class DesignPowerFeedBulkEditView(generic.BulkEditView):
+    queryset = models.DesignPowerFeed.objects.all()
+    filterset = filtersets.DesignPowerFeedFilterSet
+    table = tables.DesignPowerFeedTable
+    form = forms.DesignPowerFeedBulkEditForm
+
+
+@register_model_view(models.DesignPowerFeed, "bulk_delete", path="delete", detail=False)
+class DesignPowerFeedBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.DesignPowerFeed.objects.all()
+    filterset = filtersets.DesignPowerFeedFilterSet
+    table = tables.DesignPowerFeedTable

@@ -93,7 +93,7 @@
     {# ---- Front face ---- #}
     <div class="text-center nbx-rd-face" data-rd-face="front" id="nbx-rd-face-front-{{ rid }}">
       <h3 class="h5">{% trans "Front" %}</h3>
-      <div class="d-flex justify-content-center">
+      <div class="d-flex justify-content-center nbx-rd-face-row">
         <ul class="nbx-rd-unit-numbers">
           {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
         </ul>
@@ -163,7 +163,7 @@
     {# ---- Rear face ---- #}
     <div class="text-center nbx-rd-face" data-rd-face="rear" id="nbx-rd-face-rear-{{ rid }}">
       <h3 class="h5">{% trans "Rear" %}</h3>
-      <div class="d-flex justify-content-center">
+      <div class="d-flex justify-content-center nbx-rd-face-row">
         <ul class="nbx-rd-unit-numbers">
           {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
         </ul>

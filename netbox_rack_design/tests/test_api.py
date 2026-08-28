@@ -35,6 +35,7 @@ from ..models import (
     DesignPowerFeed,
     DesignRackPower,
     FavoriteDeviceType,
+    FavoriteSet,
     HiddenDesignRack,
 )
 from .utils import api_token_header, create_dcim_environment
@@ -1902,6 +1903,50 @@ class HiddenDesignRackTest(APITestCase):
             )
 
 
+class DesignPowerFeedAPITest(APIViewTestCases.APIViewTestCase):
+    """Planned feeds through the REST API, the twin of the new UI views."""
+
+    model = DesignPowerFeed
+    view_namespace = "plugins-api:netbox_rack_design"
+    brief_fields = ["display", "id", "name", "url"]
+    bulk_update_data = {"amperage": 32}
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        rack = env["racks"][0]
+        design = Design.objects.create(title="Feed API Design", site=env["site"])
+        design.racks.set([rack])
+
+        for name in ("Feed A", "Feed B", "Feed C"):
+            DesignPowerFeed.objects.create(design=design, rack=rack, name=name)
+
+        tags = create_tags("FeedAPI-Alpha", "FeedAPI-Bravo", "FeedAPI-Charlie")
+        cls.create_data = [
+            {
+                "design": design.pk, "rack": rack.pk, "name": "Feed D",
+                "voltage": 230, "amperage": 16,
+                "tags": [t.pk for t in tags],
+            },
+            {"design": design.pk, "rack": rack.pk, "name": "Feed E",
+             "voltage": 230, "amperage": 16},
+            {"design": design.pk, "rack": rack.pk, "name": "Feed F",
+             "voltage": 400, "amperage": 32, "phase": "three-phase"},
+        ]
+
+    def test_derated_watts_is_reported(self):
+        """The API answers with the SAME capacity figure the UI shows."""
+        self.add_permissions("netbox_rack_design.view_designpowerfeed")
+        feed = DesignPowerFeed.objects.first()
+        url = reverse(
+            "plugins-api:netbox_rack_design-api:designpowerfeed-detail",
+            kwargs={"pk": feed.pk},
+        )
+        response = self.client.get(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["derated_watts"], feed.derated_watts)
+
+
 class FavoriteDeviceTypeTest(APITestCase):
     """
     Tests for the user-scoped favorite-device-types endpoint (increment 2c-1).
@@ -1966,9 +2011,15 @@ class FavoriteDeviceTypeTest(APITestCase):
 
     def test_list_returns_only_current_users_favorites(self):
         """GET returns ONLY the requesting user's device-type ids."""
-        FavoriteDeviceType.objects.create(user=self.user, device_type=self.device_type)
         FavoriteDeviceType.objects.create(
-            user=self.user_b, device_type=self.other_device_type
+            user=self.user,
+            favorite_set=FavoriteSet.default_for(self.user),
+            device_type=self.device_type,
+        )
+        FavoriteDeviceType.objects.create(
+            user=self.user_b,
+            favorite_set=FavoriteSet.default_for(self.user_b),
+            device_type=self.other_device_type,
         )
 
         # User A sees only their own.
@@ -1984,7 +2035,9 @@ class FavoriteDeviceTypeTest(APITestCase):
     def test_toggle_as_user_a_never_affects_user_b(self):
         """User B's favorites are untouched when user A toggles."""
         b_fav = FavoriteDeviceType.objects.create(
-            user=self.user_b, device_type=self.device_type
+            user=self.user_b,
+            favorite_set=FavoriteSet.default_for(self.user_b),
+            device_type=self.device_type,
         )
         # User A stars the same device type.
         body = {"device_type_id": self.device_type.pk}
@@ -2034,7 +2087,11 @@ class FavoriteDeviceTypeTest(APITestCase):
 
     def test_double_star_does_not_duplicate_row(self):
         """Pre-existing star + a star toggle reaching get_or_create stays unique."""
-        FavoriteDeviceType.objects.create(user=self.user, device_type=self.device_type)
+        FavoriteDeviceType.objects.create(
+            user=self.user,
+            favorite_set=FavoriteSet.default_for(self.user),
+            device_type=self.device_type,
+        )
         # get_or_create must not raise the unique constraint nor add a 2nd row;
         # because the row already exists, the toggle unstars it.
         body = {"device_type_id": self.device_type.pk}
@@ -2047,6 +2104,225 @@ class FavoriteDeviceTypeTest(APITestCase):
             ).count(),
             0,
         )
+
+
+class FavoriteSetTest(APITestCase):
+    """
+    Named favorite SETS: several starred lists per user (request 2026-08-28).
+
+    Same isolation contract as the favorites they hold -- a user only ever sees
+    or changes their own sets, and never names a user -- plus the two properties
+    the feature exists for: a device type can be starred in more than one set,
+    and each set's membership is independent.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.device_type = env["device_type"]
+        from dcim.models import DeviceType
+
+        cls.other_device_type = DeviceType.objects.create(
+            manufacturer=env["manufacturer"],
+            model="Set Device Type 2",
+            slug="set-device-type-2",
+            u_height=1,
+        )
+
+    def setUp(self):
+        super().setUp()
+        self.user_b = User.objects.create_user(username="favset_user_b")
+        self.token_b = Token.objects.create(user=self.user_b)
+        self.header_b = api_token_header(self.token_b)
+
+    def _sets_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:favoriteset-list")
+
+    def _set_url(self, pk):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:favoriteset-detail", kwargs={"pk": pk}
+        )
+
+    def _favorites_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:favoritedevicetype-list")
+
+    def _toggle_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:favoritedevicetype-toggle")
+
+    def test_first_read_provisions_a_default_set(self):
+        """A user who never starred anything still gets a set to work in."""
+        response = self.client.get(self._sets_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], FavoriteSet.DEFAULT_NAME)
+        self.assertTrue(results[0]["is_default"])
+        self.assertEqual(results[0]["device_type_ids"], [])
+
+    def test_create_lists_and_deletes_a_named_set(self):
+        # The editor lists first (which provisions the default), then creates.
+        self.client.get(self._sets_url(), **self.header)
+        response = self.client.post(
+            self._sets_url(), {"name": "for network"}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        set_id = response.data["id"]
+        self.assertEqual(response.data["name"], "for network")
+        self.assertFalse(response.data["is_default"])
+
+        response = self.client.get(self._sets_url(), **self.header)
+        names = [row["name"] for row in response.data["results"]]
+        # The default leads, so the editor never has to hunt for it.
+        self.assertEqual(names, [FavoriteSet.DEFAULT_NAME, "for network"])
+
+        response = self.client.delete(self._set_url(set_id), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertFalse(FavoriteSet.objects.filter(pk=set_id).exists())
+
+    def test_a_duplicate_name_is_refused_per_user_only(self):
+        """(user, name) is unique -- but two users may both have "for server"."""
+        self.client.post(
+            self._sets_url(), {"name": "for server"}, format="json", **self.header)
+        response = self.client.post(
+            self._sets_url(), {"name": "for server"}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("name", response.data)
+
+        # Case-insensitively too: "For Server" is the same handle to a human.
+        response = self.client.post(
+            self._sets_url(), {"name": "For Server"}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+        # User B is unaffected by user A's names.
+        response = self.client.post(
+            self._sets_url(), {"name": "for server"}, format="json", **self.header_b)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+
+    def test_a_blank_name_is_refused(self):
+        response = self.client.post(
+            self._sets_url(), {"name": "   "}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_rename_keeps_the_membership(self):
+        created = self.client.post(
+            self._sets_url(), {"name": "for srv"}, format="json", **self.header)
+        set_id = created.data["id"]
+        self.client.post(
+            self._toggle_url(),
+            {"device_type_id": self.device_type.pk, "set_id": set_id},
+            format="json", **self.header)
+
+        response = self.client.patch(
+            self._set_url(set_id), {"name": "for server"}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "for server")
+        self.assertEqual(response.data["device_type_ids"], [self.device_type.pk])
+
+    def test_the_same_device_type_can_be_starred_in_several_sets(self):
+        """The whole point: "for server" and "for network" may overlap."""
+        a = self.client.post(
+            self._sets_url(), {"name": "for server"}, format="json", **self.header).data
+        b = self.client.post(
+            self._sets_url(), {"name": "for network"}, format="json", **self.header).data
+        for set_id in (a["id"], b["id"]):
+            response = self.client.post(
+                self._toggle_url(),
+                {"device_type_id": self.device_type.pk, "set_id": set_id},
+                format="json", **self.header)
+            self.assertHttpStatus(response, status.HTTP_200_OK)
+            self.assertTrue(response.data["favorite"])
+
+        self.assertEqual(
+            FavoriteDeviceType.objects.filter(
+                user=self.user, device_type=self.device_type).count(), 2)
+
+    def test_unstarring_in_one_set_leaves_the_other_alone(self):
+        a = self.client.post(
+            self._sets_url(), {"name": "A"}, format="json", **self.header).data
+        b = self.client.post(
+            self._sets_url(), {"name": "B"}, format="json", **self.header).data
+        for set_id in (a["id"], b["id"]):
+            self.client.post(
+                self._toggle_url(),
+                {"device_type_id": self.device_type.pk, "set_id": set_id},
+                format="json", **self.header)
+
+        self.client.post(
+            self._toggle_url(),
+            {"device_type_id": self.device_type.pk, "set_id": a["id"]},
+            format="json", **self.header)
+
+        response = self.client.get(
+            self._favorites_url() + f"?set_id={a['id']}", **self.header)
+        self.assertEqual(response.data["device_type_ids"], [])
+        response = self.client.get(
+            self._favorites_url() + f"?set_id={b['id']}", **self.header)
+        self.assertEqual(response.data["device_type_ids"], [self.device_type.pk])
+
+    def test_favorites_without_a_set_id_answer_from_the_default(self):
+        """An older client (no set_id) keeps working, on the default set."""
+        self.client.post(
+            self._toggle_url(), {"device_type_id": self.device_type.pk},
+            format="json", **self.header)
+        response = self.client.get(self._favorites_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["device_type_ids"], [self.device_type.pk])
+        self.assertEqual(
+            response.data["set_id"], FavoriteSet.default_for(self.user).pk)
+
+    def test_another_users_set_id_falls_back_to_your_own_default(self):
+        """A stale/foreign set id must never read or write someone else's set."""
+        theirs = self.client.post(
+            self._sets_url(), {"name": "theirs"}, format="json", **self.header_b).data
+
+        response = self.client.post(
+            self._toggle_url(),
+            {"device_type_id": self.device_type.pk, "set_id": theirs["id"]},
+            format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["set_id"], FavoriteSet.default_for(self.user).pk)
+        self.assertFalse(
+            FavoriteDeviceType.objects.filter(favorite_set_id=theirs["id"]).exists())
+
+    def test_a_user_cannot_touch_another_users_set(self):
+        theirs = self.client.post(
+            self._sets_url(), {"name": "theirs"}, format="json", **self.header_b).data
+
+        response = self.client.patch(
+            self._set_url(theirs["id"]), {"name": "mine"}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_404_NOT_FOUND)
+        response = self.client.delete(self._set_url(theirs["id"]), **self.header)
+        self.assertHttpStatus(response, status.HTTP_404_NOT_FOUND)
+        self.assertTrue(FavoriteSet.objects.filter(pk=theirs["id"]).exists())
+
+    def test_deleting_a_set_removes_its_stars_and_reports_how_many(self):
+        created = self.client.post(
+            self._sets_url(), {"name": "doomed"}, format="json", **self.header).data
+        for dt in (self.device_type, self.other_device_type):
+            self.client.post(
+                self._toggle_url(),
+                {"device_type_id": dt.pk, "set_id": created["id"]},
+                format="json", **self.header)
+
+        response = self.client.delete(self._set_url(created["id"]), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["favorites_removed"], 2)
+        self.assertEqual(
+            FavoriteDeviceType.objects.filter(favorite_set_id=created["id"]).count(), 0)
+
+    def test_deleting_the_last_set_leaves_a_fresh_default(self):
+        """The editor always has a set to work in, even after deleting them all."""
+        for row in self.client.get(self._sets_url(), **self.header).data["results"]:
+            self.client.delete(self._set_url(row["id"]), **self.header)
+        self.assertEqual(FavoriteSet.objects.filter(user=self.user).count(), 0)
+
+        response = self.client.get(self._sets_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 1)
+        self.assertEqual(response.data["results"][0]["name"], FavoriteSet.DEFAULT_NAME)
+
+    def test_unauthenticated_is_rejected(self):
+        response = self.client.get(self._sets_url())
+        self.assertIn(response.status_code, (401, 403))
 
 
 class DeviceTypePowerTest(APITestCase):

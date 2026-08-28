@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import Rack, Site
 from django.urls import reverse
 from utilities.testing import TestCase, ViewTestCases, create_tags
@@ -239,6 +240,82 @@ class DesignPlacementTest(ViewTestCases.PrimaryObjectViewTestCase):
         cls.bulk_edit_data = {
             "proposed_name": "renamed-node",
         }
+
+
+class DesignPowerFeedTest(ViewTestCases.PrimaryObjectViewTestCase):
+    """Planned feeds are first-class objects: list, detail, edit, delete, bulk.
+
+    They used to exist only inside the editor's dialogs, with no route to see or
+    remove one (user 2026-08-28) — and a stray feed silently inflates a
+    greenfield rack's capacity bar.
+    """
+
+    model = DesignPowerFeed
+
+    def _get_base_url(self):
+        return f"plugins:netbox_rack_design:{self.model._meta.model_name}_{{}}"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        site = env["site"]
+        rack = env["racks"][0]
+        design = Design.objects.create(title="Feed Design", site=site)
+        design.racks.set([rack])
+
+        for name in ("Feed A", "Feed B", "Feed C"):
+            DesignPowerFeed.objects.create(design=design, rack=rack, name=name)
+
+        tags = create_tags("Feed-Alpha", "Feed-Bravo", "Feed-Charlie")
+
+        cls.form_data = {
+            "design": design.pk,
+            "rack": rack.pk,
+            "name": "Feed D",
+            "voltage": 230,
+            "amperage": 32,
+            "phase": PowerFeedPhaseChoices.PHASE_SINGLE,
+            "supply": PowerFeedSupplyChoices.SUPPLY_AC,
+            "tags": [t.pk for t in tags],
+        }
+        cls.csv_data = (
+            "design,rack,name,voltage,amperage,phase,supply",
+            f"{design.title},{rack.name},Feed E,230,16,single-phase,ac",
+            f"{design.title},{rack.name},Feed F,230,16,single-phase,ac",
+            f"{design.title},{rack.name},Feed G,230,16,single-phase,ac",
+        )
+        cls.csv_update_data = (
+            "id,amperage",
+            *[
+                f"{feed.pk},20"
+                for feed in DesignPowerFeed.objects.filter(design=design).order_by("pk")
+            ],
+        )
+        cls.bulk_edit_data = {"amperage": 32}
+
+
+class DesignPowerFeedDerationTest(TestCase):
+    """The list/detail figure must be the one the capacity bar actually uses."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.rack = env["racks"][0]
+        cls.design = Design.objects.create(title="Derate Design", site=env["site"])
+
+    def test_derated_watts_matches_the_projection(self):
+        from netbox.config import get_config
+
+        from netbox_rack_design.distribution import breaker_watts
+
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.rack, name="Feed A",
+            voltage=230, amperage=32,
+        )
+        max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
+        expected = int(round((breaker_watts(feed) or 0) * max_util / 100.0))
+        self.assertEqual(feed.derated_watts, expected)
+        self.assertGreater(feed.derated_watts, 0)
 
 
 class RenamedMoveRenderTest(TestCase):
@@ -684,6 +761,13 @@ class DesignEditorViewTest(TestCase):
         self.assertIn("nbx-rd-quick", content)
         self.assertIn("nbx-rd-quick-list", content)
         self.assertIn("data-favorites-url", content)
+        # Named favorite sets: the selector plus its new/rename/delete controls,
+        # and the endpoint the editor reads them from.
+        self.assertIn("data-favorite-sets-url", content)
+        self.assertIn("nbx-rd-favset-select", content)
+        self.assertIn("nbx-rd-favset-new", content)
+        self.assertIn("nbx-rd-favset-rename", content)
+        self.assertIn("nbx-rd-favset-delete", content)
 
     def test_editor_view_renders_role_and_tenant_selectors(self):
         # Device role + Tenant now live in a compact ALWAYS-VISIBLE toolbar row
@@ -1025,6 +1109,47 @@ class DesignEditorViewTest(TestCase):
         # Rack 1 (with a move + a remove) actually projects some widgets, so the
         # comparison above is non-vacuous.
         self.assertTrue(blocks[0]["widgets"])
+
+
+class RackFloorAlignmentMarkupTest(TestCase):
+    """Racks of different heights hang from a common floor, not a common ceiling.
+
+    The alignment itself is measured in the browser (rack_layout.js pads the
+    shorter rack's face rows); what CI can hold is the wiring it needs -- the
+    padded row carries the hook class, and both rack-rendering pages load the
+    script. Silently dropping either leaves the racks top-aligned again with
+    nothing failing.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.rack1 = env["racks"][0]
+        cls.rack2 = env["racks"][1]
+        cls.design = Design.objects.create(title="Floor Design", site=cls.site)
+        cls.design.racks.set([cls.rack1, cls.rack2])
+
+    def _get(self, name, **kwargs):
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(
+            reverse(f"plugins:netbox_rack_design:{name}", kwargs=kwargs))
+        self.assertHttpStatus(response, 200)
+        return response.content.decode()
+
+    def test_editor_pads_face_rows_and_loads_the_layout_script(self):
+        content = self._get(
+            "design_editor", pk=self.design.pk, rack_id=self.rack1.pk)
+        self.assertIn("nbx-rd-face-row", content)
+        self.assertIn("js/rack_layout.js", content)
+
+    def test_elevation_pads_face_rows_and_loads_the_layout_script(self):
+        content = self._get("design_elevation", pk=self.design.pk)
+        self.assertIn("nbx-rd-face-row", content)
+        self.assertIn("js/rack_layout.js", content)
 
 
 class DesignPlannedFeedPanelTest(TestCase):

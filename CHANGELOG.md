@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-08-28
+
+### Release Summary
+
+A workspace-and-inventory release. Favorites stop being one flat list — they
+become named sets you switch between — planned power feeds stop being invisible
+and get list, detail and delete views of their own, and the multi-rack workspace
+learns to hang racks from a common floor instead of a common ceiling.
+
+### Added
+
+- **Named favorite sets.** The catalog stars used to write one flat list per
+  user, so planning a server build and a network build meant re-starring every
+  time. Favorites now live in named sets ("Default", "for server", "for
+  network"): the Quick-access panel carries a set selector plus create, rename
+  and delete, the stars read and write the selected set, and the same device
+  type may sit in as many sets as you like. Sets are per user and their names
+  are unique per user — two people can each have their own "for server".
+  Existing favorites are migrated into a set named "Default", which is also what
+  a set-unaware client keeps talking to.
+  New endpoint `/api/plugins/rack-design/favorite-sets/` (list/create/rename/
+  delete); `/favorite-device-types/` gained an optional `set_id`.
+- **Planned power feeds have their own views.** A feed created by the editor's
+  rack-power or PDU-bind dialog could be seen nowhere and removed by nothing,
+  while silently sizing a greenfield rack's capacity bar. `DesignPowerFeed` is
+  now a first-class object: **Rack Design → Planned Power Feeds** lists them
+  with filters, bulk edit and bulk delete; each feed has a detail page showing
+  its derated capacity and the planned PDUs bound to it; and the design page's
+  feed panel gained per-row edit and delete. Also exposed over REST
+  (`/api/plugins/rack-design/planned-power-feeds/`) and GraphQL
+  (`planned_power_feed`), and indexed for global search.
+- **Racks of different heights now hang from a common floor.** A 47U rack beside
+  a 42U one started at the same y, so the taller rack merely ran further down
+  and U1 of one sat level with U6 of the other. Both the editor and the
+  read-only elevation now align rack floors, so height reads as height and the
+  same U lines up across racks.
+
+### Fixed
+
+- **The editor no longer collapses to a strip when no rack is visible.** A
+  design with zero racks (or with every rack hidden) shrank the workspace to
+  whatever was left, and since the drawer stretches to it, the Add-rack panel
+  collapsed too — making the first rack painful to add. The workspace keeps a
+  usable height.
+- **The red × says what it will do.** On a planned move it now reads "Cancel
+  this planned move" and on a planned add "Cancel this planned add", instead of
+  "Flag for removal" on every tile — nothing is being flagged for removal there.
+
 ## [0.22.0] - 2026-08-28
 
 ### Release Summary
