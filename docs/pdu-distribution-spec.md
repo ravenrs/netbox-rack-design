@@ -326,6 +326,30 @@ DesignPlacement
   `DesignRackPower`;
 - then adding PDUs binds to those planned feeds.
 
+**Copy from rack REPLACES the target's planned feeds** (ruled 2026-08-28). The
+button's promise is "this rack is fed like that one", so afterwards the target
+holds exactly the source's set — no more, no less. It used to upsert by name and
+only ever add, and since retargeting rewrites a *rack-name prefix* only, feeds
+named by any other scheme (`Utility A`) never collided: copying from three racks
+in turn left the union of all three, and the rack's capacity bar read as the sum
+of every source ever clicked. Rules that fall out of it:
+
+- a feed whose (retargeted) name survives keeps its **row**, so every PDU bound
+  to it stays bound; the rest are deleted and their PDUs unbound
+  (`planned_power_feed` is `SET_NULL`), with the count returned so the dialog can
+  say so;
+- a source with **no feeds is a no-op, not a wipe** — picking the wrong rack in
+  the dropdown must not strip a supply that has no undo.
+
+**Planned feeds are visible and removable.** They size a greenfield rack's
+capacity bar, so they cannot be write-only:
+
+- the rack power dialog lists this rack's planned feeds, each with a × that
+  deletes it (`DELETE .../planned-feed/`), reporting how many PDUs it unbound;
+- the design detail page carries a **Planned power feeds** panel — every feed in
+  the design, its rack, its electricals, the **derated watts the bar actually
+  uses**, and the PDUs bound to it.
+
 **Feeds are never defined by a script** — a script can't invent breaker
 amperage; it needs source data, which the model provides. The script/CF layer is
 for distribution *behaviour* only.

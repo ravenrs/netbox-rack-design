@@ -121,7 +121,44 @@ class DesignView(generic.ObjectView):
             "affected_racks": affected_racks,
             "affected_rack_count": len(affected_racks),
             "scoped_racks": scoped_racks,
+            "planned_feeds": self._planned_feed_rows(instance),
         }
+
+    @staticmethod
+    def _planned_feed_rows(design):
+        """The design's PLANNED power feeds, one row per feed.
+
+        Planned feeds are written by the rack-power dialog ("copy from rack")
+        and by the PDU bind dialog, and until now they were visible NOWHERE --
+        not on this page, not in a list view, not through a UI route of any kind
+        (user 2026-08-28: "where do we look at the feeds we created?"). They size
+        a greenfield rack's capacity bar, so a stray one silently inflates it,
+        which is exactly the kind of thing a plan must be able to show.
+
+        Each row carries the derated watts the capacity bar actually uses, and
+        the PDUs bound to that feed, so the page answers "where did this number
+        come from" and "what breaks if I remove it".
+        """
+        from netbox.config import get_config
+
+        from .distribution import breaker_watts
+
+        max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
+        rows = []
+        feeds = (
+            design.planned_feeds.select_related("rack")
+            .prefetch_related("bound_placements")
+            .order_by("rack__name", "name")
+        )
+        for feed in feeds:
+            watts = breaker_watts(feed) or 0
+            rows.append({
+                "feed": feed,
+                "rack": feed.rack,
+                "watts": round(watts * max_util / 100.0) if watts else 0,
+                "bound": list(feed.bound_placements.all()),
+            })
+        return rows
 
 
 @register_model_view(models.Design, "elevation", path="elevation")

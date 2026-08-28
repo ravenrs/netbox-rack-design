@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-08-28
+
+### Release Summary
+
+Planned power feeds stop being write-only. They size a greenfield rack's
+capacity bar, yet nothing in the UI listed them and nothing could remove one, so
+a feed copied by mistake inflated the bar with nothing to point at — and "copy
+from rack" only ever added, which meant copying from several racks in turn left
+the union of all of them. Copying now replaces, and the feeds a design plans are
+visible on the design page and removable from the rack power dialog.
+
+### Changed
+
+- **"Copy from rack" now replaces a rack's planned feeds instead of adding to
+  them.** Only a rack-name *prefix* is retargeted when a feed is copied, so feeds
+  named by any other scheme (`Utility A`) never collided — copying from several
+  racks in turn left the union of all of them, and the rack's capacity bar read
+  as the sum of every source ever clicked. The target now ends up fed exactly
+  like the source. A feed whose name survives the copy keeps its row, and with it
+  every PDU bound to it; the rest are removed and their PDUs unbound, with the
+  count reported in the confirmation. A source rack with no feeds is a no-op
+  rather than a wipe, since that is far likelier to be a mis-click than an
+  instruction to strip the rack's supply.
+
+### Added
+
+- **Planned power feeds are visible and removable.** They size a greenfield
+  rack's capacity bar but had no UI at all — no list, no detail page, no way to
+  delete one short of deleting the whole design. Now: the rack power dialog lists
+  the rack's planned feeds with a × on each, and the design detail page gains a
+  **Planned power feeds** panel showing every feed, its rack, its electricals,
+  the derated watts the capacity bar actually uses, and the PDUs bound to it.
+  Removing a feed reports how many PDUs lost their binding.
+- `DELETE /api/plugins/rack-design/designs/<pk>/planned-feed/` — addressed by
+  `feed_id`, or by `rack_id` + `name`. Requires `change_design`, since it edits a
+  design rather than deleting one.
+
 ## [0.20.2] - 2026-08-27
 
 ### Release Summary

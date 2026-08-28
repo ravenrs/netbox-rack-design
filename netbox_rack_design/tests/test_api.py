@@ -2601,6 +2601,78 @@ class CopyFeedsActionTest(APITestCase):
             DesignPowerFeed.objects.filter(design=self.design).count(), 0
         )
 
+    def test_copy_replaces_the_targets_planned_feeds(self):
+        """REGRESSION (user 2026-08-28): copying from several racks in turn left
+        the UNION of all of them, and the rack's capacity read as the sum of
+        every source ever clicked.
+
+        Only a rack-name PREFIX is retargeted, so feeds named by any other
+        scheme never collided and simply piled up. "Copy from rack" means the
+        target ends up fed like the source -- no more, no less.
+        """
+        self._grant()
+        stale = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.target, name="Utility A",
+            voltage=230, amperage=63)
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            sorted(DesignPowerFeed.objects.filter(
+                design=self.design, rack=self.target
+            ).values_list("name", flat=True)),
+            [f"{self.target.name}-A", f"{self.target.name}-B"],
+            "the target must hold exactly the source's feeds")
+        self.assertFalse(DesignPowerFeed.objects.filter(pk=stale.pk).exists())
+        self.assertEqual(response.data["deleted"], 1)
+        self.assertEqual(response.data["unbound"], 0)
+
+    def test_replacing_reports_the_pdus_it_unbinds(self):
+        """A PDU bound to a feed the copy removes loses its binding (SET_NULL),
+        so the count comes back for the dialog to warn with. A feed whose NAME
+        survives keeps its row, and with it every binding."""
+        self._grant()
+        doomed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.target, name="Utility A",
+            voltage=230, amperage=63)
+        survivor = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.target, name=f"{self.target.name}-A",
+            voltage=230, amperage=16)
+        env_type = DeviceType.objects.first()
+        bound = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=env_type, target_rack=self.target,
+            target_position=Decimal("1.0"), target_face="front",
+            proposed_name="pdu-doomed", planned_power_feed=doomed,
+        )
+        kept = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=env_type, target_rack=self.target,
+            target_position=Decimal("2.0"), target_face="front",
+            proposed_name="pdu-kept", planned_power_feed=survivor,
+        )
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["unbound"], 1)
+        bound.refresh_from_db()
+        kept.refresh_from_db()
+        self.assertIsNone(bound.planned_power_feed_id, "its feed is gone")
+        self.assertEqual(
+            kept.planned_power_feed_id, survivor.pk,
+            "a feed whose name survives keeps its row, so its PDU stays bound")
+
+    def test_source_with_no_feeds_never_wipes_the_target(self):
+        """A rack with nothing to give is a no-op, not a purge: picking the wrong
+        rack in the dropdown must not strip a planned supply that has no undo."""
+        self._grant()
+        PowerFeed.objects.filter(rack=self.source).delete()
+        keep = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.target, name="Utility A",
+            voltage=230, amperage=63)
+        response = self._post(rack_id=self.target.pk, source_rack_id=self.source.pk)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["deleted"], 0)
+        self.assertTrue(DesignPowerFeed.objects.filter(pk=keep.pk).exists())
+
     def test_same_rack_rejected(self):
         """Copying a rack onto itself is a 400, not a self-duplicating no-op."""
         self._grant()
@@ -2648,6 +2720,69 @@ class PlannedFeedActionTest(APITestCase):
             "plugins-api:netbox_rack_design-api:design-planned-feed",
             kwargs={"pk": (design or self.design).pk},
         )
+
+    def _grant(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design"
+        )
+
+    def test_delete_removes_a_planned_feed_by_id(self):
+        """A planned feed had no way out of the UI at all (user 2026-08-28): a
+        mistyped or no-longer-wanted one could only be removed by deleting the
+        whole design."""
+        self._grant()
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.racks[0], name="Feed A",
+            voltage=230, amperage=16)
+        response = self.client.delete(
+            self._url(), {"feed_id": feed.pk}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data, {"deleted": 1, "unbound": 0})
+        self.assertFalse(DesignPowerFeed.objects.filter(pk=feed.pk).exists())
+
+    def test_delete_by_rack_and_name_reports_the_pdus_it_unbinds(self):
+        """The dialog knows a feed by rack + name, so that addresses it too --
+        and deleting one unbinds the PDUs drawing from it (SET_NULL), which the
+        caller is told about rather than discovering later."""
+        self._grant()
+        rack = self.racks[0]
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=rack, name="Feed A", voltage=230, amperage=16)
+        placement = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=DeviceType.objects.first(), target_rack=rack,
+            target_position=Decimal("3.0"), target_face="front",
+            proposed_name="pdu-1", planned_power_feed=feed,
+        )
+        response = self.client.delete(
+            self._url(), {"rack_id": rack.pk, "name": "Feed A"},
+            format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["unbound"], 1)
+        placement.refresh_from_db()
+        self.assertIsNone(placement.planned_power_feed_id)
+
+    def test_delete_of_an_unknown_feed_is_404(self):
+        self._grant()
+        response = self.client.delete(
+            self._url(), {"feed_id": 999999}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_without_an_address_is_400(self):
+        self._grant()
+        response = self.client.delete(self._url(), {}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_delete_without_change_permission_denied(self):
+        """Read access is not enough to destroy planning data."""
+        self.add_permissions("netbox_rack_design.view_design")
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, rack=self.racks[0], name="Feed A",
+            voltage=230, amperage=16)
+        response = self.client.delete(
+            self._url(), {"feed_id": feed.pk}, format="json", **self.header)
+        self.assertIn(response.status_code, (403, 404))
+        self.assertTrue(DesignPowerFeed.objects.filter(pk=feed.pk).exists())
 
     def test_post_creates_a_planned_feed(self):
         """POST creates a new DesignPowerFeed and returns its serialized shape."""
