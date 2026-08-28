@@ -3,9 +3,14 @@
 import strawberry_django
 
 from ..compat import GraphQLDescribedModelFilterBase, GraphQLModelFilterBase
-from ..models import Design, DesignGroup, DesignPlacement
+from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
 
-__all__ = ("DesignGroupFilter", "DesignFilter", "DesignPlacementFilter")
+__all__ = (
+    "DesignGroupFilter",
+    "DesignFilter",
+    "DesignPlacementFilter",
+    "DesignPowerFeedFilter",
+)
 
 
 @strawberry_django.filter_type(DesignGroup, lookups=True)
@@ -25,4 +30,9 @@ class DesignFilter(GraphQLDescribedModelFilterBase):
 
 @strawberry_django.filter_type(DesignPlacement, lookups=True)
 class DesignPlacementFilter(GraphQLModelFilterBase):
+    pass
+
+
+@strawberry_django.filter_type(DesignPowerFeed, lookups=True)
+class DesignPowerFeedFilter(GraphQLModelFilterBase):
     pass

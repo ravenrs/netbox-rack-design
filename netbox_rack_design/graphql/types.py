@@ -7,7 +7,12 @@ import strawberry_django
 from netbox.graphql.types import NetBoxObjectType
 
 from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
-from .filters import DesignFilter, DesignGroupFilter, DesignPlacementFilter
+from .filters import (
+    DesignFilter,
+    DesignGroupFilter,
+    DesignPlacementFilter,
+    DesignPowerFeedFilter,
+)
 
 if TYPE_CHECKING:
     from dcim.graphql.types import (
@@ -47,16 +52,21 @@ class DesignType(NetBoxObjectType):
     depends_on: list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]
 
 
-# A PLANNED power feed (plain planning model). Exposed only as the nested target
-# of DesignPlacement.planned_power_feed -- just its electricals + identity, no
-# nested design/rack FKs (keeps the schema flat and avoids over-exposing).
+# A PLANNED power feed. Now a queryable object in its own right (it became a
+# NetBoxModel when it got its own list/detail/delete views), as well as the
+# nested target of DesignPlacement.planned_power_feed.
 @strawberry_django.type(
     DesignPowerFeed,
-    fields=["id", "name", "voltage", "amperage", "phase", "supply"],
+    fields="__all__",
+    filters=DesignPowerFeedFilter,
     pagination=True,
 )
-class DesignPowerFeedType:
-    pass
+class DesignPowerFeedType(NetBoxObjectType):
+    # Cross-app/cross-model FKs are nullable for the same reason as DesignType's:
+    # under object-level permissions a related object the caller cannot view
+    # resolves to null.
+    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+    rack: Annotated["RackType", strawberry.lazy("dcim.graphql.types")] | None
 
 
 @strawberry_django.type(DesignPlacement, fields="__all__", filters=DesignPlacementFilter, pagination=True)

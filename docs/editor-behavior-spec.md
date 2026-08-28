@@ -657,3 +657,58 @@ between columns like any other planned add (§4.6); moving a REAL blade between
 chassis still is not offered, because that needs the ghost/homecoming machinery
 a device-less tile does without. Both remaining items are cheaper after §2.6 than
 before it, which was part of the point.
+
+## 11. Palette favorites (named sets — Unreleased)
+
+### 11.1 What a set is
+
+A **favorite set** is a named list of device types belonging to ONE user. People
+plan in modes — a server build and a network build pull different hardware — and
+one flat list meant re-starring on every switch (user request 2026-08-28).
+
+- A user has any number of sets; `(user, name)` is unique, and only per user, so
+  two people may each keep a "for server".
+- `Default` is the set a user starts with. It is not privileged: it can be
+  renamed or deleted like any other, and is re-created empty if the user ends up
+  with none, so the editor always has a set to work in.
+- Membership is per set: the same device type may be starred in several sets at
+  once. Uniqueness is `(favorite_set, device_type)`, NOT `(user, device_type)`.
+- Deleting a set deletes its stars. It never touches the device types.
+
+### 11.2 Model
+
+`FavoriteSet(user, name, created)` and `FavoriteDeviceType(user, favorite_set,
+device_type, created)`. Both are plain `django.db.models.Model`, never
+`NetBoxModel`: starring is a personal UI preference and must not write
+ObjectChange rows, index for search, or carry custom fields/tags.
+
+`user` stays on `FavoriteDeviceType` alongside the set so the user-scoped API can
+filter by the requesting user without a join.
+
+### 11.3 API
+
+| Endpoint | Does |
+|---|---|
+| `GET /favorite-sets/` | the user's sets, default first, each with `device_type_ids`; provisions the default on first read |
+| `POST /favorite-sets/` | create (400 on a duplicate name, case-insensitive, or a blank one) |
+| `PATCH /favorite-sets/<id>/` | rename |
+| `DELETE /favorite-sets/<id>/` | delete the set and its stars; reports `favorites_removed` |
+| `GET /favorite-device-types/?set_id=` | that set's ids (default set when omitted) |
+| `POST /favorite-device-types/toggle/` | body `{device_type_id, set_id?}` |
+
+Every query is filtered by `request.user` and the client never names a user. A
+`set_id` that is not the caller's own resolves to their default rather than
+404-ing: set ids are UI state that goes stale (the set was deleted in another
+tab), and the safe reading of a stale id is "no set chosen".
+
+### 11.4 UI
+
+The Quick-access panel's header carries the set `<select>` (each option showing
+its member count) plus new / rename / delete. The selection is remembered in
+`localStorage` — it is browser-local UI state, not design data. The catalog
+stars read and write the selected set, and their tooltip names it ("Star (add to
+for network)"), so it is always clear which list is being changed.
+
+The `<select>` carries `no-ts` so NetBox's TomSelect enhancement leaves it alone:
+its options are rebuilt after every set change, which a TomSelect wrapper would
+not pick up.

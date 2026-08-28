@@ -2716,6 +2716,11 @@
             } finally {
                 rdEndPushSuppression();
                 refreshing = false;
+                // The × means something different on every tile state, and a tile
+                // changes state under the user's hands (a drag turns `existing`
+                // into `move_in`), so the label is re-derived here rather than
+                // frozen at render time.
+                syncRemoveLabels();
                 // Phase 1 read-model (spec §2): an OFF-by-default diagnostic. When a
                 // developer sets window.__rdDebugInvariants, re-derive the read-model
                 // from the freshly-settled DOM and log any invariant violation. This
@@ -4851,6 +4856,35 @@
             markDirty();
         }
 
+        // What the red × does to THIS tile, in the tile's own words. A planned
+        // move and a planned add are both cancellations of a plan -- nothing is
+        // being flagged for removal -- and saying "Flag for removal" on them
+        // described the wrong outcome (user 2026-08-28). Only a real, existing
+        // device is flagged (and clicking again un-flags it).
+        function removeBtnLabel(itemEl, idx, st) {
+            if (st.widget.kind === "add" || itemEl.classList.contains("nbx-rd-state-add")) {
+                return "Cancel this planned add";
+            }
+            if (st.widget.device_id != null && isMoveTile(itemEl, idx, st)) {
+                return "Cancel this planned move";
+            }
+            return st.removed ? "Undo removal" : "Flag for removal";
+        }
+
+        function syncRemoveLabels() {
+            block.querySelectorAll(".grid-stack-item").forEach(function (itemEl) {
+                var btn = itemEl.querySelector(":scope > .grid-stack-item-content > .nbx-rd-remove-btn");
+                if (!btn) { return; }
+                var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
+                var st = state[idx];
+                if (!st) { return; }
+                var label = removeBtnLabel(itemEl, idx, st);
+                if (btn.getAttribute("title") === label) { return; }
+                btn.setAttribute("title", label);
+                btn.setAttribute("aria-label", label);
+            });
+        }
+
         function handleRemoveClick(itemEl) {
             var idx = parseInt(itemEl.getAttribute("data-widget-index"), 10);
             var st = state[idx];
@@ -5889,7 +5923,46 @@
 
         var favoritesUrl = root.getAttribute("data-favorites-url")
             || "/api/plugins/rack-design/favorite-device-types/";
+        // Named favorite SETS: one starred list per way of working (user request
+        // 2026-08-28 -- "for server" pulls different types than "for network",
+        // and one flat list meant re-starring on every switch). The stars read
+        // and write whichever set is selected here.
+        var favoriteSetsUrl = root.getAttribute("data-favorite-sets-url")
+            || "/api/plugins/rack-design/favorite-sets/";
         var favoriteIds = {};   // id (number) -> true  (used as a Set)
+        var favoriteSets = [];  // [{id, name, is_default, device_type_ids}]
+        var activeSetId = null;
+        var setSelectEl = document.getElementById("nbx-rd-favset-select");
+        // The chosen set is per-user UI state that must survive a reload, but it
+        // is not design data -- it belongs in the browser, not in a table.
+        var SET_STORAGE_KEY = "nbx-rd-favorite-set";
+
+        function rememberedSetId() {
+            try {
+                var raw = window.localStorage.getItem(SET_STORAGE_KEY);
+                return raw ? parseInt(raw, 10) : null;
+            } catch (e) { return null; }
+        }
+
+        function rememberSetId(id) {
+            try {
+                if (id == null) { window.localStorage.removeItem(SET_STORAGE_KEY); }
+                else { window.localStorage.setItem(SET_STORAGE_KEY, String(id)); }
+            } catch (e) { /* private mode: the choice just does not persist */ }
+        }
+
+        function activeSetName() {
+            for (var i = 0; i < favoriteSets.length; i += 1) {
+                if (favoriteSets[i].id === activeSetId) { return favoriteSets[i].name; }
+            }
+            return "";
+        }
+
+        function starTitle(fav) {
+            var name = activeSetName();
+            if (fav) { return name ? "Unstar (remove from " + name + ")" : "Unstar (remove favorite)"; }
+            return name ? "Star (add to " + name + ")" : "Star (add favorite)";
+        }
 
         function setStatus(msg) {
             if (statusEl) { statusEl.textContent = msg || ""; }
@@ -5941,7 +6014,7 @@
             star.type = "button";
             star.className = "nbx-rd-fav-btn" + (fav ? " is-fav" : "");
             star.setAttribute("data-device-type-id", String(dt.id));
-            star.setAttribute("title", fav ? "Unstar (remove favorite)" : "Star (add favorite)");
+            star.setAttribute("title", starTitle(fav));
             star.setAttribute("aria-label", star.getAttribute("title"));
             star.setAttribute("aria-pressed", fav ? "true" : "false");
             var icon = document.createElement("i");
@@ -6116,7 +6189,7 @@
         function applyFavState(starBtn, fav) {
             starBtn.classList.toggle("is-fav", fav);
             starBtn.setAttribute("aria-pressed", fav ? "true" : "false");
-            starBtn.setAttribute("title", fav ? "Unstar (remove favorite)" : "Star (add favorite)");
+            starBtn.setAttribute("title", starTitle(fav));
             starBtn.setAttribute("aria-label", starBtn.getAttribute("title"));
             var icon = starBtn.querySelector("i");
             if (icon) { icon.className = "mdi " + (fav ? "mdi-star" : "mdi-star-outline"); }
@@ -6139,7 +6212,7 @@
                     "Content-Type": "application/json",
                     "X-CSRFToken": getCsrfToken(),
                 },
-                body: JSON.stringify({ device_type_id: id }),
+                body: JSON.stringify({ device_type_id: id, set_id: activeSetId }),
             }).then(function (resp) {
                 if (!resp.ok) { throw new Error("HTTP " + resp.status); }
                 return resp.json();
@@ -6166,7 +6239,9 @@
         if (quickListEl) { quickListEl.addEventListener("click", onStarClick); }
 
         function loadFavoritesThenFetch() {
-            fetch(favoritesUrl, {
+            var url = favoritesUrl
+                + (activeSetId != null ? "?set_id=" + encodeURIComponent(activeSetId) : "");
+            fetch(url, {
                 credentials: "same-origin",
                 headers: { "Accept": "application/json" },
             }).then(function (resp) {
@@ -6177,14 +6252,265 @@
                 ((data && data.device_type_ids) || []).forEach(function (id) {
                     favoriteIds[id] = true;
                 });
+                // The server has the last word on which set answered: a stale
+                // remembered id (its set deleted in another tab) resolves to the
+                // default rather than 404-ing, and the UI must follow it there.
+                if (data && data.set_id != null) { activeSetId = data.set_id; }
             }).catch(function () {
                 favoriteIds = {};
             }).then(function () {
+                renderSetSelector();
                 renderQuickAccess();
                 fetchTypes();
             });
         }
-        loadFavoritesThenFetch();
+
+        // ---- Favorite sets (named star lists) -------------------------------
+        function renderSetSelector() {
+            if (!setSelectEl) { return; }
+            setSelectEl.innerHTML = "";
+            favoriteSets.forEach(function (fs) {
+                var opt = document.createElement("option");
+                opt.value = String(fs.id);
+                opt.textContent = fs.name
+                    + " (" + ((fs.device_type_ids || []).length) + ")";
+                if (fs.id === activeSetId) { opt.selected = true; }
+                setSelectEl.appendChild(opt);
+            });
+            // A user always has at least one set (the server provisions the
+            // default on first read), so an empty select means the load failed.
+            setSelectEl.disabled = !favoriteSets.length;
+        }
+
+        function setsFetch(method, url, body) {
+            var opts = {
+                method: method,
+                credentials: "same-origin",
+                headers: { "Accept": "application/json" },
+            };
+            if (body !== undefined) {
+                opts.headers["Content-Type"] = "application/json";
+                opts.headers["X-CSRFToken"] = getCsrfToken();
+                opts.body = JSON.stringify(body);
+            } else if (method !== "GET") {
+                opts.headers["X-CSRFToken"] = getCsrfToken();
+            }
+            return fetch(url, opts).then(function (resp) {
+                return resp.text().then(function (text) {
+                    var data = null;
+                    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+                    if (!resp.ok) {
+                        var msg = (data && data.name && data.name[0])
+                            || ("HTTP " + resp.status);
+                        throw new Error(msg);
+                    }
+                    return data;
+                });
+            });
+        }
+
+        function loadSets() {
+            return setsFetch("GET", favoriteSetsUrl).then(function (data) {
+                favoriteSets = (data && data.results) || [];
+                var remembered = rememberedSetId();
+                var found = favoriteSets.some(function (fs) { return fs.id === remembered; });
+                activeSetId = found
+                    ? remembered
+                    : (favoriteSets.length ? favoriteSets[0].id : null);
+            }).catch(function () {
+                favoriteSets = [];
+                activeSetId = null;
+            });
+        }
+
+        function switchToSet(id) {
+            activeSetId = id;
+            rememberSetId(id);
+            loadFavoritesThenFetch();
+        }
+
+        function refreshSetsThen(selectId) {
+            return loadSets().then(function () {
+                if (selectId != null
+                    && favoriteSets.some(function (fs) { return fs.id === selectId; })) {
+                    activeSetId = selectId;
+                }
+                rememberSetId(activeSetId);
+                loadFavoritesThenFetch();
+            });
+        }
+
+        if (setSelectEl) {
+            setSelectEl.addEventListener("change", function () {
+                var id = parseInt(setSelectEl.value, 10);
+                if (!isNaN(id)) { switchToSet(id); }
+            });
+        }
+
+        var newSetBtn = document.getElementById("nbx-rd-favset-new");
+        if (newSetBtn) {
+            newSetBtn.addEventListener("click", function () {
+                showFavSetPrompt({
+                    title: "New favorite set",
+                    label: "Name",
+                    value: "",
+                    confirmText: "Create",
+                }, function (name) {
+                    setsFetch("POST", favoriteSetsUrl, { name: name })
+                        .then(function (data) { refreshSetsThen(data && data.id); })
+                        .catch(function (err) { showFavSetError(err.message); });
+                });
+            });
+        }
+
+        var renameSetBtn = document.getElementById("nbx-rd-favset-rename");
+        if (renameSetBtn) {
+            renameSetBtn.addEventListener("click", function () {
+                if (activeSetId == null) { return; }
+                showFavSetPrompt({
+                    title: "Rename favorite set",
+                    label: "Name",
+                    value: activeSetName(),
+                    confirmText: "Rename",
+                }, function (name) {
+                    setsFetch("PATCH", favoriteSetsUrl + activeSetId + "/", { name: name })
+                        .then(function () { refreshSetsThen(activeSetId); })
+                        .catch(function (err) { showFavSetError(err.message); });
+                });
+            });
+        }
+
+        var deleteSetBtn = document.getElementById("nbx-rd-favset-delete");
+        if (deleteSetBtn) {
+            deleteSetBtn.addEventListener("click", function () {
+                if (activeSetId == null) { return; }
+                var name = activeSetName();
+                var count = Object.keys(favoriteIds).length;
+                showFavSetConfirm(
+                    "Delete favorite set",
+                    "Delete \u201c" + name + "\u201d and its "
+                        + count + " starred device type"
+                        + (count === 1 ? "" : "s") + "? The device types themselves "
+                        + "are not touched.",
+                    "Delete",
+                    function () {
+                        setsFetch("DELETE", favoriteSetsUrl + activeSetId + "/")
+                            .then(function () { refreshSetsThen(null); })
+                            .catch(function (err) { showFavSetError(err.message); });
+                    }
+                );
+            });
+        }
+
+        // Bootstrap modals, never window.prompt/confirm -- every dialog in this
+        // editor is this shape (see showMoveNameDialog), including for the test
+        // shim that drives them through the DOM.
+        function buildFavSetModal(title, bodyHtml, confirmText, danger) {
+            var overlay = document.createElement("div");
+            overlay.className = "modal fade nbx-rd-favset-modal";
+            overlay.setAttribute("tabindex", "-1");
+            overlay.innerHTML =
+                '<div class="modal-dialog modal-dialog-centered modal-sm">'
+                + '<div class="modal-content">'
+                + '<div class="modal-header">'
+                + '<h5 class="modal-title"></h5>'
+                + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+                + "</div>"
+                + '<div class="modal-body">' + bodyHtml + "</div>"
+                + '<div class="modal-footer">'
+                + '<button type="button" class="btn btn-sm btn-link" data-rd-favset-cancel>Cancel</button>'
+                + '<button type="button" class="btn btn-sm '
+                + (danger ? "btn-danger" : "btn-primary")
+                + '" data-rd-favset-confirm></button>'
+                + "</div>"
+                + "</div></div>";
+            overlay.querySelector(".modal-title").textContent = title;
+            overlay.querySelector("[data-rd-favset-confirm]").textContent = confirmText;
+            document.body.appendChild(overlay);
+
+            var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
+            var modal = ctor ? new ctor(overlay) : null;
+            var shownDone = false, hidePending = false, decided = false;
+            overlay.addEventListener("shown.bs.modal", function () {
+                shownDone = true;
+                if (hidePending && modal) { modal.hide(); }
+                var input = overlay.querySelector("[data-rd-favset-input]");
+                if (input) { input.focus(); input.select(); }
+            });
+            overlay.addEventListener("hidden.bs.modal", function () { overlay.remove(); });
+            return {
+                overlay: overlay,
+                requestHide: function () {
+                    if (!modal) { overlay.remove(); return; }
+                    if (shownDone) { modal.hide(); } else { hidePending = true; }
+                },
+                show: function () { if (modal) { modal.show(); } },
+                decide: function (fn) {
+                    if (decided) { return; }
+                    decided = true;
+                    if (typeof fn === "function") { fn(); }
+                },
+            };
+        }
+
+        function showFavSetPrompt(opts, onConfirm) {
+            var dlg = buildFavSetModal(
+                opts.title,
+                '<label class="form-label" data-rd-favset-label></label>'
+                + '<input type="text" class="form-control form-control-sm" '
+                + 'maxlength="100" data-rd-favset-input>'
+                + '<div class="text-danger small mt-1" data-rd-favset-error></div>',
+                opts.confirmText, false);
+            dlg.overlay.querySelector("[data-rd-favset-label]").textContent = opts.label;
+            var input = dlg.overlay.querySelector("[data-rd-favset-input]");
+            input.value = opts.value || "";
+
+            function submit() {
+                var name = (input.value || "").trim();
+                if (!name) {
+                    dlg.overlay.querySelector("[data-rd-favset-error]").textContent =
+                        "A set needs a name.";
+                    return;
+                }
+                dlg.decide(function () { onConfirm(name); });
+                dlg.requestHide();
+            }
+            dlg.overlay.querySelector("[data-rd-favset-confirm]")
+                .addEventListener("click", submit);
+            input.addEventListener("keydown", function (event) {
+                if (event.key === "Enter") { event.preventDefault(); submit(); }
+            });
+            dlg.overlay.querySelector("[data-rd-favset-cancel]")
+                .addEventListener("click", function () { dlg.requestHide(); });
+            dlg.overlay.querySelector(".btn-close")
+                .addEventListener("click", function () { dlg.requestHide(); });
+            dlg.show();
+        }
+
+        function showFavSetConfirm(title, message, confirmText, onConfirm) {
+            var dlg = buildFavSetModal(
+                title, '<p data-rd-favset-message></p>', confirmText, true);
+            dlg.overlay.querySelector("[data-rd-favset-message]").textContent = message;
+            dlg.overlay.querySelector("[data-rd-favset-confirm]")
+                .addEventListener("click", function () {
+                    dlg.decide(onConfirm);
+                    dlg.requestHide();
+                });
+            dlg.overlay.querySelector("[data-rd-favset-cancel]")
+                .addEventListener("click", function () { dlg.requestHide(); });
+            dlg.overlay.querySelector(".btn-close")
+                .addEventListener("click", function () { dlg.requestHide(); });
+            dlg.show();
+        }
+
+        // A rejected name (duplicate, empty) must say so where the user is
+        // looking, not vanish into the console.
+        function showFavSetError(message) {
+            createToast("danger", "Favorites",
+                message || "Could not update the favorite set.");
+        }
+
+        loadSets().then(loadFavoritesThenFetch);
     })();
 
     // ---- Shared device hover card (name / role / tenant) -------------------

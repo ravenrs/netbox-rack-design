@@ -24,8 +24,10 @@ __all__ = (
     "DesignGroupSerializer",
     "DesignSerializer",
     "DesignPlacementSerializer",
+    "DesignPowerFeedSerializer",
     "SaveLayoutSerializer",
     "PreviewNameSerializer",
+    "FavoriteSetWriteSerializer",
     "FavoriteToggleSerializer",
     "DesignRackScopeSerializer",
     "HiddenRackToggleSerializer",
@@ -148,6 +150,31 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "kind")
+
+
+class DesignPowerFeedSerializer(NetBoxModelSerializer):
+    """A design's PLANNED power feed -- read, edit and delete it like any object.
+
+    Mirrors ``dcim.PowerFeed``'s field names on purpose (see the model), and
+    exposes ``derated_watts``: the figure this feed actually contributes to its
+    rack's capacity bar, so an API client sees the same number the UI does.
+    """
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:designpowerfeed-detail"
+    )
+    design = NestedDesignSerializer()
+    rack = RackSerializer(nested=True)
+    derated_watts = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = DesignPowerFeed
+        fields = (
+            "id", "url", "display", "design", "rack", "name",
+            "voltage", "amperage", "phase", "supply", "derated_watts",
+            "tags", "custom_fields", "created", "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "name")
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +338,26 @@ class PreviewNameSerializer(serializers.Serializer):
 
 
 class FavoriteToggleSerializer(serializers.Serializer):
-    """Body for POST .../favorite-device-types/toggle/."""
+    """Body for POST .../favorite-device-types/toggle/.
+
+    ``set_id`` names which of the user's favorite SETS to star into. It stays
+    optional so an older client (and the plain "star it" case) keeps working:
+    the viewset falls back to the user's default set.
+    """
 
     device_type_id = serializers.IntegerField()
+    set_id = serializers.IntegerField(required=False, allow_null=True)
+
+
+class FavoriteSetWriteSerializer(serializers.Serializer):
+    """Body for POST/PATCH .../favorite-sets/ -- the set's name.
+
+    A name is the user's only handle on a set, so a blank one is refused here
+    rather than creating an unclickable row. Uniqueness per user is enforced by
+    the viewset (it knows the requesting user; this serializer does not).
+    """
+
+    name = serializers.CharField(max_length=100, allow_blank=False, trim_whitespace=True)
 
 
 # ---------------------------------------------------------------------------

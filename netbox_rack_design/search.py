@@ -2,9 +2,9 @@
 
 from netbox.search import SearchIndex
 
-from .models import Design, DesignGroup
+from .models import Design, DesignGroup, DesignPowerFeed
 
-__all__ = ("DesignIndex", "DesignGroupIndex", "indexes")
+__all__ = ("DesignIndex", "DesignGroupIndex", "DesignPowerFeedIndex", "indexes")
 
 
 class DesignIndex(SearchIndex):
@@ -27,4 +27,12 @@ class DesignGroupIndex(SearchIndex):
     display_attrs = ("parent", "description")
 
 
-indexes = (DesignIndex, DesignGroupIndex)
+class DesignPowerFeedIndex(SearchIndex):
+    model = DesignPowerFeed
+    fields = (
+        ("name", 100),
+    )
+    display_attrs = ("design", "rack", "voltage", "amperage")
+
+
+indexes = (DesignIndex, DesignGroupIndex, DesignPowerFeedIndex)

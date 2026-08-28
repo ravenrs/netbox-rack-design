@@ -284,8 +284,28 @@ DesignPowerFeed
   unique_together (design, rack, name)
 ```
 
-Plain `models.Model` (like `HiddenDesignRack`/`DesignRackPower`) — planning
-scratch data, not a change-logged object. Read-only w.r.t. `dcim`.
+A `NetBoxModel` (unlike `HiddenDesignRack`/`DesignRackPower`, which stay plain):
+a planned feed is design data a team reads, edits and deletes on its own.
+Read-only w.r.t. `dcim` — no real `PowerFeed` is ever written.
+
+**Its own views (Unreleased).** Feeds were created by the editor's dialogs and
+then visible nowhere, with no way to remove one — while still sizing a
+greenfield rack's capacity bar, so a stray feed silently inflated it. They now
+have the same view set as `DesignPlacement`:
+
+| Route | Does |
+|---|---|
+| `Rack Design → Planned Power Feeds` (`/plugins/rack-design/power-feeds/`) | filterable list, bulk edit, bulk delete, import/export |
+| `/power-feeds/<pk>/` | detail: identity, electricals, **derated capacity**, and the planned PDUs bound to it |
+| `/power-feeds/<pk>/edit/` · `/delete/` | correct or remove one feed |
+| the design page's *Planned power feeds* panel | per-row edit + delete, returning to the design |
+| `/api/plugins/rack-design/planned-power-feeds/` · GraphQL `planned_power_feed` | the REST/GraphQL twins |
+
+`DesignPowerFeed.derated_watts` is the figure the capacity bar actually uses —
+`breaker_watts()` derated by the instance's `POWERFEED_DEFAULT_MAX_UTILIZATION`
+— so the list, the detail page and the rack's chips can never disagree about
+what a feed is worth. Deleting a feed unbinds the planned PDUs that pointed at
+it (`SET_NULL`), which the detail page names before you delete.
 
 ### 6.2 Binding — the PDU → feed link
 

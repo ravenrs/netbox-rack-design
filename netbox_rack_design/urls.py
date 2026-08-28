@@ -16,4 +16,6 @@ urlpatterns = (
     path("elevations/", views.ElevationBrowserView.as_view(), name="elevation_browser"),
     path("placements/", include(get_model_urls("netbox_rack_design", "designplacement", detail=False))),
     path("placements/<int:pk>/", include(get_model_urls("netbox_rack_design", "designplacement"))),
+    path("power-feeds/", include(get_model_urls("netbox_rack_design", "designpowerfeed", detail=False))),
+    path("power-feeds/<int:pk>/", include(get_model_urls("netbox_rack_design", "designpowerfeed"))),
 )

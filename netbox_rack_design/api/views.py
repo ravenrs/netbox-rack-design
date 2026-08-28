@@ -23,6 +23,7 @@ from ..models import (
     DesignPowerFeed,
     DesignRackPower,
     FavoriteDeviceType,
+    FavoriteSet,
     HiddenDesignChassis,
     HiddenDesignRack,
 )
@@ -30,8 +31,10 @@ from .serializers import (
     CopyFeedsSerializer,
     DesignGroupSerializer,
     DesignPlacementSerializer,
+    DesignPowerFeedSerializer,
     DesignRackScopeSerializer,
     DesignSerializer,
+    FavoriteSetWriteSerializer,
     FavoriteToggleSerializer,
     HiddenChassisToggleSerializer,
     HiddenRackShowAllSerializer,
@@ -50,7 +53,9 @@ __all__ = (
     "DesignGroupViewSet",
     "DesignViewSet",
     "DesignPlacementViewSet",
+    "DesignPowerFeedViewSet",
     "FavoriteDeviceTypeViewSet",
+    "FavoriteSetViewSet",
     "HiddenDesignRackViewSet",
     "DeviceTypePowerViewSet",
 )
@@ -1773,6 +1778,118 @@ class DesignPlacementViewSet(NetBoxModelViewSet):
     filterset_class = filtersets.DesignPlacementFilterSet
 
 
+class DesignPowerFeedViewSet(NetBoxModelViewSet):
+    """A design's PLANNED power feeds -- the REST twin of the new UI views."""
+
+    queryset = DesignPowerFeed.objects.select_related(
+        "design", "rack"
+    ).prefetch_related("tags", "bound_placements")
+    serializer_class = DesignPowerFeedSerializer
+    filterset_class = filtersets.DesignPowerFeedFilterSet
+
+
+class FavoriteSetViewSet(viewsets.ViewSet):
+    """
+    The requesting user's NAMED favorite sets ("Default", "for server", ...).
+
+    Like the favorites it groups, this is deliberately NOT a NetBoxModelViewSet:
+    every query is filtered by ``request.user`` and the client never supplies a
+    user, so a user can only ever see or change their own sets.
+
+    Endpoints:
+      GET    /api/plugins/rack-design/favorite-sets/
+             -> {"results": [{"id", "name", "is_default", "device_type_ids"}, ...]}
+      POST   /api/plugins/rack-design/favorite-sets/   body {"name"}
+      PATCH  /api/plugins/rack-design/favorite-sets/<id>/  body {"name"}  (rename)
+      DELETE /api/plugins/rack-design/favorite-sets/<id>/  (drops its stars too)
+
+    The listing always contains at least one set: a user who has never starred
+    anything gets their default provisioned on first read, so the editor always
+    has a set to work in.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _serialize(fav_set, members):
+        return {
+            "id": fav_set.pk,
+            "name": fav_set.name,
+            "is_default": fav_set.name == FavoriteSet.DEFAULT_NAME,
+            "device_type_ids": members.get(fav_set.pk, []),
+        }
+
+    def _rows(self, user):
+        sets = list(FavoriteSet.objects.filter(user=user).order_by("name"))
+        if not sets:
+            sets = [FavoriteSet.default_for(user)]
+        members = {}
+        for set_id, dt_id in FavoriteDeviceType.objects.filter(
+            favorite_set__in=sets
+        ).values_list("favorite_set_id", "device_type_id"):
+            members.setdefault(set_id, []).append(dt_id)
+        # The default set leads: it is what the editor selects when the user has
+        # made no choice, so it should not be hunted for in the middle of a list.
+        sets.sort(key=lambda s: (s.name != FavoriteSet.DEFAULT_NAME, s.name.lower()))
+        return [self._serialize(s, members) for s in sets]
+
+    def list(self, request):
+        return Response({"results": self._rows(request.user)})
+
+    def create(self, request):
+        body = FavoriteSetWriteSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        name = body.validated_data["name"].strip()
+        if FavoriteSet.objects.filter(user=request.user, name__iexact=name).exists():
+            return Response(
+                {"name": ["You already have a favorite set with that name."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        fav_set = FavoriteSet.objects.create(user=request.user, name=name)
+        return Response(
+            self._serialize(fav_set, {}), status=status.HTTP_201_CREATED
+        )
+
+    def partial_update(self, request, pk=None):
+        """Rename one of the user's own sets."""
+        fav_set = FavoriteSet.objects.filter(user=request.user, pk=pk).first()
+        if fav_set is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        body = FavoriteSetWriteSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        name = body.validated_data["name"].strip()
+        clash = FavoriteSet.objects.filter(
+            user=request.user, name__iexact=name
+        ).exclude(pk=fav_set.pk).exists()
+        if clash:
+            return Response(
+                {"name": ["You already have a favorite set with that name."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        fav_set.name = name
+        fav_set.save(update_fields=["name"])
+        members = {
+            fav_set.pk: list(
+                FavoriteDeviceType.objects.filter(favorite_set=fav_set)
+                .values_list("device_type_id", flat=True)
+            )
+        }
+        return Response(self._serialize(fav_set, members))
+
+    def destroy(self, request, pk=None):
+        """Delete one of the user's own sets, and with it its stars.
+
+        Deleting the last set is allowed: the next read provisions an empty
+        default rather than leaving the editor with nothing to work in.
+        """
+        fav_set = FavoriteSet.objects.filter(user=request.user, pk=pk).first()
+        if fav_set is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        removed = FavoriteDeviceType.objects.filter(favorite_set=fav_set).count()
+        fav_set.delete()
+        return Response({"deleted": True, "favorites_removed": removed})
+
+
 class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
     """
     User-scoped "favorite device types" (the catalog palette's stars).
@@ -1782,28 +1899,53 @@ class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
     and the client NEVER supplies a user — a user can only ever read or change
     their own favorites.
 
+    Stars live in a :class:`FavoriteSet`. ``set_id`` selects which one; omitted
+    (or naming a set that is not the requesting user's) it falls back to that
+    user's default set, which is also what an older client gets.
+
     Endpoints:
-      GET  /api/plugins/rack-design/favorite-device-types/        -> {"device_type_ids": [...]}
+      GET  /api/plugins/rack-design/favorite-device-types/[?set_id=<id>]
+           -> {"set_id": <id>, "device_type_ids": [...]}
       POST /api/plugins/rack-design/favorite-device-types/toggle/ -> star/unstar
     """
 
     permission_classes = [IsAuthenticated]
 
+    @staticmethod
+    def _resolve_set(user, raw_set_id):
+        """The user's set named by ``raw_set_id``, or their default.
+
+        Another user's set id resolves to the caller's default rather than
+        404-ing: set ids are UI state that can go stale (the set was deleted in
+        another tab), and the safe reading of a stale id is "no set chosen".
+        """
+        try:
+            set_id = int(raw_set_id)
+        except (TypeError, ValueError):
+            set_id = 0
+        if set_id:
+            owned = FavoriteSet.objects.filter(user=user, pk=set_id).first()
+            if owned is not None:
+                return owned
+        return FavoriteSet.default_for(user)
+
     def list(self, request):
-        """Return only the requesting user's favorite device-type ids."""
+        """Return the requesting user's favorite device-type ids in one set."""
+        fav_set = self._resolve_set(request.user, request.query_params.get("set_id"))
         ids = list(
-            FavoriteDeviceType.objects.filter(user=request.user)
+            FavoriteDeviceType.objects.filter(user=request.user, favorite_set=fav_set)
             .values_list("device_type_id", flat=True)
         )
-        return Response({"device_type_ids": ids})
+        return Response({"set_id": fav_set.pk, "device_type_ids": ids})
 
     @action(detail=False, methods=["post"], url_path="toggle")
     def toggle(self, request):
         """
         Star or unstar a device type for the requesting user (idempotent).
 
-        Body: {"device_type_id": <id>}. Returns {"device_type_id": <id>,
-        "favorite": true|false} where ``favorite`` reflects the resulting state.
+        Body: {"device_type_id": <id>, "set_id": <id>?}. Returns
+        {"device_type_id", "set_id", "favorite"} where ``favorite`` reflects the
+        resulting state within that set.
         """
         body = FavoriteToggleSerializer(data=request.data)
         body.is_valid(raise_exception=True)
@@ -1815,15 +1957,24 @@ class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        fav_set = self._resolve_set(request.user, body.validated_data.get("set_id"))
         favorite, created = FavoriteDeviceType.objects.get_or_create(
-            user=request.user, device_type_id=device_type_id
+            user=request.user, favorite_set=fav_set, device_type_id=device_type_id
         )
         if created:
-            return Response({"device_type_id": device_type_id, "favorite": True})
+            return Response({
+                "device_type_id": device_type_id,
+                "set_id": fav_set.pk,
+                "favorite": True,
+            })
 
-        # Already starred → toggle off.
+        # Already starred in this set → toggle off.
         favorite.delete()
-        return Response({"device_type_id": device_type_id, "favorite": False})
+        return Response({
+            "device_type_id": device_type_id,
+            "set_id": fav_set.pk,
+            "favorite": False,
+        })
 
 
 class DeviceTypePowerViewSet(viewsets.ViewSet):

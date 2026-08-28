@@ -36,6 +36,17 @@ menu = PluginMenu(
                     link_text="Placements",
                 ),
                 PluginMenuItem(
+                    link="plugins:netbox_rack_design:designpowerfeed_list",
+                    link_text="Planned Power Feeds",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rack_design:designpowerfeed_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_rack_design:elevation_browser",
                     link_text="Elevations",
                     permissions=["netbox_rack_design.view_design"],
