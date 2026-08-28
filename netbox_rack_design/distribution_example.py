@@ -217,15 +217,25 @@ def _unit_to_bank(rack, pdus, pdu_location):
     return result
 
 
-def _legs_for(device, unit_map):
+def _legs_for(device, unit_map, pdus=None):
     """The ``(pdu, bank)`` refs a device charges, one per redundant leg.
 
-    * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU): charge
-      the outlet's bank directly, one ref per cabling.
-    * **Uncabled** (planned/unconnected): a device with 2+ PSUs is redundant
-      -> charged in FULL to each leg it maps to (worst-case failover); a
-      single-PSU device sits on ONE leg only (never split), attributed by U
-      position via ``unit_map``.
+    * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU) **in this
+      rack**: charge the outlet's bank directly, one ref per cabling.
+    * **Uncabled** -- and a device whose cabling leads OUT of this rack:
+      attributed by U position via ``unit_map``. A device with 2+ PSUs is
+      redundant -> charged in FULL to each leg it maps to (worst-case
+      failover); a single-PSU device sits on ONE leg only (never split).
+
+    Cross-rack cabling is ordinary: a device in one rack is often fed from a
+    PDU in another (and a device MOVED between racks keeps its old cabling
+    until the design is implemented). Those refs name a PDU that is not part of
+    THIS rack's topology, so they are dropped here and the device falls back to
+    U-position attribution -- the same rule ``distribution._legs_for_native``
+    follows. Charging them unfiltered raised ``KeyError`` inside ``_charge``,
+    which killed the whole script and left the rack with NO per-bank
+    distribution at all (user 2026-08-28: "where did the bank distribution
+    go?" -- one rack's devices were cabled to the neighbour's PDUs).
     """
     device_obj = device.get("device")
     if device_obj is not None:
@@ -238,6 +248,11 @@ def _legs_for(device, unit_map):
                     if pdu_device is not None and bank_id is not None:
                         # banks are keyed by str(bank_id) (_collect_pdus).
                         refs.append((pdu_device.name, str(bank_id)))
+        if pdus is not None:
+            refs = [
+                ref for ref in refs
+                if ref[0] in pdus and ref[1] in pdus[ref[0]]["banks"]
+            ]
         if refs:
             return refs
     unit = device.get("u_position")
@@ -259,7 +274,17 @@ def _charge(pdus, bank_ref, device, power_type):
     """Add ``device['draw_w']`` to a bank's allocated/planned bucket and record
     the device line. ``bank_ref`` is ``(pdu_name, bank_id)``."""
     pdu_name, bank_id = bank_ref
-    bank = pdus[pdu_name]["banks"][bank_id]
+    # Belt and braces for a ref this rack cannot resolve (a foreign PDU, a bank
+    # the topology omitted): skip the charge rather than raise -- one unchargeable
+    # device must never cost the rack its whole distribution.
+    pdu = pdus.get(pdu_name)
+    if pdu is None or bank_id not in pdu["banks"]:
+        logger.debug(
+            "distribution_example._charge: device=%r cabled to unresolved bank %s/%s -- skipped",
+            device.get("name", ""), pdu_name, bank_id,
+        )
+        return
+    bank = pdu["banks"][bank_id]
     draw = float(device.get("draw_w") or 0)
     bank[power_type] += draw
     logger.debug(
@@ -365,7 +390,7 @@ def build(rack, devices):
             )
             continue
         power_type = "planned_power" if device.get("status") == "planned" else "allocated_power"
-        for bank_ref in _legs_for(device, unit_map):
+        for bank_ref in _legs_for(device, unit_map, pdus):
             _charge(pdus, bank_ref, device, power_type)
 
     rack_summary = _finalize(pdus, _power_limitation_w(rack))

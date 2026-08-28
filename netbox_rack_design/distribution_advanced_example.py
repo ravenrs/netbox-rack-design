@@ -302,7 +302,7 @@ def build(rack, devices):
             )
             continue
         power_type = "planned_power" if device.get("status") == "planned" else "allocated_power"
-        for bank_ref in _legs_for(device, unit_map):
+        for bank_ref in _legs_for(device, unit_map, pdus):
             _charge(pdus, bank_ref, device, power_type)
 
     warn_pct, critical_pct = _thresholds()
