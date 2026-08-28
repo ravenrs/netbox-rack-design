@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-08-28
+
+### Release Summary
+
+A rack could lose its entire per-bank distribution — every PDU chip gone —
+because of a single device fed from a PDU in another rack.
+
+### Fixed
+
+- **One device cabled to a neighbouring rack's PDU no longer wipes the whole
+  rack's per-bank distribution.** The shipped distribution scripts charged a
+  device to the bank of whatever outlet it was cabled to, without checking that
+  PDU belongs to the rack being computed. A foreign PDU is not in that rack's
+  topology, so the charge raised `KeyError`, `generate_distribution` caught it
+  and returned `None`, and the rack fell back to the per-device heatmap with no
+  bank chips at all. Cross-rack feeding is ordinary — shared PDUs, and a device
+  moved between racks keeps its cabling until the plan is implemented — so the
+  foreign cabling is now ignored and the device is attributed by U position
+  instead, exactly as the builtin engine has always done. `_charge` also skips an
+  unresolvable PDU or bank rather than raising, so no future caller can take a
+  rack's distribution down this way. Affects `distribution_example` and
+  `distribution_advanced_example`; the builtin (`distribution_mode = "builtin"`)
+  was never affected.
+
+  **If you copied an example script into `SCRIPTS_ROOT`**, replace that copy from
+  this release — a pip upgrade does not touch files under `scripts/`.
+
 ## [0.21.0] - 2026-08-28
 
 ### Release Summary

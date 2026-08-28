@@ -41,8 +41,13 @@ from django.test import TestCase, override_settings
 from extras.models import CustomField
 
 from ..choices import DesignPlacementKindChoices
-from ..distribution import devices_from_elevation
-from ..distribution_example import build, read_planning_field, read_planning_fields
+from ..distribution import _collect_pdus, devices_from_elevation
+from ..distribution_example import (
+    _charge,
+    build,
+    read_planning_field,
+    read_planning_fields,
+)
 from ..models import Design, DesignPlacement, DesignPowerFeed
 from ..projection import project_rack
 
@@ -224,6 +229,76 @@ class DistributionExampleTestCase(TestCase):
         dist = build(self.rack, [entry])
         # Bank 2 on pdu_a, regardless of U-position based bank slicing.
         self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["2"]["allocated_power"], 250)
+
+    def test_device_cabled_to_a_PDU_IN_ANOTHER_RACK_still_distributes(self):
+        """REGRESSION (user 2026-08-28): "where did the bank distribution go?"
+
+        A device fed from a PDU in a NEIGHBOURING rack is ordinary -- shared
+        PDUs, and a device MOVED between racks keeps its old cabling until the
+        plan is implemented. The script charged by the cabled outlet's PDU name
+        without checking that PDU belongs to THIS rack, so ``_charge`` raised
+        KeyError, ``generate_distribution`` swallowed it, and the rack lost its
+        per-bank distribution ENTIRELY -- every chip gone, for every PDU, because
+        of one device. The builtin engine never had this bug.
+
+        The foreign cabling is ignored and the device falls back to U-position
+        attribution, so its draw stays on the rack it physically occupies.
+        """
+        other_rack = Rack.objects.create(
+            name="D Rack 2", site=self.site, u_height=10)
+        foreign_pdu = Device.objects.create(
+            name="d-pdu-r2-1", device_type=self.pdu_type, site=self.site,
+            rack=other_rack, role=self.pdu_role, status="active")
+        foreign_outlet = PowerOutlet.objects.create(device=foreign_pdu, name="1/1")
+
+        srv_type = DeviceType.objects.create(
+            manufacturer=self.pdu_type.manufacturer, model="Srv Foreign",
+            slug="srv-foreign", u_height=1, is_full_depth=False)
+        srv_role = DeviceRole.objects.create(name="Server FX", slug="server-fx")
+        srv = Device.objects.create(
+            name="foreign-fed-srv", device_type=srv_type, site=self.site,
+            rack=self.rack, position=3, face="front", status="active",
+            role=srv_role)
+        pp = PowerPort.objects.create(device=srv, name="PSU1", allocated_draw=400)
+        Cable(a_terminations=[pp], b_terminations=[foreign_outlet]).save()
+
+        entry = {
+            "name": "foreign-fed-srv", "role": "server-fx", "status": "active",
+            "u_position": 3, "face": "front", "draw_w": 400.0, "draw_known": True,
+            "power_ports": [{"name": "PSU1", "draw": 400, "connected": "1/1"}],
+            "device": srv, "device_type": srv_type,
+        }
+        dist = build(self.rack, [entry])
+
+        self.assertIsNotNone(
+            dist, "one foreign-cabled device must not cost the rack its whole "
+                  "distribution")
+        charged = sum(
+            bank["allocated_power"]
+            for pdu in dist["pdus"].values()
+            for bank in pdu["banks"].values()
+        )
+        self.assertEqual(
+            charged, 400,
+            "the draw must land on THIS rack's banks by U position, not vanish")
+        self.assertNotIn(
+            "d-pdu-r2-1", dist["pdus"], "a PDU from another rack is not this "
+            "rack's topology")
+
+    def test_charge_skips_a_bank_this_rack_cannot_resolve(self):
+        """Belt and braces behind the filter above: handed a ref naming a PDU or
+        bank that is not in the topology, ``_charge`` skips it instead of
+        raising, so no future caller can take the whole rack down again."""
+        pdus = _collect_pdus(self.rack, [])
+        device = {"name": "x", "draw_w": 100.0, "u_position": 1, "status": "active"}
+        _charge(pdus, ("no-such-pdu", "1"), device, "allocated_power")
+        _charge(pdus, ("d-pdu-r1-1", "99"), device, "allocated_power")
+        charged = sum(
+            bank["allocated_power"]
+            for pdu in pdus.values()
+            for bank in pdu["banks"].values()
+        )
+        self.assertEqual(charged, 0)
 
     # --- pdu_location (via planning_fields) flips the unit->bank direction -
 
