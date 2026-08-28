@@ -1363,6 +1363,38 @@ class RecomputeDistributionTest(APITestCase):
         self.assertHttpStatus(after, status.HTTP_200_OK)
         self.assertGreater(after.data["power"][str(self.rack.pk)]["capacity_w"], before)
 
+    def test_recompute_reports_why_a_rack_has_no_distribution(self):
+        """A live edit can BREAK the engine, so the reason travels with every
+        recompute -- otherwise the chip strip just empties mid-session and the
+        user is left guessing (user 2026-08-28)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {"design_id": self.design.pk,
+                "racks": [{"rack_id": self.rack.pk, "front": []}]}
+
+        with override_settings(PLUGINS_CONFIG={"netbox_rack_design": {
+                "distribution_mode": "script",
+                "distribution_script":
+                    "netbox_rack_design.tests.test_distribution.raising_distribution_fn"}}):
+            resp = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["distributions"][str(self.rack.pk)])
+        st = resp.data["distribution_status"][str(self.rack.pk)]
+        self.assertEqual(st["state"], "failed")
+        self.assertIn("RuntimeError", st["detail"])
+        self.assertIn("raising_distribution_fn", st["script"])
+
+        with override_settings(PLUGINS_CONFIG={"netbox_rack_design": {
+                "distribution_mode": "none"}}):
+            off = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertEqual(
+            off.data["distribution_status"][str(self.rack.pk)]["state"], "off",
+            "an engine that is switched off must not read as missing data")
+
+        with override_settings(PLUGINS_CONFIG={"netbox_rack_design": {
+                "distribution_mode": "builtin"}}):
+            ok = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertEqual(ok.data["distribution_status"][str(self.rack.pk)]["state"], "ok")
+
     def test_recompute_requires_view_permission(self):
         # No permission granted -> 403 (POST maps to view_design for this action).
         resp = self.client.post(

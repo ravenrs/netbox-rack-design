@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-08-28
+
+### Release Summary
+
+The per-bank distribution stops failing silently. When the engine breaks, the
+rack now says so — which exception, from which script — instead of quietly
+rendering an empty chip strip that looks exactly like a rack with no PDUs.
+
+### Added
+
+- **A rack with no per-bank chips now explains itself.** Four different causes
+  produced the same blank strip — the script raised, the PDU has no resolvable
+  feed, `distribution_mode` is `none`, or a stale script copy is being loaded —
+  and telling them apart meant reproducing the data and calling the engine by
+  hand. Under the power bar the editor now renders:
+  - **failed** (red): "the distribution script failed", with the exception type,
+    its message and the script's dotted path on hover;
+  - **empty**: which PDU had to be omitted and why (input not cabled to a
+    `dcim.PowerFeed` and not bound to a planned feed / no parseable outlet
+    banks), or that the rack has no PDU device at all;
+  - **off**: that per-bank distribution is switched off, so a configuration
+    answer never reads as missing data.
+- `generate_distribution_status(elevation)` returns `(distribution, status)`;
+  the status also rides `elevation.power["distribution_status"]` and a new
+  `distribution_status` block in the `recompute-distribution/` response, so an
+  edit that breaks the engine reports itself immediately rather than at the next
+  page load. `generate_distribution(elevation)` is unchanged for scripts and
+  existing callers.
+
 ## [0.21.1] - 2026-08-28
 
 ### Release Summary

@@ -33,6 +33,7 @@ from ..distribution import (
     build_native,
     devices_from_elevation,
     generate_distribution,
+    generate_distribution_status,
 )
 from ..models import Design, DesignPlacement, DesignPowerFeed, DesignRackPower
 from ..projection import project_rack
@@ -50,6 +51,21 @@ def sample_distribution_fn(rack, devices):
 
 
 sample_distribution_fn.calls = []
+
+
+# A script result that actually CONTAINS a PDU. The sentinel above has an empty
+# `pdus`, which correctly reports as "empty" -- a distribution with no PDU draws
+# no chips, and that is exactly the case the status has to explain.
+POPULATED_DISTRIBUTION = {
+    "scheme": "test",
+    "pdus": {"p1": {"banks": {"1": {"max_power": 100, "allocated_power": 0,
+                                    "planned_power": 0, "devices": []}}}},
+    "rack": {},
+}
+
+
+def populated_distribution_fn(rack, devices):
+    return POPULATED_DISTRIBUTION
 
 
 not_callable_value = "I am a string, not a function"
@@ -73,6 +89,7 @@ def _plugins_config(**overrides):
 
 _FN = "netbox_rack_design.tests.test_distribution.sample_distribution_fn"
 _RAISING = "netbox_rack_design.tests.test_distribution.raising_distribution_fn"
+_POPULATED = "netbox_rack_design.tests.test_distribution.populated_distribution_fn"
 _NOT_CALLABLE = "netbox_rack_design.tests.test_distribution.not_callable_value"
 
 
@@ -220,6 +237,112 @@ class DistributionLoaderTestCase(TestCase):
     def test_project_rack_attaches_script_distribution(self):
         elevation = self._elevation()
         self.assertIs(elevation.power["distribution"], SENTINEL_DISTRIBUTION)
+
+
+class DistributionStatusTestCase(TestCase):
+    """Every empty chip strip must say WHY (user 2026-08-28).
+
+    A failing engine used to log a warning and return ``None``, which on screen
+    is indistinguishable from a rack that legitimately has no PDUs. Four causes,
+    one blank result: the only way to tell them apart was reproducing the data
+    and calling the engine by hand.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.design = Design.objects.create(title="Status", site=cls.site)
+        DesignPlacement.objects.create(
+            design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=env["device_type"], device_role=env["device_role"],
+            target_rack=cls.racks[0], target_position=10, target_face="front",
+            proposed_name="planned-sw1",
+        )
+
+    def _status(self, **cfg):
+        with override_settings(PLUGINS_CONFIG=_plugins_config(**cfg)):
+            elevation = project_rack(self.design, self.racks[0])
+            _result, status = generate_distribution_status(elevation)
+            return status
+
+    def test_mode_none_reports_off_not_missing_data(self):
+        """'The feature is switched off' and 'this rack has nothing' are
+        different answers and must not look the same."""
+        status = self._status(distribution_mode="none")
+        self.assertEqual(status["state"], "off")
+        self.assertEqual(status["engine"], "none")
+        self.assertIn("distribution_mode", status["detail"])
+
+    def test_a_raising_script_reports_the_exception_and_the_path(self):
+        status = self._status(distribution_mode="script", distribution_script=_RAISING)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["engine"], "script")
+        self.assertEqual(status["script"], _RAISING)
+        self.assertIn("RuntimeError", status["detail"])
+        self.assertIn("boom", status["detail"],
+                      "the script's own message is what identifies the break")
+
+    def test_script_mode_with_no_path_configured_reports_failed(self):
+        status = self._status(distribution_mode="script", distribution_script="")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("no 'distribution_script'", status["detail"])
+
+    def test_an_unimportable_script_reports_failed(self):
+        status = self._status(distribution_mode="script",
+                              distribution_script="nope.not_a_module.build")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("Could not import", status["detail"])
+
+    def test_a_rack_with_no_pdu_says_so(self):
+        status = self._status(distribution_mode="builtin")
+        self.assertEqual(status["state"], "empty")
+        self.assertIn("no PDU device", status["detail"])
+
+    def test_a_pdu_without_a_feed_is_named_with_its_reason(self):
+        """The commonest real cause: the PDU exists, its input is uncabled, so
+        the engine omits it and the rack shows nothing."""
+        from dcim.models import Device, DeviceRole, DeviceType, PowerOutlet
+
+        pdu_role = DeviceRole.objects.create(name="PDU", slug="pdu")
+        pdu_type = DeviceType.objects.create(
+            manufacturer=DeviceType.objects.first().manufacturer,
+            model="St PDU", slug="st-pdu", u_height=0)
+        pdu = Device.objects.create(
+            name="st-pdu-1", device_type=pdu_type, site=self.site,
+            rack=self.racks[0], role=pdu_role, status="active")
+        PowerOutlet.objects.create(device=pdu, name="1/1")
+
+        status = self._status(distribution_mode="builtin")
+        self.assertEqual(status["state"], "empty")
+        self.assertIn("st-pdu-1", status["detail"])
+        self.assertIn("no power feed", status["detail"])
+
+    def test_a_working_engine_reports_ok_with_no_detail(self):
+        status = self._status(distribution_mode="script", distribution_script=_POPULATED)
+        self.assertEqual(status["state"], "ok")
+        self.assertEqual(status["detail"], "")
+
+    def test_projection_carries_the_status(self):
+        """The editor reads it off the projection, so it must ride along."""
+        with override_settings(PLUGINS_CONFIG=_plugins_config(distribution_mode="none")):
+            elevation = project_rack(self.design, self.racks[0])
+        self.assertEqual(elevation.power["distribution_status"]["state"], "off")
+
+    def test_a_script_returning_no_pdus_reports_empty_not_ok(self):
+        """A dict with an empty ``pdus`` draws no chips either, so it is an
+        "empty" answer that still owes the user a reason."""
+        status = self._status(distribution_mode="script", distribution_script=_FN)
+        self.assertEqual(status["state"], "empty")
+
+    def test_generate_distribution_still_returns_just_the_result(self):
+        """The old one-value entry point stays, for scripts and callers that
+        only want the distribution."""
+        with override_settings(PLUGINS_CONFIG=_plugins_config(
+                distribution_mode="script", distribution_script=_FN)):
+            elevation = project_rack(self.design, self.racks[0])
+            self.assertIs(generate_distribution(elevation), SENTINEL_DISTRIBUTION)
 
 
 class PlannedPduPowerConfigTestCase(TestCase):
