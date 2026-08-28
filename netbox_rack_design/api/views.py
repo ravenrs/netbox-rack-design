@@ -36,6 +36,7 @@ from .serializers import (
     HiddenChassisToggleSerializer,
     HiddenRackShowAllSerializer,
     HiddenRackToggleSerializer,
+    PlannedFeedDeleteSerializer,
     PlannedFeedSerializer,
     PlannedFeedUpsertSerializer,
     PreviewNameSerializer,
@@ -182,11 +183,16 @@ class ChangeDesignPermissions(TokenPermissions):
     EDIT an existing Design (not creation), so a POST to them must require
     ``change_design`` rather than the default ``add_design`` that
     TokenPermissions maps POST to.
+
+    DELETE is remapped for the same reason: deleting a planned feed edits the
+    design, it does not delete the design, so requiring ``delete_design`` would
+    demand a permission far broader than the act.
     """
 
     perms_map = {
         **TokenPermissions.perms_map,
         "POST": ["%(app_label)s.change_%(model_name)s"],
+        "DELETE": ["%(app_label)s.change_%(model_name)s"],
     }
 
 
@@ -670,15 +676,25 @@ class DesignViewSet(NetBoxModelViewSet):
 
         Each copied feed is named for the TARGET rack when the source name is
         prefixed with the source rack's name (``R101-A`` copied from R101 to R103
-        becomes ``R103-A``); any other name is kept verbatim. Upserts by the
-        ``(design, rack, name)`` unique_together, so re-copying updates the
-        electricals instead of duplicating rows. Writes ONLY DesignPowerFeed
-        rows -- never dcim, and never the target rack.
+        becomes ``R103-A``); any other name is kept verbatim.
+
+        REPLACES the target's planned feeds rather than adding to them (user
+        2026-08-28): the button says "copy from rack", so the target must end up
+        fed like the source -- no more, no less. Copying from three racks in turn
+        used to leave the union of all three whenever their feeds were named by
+        some scheme other than the rack-name prefix (``Utility A`` is kept
+        verbatim, so nothing collided), and the rack's capacity read as the SUM
+        of every source ever clicked. Feeds whose name survives the copy keep
+        their row -- and therefore every PDU bound to them; the rest are deleted,
+        which unbinds their PDUs (``planned_power_feed`` is SET_NULL), so the
+        count of those is reported for the UI to warn about.
+
+        Writes ONLY DesignPowerFeed rows -- never dcim, and never the target rack.
 
         POST .../designs/<pk>/copy-feeds/
           body {"rack_id": <target>, "source_rack_id": <source>}
           -> {"feeds": [{"id","name","voltage","amperage","phase","supply"}, ...],
-              "created": <n>, "updated": <n>}
+              "created": <n>, "updated": <n>, "deleted": <n>, "unbound": <n>}
 
         URL name: plugins-api:netbox_rack_design-api:design-copy-feeds
         Path:     /api/plugins/rack-design/designs/<pk>/copy-feeds/
@@ -714,33 +730,56 @@ class DesignViewSet(NetBoxModelViewSet):
                 design=design, rack=source).order_by("name"))
 
         copied, created_count, updated_count = [], 0, 0
-        for feed in sources:
-            name = _retarget_feed_name(feed.name, source.name, target.name)
-            electricals = {
-                "voltage": feed.voltage,
-                "amperage": feed.amperage,
-                "phase": getattr(feed.phase, "value", feed.phase),
-                "supply": getattr(feed.supply, "value", feed.supply),
-            }
-            planned, created = DesignPowerFeed.objects.get_or_create(
-                design=design, rack=target, name=name, defaults=electricals)
-            if created:
-                created_count += 1
-            else:
-                for field_name, value in electricals.items():
-                    setattr(planned, field_name, value)
-                planned.save()
-                updated_count += 1
-            copied.append(planned)
+        with transaction.atomic():
+            for feed in sources:
+                name = _retarget_feed_name(feed.name, source.name, target.name)
+                electricals = {
+                    "voltage": feed.voltage,
+                    "amperage": feed.amperage,
+                    "phase": getattr(feed.phase, "value", feed.phase),
+                    "supply": getattr(feed.supply, "value", feed.supply),
+                }
+                planned, created = DesignPowerFeed.objects.get_or_create(
+                    design=design, rack=target, name=name, defaults=electricals)
+                if created:
+                    created_count += 1
+                else:
+                    for field_name, value in electricals.items():
+                        setattr(planned, field_name, value)
+                    planned.save()
+                    updated_count += 1
+                copied.append(planned)
+
+            # The replace half: whatever this rack was planned to have before and
+            # the source does not supply is gone. Counted BEFORE the delete, so
+            # the dialog can say how many PDUs it just unbound.
+            #
+            # A source with NO feeds stays a no-op rather than a wipe: "copy from
+            # a rack that has nothing" is far more likely a mis-click on the rack
+            # picker than an instruction to strip this rack of its supply, and
+            # the destructive reading has no undo.
+            stale = DesignPowerFeed.objects.filter(
+                design=design, rack=target
+            ).exclude(pk__in=[f.pk for f in copied]) if copied else (
+                DesignPowerFeed.objects.none())
+            unbound = DesignPlacement.objects.filter(
+                design=design, planned_power_feed__in=stale
+            ).count()
+            deleted_count = stale.count()
+            stale.delete()
 
         logger.debug(
-            "api.copy_feeds: design=%s %s -> %s created=%d updated=%d",
-            design.pk, source.name, target.name, created_count, updated_count)
+            "api.copy_feeds: design=%s %s -> %s created=%d updated=%d deleted=%d "
+            "unbound=%d",
+            design.pk, source.name, target.name, created_count, updated_count,
+            deleted_count, unbound)
         return Response(
             {
                 "feeds": PlannedFeedSerializer(copied, many=True).data,
                 "created": created_count,
                 "updated": updated_count,
+                "deleted": deleted_count,
+                "unbound": unbound,
             },
             status=status.HTTP_200_OK,
         )
@@ -789,7 +828,7 @@ class DesignViewSet(NetBoxModelViewSet):
             {"real": real_feeds, "planned": planned_feeds}, status=status.HTTP_200_OK
         )
 
-    @action(detail=True, methods=["get", "post"], url_path="planned-feed")
+    @action(detail=True, methods=["get", "post", "delete"], url_path="planned-feed")
     def planned_feed(self, request, pk=None):
         """
         Upsert/list this design's planned power feeds (``DesignPowerFeed`` --
@@ -799,16 +838,23 @@ class DesignViewSet(NetBoxModelViewSet):
         name UPDATES the electricals rather than duplicating the row. Never
         writes to dcim.
 
-        GET  .../designs/<pk>/planned-feed/?rack_id=<id>
-             -> [{"id","name","voltage","amperage","phase","supply"}, ...]
-        POST .../designs/<pk>/planned-feed/ body {"rack_id","name","voltage",
-             "amperage","phase","supply"} -> upsert, returns the one feed.
+        GET    .../designs/<pk>/planned-feed/?rack_id=<id>
+               -> [{"id","name","voltage","amperage","phase","supply"}, ...]
+        POST   .../designs/<pk>/planned-feed/ body {"rack_id","name","voltage",
+               "amperage","phase","supply"} -> upsert, returns the one feed.
+        DELETE .../designs/<pk>/planned-feed/ body {"feed_id"} (or
+               {"rack_id","name"}) -> {"deleted","unbound"}. A planned feed had
+               no way out of the UI at all, so a mistyped or no-longer-wanted one
+               was unremovable short of deleting the design (user 2026-08-28).
+               Deleting one unbinds the PDUs that drew from it
+               (``planned_power_feed`` is SET_NULL) -- that count comes back so
+               the dialog can say so.
 
         URL name: plugins-api:netbox_rack_design-api:design-planned-feed
         Path:     /api/plugins/rack-design/designs/<pk>/planned-feed/
         """
         if request.user.is_authenticated:
-            perm = "change" if request.method == "POST" else "view"
+            perm = "view" if request.method == "GET" else "change"
             self.queryset = Design.objects.restrict(request.user, perm)
         design = self.get_object()
 
@@ -847,6 +893,35 @@ class DesignViewSet(NetBoxModelViewSet):
                 design.pk, rack_id, data["name"], "created" if created else "updated",
             )
             return Response(PlannedFeedSerializer(feed).data, status=status.HTTP_200_OK)
+
+        if request.method == "DELETE":
+            body = PlannedFeedDeleteSerializer(data=request.data)
+            body.is_valid(raise_exception=True)
+            data = body.validated_data
+            feeds_qs = DesignPowerFeed.objects.filter(design=design)
+            if data.get("feed_id") is not None:
+                feeds_qs = feeds_qs.filter(pk=data["feed_id"])
+            else:
+                feeds_qs = feeds_qs.filter(
+                    rack_id=data["rack_id"], name=data["name"])
+            if not feeds_qs.exists():
+                return Response(
+                    {"detail": "No such planned feed in this design."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            with transaction.atomic():
+                unbound = DesignPlacement.objects.filter(
+                    design=design, planned_power_feed__in=feeds_qs
+                ).count()
+                deleted_count = feeds_qs.count()
+                feeds_qs.delete()
+            logger.debug(
+                "api.planned_feed: design=%s deleted=%d unbound=%d",
+                design.pk, deleted_count, unbound)
+            return Response(
+                {"deleted": deleted_count, "unbound": unbound},
+                status=status.HTTP_200_OK,
+            )
 
         # GET: list this rack's planned feeds.
         rack_id = request.query_params.get("rack_id")

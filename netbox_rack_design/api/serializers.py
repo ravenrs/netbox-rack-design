@@ -33,6 +33,7 @@ __all__ = (
     "HiddenRackShowAllSerializer",
     "RackPowerSerializer",
     "PlannedFeedSerializer",
+    "PlannedFeedDeleteSerializer",
     "PlannedFeedUpsertSerializer",
 )
 
@@ -389,6 +390,27 @@ class CopyFeedsSerializer(serializers.Serializer):
 
     rack_id = serializers.IntegerField()
     source_rack_id = serializers.IntegerField()
+
+
+class PlannedFeedDeleteSerializer(serializers.Serializer):
+    """Body for DELETE .../designs/<pk>/planned-feed/.
+
+    Addressed either by row id or by the natural key the dialog knows
+    (``rack_id`` + ``name``), so a caller holding one or the other need not look
+    the feed up first.
+    """
+
+    feed_id = serializers.IntegerField(required=False)
+    rack_id = serializers.IntegerField(required=False)
+    name = serializers.CharField(max_length=100, required=False)
+
+    def validate(self, attrs):
+        if attrs.get("feed_id") is None and not (
+            attrs.get("rack_id") is not None and attrs.get("name")
+        ):
+            raise serializers.ValidationError(
+                "Provide feed_id, or both rack_id and name.")
+        return attrs
 
 
 class PlannedFeedUpsertSerializer(serializers.Serializer):

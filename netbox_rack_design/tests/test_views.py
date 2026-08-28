@@ -1,5 +1,7 @@
 """UI view tests for NetBox Rack Design (subclassing NetBox's standard suite)."""
 
+from decimal import Decimal
+
 from dcim.models import Rack, Site
 from django.urls import reverse
 from utilities.testing import TestCase, ViewTestCases, create_tags
@@ -7,7 +9,13 @@ from utilities.testing import TestCase, ViewTestCases, create_tags
 from .. import views
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..forms import DesignForm
-from ..models import Design, DesignGroup, DesignPlacement, HiddenDesignRack
+from ..models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    HiddenDesignRack,
+)
 from .utils import create_dcim_environment
 
 
@@ -1017,6 +1025,71 @@ class DesignEditorViewTest(TestCase):
         # Rack 1 (with a move + a remove) actually projects some widgets, so the
         # comparison above is non-vacuous.
         self.assertTrue(blocks[0]["widgets"])
+
+
+class DesignPlannedFeedPanelTest(TestCase):
+    """The design detail page lists this design's PLANNED power feeds.
+
+    They size a greenfield rack's capacity bar, and until 0.21.0 they were
+    visible through no UI route whatsoever -- so a feed copied by mistake
+    inflated the bar with nothing to point at (user 2026-08-28: "where do we
+    look at the feeds we created?").
+    """
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.rack = env["racks"][0]
+        cls.device_type = env["device_type"]
+        cls.role = env["device_role"]
+        cls.design = Design.objects.create(title="Feed panel design", site=cls.site)
+        cls.feed = DesignPowerFeed.objects.create(
+            design=cls.design, rack=cls.rack, name="R101-A",
+            voltage=230, amperage=32,
+        )
+        cls.pdu = DesignPlacement.objects.create(
+            design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, device_role=cls.role,
+            target_rack=cls.rack, target_position=Decimal("1.0"),
+            target_face="front", proposed_name="pdu-a1",
+            planned_power_feed=cls.feed,
+        )
+
+    def _url(self):
+        return reverse("plugins:netbox_rack_design:design", kwargs={"pk": self.design.pk})
+
+    def test_panel_lists_the_feed_with_its_derated_capacity(self):
+        response = self.client.get(self._url())
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn("Planned power feeds", content)
+        self.assertIn("R101-A", content)
+        rows = response.context["planned_feeds"]
+        self.assertEqual([r["feed"].pk for r in rows], [self.feed.pk])
+        # 230 V x 32 A = 7360 W, derated by POWERFEED_DEFAULT_MAX_UTILIZATION --
+        # the same number the capacity bar sizes against, not the raw breaker.
+        from netbox.config import get_config
+        max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
+        self.assertEqual(rows[0]["watts"], round(230 * 32 * max_util / 100.0))
+
+    def test_panel_names_the_pdus_bound_to_the_feed(self):
+        """A feed's row says what breaks if it is removed."""
+        response = self.client.get(self._url())
+        self.assertEqual(
+            [p.pk for p in response.context["planned_feeds"][0]["bound"]],
+            [self.pdu.pk])
+        self.assertIn("pdu-a1", response.content.decode())
+
+    def test_a_design_without_planned_feeds_says_so(self):
+        other = Design.objects.create(title="No feeds", site=self.site)
+        response = self.client.get(
+            reverse("plugins:netbox_rack_design:design", kwargs={"pk": other.pk}))
+        self.assertHttpStatus(response, 200)
+        self.assertEqual(response.context["planned_feeds"], [])
+        self.assertIn("No planned feeds", response.content.decode())
 
 
 class DesignEditorDefaultRouteTest(TestCase):

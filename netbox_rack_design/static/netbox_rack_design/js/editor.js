@@ -752,6 +752,32 @@
         });
     }
 
+    // This rack's PLANNED feeds (DesignPowerFeed rows), for the rack power
+    // dialog's "current supply" list. Read-only.
+    function fetchPlannedFeeds(rackId) {
+        return fetch(apiPlannedFeedUrl() + "?rack_id=" + encodeURIComponent(rackId), {
+            credentials: "same-origin",
+            headers: { "Accept": "application/json" },
+        }).then(function (resp) { return resp.ok ? resp.json() : []; })
+            .catch(function () { return []; });
+    }
+
+    // Delete ONE planned feed. Answers with how many planned PDUs it unbound --
+    // a feed is the thing a PDU's breaker is sized from, so removing one is not
+    // a silent act and the dialog says what it cost.
+    function deletePlannedFeed(feedId) {
+        rdTrace("dist.plannedfeed.delete", { feedId: feedId });
+        return fetch(apiPlannedFeedUrl(), {
+            method: "DELETE",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
+            body: JSON.stringify({ feed_id: parseInt(feedId, 10) }),
+        }).then(function (resp) {
+            if (!resp.ok) { throw new Error("HTTP " + resp.status); }
+            return resp.json();
+        });
+    }
+
     function postRackPower(rackId, powerConfig) {
         rdTrace("dist.rackpower.save", {
             rackId: rackId, source: powerConfig ? powerConfig.source : null,
@@ -1271,6 +1297,14 @@
             + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
             + "</div>"
             + '<div class="modal-body">'
+            // This rack's CURRENT planned supply, listed before anything can be
+            // changed: these rows size the capacity bar, and until 0.21.0 they
+            // were invisible everywhere, so a feed copied by mistake inflated
+            // the bar with nothing to point at and no way to remove it.
+            + '<div class="nbx-rd-rackpower-planned mb-3">'
+            + '<div class="fw-bold small mb-1">Planned feeds for this rack</div>'
+            + '<div class="nbx-rd-planned-list"><div class="text-muted small">Loading…</div></div>'
+            + "</div>"
             + '<div class="form-check">'
             + '<input class="form-check-input" type="radio" name="nbx-rd-rackpower-mode" id="nbx-rd-rackpower-copy" value="copy_rack"'
             + (fields.length ? "" : " checked") + ">"
@@ -1300,6 +1334,52 @@
             + "</div>"
             + "</div></div>";
         document.body.appendChild(overlay);
+
+        var plannedListEl = overlay.querySelector(".nbx-rd-planned-list");
+
+        function renderPlannedFeeds() {
+            return fetchPlannedFeeds(rackId).then(function (feeds) {
+                if (!plannedListEl) { return; }
+                if (!feeds.length) {
+                    plannedListEl.innerHTML =
+                        '<div class="text-muted small">None — this rack is sized '
+                        + "from its real feeds, or from the flat fallback.</div>";
+                    return;
+                }
+                plannedListEl.innerHTML = feeds.map(function (f) {
+                    return '<div class="d-flex align-items-center justify-content-between'
+                        + ' border-bottom py-1">'
+                        + '<span class="small">'
+                        + String(feedRowLabel(f)).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                        + "</span>"
+                        + '<button type="button" class="btn btn-sm btn-ghost-danger'
+                        + ' nbx-rd-planned-del" data-feed-id="' + f.id + '"'
+                        + ' title="Remove this planned feed">'
+                        + '<i class="mdi mdi-close" aria-hidden="true"></i></button>'
+                        + "</div>";
+                }).join("");
+                plannedListEl.querySelectorAll(".nbx-rd-planned-del").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        btn.disabled = true;
+                        deletePlannedFeed(btn.getAttribute("data-feed-id")).then(function (res) {
+                            createToast(
+                                "success", "Removed",
+                                (res && res.unbound)
+                                    ? "Planned feed removed; " + res.unbound
+                                        + " PDU(s) lost their binding."
+                                    : "Planned feed removed.");
+                            renderPlannedFeeds();
+                            refreshLivePower();
+                        }).catch(function (err) {
+                            btn.disabled = false;
+                            createToast("danger", "Error",
+                                "Could not remove that feed: " + String(err));
+                        });
+                    });
+                });
+            });
+        }
+        renderPlannedFeeds();
 
         var copyRadio = overlay.querySelector("#nbx-rd-rackpower-copy");
         var manualRadio = overlay.querySelector("#nbx-rd-rackpower-manual");
@@ -1362,9 +1442,11 @@
                 }).length;
                 var bits = ["Loaded from " + srcRackName + "."];
                 if (loadedFeeds.length) {
-                    bits.push("Feeds to copy: " + loadedFeeds.map(feedRowLabel).join(", ") + ".");
+                    bits.push("On Save this rack's planned feeds are REPLACED by: "
+                        + loadedFeeds.map(feedRowLabel).join(", ") + ".");
                 } else {
-                    bits.push("That rack has no feeds to copy.");
+                    bits.push("That rack has no feeds to copy — your planned feeds "
+                        + "are left as they are.");
                 }
                 bits.push(cfCount + " power field(s) copied.");
                 statusEl.textContent = bits.join(" ");
@@ -1408,16 +1490,24 @@
                 ? copiedFrom.rack_id : null;
             var feedsCopied = copySource != null
                 ? postCopyFeeds(rackId, copySource).then(function (res) {
-                    return (res && res.feeds) ? res.feeds.length : 0;
+                    return {
+                        copied: (res && res.feeds) ? res.feeds.length : 0,
+                        deleted: (res && res.deleted) || 0,
+                        unbound: (res && res.unbound) || 0,
+                    };
                 })
-                : Promise.resolve(0);
+                : Promise.resolve({ copied: 0, deleted: 0, unbound: 0 });
             feedsCopied.then(function (count) {
                 return postRackPower(rackId, cfg).then(function () { return count; });
             }).then(function (count) {
                 createToast(
                     "success", "Saved",
-                    count
-                        ? "Rack power settings saved; " + count + " feed(s) copied."
+                    count.copied
+                        ? ("Rack power settings saved; " + count.copied + " feed(s) copied"
+                            + (count.deleted ? ", " + count.deleted + " replaced" : "")
+                            + (count.unbound
+                                ? " (" + count.unbound + " PDU(s) lost their binding)" : "")
+                            + ".")
                         : "Rack power settings saved.");
                 var btn = document.querySelector(
                     '.nbx-rd-rack-block[data-rack-id="' + rackId + '"] [data-rd-rack-power-btn]');

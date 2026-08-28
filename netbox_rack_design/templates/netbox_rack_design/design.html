@@ -185,6 +185,63 @@
   </div>
 </div>
 
+{# ------------------------------------------------------------------------ #}
+{# PLANNED power feeds. They are written by the rack-power "copy from rack"   #}
+{# dialog and the PDU bind dialog, and they SIZE a greenfield rack's capacity #}
+{# bar -- so a stray one silently inflates it. Until now they had no UI at    #}
+{# all; this panel is where a plan shows its own supply.                      #}
+{# ------------------------------------------------------------------------ #}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">
+        {% trans "Planned power feeds" %}
+        <span class="badge text-bg-secondary ms-1">{{ planned_feeds|length }}</span>
+      </h2>
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th>{% trans "Rack" %}</th>
+            <th>{% trans "Feed" %}</th>
+            <th>{% trans "Supply" %}</th>
+            <th class="text-end">{% trans "Capacity" %}</th>
+            <th>{% trans "Bound PDUs" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in planned_feeds %}
+            <tr>
+              <td>{{ row.rack|linkify }}</td>
+              <td>{{ row.feed.name }}</td>
+              <td class="text-muted">
+                {{ row.feed.voltage }} V · {{ row.feed.amperage }} A ·
+                {{ row.feed.get_phase_display }} · {{ row.feed.get_supply_display }}
+              </td>
+              <td class="text-end">{{ row.watts }} W</td>
+              <td>
+                {% for placement in row.bound %}
+                  <a href="{{ placement.get_absolute_url }}">{{ placement.proposed_name|default:placement }}</a>{% if not forloop.last %}, {% endif %}
+                {% empty %}
+                  <span class="text-muted">{% trans "none" %}</span>
+                {% endfor %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="5" class="text-muted">
+                {% trans "No planned feeds — this design's racks are sized from their real feeds." %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="card-footer text-muted small">
+        {% trans "Planned feeds exist only inside this design; no dcim.PowerFeed is ever written. Capacity is the breaker's watts derated by POWERFEED_DEFAULT_MAX_UTILIZATION, exactly as NetBox derates a real feed. Add, replace or remove them from a rack's power dialog in the editor." %}
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="row mb-3">
   <div class="col col-md-12">
     <div class="card">
