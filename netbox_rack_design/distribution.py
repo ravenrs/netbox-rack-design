@@ -786,30 +786,114 @@ def _run_script(rack, devices):
     return fn(rack, devices)
 
 
-def generate_distribution(elevation, *, mode=None):
-    """Compute the per-PDU/bank distribution for a projected rack, or ``None``.
+def _exc_line(exc):
+    """``TypeError: 'NoneType' is not subscriptable`` -- one actionable line.
 
-    ``mode`` -- optional override for the configured ``distribution_mode`` (the
-    editor/tests can force a mode without touching config).
-
-    Returns the ``Distribution`` dict in ``builtin``/``script`` mode, or
-    ``None`` in ``none`` mode (and as the graceful fallback in either of the
-    other two). Never writes to ``dcim``.
-
-    Robust to a broken engine: ``builtin`` never raises on its own (bad data
-    degrades PDU-by-PDU inside :func:`build_native`), but an unexpected error
-    is still caught here as a last resort; a broken ``script`` (unresolvable
-    dotted path, not callable, or a raising callable) is always caught. Either
-    failure logs a warning and **returns ``None``** -- the heatmap degrades to
-    the per-device rack-share view rather than erroring the page.
+    The traceback goes to the log; what reaches the screen is the type and the
+    message, which is what identifies a broken script.
     """
+    text = str(exc).strip().splitlines()
+    return f"{type(exc).__name__}: {text[0]}" if text else type(exc).__name__
+
+
+def _omitted_pdu_reasons(rack, devices):
+    """Why each of this rack's PDUs could not be used, as ``["name -- why"]``.
+
+    ``_collect_pdus`` drops an unusable PDU and logs at debug, which is
+    invisible in production. The same three checks are repeated here to say it
+    out loud: a rack whose PDUs are all uncabled shows no banks, and the user is
+    owed the reason rather than an empty strip.
+    """
+    by_device_pk = {d["device"].pk: d for d in devices if d.get("device") is not None}
+    out = []
+    for dev in rack.devices.all():
+        role = (dev.role.slug if dev.role else "").lower()
+        if role not in PDU_ROLE_SLUGS:
+            continue
+        entry = by_device_pk.get(dev.pk)
+        feed = entry.get("feed") if entry else None
+        if feed is None and _real_pdu_cabled_feed(dev) is None:
+            out.append(
+                f"{dev.name} -- no power feed: its input port is not cabled to a "
+                "dcim.PowerFeed, and it is not bound to a planned feed"
+            )
+            continue
+        if not _bank_ids_of(o.name for o in dev.poweroutlets.all()):
+            out.append(
+                f"{dev.name} -- no parseable outlet banks: outlet names carry no "
+                "bank segment (expected e.g. '1/1', '2/3')"
+            )
+    return out
+
+
+def _ok_or_empty(result, engine, script, rack, devices):
+    """``ok`` when the engine produced a distribution, else ``empty`` + why."""
+    if result and (result.get("pdus") or {}):
+        return {"state": "ok", "engine": engine, "script": script or None, "detail": ""}
+    reasons = _omitted_pdu_reasons(rack, devices)
+    if reasons:
+        detail = "No usable PDU in this rack: " + "; ".join(reasons) + "."
+    else:
+        detail = (
+            "This rack has no PDU device, so there are no banks to distribute "
+            "across. Add a device with a PDU role, or check its role slug."
+        )
+    return {"state": "empty", "engine": engine, "script": script or None,
+            "detail": detail}
+
+
+def generate_distribution(elevation, *, mode=None):
+    """The per-PDU/bank distribution for a projected rack, or ``None``.
+
+    Thin wrapper over :func:`generate_distribution_status` for callers that only
+    want the result (scripts, tests, anything pre-0.22).
+    """
+    result, _status = generate_distribution_status(elevation, mode=mode)
+    return result
+
+
+def generate_distribution_status(elevation, *, mode=None):
+    """``(distribution, status)`` for a projected rack.
+
+    ``status`` is why there is (or is not) a distribution, so the UI can say so
+    instead of rendering an empty space. A failing engine used to log a warning
+    and return ``None``, which on screen is indistinguishable from a rack that
+    legitimately has no PDUs -- four different causes, one blank result, and the
+    only way to tell them apart was reproducing the data and calling the engine
+    by hand (user 2026-08-28: a silent breakage is not acceptable, the user must
+    be told what broke in the script).
+
+    ::
+
+        {"state": "ok" | "off" | "failed" | "empty",
+         "engine": "none" | "builtin" | "script",
+         "script": "<dotted path>" or None,
+         "detail": "<one line a human can act on>"}
+
+    * ``off``    -- ``distribution_mode`` is "none"; the feature is switched off,
+                    which is a configuration answer, not missing data.
+    * ``failed`` -- the engine raised. ``detail`` carries the exception type and
+                    message, and ``script`` the dotted path that produced it.
+    * ``empty``  -- the engine ran and resolved no PDU. ``detail`` names each PDU
+                    it had to omit and why (no feed / no parseable outlet banks),
+                    or says the rack has no PDU device at all.
+    * ``ok``     -- a distribution was produced.
+    """
+
     if mode is None:
         mode = get_plugin_config(PLUGIN_NAME, "distribution_mode", DEFAULT_DISTRIBUTION_MODE)
 
     logger.debug("distribution.generate_distribution: rack=%r mode=%r", getattr(elevation.rack, "name", None), mode)
 
     if mode not in ("builtin", "script"):
-        return None
+        return None, {
+            "state": "off", "engine": "none", "script": None,
+            "detail": (
+                "Per-bank distribution is switched off "
+                "(distribution_mode is 'none'). Set it to 'builtin', or to "
+                "'script' with a 'distribution_script' path, to compute banks."
+            ),
+        }
 
     # Per-design rack power cf override (docs/pdu-distribution-spec.md): merge
     # DesignRackPower.power_config over the in-memory rack.cf right before the
@@ -834,33 +918,39 @@ def generate_distribution(elevation, *, mode=None):
     if mode == "builtin":
         try:
             result = build_native(elevation.rack, devices)
-        except Exception:  # noqa: BLE001 - the built-in must never break the editor
+        except Exception as exc:  # noqa: BLE001 - must never break the editor
             logger.warning(
                 "distribution_mode 'builtin' raised unexpectedly for rack %r; "
                 "falling back to no per-bank distribution (per-device heatmap).",
                 getattr(elevation.rack, "name", None), exc_info=True,
             )
-            result = None
+            return None, {
+                "state": "failed", "engine": "builtin", "script": None,
+                "detail": f"The builtin distribution engine raised {_exc_line(exc)}",
+            }
         logger.debug(
             "distribution.generate_distribution: rack=%r builtin result=%s",
             getattr(elevation.rack, "name", None), "None (fallback)" if result is None else "dict",
         )
-        return result
+        return result, _ok_or_empty(result, "builtin", None, elevation.rack, devices)
 
     # mode == "script"
+    path = get_plugin_config(PLUGIN_NAME, "distribution_script", "")
     try:
         result = _run_script(elevation.rack, devices)
         logger.debug(
             "distribution.generate_distribution: rack=%r script result=%s",
             getattr(elevation.rack, "name", None), "None (fallback)" if result is None else "dict",
         )
-        return result
-    except Exception:  # noqa: BLE001 - any failure degrades to no distribution
-        path = get_plugin_config(PLUGIN_NAME, "distribution_script", "")
+        return result, _ok_or_empty(result, "script", path, elevation.rack, devices)
+    except Exception as exc:  # noqa: BLE001 - any failure degrades, never raises
         logger.warning(
             "distribution_script %r failed; falling back to no per-bank "
             "distribution (per-device heatmap). Fix the 'distribution_script' "
             "plugin config to restore per-bank distribution.",
             path, exc_info=True,
         )
-        return None
+        return None, {
+            "state": "failed", "engine": "script", "script": path or None,
+            "detail": f"The distribution script raised {_exc_line(exc)}",
+        }

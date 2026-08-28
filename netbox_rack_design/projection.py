@@ -1285,6 +1285,11 @@ def project_rack(design, rack):
     # "builtin" (native, zero-config) or "script" mode (else None -> the
     # frontend keeps the per-device heatmap). A broken builtin/script degrades
     # to None, never erroring the projection.
-    from .distribution import generate_distribution
-    elevation.power["distribution"] = generate_distribution(elevation)
+    from .distribution import generate_distribution_status
+    dist, dist_status = generate_distribution_status(elevation)
+    elevation.power["distribution"] = dist
+    # WHY there is (or is not) a distribution, so the editor can say so instead
+    # of rendering an empty strip -- a failing script must never look like a
+    # rack that simply has no PDUs (user 2026-08-28).
+    elevation.power["distribution_status"] = dist_status
     return elevation

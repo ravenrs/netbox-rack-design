@@ -85,6 +85,8 @@
   {# only in distribution_mode="script". power_heatmap.js reads it to color    #}
   {# PDU banks and tint tiles by feed/bank when the heatmap is on.             #}
   {% if b.power.distribution %}{% with did="rd-distribution-"|add:rid %}{{ b.power.distribution|json_script:did }}{% endwith %}{% endif %}
+  {# WHY the strip is empty (off / failed / no usable PDU) -- always emitted. #}
+  {% if b.power.distribution_status %}{% with sid="rd-diststatus-"|add:rid %}{{ b.power.distribution_status|json_script:sid }}{% endwith %}{% endif %}
 
   {# ---- Rack faces: Front + Rear side by side (independent toggles). ---- #}
   <div class="nbx-rd-faces">

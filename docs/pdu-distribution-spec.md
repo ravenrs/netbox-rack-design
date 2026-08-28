@@ -350,6 +350,27 @@ capacity bar, so they cannot be write-only:
   the design, its rack, its electricals, the **derated watts the bar actually
   uses**, and the PDUs bound to it.
 
+**A failing engine must SAY SO** (ruled 2026-08-28). `generate_distribution()`
+degrades to `None` on any failure, and an empty chip strip is indistinguishable
+from a rack that legitimately has no PDUs — four causes, one blank result. So the
+projection now carries a **status** beside the distribution, and the editor
+renders it under the power bar:
+
+| state | meaning | shown as |
+|---|---|---|
+| `ok` | a distribution was produced | nothing (the chips speak) |
+| `off` | `distribution_mode` is `none` | muted "Per-bank distribution is off" |
+| `failed` | the engine raised | **red** notice; hover gives the exception type, its message and the script's dotted path |
+| `empty` | the engine ran, resolved no PDU | muted notice; hover names each omitted PDU and why (no feed / no parseable outlet banks) |
+
+`generate_distribution_status(elevation)` returns `(distribution, status)`;
+`generate_distribution(elevation)` still returns just the distribution for
+scripts and older callers. The status rides `elevation.power["distribution_status"]`,
+the `rd-diststatus-<rack_id>` json_script, and the `distribution_status` block of
+`recompute-distribution/` — so a live edit that breaks the engine reports itself
+immediately rather than at the next page load. Degrading (never erroring the
+page) is unchanged; what changed is that the degrade is visible.
+
 **Feeds are never defined by a script** — a script can't invent breaker
 amperage; it needs source data, which the model provides. The script/CF layer is
 for distribution *behaviour* only.

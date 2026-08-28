@@ -322,7 +322,11 @@ class DesignViewSet(NetBoxModelViewSet):
         editor reuses its existing per-rack save payload.
 
         Returns ``{"distributions": {"<rack_id>": <distribution-json-or-null>},
+        "distribution_status": {"<rack_id>": {"state","engine","script","detail"}},
         "power": {"<rack_id>": <rack power summary without "distribution">}}``.
+        ``distribution_status`` says WHY a rack has no distribution (engine off,
+        the script raised, no usable PDU), so a live edit that breaks the engine
+        reports itself instead of silently emptying the chip strip.
         The ``power`` block keeps the rack BAR live as well: its capacity comes
         from the rack's feeds (planned ones included) via maths the browser must
         not duplicate, so without it the denominator would stay at whatever the
@@ -352,6 +356,7 @@ class DesignViewSet(NetBoxModelViewSet):
         self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
 
         distributions = {}
+        dist_status = {}
         powers = {}
         with transaction.atomic():
             for rack_data in data["racks"]:
@@ -359,6 +364,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 rack = Rack.objects.filter(pk=rack_id).first()
                 if rack is None:
                     distributions[str(rack_id)] = None
+                    dist_status[str(rack_id)] = None
                     powers[str(rack_id)] = None
                     continue
                 items = []
@@ -393,6 +399,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 rack = Rack.objects.get(pk=rack_id)
                 elevation = projection.project_rack(design, rack)
                 distributions[str(rack_id)] = elevation.power.get("distribution")
+                dist_status[str(rack_id)] = elevation.power.get("distribution_status")
                 # The rack-level summary rides along so the editor's power BAR is
                 # live too, not just the per-bank chips. Capacity is the reason:
                 # it comes from the rack's feeds -- including PLANNED ones -- and
@@ -400,7 +407,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 # bar's denominator would otherwise stay frozen at whatever the
                 # page was rendered with until the next Save (user 2026-08-20).
                 power = {k: v for k, v in elevation.power.items()
-                         if k != "distribution"}
+                         if k not in ("distribution", "distribution_status")}
                 powers[str(rack_id)] = power
 
             # Read-only: discard every transient placement. Must be the LAST DB
@@ -408,7 +415,8 @@ class DesignViewSet(NetBoxModelViewSet):
             transaction.set_rollback(True)
 
         return Response(
-            {"distributions": distributions, "power": powers},
+            {"distributions": distributions, "distribution_status": dist_status,
+             "power": powers},
             status=status.HTTP_200_OK,
         )
 

@@ -123,6 +123,27 @@
         }
     }
 
+    // Why a rack has (or has not) a distribution: {state, engine, script, detail}.
+    // Same two sources as the distribution itself -- the live recompute first,
+    // then the server-rendered blob. Without this a rack whose script just threw
+    // looks exactly like a rack with no PDUs, which cost hours to tell apart
+    // (user 2026-08-28: a silent breakage is not acceptable).
+    var liveDistStatus = {};
+
+    function readDistStatus(block) {
+        var rackId = block.getAttribute("data-rack-id") || "";
+        if (Object.prototype.hasOwnProperty.call(liveDistStatus, rackId)) {
+            return liveDistStatus[rackId];
+        }
+        var el = document.getElementById("rd-diststatus-" + rackId);
+        if (!el) { return null; }
+        try {
+            return JSON.parse(el.textContent) || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     // Index a Distribution into { byName: {deviceName: {feeds, hottest}}, banks }.
     // A device charged to BOTH legs records BOTH feeds (so the tile shows the A
     // and B accent), and keeps the hottest bank for its fill color.
@@ -232,6 +253,40 @@
     // power bar -- a feed A/B color key (explaining the blue/orange tile edges),
     // one chip per PDU bank colored by state (used/breaker W), plus an instant
     // ⚠ tooltip listing rack overload/limit warnings. Falsy `dist` removes it.
+    // The visible half of "no silent failures": when there are no chips, say why.
+    // `failed` is an error the user must act on (the script's own exception, and
+    // which script it was); `empty` explains which PDU was unusable; `off` says
+    // the feature is switched off rather than leaving the strip blank, which is
+    // exactly the confusion this was written for.
+    function renderDistNotice(block, status) {
+        var existing = block.querySelector(".nbx-rd-dist-notice");
+        if (!status || status.state === "ok") {
+            if (existing) { existing.remove(); }
+            return;
+        }
+        var el = existing || document.createElement("div");
+        el.className = "nbx-rd-dist-notice nbx-rd-dist-notice-" + status.state;
+        var icon = status.state === "failed" ? "mdi-alert-circle" : "mdi-information-outline";
+        var label = status.state === "failed"
+            ? "Per-bank distribution unavailable — the "
+                + (status.engine === "script" ? "distribution script" : "builtin engine")
+                + " failed"
+            : (status.state === "off"
+                ? "Per-bank distribution is off"
+                : "No per-bank distribution for this rack");
+        el.innerHTML = '<i class="mdi ' + icon + '" aria-hidden="true"></i> '
+            + '<span class="nbx-rd-dist-notice-label"></span>';
+        el.querySelector(".nbx-rd-dist-notice-label").textContent = label;
+        var tip = [status.detail || label];
+        if (status.script) { tip.push("Script: " + status.script); }
+        attachInstantTip(el, tip.join("\n"));
+        if (!existing) {
+            var bar = block.querySelector(".nbx-rd-power-bar");
+            if (bar && bar.parentNode) { bar.parentNode.insertBefore(el, bar.nextSibling); }
+            else { block.insertBefore(el, block.firstChild); }
+        }
+    }
+
     function renderDistLegend(block, dist) {
         var existing = block.querySelector(".nbx-rd-dist-legend");
         if (!dist) { if (existing) { existing.remove(); } return; }
@@ -428,6 +483,7 @@
             // The per-bank chip strip is always-on (like the power bar), rendered
             // from readDistribution() which prefers the live-recomputed cache.
             renderDistLegend(block, readDistribution(block));
+            renderDistNotice(block, readDistStatus(block));
             if (on) { applyHeat(block, true); }
         });
         observers.forEach(function (o, i) { o.observe(blocks[i], OBS_OPTS); });
@@ -459,6 +515,14 @@
                 Object.keys(dists).forEach(function (rackId) {
                     var d = dists[rackId];
                     liveDist[rackId] = (d && d.pdus) ? d : null;
+                });
+                // An edit can BREAK the engine (a script that trips over the new
+                // layout), so the reason travels with every recompute -- the
+                // notice must appear the moment it starts failing, not only on
+                // the next page load.
+                var statuses = res.distribution_status || {};
+                Object.keys(statuses).forEach(function (rackId) {
+                    liveDistStatus[rackId] = statuses[rackId] || null;
                 });
                 // Capacity/thresholds come from the server (feed derating maths
                 // over real AND planned feeds, which the browser must not
