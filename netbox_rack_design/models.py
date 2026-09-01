@@ -17,6 +17,7 @@ from django.db import models
 from django.urls import reverse
 from netbox.models import NetBoxModel
 
+from . import planning_fields
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
 
 __all__ = (
@@ -345,6 +346,19 @@ class DesignPlacement(NetBoxModel):
     )
     target_bay_name = models.CharField(max_length=64, blank=True)
 
+    # Values for the deployment's own planning fields, declared in the
+    # ``placement_fields`` plugin config and destined for the real device when
+    # the design is applied. Flat ``{"<descriptor key>": value}``; validated in
+    # clean() against that config, so an unknown key or a value outside a
+    # descriptor's choices is rejected rather than silently stored.
+    #
+    # Deliberately NOT ``custom_field_data`` (which this NetBoxModel also has):
+    # that means "NetBox custom fields ON the placement object", a different
+    # thing from "values destined for the planned device". Keys here are the
+    # plugin-internal descriptor keys, never a real custom-field name, so a
+    # deployment renaming a cf edits its config and rewrites no rows.
+    planning_data = models.JSONField(blank=True, null=True)
+
     # MANUAL custom-field bridge for a PLANNED PDU add (docs/pdu-distribution-spec
     # §6): the site-specific CUSTOM fields (declared via the ``planning_fields``
     # config) the distribution script wants but which a planned PDU (no real
@@ -442,6 +456,11 @@ class DesignPlacement(NetBoxModel):
         super().clean()
         kind = self.kind
 
+        # Config-declared planning fields: validated against the deployment's
+        # ``placement_fields`` schema and normalised in place, so what reaches
+        # the database is always type-correct and free of keys nothing reads.
+        self.planning_data = planning_fields.validate_planning_data(self.planning_data, kind) or None
+
         # A planned PDU binds to at most ONE feed (real xor planned).
         if self.real_power_feed_id and self.planned_power_feed_id:
             raise ValidationError(
@@ -467,10 +486,16 @@ class DesignPlacement(NetBoxModel):
                 raise ValidationError({"device": f"A '{kind}' requires an existing device."})
             if self.device_type:
                 raise ValidationError({"device_type": f"A '{kind}' must not set a device type."})
-            if self.device_role:
-                raise ValidationError({"device_role": f"A '{kind}' must not set a device role."})
-            if self.tenant:
-                raise ValidationError({"tenant": f"A '{kind}' must not set a tenant."})
+            # Role / tenant on a MOVE are planned OVERRIDES: the design says
+            # this device becomes that role/tenant when it lands. Null means
+            # "leave the device's own value alone", so a plain reposition is
+            # unaffected. A removal takes neither -- re-attributing gear you are
+            # decommissioning means nothing.
+            if kind != DesignPlacementKindChoices.KIND_MOVE:
+                if self.device_role:
+                    raise ValidationError({"device_role": f"A '{kind}' must not set a device role."})
+                if self.tenant:
+                    raise ValidationError({"tenant": f"A '{kind}' must not set a tenant."})
 
         if kind == DesignPlacementKindChoices.KIND_REMOVE:
             return  # No target for a removal.

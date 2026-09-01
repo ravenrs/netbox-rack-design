@@ -124,15 +124,18 @@
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
                    data-name="{{ slot.display_label }}"
-                   {# A chassis answers "is there room" from its hover card (spec §10.4):
-                      the rack view REPORTS bay occupancy, the chassis layer EDITS it. #}
+                   {# Chassis occupancy for the hover card (spec 10.4): the rack view REPORTS it, the chassis layer EDITS it. #}
                    {% if slot.bays %}data-bays-used="{{ slot.bays|bays_used }}" data-bays-total="{{ slot.bays|length }}" data-bay-occupants="{{ slot.bays|bay_occupants }}"{% endif %}
                    data-draw-w="{{ slot.draw_w|floatformat:0 }}"
                    data-draw-known="{{ slot.draw_known|yesno:'1,0' }}"
                    {% if slot.power_ports %}data-power="{% for p in slot.power_ports %}{{ p.name }}:{{ p.draw|floatformat:0 }}:{% if p.connected %}1{% elif p.connected == False %}0{% endif %}{% if not forloop.last %}|{% endif %}{% endfor %}"{% endif %}
                    {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                    {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                   {# The role the device has TODAY -- emitted only when this design re-attributes it, so the card can contrast the two. #}
+                   {% with orn=slot|slot_old_role_name %}{% if orn %}data-old-role="{{ orn }}"{% endif %}{% endwith %}
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
+                   {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                    {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
                    {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
@@ -154,7 +157,11 @@
              data-name="was: {{ slot.label }}"
              {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
              {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
-             {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}></div>
+                   {# The role the device has TODAY -- emitted only when this design re-attributes it, so the card can contrast the two. #}
+                   {% with orn=slot|slot_old_role_name %}{% if orn %}data-old-role="{{ orn }}"{% endif %}{% endwith %}
+             {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
+                   {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}></div>
         {% endif %}{% endfor %}{% endif %}
         </div>{# /.nbx-rd-grid-wrap #}
       </div>
@@ -187,15 +194,18 @@
               <div class="grid-stack-item-content"
                    {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% if slot.state == 'existing' and not slot.opposite_face %} style="background-color: #{{ bg }}; color: #{{ slot|slot_text_color }};"{% endif %}{% endif %}{% endwith %}
                    data-name="{{ slot.display_label }}"
-                   {# A chassis answers "is there room" from its hover card (spec §10.4):
-                      the rack view REPORTS bay occupancy, the chassis layer EDITS it. #}
+                   {# Chassis occupancy for the hover card (spec 10.4): the rack view REPORTS it, the chassis layer EDITS it. #}
                    {% if slot.bays %}data-bays-used="{{ slot.bays|bays_used }}" data-bays-total="{{ slot.bays|length }}" data-bay-occupants="{{ slot.bays|bay_occupants }}"{% endif %}
                    data-draw-w="{{ slot.draw_w|floatformat:0 }}"
                    data-draw-known="{{ slot.draw_known|yesno:'1,0' }}"
                    {% if slot.power_ports %}data-power="{% for p in slot.power_ports %}{{ p.name }}:{{ p.draw|floatformat:0 }}:{% if p.connected %}1{% elif p.connected == False %}0{% endif %}{% if not forloop.last %}|{% endif %}{% endfor %}"{% endif %}
                    {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                    {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                   {# The role the device has TODAY -- emitted only when this design re-attributes it, so the card can contrast the two. #}
+                   {% with orn=slot|slot_old_role_name %}{% if orn %}data-old-role="{{ orn }}"{% endif %}{% endwith %}
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
+                   {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                    {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
                    {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
@@ -215,7 +225,11 @@
              data-name="was: {{ slot.label }}"
              {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
              {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
-             {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}></div>
+                   {# The role the device has TODAY -- emitted only when this design re-attributes it, so the card can contrast the two. #}
+                   {% with orn=slot|slot_old_role_name %}{% if orn %}data-old-role="{{ orn }}"{% endif %}{% endwith %}
+             {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
+                   {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}></div>
         {% endif %}{% endfor %}{% endif %}
         </div>{# /.nbx-rd-grid-wrap #}
       </div>
@@ -249,12 +263,15 @@
           <div class="grid-stack-item-content"
                {% with bg=slot|slot_color %}{% if bg %}data-role-bg="{{ bg }}" data-role-fg="{{ slot|slot_text_color }}"{% endif %}{% endwith %}
                data-name="{{ slot.display_label }}"
-               {# A chassis answers "is there room" from its hover card (spec §10.4):
-                  the rack view REPORTS bay occupancy, the chassis layer EDITS it. #}
+               {# Chassis occupancy for the hover card (spec 10.4): the rack view REPORTS it, the chassis layer EDITS it. #}
                {% if slot.bays %}data-bays-used="{{ slot.bays|bays_used }}" data-bays-total="{{ slot.bays|length }}" data-bay-occupants="{{ slot.bays|bay_occupants }}"{% endif %}
                {% with dtn=slot|slot_device_type_name %}{% if dtn %}data-device-type-name="{{ dtn }}"{% endif %}{% endwith %}
                {% with rn=slot|slot_role_name %}{% if rn %}data-role-name="{{ rn }}"{% endif %}{% endwith %}
+                   {# The role the device has TODAY -- emitted only when this design re-attributes it, so the card can contrast the two. #}
+                   {% with orn=slot|slot_old_role_name %}{% if orn %}data-old-role="{{ orn }}"{% endif %}{% endwith %}
                {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
+                   {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
+                   {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · tray"{% endif %}
                title="{{ slot.display_label }} ({{ slot.state }})">
             {% if editable %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"

@@ -147,6 +147,7 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
             "proposed_name", "device_role", "tenant",
             "target_rack", "target_position", "target_face",
             "parent_placement", "target_bay", "target_bay_name",
+            "planning_data",
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "kind")
@@ -217,6 +218,11 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     # role, or an untouched reposition) leaves the placement's existing
     # power_config field alone.
     power_config = serializers.JSONField(required=False, allow_null=True)
+    # The deployment's own config-declared planning fields
+    # (``placement_fields``), flat ``{key: value}``. WITHOUT a default so an
+    # item that omits the key leaves the placement's stored values alone; an
+    # explicit ``{}`` clears them.
+    planning_data = serializers.JSONField(required=False, allow_null=True)
     # The feed this PDU add binds to (docs/pdu-distribution-spec.md §6.2/§8) --
     # a real dcim.PowerFeed OR a planned DesignPowerFeed, never both. WITHOUT a
     # default so an item that omits both (any other role, or an untouched
@@ -285,6 +291,26 @@ class SaveLayoutSerializer(serializers.Serializer):
 
     design_id = serializers.IntegerField()
     racks = SaveLayoutRackSerializer(many=True)
+
+
+class RecomputeDistributionSerializer(SaveLayoutSerializer):
+    """Body for POST .../designs/<pk>/recompute-distribution/.
+
+    The save-layout body plus ``project_racks``: which racks the caller wants
+    numbers back for. Every submitted rack is still RECONCILED -- a cross-rack
+    move only makes sense with both ends applied, and a device that left rack A
+    is described by a placement filed under rack B -- but only the listed racks
+    are PROJECTED, and projection is the expensive half: the distribution engine
+    runs once per rack, over that rack's devices and PDUs.
+
+    Omit the field, or send an empty list, to project every submitted rack. That
+    is what a full refresh wants (the first paint, a feed change), and it keeps
+    an older editor working unchanged against a newer server.
+    """
+
+    project_racks = serializers.ListField(
+        child=serializers.IntegerField(), required=False, default=list
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -86,6 +86,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from dcim.choices import DeviceFaceChoices, SubdeviceRoleChoices
+from django.db.models import prefetch_related_objects
 from netbox.plugins import get_plugin_config
 
 from .choices import DesignPlacementKindChoices
@@ -717,18 +718,77 @@ def _bay_draw(slot, basis, parent_status):
     return total, ("known" if any_known else None)
 
 
-def _slot_role_slug(slot):
-    """The device's role slug for a slot: the real device's role (existing/move)
-    or the placement's chosen role (add). Lowercased; '' when unknown."""
+def slot_role(slot):
+    """The role this slot's device WILL have, or None.
+
+    The placement wins where it states one -- an add's chosen role, or a move's
+    planned re-attribution -- and otherwise the real device's own role stands.
+    Null on the placement means "leave it alone", so a plain reposition keeps
+    reading the device.
+    """
+    placement = slot.get("placement")
+    if placement is not None and getattr(placement, "device_role_id", None):
+        return placement.device_role
     device = slot.get("device")
-    role = None
     if device is not None and getattr(device, "role_id", None):
-        role = device.role
-    else:
-        placement = slot.get("placement")
-        if placement is not None and getattr(placement, "device_role_id", None):
-            role = placement.device_role
+        return device.role
+    return None
+
+
+def slot_tenant(slot):
+    """The tenant this slot's device WILL have, or None. Same precedence as
+    :func:`slot_role`."""
+    placement = slot.get("placement")
+    if placement is not None and getattr(placement, "tenant_id", None):
+        return placement.tenant
+    device = slot.get("device")
+    if device is not None and getattr(device, "tenant_id", None):
+        return device.tenant
+    return None
+
+
+def _slot_role_slug(slot):
+    """The slot's effective role slug, lowercased; '' when unknown."""
+    role = slot_role(slot)
     return (role.slug if role else "").lower()
+
+
+def _prefetch_power(slots_lists):
+    """Load every power port / port template for the whole elevation at once.
+
+    Three helpers below -- ``_device_draw_w``, ``_device_power_ports`` and
+    ``_device_unconnected`` -- each ask a device for ``powerports.all()``, and a
+    related manager re-queries on every access unless the objects were
+    prefetched. That is three round trips per device, so a full rack cost
+    hundreds of queries and most of the projection's wall time (measured: 1853
+    queries for one live recompute of a five-rack design, ~1.1s of it here).
+
+    Prefetching onto the already-loaded instances -- the same one-query-per-
+    elevation approach ``_attach_bays`` takes -- makes all three read from cache
+    instead. Bay occupants are included: ``_bay_draw`` reaches them too.
+    """
+    devices, device_types = [], []
+    seen_devices, seen_types = set(), set()
+
+    def collect(device, device_type):
+        if device is not None and device.pk is not None and device.pk not in seen_devices:
+            seen_devices.add(device.pk)
+            devices.append(device)
+        if device_type is not None and device_type.pk is not None and device_type.pk not in seen_types:
+            seen_types.add(device_type.pk)
+            device_types.append(device_type)
+
+    for slots in slots_lists:
+        for slot in slots:
+            collect(slot.get("device"), slot.get("device_type"))
+            for bay in (slot.get("bays") or ()):
+                occupant = bay.get("device") if isinstance(bay, dict) else None
+                collect(occupant, getattr(occupant, "device_type", None))
+
+    if devices:
+        prefetch_related_objects(devices, "powerports", "device_type__powerporttemplates")
+    if device_types:
+        prefetch_related_objects(device_types, "powerporttemplates")
 
 
 def _project_power(elevation, *, capacity_default_w, basis, warn_pct, critical_pct,
@@ -1265,6 +1325,8 @@ def project_rack(design, rack):
     _attach_bays((front, rear, non_racked))
     _attach_planned_chassis_bays((front, rear, non_racked))
     _overlay_planned_blades(design, (front, rear, non_racked))
+    # One pass for the whole elevation, before anything reads a device's power.
+    _prefetch_power((front, rear, non_racked))
 
     # Order each racked face top-of-rack first (descending U), matching
     # get_rack_units default ordering; non_racked keeps insertion order.

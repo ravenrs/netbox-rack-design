@@ -7,14 +7,14 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
-from rest_framework import status, viewsets
+from rest_framework import status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
-from .. import filtersets, naming, projection
+from .. import filtersets, naming, planning_fields, projection
 from ..choices import DesignPlacementKindChoices
 from ..models import (
     Design,
@@ -44,6 +44,7 @@ from .serializers import (
     PlannedFeedUpsertSerializer,
     PreviewNameSerializer,
     RackPowerSerializer,
+    RecomputeDistributionSerializer,
     SaveLayoutSerializer,
 )
 
@@ -58,6 +59,7 @@ __all__ = (
     "FavoriteSetViewSet",
     "HiddenDesignRackViewSet",
     "DeviceTypePowerViewSet",
+    "PlacementFieldsView",
 )
 
 
@@ -323,8 +325,19 @@ class DesignViewSet(NetBoxModelViewSet):
         transaction, projects each submitted rack, and then ROLLS THE TRANSACTION
         BACK -- so the engine sees the live edits but nothing is written.
 
-        Body: identical to ``save-layout`` (:class:`SaveLayoutSerializer`), so the
-        editor reuses its existing per-rack save payload.
+        Body: the ``save-layout`` body plus an optional ``project_racks``
+        (:class:`RecomputeDistributionSerializer`), so the editor reuses its
+        existing per-rack save payload.
+
+        Every submitted rack is RECONCILED, because a device that left rack A is
+        described by a placement filed under whichever rack it landed in --
+        project A without applying B's items and the device still looks present
+        in A. Only the racks in ``project_racks`` are PROJECTED, which is the
+        expensive half (the distribution engine runs once per rack, plus its PDU
+        and per-device power queries). An empty or absent ``project_racks``
+        projects everything, so a full refresh and an older editor both still
+        work. Racks left unprojected are simply absent from the response, and
+        the editor keeps their last-known numbers.
 
         Returns ``{"distributions": {"<rack_id>": <distribution-json-or-null>},
         "distribution_status": {"<rack_id>": {"state","engine","script","detail"}},
@@ -347,9 +360,11 @@ class DesignViewSet(NetBoxModelViewSet):
             self.queryset = Design.objects.restrict(request.user, "view")
         design = self.get_object()
 
-        body = SaveLayoutSerializer(data=request.data)
+        body = RecomputeDistributionSerializer(data=request.data)
         body.is_valid(raise_exception=True)
         data = body.validated_data
+        # Which racks to project. Empty means "all of them".
+        project_only = set(data.get("project_racks") or [])
 
         # State the reconciliation helpers rely on (mirrors save_layout). We never
         # inspect the resulting ids/flags here -- the whole transaction is rolled
@@ -401,6 +416,11 @@ class DesignViewSet(NetBoxModelViewSet):
                 rack_id = rack_data["rack_id"]
                 if str(rack_id) in distributions:
                     continue  # rack did not exist
+                if project_only and rack_id not in project_only:
+                    # Not asked for: reconciled above (so the racks that WERE
+                    # asked for see a complete layout), but not projected. The
+                    # caller keeps whatever numbers it already had for it.
+                    continue
                 rack = Rack.objects.get(pk=rack_id)
                 elevation = projection.project_rack(design, rack)
                 distributions[str(rack_id)] = elevation.power.get("distribution")
@@ -1146,6 +1166,7 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.tenant_id,
             placement.proposed_name or "",
             placement.power_config,
+            placement.planning_data,
             placement.real_power_feed_id,
             placement.planned_power_feed_id,
             placement.power_source_device_id,
@@ -1270,7 +1291,10 @@ class DesignViewSet(NetBoxModelViewSet):
     @staticmethod
     def _resolve_add_refs(item, rack, u_position, errors):
         """
-        Validate the optional device_role_id / tenant_id on an 'add' item.
+        Validate the optional device_role_id / tenant_id on an item.
+
+        Used by an 'add' (the values the planned device is created with) and by
+        a 'move' (planned overrides on an existing device).
 
         Returns (ok, device_role_id, tenant_id). On a non-null id that does not
         resolve, append an error (mirroring device_type) and return ok=False.
@@ -1507,6 +1531,10 @@ class DesignViewSet(NetBoxModelViewSet):
                     # spec.md); only meaningful for a PDU add, but persisted as-is
                     # for whatever role sent it. Absent => None.
                     power_config=item.get("power_config"),
+                    # The deployment's config-declared planning fields; validated
+                    # against that schema by DesignPlacement.clean(). Absent =>
+                    # None.
+                    planning_data=item.get("planning_data"),
                     # The feed this PDU binds to (docs/pdu-distribution-spec.md
                     # §6.2); at most one of the pair is set (enforced above and
                     # again by DesignPlacement.clean()).
@@ -1590,6 +1618,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 add.proposed_name = item.get("proposed_name") or ""
             if "power_config" in item:
                 add.power_config = item.get("power_config")
+            if "planning_data" in item:
+                add.planning_data = item.get("planning_data")
             if "power_source_device_id" in item:
                 add.power_source_device_id = self._resolve_power_source_device(item)
             # Only overwrite the binding when the editor actually sent one of the
@@ -1700,6 +1730,24 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.kind = DesignPlacementKindChoices.KIND_MOVE
             placement.device = device
             placement.device_type = None
+            # Planned re-attribution (role / tenant / the deployment's own
+            # planning fields): a move may state what the device BECOMES when it
+            # lands, not just where it goes. Assigned only when the editor
+            # actually sent the key, so a plain reposition that omits them keeps
+            # whatever the placement already held and stays idempotent; an
+            # explicit null clears the override and the device's own value
+            # stands again.
+            ok, move_role_id, move_tenant_id = self._resolve_add_refs(
+                item, rack, u_position, errors
+            )
+            if not ok:
+                return None
+            if "device_role_id" in item:
+                placement.device_role_id = move_role_id
+            if "tenant_id" in item:
+                placement.tenant_id = move_tenant_id
+            if "planning_data" in item:
+                placement.planning_data = item.get("planning_data")
             # A full-depth device occupies BOTH faces, so a client may still POST
             # one copy per face (the editor no longer does -- buildRackPayload
             # skips the opposite-face tile). Both copies reconcile to the same
@@ -2185,3 +2233,20 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
             user=request.user, design_id=design_id
         ).delete()
         return Response({"design_id": design_id, "hidden_rack_ids": []})
+
+
+class PlacementFieldsView(views.APIView):
+    """The deployment's ``placement_fields`` descriptors.
+
+    An API client cannot know which planning fields exist -- that is the whole
+    point of declaring them in config rather than hardcoding them -- so it asks
+    here before POSTing a placement with ``planning_data``. Read-only, and
+    ``target`` is withheld: it names a real custom field on the deployment's
+    devices, which is apply-time plumbing rather than part of the client
+    contract.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(planning_fields.public_placement_field_schema())

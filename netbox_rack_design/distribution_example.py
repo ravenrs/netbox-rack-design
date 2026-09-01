@@ -61,11 +61,19 @@ from extras.scripts import Script
 # package into NetBox's SCRIPTS_ROOT (a relative import would break there).
 # ``netbox_rack_design.distribution`` stays importable regardless of where THIS
 # file lives, because it's the installed plugin package, not a sibling script.
-from netbox.plugins import get_plugin_config
-
 from netbox_rack_design.distribution import (
     _bank_of,
     _collect_pdus,
+)
+
+# The config-bridge that reads custom fields generically, never by hardcoded
+# name. It lives in the plugin so all three shipped scripts -- and any
+# deployment's own -- read the same grammar; re-exported here under its
+# historical names so a copied-out script that calls them directly keeps
+# working.
+from netbox_rack_design.planning_fields import (
+    read_planning_field,  # noqa: F401
+    read_planning_fields,
 )
 
 # Plain getLogger(__name__) (not the plugin's dotted logger) so this file works
@@ -117,62 +125,6 @@ SKIP_ROLE_SLUGS = frozenset((
 # taste; a copied-out script can read them from plugin config instead.
 WARN_PCT = 80
 CRITICAL_PCT = 100
-
-
-# --- config-bridge: read custom fields generically, never by hardcoded name -
-
-
-def read_planning_field(config, source, obj):
-    """Resolve one ``planning_fields`` entry's ``source`` against ``obj``
-    (docs/pdu-distribution-spec.md Sec 5's token grammar).
-
-    * ``cf.<name>`` reads a custom field off ``obj.cf`` (the value dict every
-      ``dcim``/plugin object with custom fields exposes) -- the only grammar a
-      distribution site needs.
-    * Any other dotted path (e.g. ``role.name``) walks native attributes off
-      ``obj`` instead, for a copy-from-rack style source elsewhere in the
-      planning dialogs.
-
-    ``config`` is the field's own schema dict (``{"key", "label", "type",
-    "source"[, "choices"]}``) -- unused by the resolver itself, but threaded
-    through so a caller can post-process the raw value by its declared
-    ``type`` (e.g. cast ``"number"`` to ``float``). Returns ``None`` for a
-    missing/unset value or an unresolvable path; never raises.
-    """
-    if not source:
-        return None
-    parts = source.split(".")
-    if parts[0] == "cf":
-        if len(parts) != 2:
-            return None
-        cf = getattr(obj, "cf", None) or {}
-        return cf.get(parts[1])
-    value = obj
-    for part in parts:
-        if value is None:
-            return None
-        value = getattr(value, part, None)
-    return value
-
-
-def read_planning_fields(role, obj):
-    """Read every configured ``planning_fields[role]`` entry off ``obj``,
-    returning ``{key: value}``. This is how this script sees a site's custom
-    fields WITHOUT hardcoding their names (docs/pdu-distribution-spec.md Sec
-    5) -- e.g. a site whose rack cf is called ``rack_power_cap`` maps it to the
-    ``power_limitation`` key the algorithm below reads. An empty/missing
-    schema (the shipped default) returns ``{}`` for every ``role``, so this
-    script still runs -- just without any cf-derived override."""
-    schema = get_plugin_config(PLUGIN_NAME, "planning_fields", {}) or {}
-    fields = schema.get(role) or []
-    out = {}
-    for field in fields:
-        key = field.get("key")
-        source = field.get("source")
-        if not key or not source:
-            continue
-        out[key] = read_planning_field(field, source, obj)
-    return out
 
 
 # --- the algorithm (shared shape with distribution.build_native) -----------

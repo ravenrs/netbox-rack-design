@@ -102,6 +102,12 @@
         {# they only ever reach a user's distribution script.                  #}
         {{ distribution_mode|json_script:"rd-distribution-mode" }}
 
+        {# Config-declared PLACEMENT fields (planning_fields.py): the planning #}
+        {# attributes a planner sets on a planned device. editor.js renders the #}
+        {# rail inputs and the per-tile dialog from this -- no cf name is ever #}
+        {# named in HTML or JS. `[]` (default) -> no extra inputs at all.       #}
+        {{ placement_fields|json_script:"rd-placement-fields" }}
+
         {# ---- ONE always-visible toolbar line: the state-LEGEND filter and the #}
         {# Role/Tenant selects share a single horizontal row above the drawer +  #}
         {# racks shell, visible regardless of which drawer sections are open.     #}
@@ -144,6 +150,10 @@
             <label class="form-label small mb-0 text-nowrap" for="id_tenant">{% trans "Tenant" %}</label>
             {{ palette_form.tenant }}
           </div>
+          {# Sticky defaults for the deployment's own config-declared planning #}
+          {# fields, rendered by editor.js from the placement_fields schema --  #}
+          {# an empty mount here so no field name lives in this template.       #}
+          <div class="d-flex flex-wrap align-items-center gap-3" data-rd-placement-rail></div>
           {# Single minimal affordance: the duplicated inline hint text is gone; #}
           {# only this ⓘ remains, explained via its tooltip. #}
           <span class="nbx-rd-toolbar-hint text-muted" title="{% trans 'Applied to devices you drag in next' %}">

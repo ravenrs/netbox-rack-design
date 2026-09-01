@@ -17,7 +17,7 @@ from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
-from . import filtersets, forms, models, projection, tables
+from . import filtersets, forms, models, planning_fields, projection, tables
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
 
@@ -303,6 +303,14 @@ def _slot_to_widget(slot):
         # only ever set on a `kind=add` placement whose role is a PDU. Lets the
         # PDU power dialog reopen pre-filled after a reload.
         "power_config": placement.power_config if placement is not None else None,
+        # The deployment's config-declared planning fields
+        # (``placement_fields``): the values the planner typed, delivered back
+        # so the tile's attributes dialog reopens pre-filled after a reload.
+        "planning_data": (placement.planning_data or {}) if placement is not None else {},
+        # Planned re-attribution, round-tripped so a reloaded add or move keeps
+        # what the design says it becomes (and the editor can show it).
+        "device_role_id": placement.device_role_id if placement is not None else None,
+        "tenant_id": placement.tenant_id if placement is not None else None,
         # Feed binding (docs/pdu-distribution-spec.md §6.2): whichever of these is
         # set on the placement rides back to the editor JS so the bind-to-feed
         # dialog can preselect the PDU's current binding on reopen. At most one is
@@ -435,6 +443,13 @@ def _design_editor_context(request, design):
         # the rack-power dialog's dynamically-rendered fields. `{}` (default) ->
         # the dialog shows only the copy-from-rack row, no hardcoded cf inputs.
         "planning_fields": get_plugin_config(PLUGIN_NAME, "planning_fields", {}),
+        # Config-declared placement fields (planning_fields.py): the descriptors
+        # the editor renders as extra inputs -- in the palette rail for the ones
+        # flagged ``rail``, and in each add tile's attributes dialog. `[]`
+        # (default) -> the editor shows no extra inputs at all. ``target`` is
+        # stripped: it names a real custom field and is deployment plumbing, not
+        # part of what the frontend needs.
+        "placement_fields": planning_fields.public_placement_field_schema(),
         # Effective power-distribution engine (docs/pdu-distribution-spec.md):
         # editor.js reads this to decide whether the rack/PDU power dialogs'
         # manual cf inputs are worth showing at all -- they only ever reach a

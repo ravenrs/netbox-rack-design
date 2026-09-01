@@ -1,5 +1,6 @@
 """REST API URL routing for NetBox Rack Design."""
 
+from django.urls import path
 from netbox.api.routers import NetBoxRouter
 
 from .views import (
@@ -12,6 +13,7 @@ from .views import (
     FavoriteSetViewSet,
     HiddenDesignChassisViewSet,
     HiddenDesignRackViewSet,
+    PlacementFieldsView,
 )
 
 app_name = "netbox_rack_design"
@@ -47,4 +49,9 @@ router.register(
     basename="devicetypepower",
 )
 
-urlpatterns = router.urls
+urlpatterns = [
+    # Schema discovery for the config-declared planning fields: a client has no
+    # other way to learn which keys ``planning_data`` accepts.
+    path("placement-fields/", PlacementFieldsView.as_view(), name="placement-fields"),
+    *router.urls,
+]

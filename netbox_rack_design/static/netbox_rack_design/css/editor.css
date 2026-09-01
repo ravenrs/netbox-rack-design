@@ -349,6 +349,46 @@
     color: #fff;
 }
 
+/* ---- Per-tile planning-attributes button --------------------------------- */
+/* The config-declared placement fields (planning_fields.py). Same corner
+   treatment as the PDU power button, offset to sit beside it: a PDU add can
+   carry both, and two buttons stacked on the same 16px corner would be one
+   unclickable target. */
+.nbx-rd-placement-btn {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 2px 0 4px 0;
+    background-color: rgba(var(--tblr-secondary-rgb), 0.75);
+    color: #fff;
+    font-size: 11px;
+    cursor: pointer;
+    z-index: 2;
+}
+
+/* When the tile also has the PDU power button, that one keeps the corner. */
+.nbx-rd-power-btn ~ .nbx-rd-placement-btn {
+    left: 16px;
+    border-radius: 0 0 4px 0;
+}
+
+.nbx-rd-placement-btn .mdi {
+    font-size: 11px;
+    line-height: 16px;
+    vertical-align: middle;
+}
+
+/* Filled once the tile carries at least one value, so a glance across the rack
+   shows which planned devices still need their attributes set. */
+.nbx-rd-placement-btn.has-config {
+    background-color: rgba(var(--tblr-primary-rgb), 0.9);
+}
+
 /* ---- Per-rack power button (rack_block.html header) ----------------------- */
 /* Same "has-config" cue as the per-tile button above, applied by editor.js once
    a DesignRackPower row exists (server context or a successful save). */

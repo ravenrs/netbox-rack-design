@@ -667,6 +667,165 @@
         try { return JSON.parse(el.textContent || "\"none\"") || "none"; } catch (e) { return "none"; }
     })();
 
+    // The deployment's config-declared PLACEMENT fields (planning_fields.py):
+    // the descriptors for values a planner sets on a planned device, read once
+    // from the editor-data json_script global. `[]` (the shipped default) means
+    // no extra inputs render anywhere -- no cf name is ever hardcoded here.
+    var PLACEMENT_FIELDS = (function () {
+        var el = document.getElementById("rd-placement-fields");
+        if (!el) { return []; }
+        try { return JSON.parse(el.textContent || "[]") || []; } catch (e) { return []; }
+    })();
+
+    // Which of them a given placement kind may carry. The default is add-only,
+    // matching the role/tenant rule the model enforces.
+    function placementFieldsFor(kind) {
+        return PLACEMENT_FIELDS.filter(function (f) {
+            var kinds = f.kinds && f.kinds.length ? f.kinds : ["add"];
+            return kinds.indexOf(kind) !== -1;
+        });
+    }
+
+    // Read a rendered set of planning inputs into a flat {key: value} blob,
+    // dropping the ones left blank -- an unset field is absent, never "".
+    function readPlacementFieldInputs(scope, selector) {
+        var out = {};
+        if (!scope) { return out; }
+        // `select, input` rather than the bare class: NetBox's TomSelect
+        // enhancement copies a select's classes onto the wrapper <div> it
+        // inserts, which would otherwise match here and read as a blank field.
+        scope.querySelectorAll("select" + selector + ", input" + selector).forEach(function (input) {
+            var key = input.getAttribute("data-field-key");
+            var value = (input.value || "").trim();
+            if (key && value !== "") { out[key] = value; }
+        });
+        return out;
+    }
+
+    // ---- The palette rail's sticky defaults ---------------------------------
+    // Descriptors flagged `rail` behave like the Role/Tenant selects: pick once,
+    // every subsequent drag-in inherits the choice. Rendered from the schema
+    // into an empty mount in the toolbar, so the template names no field either.
+    var placementRailEl = document.querySelector("[data-rd-placement-rail]");
+
+    function renderPlacementRail() {
+        if (!placementRailEl) { return; }
+        var fields = PLACEMENT_FIELDS.filter(function (f) { return f.rail; });
+        if (!fields.length) { return; }
+        placementRailEl.innerHTML = fields.map(function (f) {
+            var safeLabel = String(f.label || f.key).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            return '<div class="nbx-rd-toolbar-field d-flex align-items-center gap-2">'
+                + '<label class="form-label small mb-0 text-nowrap">' + safeLabel + "</label>"
+                + planningFieldInputHtml(f, "nbx-rd-placement-rail-field") + "</div>";
+        }).join("");
+    }
+
+    // The rail's current selections, as the planning_data blob a fresh add
+    // starts life with.
+    function railPlacementData() {
+        return readPlacementFieldInputs(placementRailEl, ".nbx-rd-placement-rail-field");
+    }
+
+    // The rail's whole attribution set: Role, Tenant and the config-declared
+    // planning fields. One reader, because all three behave identically --
+    // "what the next device I touch should become" -- and a drop or a move
+    // applies them together.
+    function railAttribution() {
+        var roleEl = document.getElementById("id_device_role");
+        var tenantEl = document.getElementById("id_tenant");
+        function label(el) {
+            return (el && el.value && el.selectedOptions && el.selectedOptions.length)
+                ? el.selectedOptions[0].textContent.trim() : "";
+        }
+        return {
+            device_role_id: (roleEl && roleEl.value) ? parseInt(roleEl.value, 10) : null,
+            device_role_name: label(roleEl),
+            tenant_id: (tenantEl && tenantEl.value) ? parseInt(tenantEl.value, 10) : null,
+            tenant_name: label(tenantEl),
+            planning_data: railPlacementData(),
+        };
+    }
+
+    // Show the planned attribution on the tile straight away.
+    //
+    // The hover card reads data-* attributes, and the SERVER writes them from
+    // the projection -- which resolves override-first, but only on the next
+    // load. An override chosen in this session has to reach the same attributes
+    // itself, or the card would keep answering with the device's current values
+    // until a save + reload. The value being displaced is stashed as the "old"
+    // one, which is exactly what the card contrasts against.
+    function overrideAttr(content, attr, oldAttr, value, stash) {
+        if (!value) { return; }
+        var current = content.getAttribute(attr);
+        if (current && current !== value && !content.getAttribute(oldAttr)) {
+            content.setAttribute(oldAttr, current);
+            stash.push([attr, oldAttr]);
+        }
+        content.setAttribute(attr, value);
+    }
+
+    function stampAttributionAttrs(widget, content) {
+        if (!content) { return; }
+        var stash = widget._rdAttrStash || [];
+        overrideAttr(content, "data-role-name", "data-old-role",
+                     widget.device_role_name, stash);
+        overrideAttr(content, "data-tenant-name", "data-old-tenant",
+                     widget.tenant_name, stash);
+        widget._rdAttrStash = stash;
+        stampPlanningAttr(widget, content);
+    }
+
+    // Undo exactly what stampAttributionAttrs displaced -- never the server's
+    // own "old" attributes, which describe a move it already knows about.
+    function restoreAttributionAttrs(widget, content) {
+        if (!content) { return; }
+        (widget._rdAttrStash || []).forEach(function (pair) {
+            var old = content.getAttribute(pair[1]);
+            if (old !== null) {
+                content.setAttribute(pair[0], old);
+                content.removeAttribute(pair[1]);
+            }
+        });
+        widget._rdAttrStash = null;
+        stampPlanningAttr(widget, content);
+    }
+
+    // Stamp the rail onto a tile that has just BECOME a move. A move's role /
+    // tenant / planning fields are planned OVERRIDES -- "this device becomes
+    // that when it lands" -- so only fields the rail actually carries are
+    // written, and only into slots the tile has not already filled itself.
+    // Leaving the rail empty therefore keeps a plain reposition a plain
+    // reposition.
+    function applyRailToMove(widget) {
+        var rail = railAttribution();
+        if (rail.device_role_id != null && widget.device_role_id == null) {
+            widget.device_role_id = rail.device_role_id;
+            widget.device_role_name = rail.device_role_name;
+        }
+        if (rail.tenant_id != null && widget.tenant_id == null) {
+            widget.tenant_id = rail.tenant_id;
+            widget.tenant_name = rail.tenant_name;
+        }
+        if (Object.keys(rail.planning_data).length
+                && !Object.keys(widget.planning_data || {}).length) {
+            widget.planning_data = rail.planning_data;
+        }
+    }
+
+    // ...and take it back off when the tile lands where it started. The device
+    // is not moving after all, so the design has nothing to say about it.
+    // Safe to clear outright: only a tile that began the session as `existing`
+    // reaches this path, and such a tile never carries a saved override.
+    function clearRailFromMove(widget) {
+        widget.device_role_id = null;
+        widget.device_role_name = "";
+        widget.tenant_id = null;
+        widget.tenant_name = "";
+        widget.planning_data = null;
+    }
+
+    renderPlacementRail();
+
     // The rack's real PowerFeeds + this design's planned DesignPowerFeeds, for
     // the bind-to-feed picker (real first, then planned). Never writes.
     function fetchFeeds(rackId) {
@@ -1250,18 +1409,144 @@
     // distribution-spec.md §5): `type` in {number, text, choice}. Never a
     // hardcoded cf name -- `f.key` drives both the DOM lookup and the
     // custom_fields dict key written on confirm.
-    function planningFieldInputHtml(f) {
+    function planningFieldInputHtml(f, cssClass) {
+        var cls = cssClass || "nbx-rd-rackpower-field";
         if (f.type === "choice") {
             var opts = '<option value="">—</option>' + (f.choices || []).map(function (c) {
                 var safe = String(c).replace(/&/g, "&amp;").replace(/</g, "&lt;");
                 return '<option value="' + safe + '">' + safe + "</option>";
             }).join("");
-            return '<select class="form-select form-select-sm nbx-rd-rackpower-field" data-field-key="'
+            return '<select class="form-select form-select-sm ' + cls + '" data-field-key="'
                 + f.key + '">' + opts + "</select>";
         }
         var type = f.type === "number" ? "number" : "text";
-        return '<input type="' + type + '" class="form-control form-control-sm nbx-rd-rackpower-field" data-field-key="'
+        return '<input type="' + type + '" class="form-control form-control-sm ' + cls + '" data-field-key="'
             + f.key + '">';
+    }
+
+    // ---- The per-tile planning-attributes dialog ---------------------------
+    // The values a planner sets on a PLANNED device, declared per deployment in
+    // the `placement_fields` config (planning_fields.py) and stored on the
+    // placement's planning_data. The rail supplies the sticky defaults; this
+    // dialog is where a single tile departs from them. Nothing here knows a
+    // custom-field name -- the schema drives the inputs, `f.key` drives the blob.
+    function showPlacementFieldsDialog(widget, content, kind) {
+        var fields = placementFieldsFor(kind || widget.kind || "add");
+        if (!fields.length) { return; }
+        var current = widget.planning_data || {};
+
+        var overlay = document.createElement("div");
+        overlay.className = "modal fade nbx-rd-placement-modal";
+        overlay.setAttribute("tabindex", "-1");
+        var rowsHtml = fields.map(function (f) {
+            var safeLabel = String(f.label || f.key).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            return '<div class="mb-2"><label class="form-label small mb-0">' + safeLabel
+                + (f.required ? ' <span class="text-danger">*</span>' : "")
+                + "</label>" + planningFieldInputHtml(f, "nbx-rd-placement-field") + "</div>";
+        }).join("");
+        var title = (widget.proposed_name || widget.label || "device").replace(/</g, "&lt;");
+        overlay.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h5 class="modal-title">Planning attributes — ' + title + "</h5>"
+            + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+            + "</div>"
+            + '<div class="modal-body">' + rowsHtml
+            + '<div class="form-text">Carried on the planned device when this design is applied.</div>'
+            + "</div>"
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>'
+            + '<button type="button" class="btn btn-primary" data-rd-placement-confirm>Apply</button>'
+            + "</div></div></div>";
+        document.body.appendChild(overlay);
+
+        // Pre-fill from whatever the tile already carries, so reopening the
+        // dialog after a reload shows the stored values rather than the rail's.
+        overlay.querySelectorAll(".nbx-rd-placement-field").forEach(function (input) {
+            var key = input.getAttribute("data-field-key");
+            if (key && current[key] != null) { input.value = current[key]; }
+        });
+
+        var decided = { cancelled: false };
+        var wired = wireModal(overlay, decided);
+        overlay.querySelector("[data-rd-placement-confirm]").addEventListener("click", function () {
+            var data = readPlacementFieldInputs(overlay, ".nbx-rd-placement-field");
+            widget.planning_data = data;
+            stampPlanningAttr(widget, content);
+            if (widget._rdAttrStash === undefined) { widget._rdAttrStash = null; }
+            if (content) {
+                var btn = content.querySelector(".nbx-rd-placement-btn");
+                if (btn) { btn.classList.toggle("has-config", Object.keys(data).length > 0); }
+            }
+            markDirty();
+            wired.requestHide();
+        });
+        wired.show();
+    }
+
+    // Keep a tile's hover-card planning rows in step with its widget. The
+    // server stamps `data-planning` for every slot it renders (rack_block.html
+    // via the slot_planning filter); this is the in-session counterpart, for an
+    // add that does not exist server-side yet or whose values just changed in
+    // the dialog. Same JSON [[label, value], ...] shape, built from the same
+    // schema, so the hover card cannot tell the two apart.
+    function stampPlanningAttr(widget, content) {
+        if (!content) { return; }
+        var data = widget.planning_data || {};
+        var pairs = PLACEMENT_FIELDS
+            .filter(function (f) { return data[f.key] !== undefined && data[f.key] !== ""; })
+            .map(function (f) { return [f.label || f.key, String(data[f.key])]; });
+        if (pairs.length) {
+            if (content.getAttribute("data-rd-planning-orig") === null) {
+                // Remember what the server rendered before overwriting it, so
+                // undoing the override can put it back verbatim.
+                content.setAttribute("data-rd-planning-orig",
+                                     content.getAttribute("data-planning") || "");
+            }
+            content.setAttribute("data-planning", JSON.stringify(pairs));
+            return;
+        }
+        // The widget carries no override. That is NOT the same as "this tile has
+        // nothing to show": the server writes an existing device's OWN custom
+        // fields into the same attribute, and this function runs over every tile
+        // on every settle pass. Clearing here wiped them off the whole rack
+        // (user 2026-08-31). Only undo an override this session actually made.
+        var original = content.getAttribute("data-rd-planning-orig");
+        if (original === null) { return; }
+        if (original) {
+            content.setAttribute("data-planning", original);
+        } else {
+            content.removeAttribute("data-planning");
+        }
+        content.removeAttribute("data-rd-planning-orig");
+    }
+
+    // The tile affordance that opens it. Added to every `add` tile -- both a
+    // freshly dropped one and one rehydrated on load -- whenever the deployment
+    // declares any placement field for that kind.
+    // `kind` is the tile's EFFECTIVE kind. It has to be passed for a same-rack
+    // move: that tile keeps `widget.kind === "existing"` and signals the move
+    // through its CSS state alone, so the widget cannot answer for itself.
+    function attachPlacementFieldsButton(widget, content, kind) {
+        if (!content || content.querySelector(".nbx-rd-placement-btn")) { return; }
+        if (!placementFieldsFor(kind || widget.kind || "add").length) { return; }
+        // A fresh drop inherits the rail defaults but has no server-rendered
+        // attribute yet, so the hover card would come up empty until a reload.
+        stampPlanningAttr(widget, content);
+        var btn = document.createElement("button");
+        btn.type = "button";
+        var filled = Object.keys(widget.planning_data || {}).length > 0;
+        btn.className = "nbx-rd-placement-btn" + (filled ? " has-config" : "");
+        btn.title = "Planning attributes";
+        btn.setAttribute("aria-label", "Planning attributes");
+        btn.innerHTML = '<i class="mdi mdi-tag-outline" aria-hidden="true"></i>';
+        content.appendChild(btn);
+        btn.addEventListener("click", function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            showPlacementFieldsDialog(widget, content, kind);
+        });
     }
 
     // The per-rack power dialog: copy-from-rack is always available; the
@@ -2210,6 +2495,17 @@
             }
         });
 
+        // Config-declared planning attributes: an `add` rehydrated on load gets
+        // its attributes button back, pre-filled from the server-delivered
+        // widget.planning_data (views.py _slot_to_widget). No-op for a
+        // deployment that declares no placement_fields.
+        widgets.forEach(function (w, idx) {
+            if (!w || w.kind !== "add" || w.opposite_face) { return; }
+            var el = block.querySelector('.grid-stack-item[data-widget-index="' + idx + '"]');
+            var content = el && el.querySelector(".grid-stack-item-content");
+            attachPlacementFieldsButton(w, content);
+        });
+
         // Planned-PDU reopen affordance (docs/pdu-distribution-spec.md): a
         // reloaded PDU add gets its bind-to-feed button, pre-filled from the
         // server-delivered widget.real_power_feed_id / .planned_power_feed_id
@@ -2694,11 +2990,24 @@
                         itemEl.classList.add("nbx-rd-state-existing");
                         applyExistingColor(itemEl);
                         itemEl.classList.remove("nbx-rd-dirty");
+                        var homeContent = itemEl.querySelector(".grid-stack-item-content");
+                        restoreAttributionAttrs(w, homeContent);
+                        clearRailFromMove(w);
+                        stampPlanningAttr(w, homeContent);
+                        var homeBtn = homeContent
+                            && homeContent.querySelector(".nbx-rd-placement-btn");
+                        if (homeBtn) { homeBtn.remove(); }
                     } else {
                         ensureTempGhost(idx, st);
                         itemEl.classList.remove("nbx-rd-state-existing");
                         itemEl.classList.add("nbx-rd-state-move_in");
                         itemEl.classList.add("nbx-rd-dirty");
+                        // The rail applies to a device the design RELOCATES, not
+                        // just to one it adds (user 2026-08-31).
+                        applyRailToMove(w);
+                        var mvContent = itemEl.querySelector(".grid-stack-item-content");
+                        stampAttributionAttrs(w, mvContent);
+                        attachPlacementFieldsButton(w, mvContent, "move");
                     }
                 });
                 syncOwnedShadows();
@@ -3242,7 +3551,8 @@
             bar.setAttribute("data-name", "was: " + (label || ""));
             var src = stripeSourceContent(el, label);
             if (src) {
-                ["data-device-type-name", "data-role-name", "data-tenant-name"].forEach(function (attr) {
+                ["data-device-type-name", "data-role-name", "data-tenant-name",
+                 "data-planning"].forEach(function (attr) {
                     var v = src.getAttribute(attr);
                     if (v) { bar.setAttribute(attr, v); }
                 });
@@ -3726,6 +4036,12 @@
                     u_height: w.u_height,
                     label: w.label,
                     proposed_name: w.proposed_name || "",
+                    // Planned re-attribution travels with the tile, so hopping
+                    // racks does not silently drop an override the user set (or
+                    // re-stamp it from a rail that has since changed).
+                    device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
+                    tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
+                    planning_data: w.planning_data || null,
                     origUPosition: st.origUPosition,
                     origFace: st.origFace,
                     originRackId: originRackId,
@@ -4034,7 +4350,14 @@
                 label: d.label,
                 proposed_name: d.proposed_name || "",
                 face: face,
+                device_role_id: (d.device_role_id != null) ? d.device_role_id : null,
+                tenant_id: (d.tenant_id != null) ? d.tenant_id : null,
+                planning_data: d.planning_data || null,
             };
+            applyRailToMove(widget);
+            var adoptContent = el.querySelector(".grid-stack-item-content");
+            stampAttributionAttrs(widget, adoptContent);
+            attachPlacementFieldsButton(widget, adoptContent, "move");
             state.push({
                 widget: widget,
                 origUPosition: d.origUPosition,
@@ -4460,6 +4783,9 @@
                     placement_id: (info.placement_id != null) ? info.placement_id : null,
                     u_height: info.u_height, label: info.label,
                     proposed_name: info.proposed_name || "", face: face,
+                    device_role_id: (info.device_role_id != null) ? info.device_role_id : null,
+                    tenant_id: (info.tenant_id != null) ? info.tenant_id : null,
+                    planning_data: info.planning_data || null,
                 },
                 origUPosition: info.origUPosition, origFace: info.origFace,
                 removed: false, shadowEl: null, crossRack: true, needsRename: false,
@@ -4470,6 +4796,9 @@
             itemEl.setAttribute("data-widget-index", newIdx);
             itemEl.classList.remove("nbx-rd-state-existing", "nbx-rd-state-move_out_ghost");
             itemEl.classList.add("nbx-rd-state-move_in", "nbx-rd-dirty");
+            var reclaimContent = itemEl.querySelector(".grid-stack-item-content");
+            stampAttributionAttrs(state[newIdx].widget, reclaimContent);
+            attachPlacementFieldsButton(state[newIdx].widget, reclaimContent, "move");
             markDirty();
             rdTrace("state.write", {
                 op: "reclaimFromReject new entry", newIdx: newIdx,
@@ -4522,6 +4851,9 @@
                     device_id: w.device_id, device_type_id: w.device_type_id,
                     placement_id: w.placement_id, u_height: w.u_height,
                     label: w.label, proposed_name: w.proposed_name || "",
+                    device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
+                    tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
+                    planning_data: w.planning_data || null,
                     origUPosition: st.origUPosition, origFace: st.origFace,
                     originRackId: st.originRackId, originWidgetIndex: st.originWidgetIndex,
                 };
@@ -4964,6 +5296,14 @@
                     // handler above; rides this add's save item so
                     // SaveLayoutItemSerializer persists it onto the placement.
                     if (w.power_config) { item.power_config = w.power_config; }
+                    // Config-declared planning fields. Sent whenever the
+                    // deployment declares any, INCLUDING when empty, so
+                    // clearing the last value on a tile actually clears the
+                    // stored blob (the view leaves the field alone only when
+                    // the key is absent entirely).
+                    if (PLACEMENT_FIELDS.length) {
+                        item.planning_data = w.planning_data || {};
+                    }
                     // Reference a real PDU for live cf (§6, mutually exclusive with
                     // power_config -- showPduPowerDialog's confirm handler clears
                     // whichever mode isn't active).
@@ -4985,11 +5325,24 @@
                             planned_power_feed_id: w.planned_power_feed_id || null,
                         });
                     }
-                } else if (w.proposed_name) {
-                    // A move that went through the §4a dialog carries its chosen
-                    // name. Omitted (no name) => the view leaves the placement's
-                    // existing proposed_name untouched, keeping the save idempotent.
-                    item.proposed_name = w.proposed_name;
+                } else {
+                    if (w.proposed_name) {
+                        // A move that went through the §4a dialog carries its chosen
+                        // name. Omitted (no name) => the view leaves the placement's
+                        // existing proposed_name untouched, keeping the save idempotent.
+                        item.proposed_name = w.proposed_name;
+                    }
+                    // Planned re-attribution on a move: role, tenant and the
+                    // deployment's planning fields, sent ONLY when this tile
+                    // actually carries them. A reloaded move whose overrides
+                    // live server-side omits all three, so an untouched
+                    // round-trip preserves them and stays idempotent.
+                    if (w.device_role_id != null) { item.device_role_id = w.device_role_id; }
+                    if (w.tenant_id != null) { item.tenant_id = w.tenant_id; }
+                    if (PLACEMENT_FIELDS.length && w.planning_data
+                            && Object.keys(w.planning_data).length) {
+                        item.planning_data = w.planning_data;
+                    }
                 }
 
                 // The slot this tile occupies, addressed by the frame -- a unit
@@ -5341,6 +5694,10 @@
                     label: label,
                     face: face,
                     is_full_depth: isFullDepth,
+                    // Sticky defaults from the palette rail's config-declared
+                    // planning fields -- the same "pick once, every drop
+                    // inherits it" behaviour Role and Tenant have.
+                    planning_data: railPlacementData(),
                 };
                 state.push({
                     widget: widget, origUPosition: uPosition, origFace: face, removed: false, shadowEl: null,
@@ -5486,6 +5843,8 @@
                     setTileDisplayName(content, nameInput.value);
                     markDirty();
                 });
+
+                attachPlacementFieldsButton(widget, content);
 
                 // Planned-PDU power dialog (docs/pdu-distribution-spec.md): a PDU
                 // add has no real device/PowerFeed yet, so its breaker/phase (and,
@@ -5803,8 +6162,56 @@
     // derating/phase maths over real AND planned feeds).
     var recomputeDistUrl = saveUrl
         ? saveUrl.replace(/save-layout\/?$/, "recompute-distribution/") : "";
-    function recomputeDistribution() {
+    // The body of the last recompute we actually got an answer for. An identical
+    // layout yields an identical answer, so re-sending one buys nothing but a
+    // full server round trip (reconcile every item, run the distribution engine
+    // once per rack). The live recompute is driven by DOM mutations and plenty
+    // of those leave the LAYOUT untouched -- a settle pass, a class toggle, a
+    // re-render -- so this guard is what keeps a single edit to a single
+    // request no matter how many times the DOM churns behind it.
+    var lastRecomputeBody = null;
+    // The same payload split per rack: {rackId: JSON of that rack's bucket}, from
+    // the last request that was ANSWERED. Diffing against it is what decides
+    // which racks need re-projecting.
+    var lastRackBodies = null;
+    // ``opts.force``: send even when the layout is byte-identical. For the
+    // callers whose ANSWER changes without the layout changing -- defining or
+    // copying a planned feed moves the rack's capacity but mutates no tile.
+    // Which racks to run the distribution engine over is derived HERE, by
+    // diffing this payload against the last answered one rack by rack. The whole
+    // layout still travels -- the server reconciles all of it, because a device
+    // that left one rack is described by a placement filed under another -- but
+    // projecting only the racks whose contents actually changed keeps a round
+    // trip proportional to the edit rather than to the design.
+    //
+    // The payload is the right signal because it IS the question being asked.
+    // Deriving the set from DOM mutations instead looked equivalent and was not:
+    // GridStack toggles drag-lifecycle classes (ui-draggable-disabled and
+    // friends) on tiles in every rack for the duration of a drag, so every drag
+    // marked the whole design dirty however carefully the observers were scoped.
+    function recomputeDistribution(opts) {
         if (!recomputeDistUrl) { return Promise.resolve(null); }
+        var force = !!(opts && opts.force);
+        var payload = buildLayoutPayload();
+        var rackBodies = {};
+        payload.racks.forEach(function (rack) {
+            rackBodies[rack.rack_id] = JSON.stringify(rack);
+        });
+        var body = JSON.stringify(payload);
+        if (!force && body === lastRecomputeBody) {
+            return Promise.resolve({ unchanged: true });
+        }
+        // No baseline yet (first recompute of the session) or a forced refresh
+        // whose trigger is invisible to the layout: project everything.
+        var projectRacks = [];
+        if (!force && lastRackBodies) {
+            Object.keys(rackBodies).forEach(function (id) {
+                if (rackBodies[id] !== lastRackBodies[id]) {
+                    projectRacks.push(Number(id));
+                }
+            });
+        }
+        if (projectRacks.length) { payload.project_racks = projectRacks; }
         return fetch(recomputeDistUrl, {
             method: "POST",
             credentials: "same-origin",
@@ -5812,12 +6219,21 @@
                 "Content-Type": "application/json",
                 "X-CSRFToken": getCsrfToken(),
             },
-            body: JSON.stringify(buildLayoutPayload()),
+            body: JSON.stringify(payload),
         }).then(function (response) {
             return response.ok ? response.json() : null;
         }).then(function (data) {
             if (!data || !data.distributions) { return null; }
-            return { distributions: data.distributions, power: data.power || {} };
+            // Remembered only once it has been ANSWERED, so a failed request is
+            // retried on the next mutation rather than suppressed by the guard,
+            // and the racks it would have covered stay in the next diff.
+            lastRecomputeBody = body;
+            lastRackBodies = rackBodies;
+            return {
+                distributions: data.distributions,
+                distribution_status: data.distribution_status || {},
+                power: data.power || {},
+            };
         }).catch(function () { return null; });
     }
 
@@ -6525,9 +6941,39 @@
         document.body.appendChild(hcard);
         var currentContent = null;
 
+        // The tiles carry a native `title` (rack_block.html, and the stripe bars
+        // below) so the read-only elevation -- which never loads this file --
+        // still answers "what is this". In the editor that tooltip is strictly
+        // worse than the card and, appearing on the browser's own ~1s delay,
+        // pops up ON TOP of it. So the card takes the title away for as long as
+        // it is showing and hands it straight back afterwards; anything the
+        // card cannot describe (fillCard returned false) keeps its tooltip.
+        var titleHiddenOn = null;
+
+        function suppressNativeTooltip(el) {
+            if (titleHiddenOn === el) { return; }
+            restoreNativeTooltip();
+            var title = el.getAttribute("title");
+            if (title === null) { return; }
+            el.setAttribute("data-rd-title", title);
+            el.removeAttribute("title");
+            titleHiddenOn = el;
+        }
+
+        function restoreNativeTooltip() {
+            if (!titleHiddenOn) { return; }
+            var title = titleHiddenOn.getAttribute("data-rd-title");
+            if (title !== null) {
+                titleHiddenOn.setAttribute("title", title);
+                titleHiddenOn.removeAttribute("data-rd-title");
+            }
+            titleHiddenOn = null;
+        }
+
         function hideCard() {
             hcard.style.display = "none";
             currentContent = null;
+            restoreNativeTooltip();
         }
 
         function fillCard(content) {
@@ -6539,6 +6985,8 @@
             // the device's real dcim name/tenant + where it went/is going.
             var oldName = content.getAttribute("data-old-name");
             var oldTenant = content.getAttribute("data-old-tenant");
+            // The role the device has today, when the design re-attributes it.
+            var oldRole = content.getAttribute("data-old-role");
             var newName = content.getAttribute("data-new-name");
             var movedTo = content.getAttribute("data-moved-to");
             var power = content.getAttribute("data-power");
@@ -6547,7 +6995,16 @@
             var baysUsed = content.getAttribute("data-bays-used");
             var baysTotal = content.getAttribute("data-bays-total");
             var bayOccupants = content.getAttribute("data-bay-occupants");
-            if (!name && !deviceType && !role && !tenant && !power && !baysTotal) { return false; }
+            // The deployment's config-declared planning fields, already
+            // resolved to [[label, value], ...] -- by the server for a rendered
+            // slot (any state: a real device's custom field, or a planned add's
+            // planning_data) and by stampPlanningAttr for an in-session add.
+            // Nothing here knows a field name.
+            var planning = [];
+            try { planning = JSON.parse(content.getAttribute("data-planning") || "[]"); }
+            catch (e) { planning = []; }
+            if (!name && !deviceType && !role && !tenant && !power && !baysTotal
+                && !planning.length) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -6560,11 +7017,12 @@
                 ["New name", (newName && newName !== name) ? newName : null],
                 ["Type", deviceType],
                 ["Role", role],
+                ["Old role", (oldRole && oldRole !== role) ? oldRole : null],
                 ["Tenant", tenant],
                 ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
                 ["To", movedTo],
                 ["Bays", baysTotal ? (baysUsed + " of " + baysTotal + " used") : null],
-            ].forEach(function (pair) {
+            ].concat(planning).forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");
                 row.className = "nbx-rd-hovercard-row";
@@ -6687,6 +7145,7 @@
             applyHoverLink(item);
             if (!content || content === currentContent) { return; }
             if (!fillCard(content)) { hideCard(); return; }
+            suppressNativeTooltip(content);
             currentContent = content;
             positionCard(content);
         });
