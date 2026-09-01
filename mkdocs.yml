@@ -8,6 +8,7 @@ nav:
   - Guides:
       - Device naming: device-naming.md
       - Power distribution: power-distribution.md
+      - Planning fields: planning-fields.md
   - Reference:
       - Power projection spec: power-projection-spec.md
       - PDU distribution spec: pdu-distribution-spec.md

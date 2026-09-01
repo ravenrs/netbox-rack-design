@@ -9,8 +9,12 @@ is two grid rows, so ``gs-h`` / ``gs-max-row`` are the U values doubled. Adapted
 from netbox-reorder-rack's ``templatetags/rack.py``.
 """
 
+import json
+
 from django import template
 from utilities.html import foreground_color
+
+from .. import planning_fields, projection
 
 register = template.Library()
 
@@ -78,10 +82,15 @@ def stripe_height_pct(slot, rack):
 
 @register.filter()
 def slot_color(slot):
-    """Background hex color for a slot (its device role color, no leading #)."""
-    device = slot.get("device")
-    if device is not None and device.role and device.role.color:
-        return device.role.color
+    """Background hex color for a slot (its EFFECTIVE role's color, no leading #).
+
+    Effective, not the device's own: a move that re-attributes the device is
+    coloured by the role it is planned to have, which is the whole point of
+    showing the planned world rather than the current one.
+    """
+    role = projection.slot_role(slot)
+    if role is not None and role.color:
+        return role.color
     return ""
 
 
@@ -99,17 +108,30 @@ def slot_role_name(slot):
     """
     Device-role NAME for a slot's hover card.
 
-    Real devices (existing / move / remove) carry their own role; a planned
-    ``add`` carries the role chosen on its placement. Returns "" when neither
-    has a role so the template can omit the line entirely.
+    The EFFECTIVE role: a planned add's chosen role, a move's planned
+    re-attribution, or otherwise the real device's own. Returns "" when there is
+    none so the template can omit the line entirely.
+    """
+    role = projection.slot_role(slot)
+    return role.name if role is not None else ""
+
+
+@register.filter()
+def slot_old_role_name(slot):
+    """The role a MOVED device has today, when the design overrides it.
+
+    Returns "" unless there is genuinely something to contrast, so the hover
+    card shows a "was" line only where the plan actually changes the role.
     """
     device = slot.get("device")
-    if device is not None and device.role:
-        return device.role.name
     placement = slot.get("placement")
-    if placement is not None and placement.device_role:
-        return placement.device_role.name
-    return ""
+    if device is None or placement is None:
+        return ""
+    if not getattr(placement, "device_role_id", None):
+        return ""
+    if device.role is None or device.role_id == placement.device_role_id:
+        return ""
+    return device.role.name
 
 
 @register.filter()
@@ -131,16 +153,13 @@ def slot_device_type_name(slot):
 @register.filter()
 def slot_tenant_name(slot):
     """
-    Tenant NAME for a slot's hover card (real device's tenant, or a planned
-    add's tenant). Returns "" when there is no tenant.
+    Tenant NAME for a slot's hover card.
+
+    The EFFECTIVE tenant: a planned add's or a move's planned tenant, otherwise
+    the real device's own. Returns "" when there is none.
     """
-    device = slot.get("device")
-    if device is not None and device.tenant:
-        return device.tenant.name
-    placement = slot.get("placement")
-    if placement is not None and placement.tenant:
-        return placement.tenant.name
-    return ""
+    tenant = projection.slot_tenant(slot)
+    return tenant.name if tenant is not None else ""
 
 
 @register.filter()
@@ -179,3 +198,22 @@ def bay_occupants(bays):
         # chassis layer, where there is room for it.
         out.append(f"Bay {index}: {label}")
     return ", ".join(out)
+
+
+@register.filter()
+def slot_planning(slot):
+    """The deployment's config-declared planning fields for a slot's hover card.
+
+    Emitted as a JSON array of ``[label, value]`` pairs rather than the
+    ``a:b|c:d`` shape ``data-power`` uses, because a text planning field may
+    legitimately contain a colon or a pipe. Returns "" when the deployment
+    declares no planning fields (or none of them is set here), so the template
+    omits the attribute entirely.
+    """
+    pairs = planning_fields.read_for_slot(
+        slot.get("device"),
+        getattr(slot.get("placement"), "planning_data", None),
+    )
+    if not pairs:
+        return ""
+    return json.dumps([[label, str(value)] for label, value in pairs])

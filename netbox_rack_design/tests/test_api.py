@@ -1337,6 +1337,67 @@ class RecomputeDistributionTest(APITestCase):
         )
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
 
+    def test_project_racks_scopes_the_response_but_not_the_reconciliation(self):
+        """``project_racks`` limits which racks are PROJECTED, never which are
+        applied. Projection is the expensive half (the distribution engine runs
+        once per rack), and re-running it over racks nobody edited is what made
+        a single drop cost seconds.
+
+        The dangerous half is reconciliation: a device that LEAVES a rack is
+        described by a placement filed under the rack it lands in. Skip that
+        rack's items and the source still shows the device. So this asks for the
+        SOURCE rack only, while the move item sits in the destination's bucket --
+        the source can only drop to 1000 W if the destination was reconciled.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        a, b = self.consumers["cons-a"], self.consumers["cons-b"]
+
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk,
+             "project_racks": [self.rack.pk],
+             "racks": [
+                 {"rack_id": self.rack.pk, "front": [self._existing(a, 1)]},
+                 {"rack_id": self.rack2.pk, "front": [
+                     {"kind": "move", "device_id": b.pk, "u_position": 1,
+                      "face": "front"},
+                 ]},
+             ]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+
+        # Only the requested rack came back; the editor keeps its own numbers
+        # for the rest rather than being handed nulls.
+        self.assertEqual(list(resp.data["distributions"].keys()), [str(self.rack.pk)])
+        self.assertEqual(list(resp.data["power"].keys()), [str(self.rack.pk)])
+        # ...and it reflects the move that was described in the OTHER rack.
+        self.assertEqual(self._bank2_load(resp.data), 1000)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_recompute_without_project_racks_projects_everything(self):
+        """No ``project_racks`` means every submitted rack, so a full refresh --
+        and an editor older than the field -- keeps working unchanged.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        a, b = self.consumers["cons-a"], self.consumers["cons-b"]
+        payload = {"design_id": self.design.pk, "racks": [
+            {"rack_id": self.rack.pk, "front": [self._existing(a, 1)]},
+            {"rack_id": self.rack2.pk, "front": [self._existing(b, 1)]},
+        ]}
+
+        for label, body in (
+            ("absent", payload),
+            ("empty", dict(payload, project_racks=[])),
+        ):
+            with self.subTest(project_racks=label):
+                resp = self.client.post(self._url(), body, format="json", **self.header)
+                self.assertHttpStatus(resp, status.HTTP_200_OK)
+                self.assertEqual(
+                    sorted(resp.data["distributions"].keys()),
+                    sorted([str(self.rack.pk), str(self.rack2.pk)]),
+                )
+
     def test_recompute_returns_live_rack_power_summary(self):
         """The response carries the rack-level power summary too, so the editor's
         BAR is live: its capacity comes from the rack's feeds (planned included),

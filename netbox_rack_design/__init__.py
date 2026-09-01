@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 
 from netbox.plugins import PluginConfig
@@ -74,6 +74,21 @@ class RackdesignConfig(PluginConfig):
         #     ],
         #   }
         "planning_fields": {},
+        # Planning fields a planner SETS on a planned placement -- the config
+        # counterpart of the hardcoded device_role/tenant. Values are stored on
+        # DesignPlacement.planning_data and are destined for the real device
+        # when the design is applied. No custom field is ever hardcoded in the
+        # plugin: a deployment points these descriptors at ITS OWN cf. Empty by
+        # default, in which case the editor shows no extra inputs at all.
+        # Example:
+        #   "placement_fields": [
+        #     {"key": "hw_class", "label": "HW class", "type": "choice",
+        #      "choices": ["gp", "storage", "gpu"], "target": "cf.hw_class",
+        #      "kinds": ["add"], "rail": True},
+        #     {"key": "burn_in_hours", "label": "Burn-in (h)", "type": "number",
+        #      "target": "cf.burn_in_hours"},
+        #   ]
+        "placement_fields": [],
     }
 
 

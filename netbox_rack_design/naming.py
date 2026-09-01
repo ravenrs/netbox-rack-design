@@ -70,6 +70,8 @@ import string
 from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
 
+from . import planning_fields
+
 logger = logging.getLogger("netbox_rack_design.naming")
 
 __all__ = (
@@ -208,6 +210,28 @@ class _AddDevicePlaceholderProxy:
     @property
     def face(self):
         return self._placement.target_face
+
+    @property
+    def cf(self):
+        """The custom fields this planned device WILL have, keyed the way a
+        real ``dcim.Device.cf`` is.
+
+        A planned add has no device to read custom fields from, so the values
+        come from the placement's ``planning_data`` -- mapped from the
+        plugin-internal descriptor keys back to the deployment's real custom
+        field names via each descriptor's ``target``. That mapping is what makes
+        ``{device.cf[hw_class]}`` mean the same thing for an add as it does for
+        an existing device. Descriptors with a non-``cf.`` target are skipped:
+        they land on a native attribute, not in ``cf``.
+        """
+        data = self._placement.planning_data or {}
+        out = {}
+        for field in planning_fields.placement_field_schema():
+            target = field.get("target") or ""
+            if not target.startswith("cf."):
+                continue
+            out[target[3:]] = data.get(field["key"])
+        return out
 
 
 def _build_context(placement, n):

@@ -77,6 +77,8 @@
                  data-bay-name="{{ slot.name }}"
                  {% if slot.bay %}data-bay-id="{{ slot.bay.pk }}"{% endif %}
                  {% if slot.device_type %}data-device-type-name="{{ slot.device_type }}"{% endif %}
+                 {# Config-declared planning fields, resolved as for a rack tile (rack_block.html). #}
+                 {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                  title="{% blocktrans with n=slot.index %}Bay {{ n }}{% endblocktrans %} ({{ slot.name }}) · {{ slot.label }}">
               {% if editable %}<button type="button" class="nbx-rd-remove-btn"
                       title="{% trans 'Flag for removal' %}"

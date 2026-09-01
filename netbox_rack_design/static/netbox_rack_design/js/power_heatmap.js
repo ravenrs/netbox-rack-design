@@ -473,20 +473,35 @@
     };
     var pending = null;
 
-    function recomputeAll() {
-        // Detach while we write (our own attribute/class edits would otherwise
-        // re-trigger the observers), then reattach.
+    // Run ``fn`` with our observers off. Every write this module makes is a
+    // RENDERING of numbers we already have -- heat classes, the bar label, the
+    // chip strip -- so none of it should count as an edit. Left attached, each
+    // one marks its rack dirty and asks the server to recompute what it just
+    // finished drawing.
+    function withObserversDetached(fn) {
         observers.forEach(function (o) { o.disconnect(); });
-        var on = heatmapOn();
-        blocks.forEach(function (block) {
-            updateBar(block);
-            // The per-bank chip strip is always-on (like the power bar), rendered
-            // from readDistribution() which prefers the live-recomputed cache.
-            renderDistLegend(block, readDistribution(block));
-            renderDistNotice(block, readDistStatus(block));
-            if (on) { applyHeat(block, true); }
+        try {
+            fn();
+        } finally {
+            observers.forEach(function (o, i) {
+                if (blocks[i]) { o.observe(blocks[i], OBS_OPTS); }
+            });
+        }
+    }
+
+    function recomputeAll() {
+        withObserversDetached(function () {
+            var on = heatmapOn();
+            blocks.forEach(function (block) {
+                updateBar(block);
+                // The per-bank chip strip is always-on (like the power bar),
+                // rendered from readDistribution() which prefers the
+                // live-recomputed cache.
+                renderDistLegend(block, readDistribution(block));
+                renderDistNotice(block, readDistStatus(block));
+                if (on) { applyHeat(block, true); }
+            });
         });
-        observers.forEach(function (o, i) { o.observe(blocks[i], OBS_OPTS); });
     }
 
     // ---- live per-bank distribution (server round-trip, no persist) ---------
@@ -500,17 +515,47 @@
     // freshest response wins; a null result keeps the last-known distribution.
     var liveDistPending = null;
     var liveDistSeq = 0;
-    function requestLiveDistribution() {
+    // One recompute at a time. The endpoint replays the whole save
+    // reconciliation and re-projects every rack, so a single drop can cost
+    // seconds -- and one interaction produces several mutation bursts further
+    // apart than the debounce (the drag itself, the settle pass, the rename
+    // dialog). Firing one request per burst queued six of them behind each
+    // other and turned a drop into ~17s of waiting (user 2026-08-31).
+    //
+    // So: while a request is in flight, later ones only raise a flag, and
+    // exactly one follow-up runs when it returns. The layout is read fresh at
+    // send time, so that follow-up sees every edit made in the meantime -- no
+    // intermediate state is worth a round trip nobody will look at.
+    var liveDistInFlight = false;
+    var liveDistAgain = false;
+    // A forced request (a feed change) must stay forced even when it is deferred
+    // behind an in-flight one, or the payload guard would swallow it.
+    var liveDistAgainForce = false;
+    var LIVE_DIST_DEBOUNCE_MS = 400;
+
+    // ``force``: ask even when the layout has not changed. Only the feed dialogs
+    // need it -- their change moves the rack's capacity without touching a tile.
+    function requestLiveDistribution(force) {
         var editor = window.NbxRdEditor;
         if (!editor || typeof editor.recomputeDistribution !== "function") { return; }
+        if (liveDistInFlight) {
+            liveDistAgain = true;
+            liveDistAgainForce = liveDistAgainForce || !!force;
+            return;
+        }
         if (liveDistPending) { window.clearTimeout(liveDistPending); }
         liveDistPending = window.setTimeout(function () {
             liveDistPending = null;
+            liveDistInFlight = true;
             var seq = ++liveDistSeq;
-            editor.recomputeDistribution().then(function (res) {
+            // Which racks get re-projected is decided in recomputeDistribution,
+            // by diffing this layout against the last answered one.
+            editor.recomputeDistribution({ force: !!force }).then(function (res) {
                 // Drop a stale response (a newer edit already fired) or a null one
                 // (the request failed) -- never blank the chips on a hiccup.
-                if (seq !== liveDistSeq || !res) { return; }
+                // ``unchanged`` means the layout is byte-identical to the last
+                // answered request, so the numbers on screen are already right.
+                if (seq !== liveDistSeq || !res || res.unchanged) { return; }
                 var dists = res.distributions || {};
                 Object.keys(dists).forEach(function (rackId) {
                     var d = dists[rackId];
@@ -546,8 +591,22 @@
                     }
                 });
                 recomputeAll();
+            }).catch(function () {
+                // Swallowed on purpose: the caller already treats a failure as
+                // "keep the last-known numbers". What matters here is that the
+                // in-flight latch is released either way. A failed request
+                // leaves lastRackBodies untouched, so the racks it would have
+                // covered are still in the next diff.
+            }).then(function () {
+                liveDistInFlight = false;
+                if (liveDistAgain) {
+                    liveDistAgain = false;
+                    var again = liveDistAgainForce;
+                    liveDistAgainForce = false;
+                    requestLiveDistribution(again);
+                }
             });
-        }, 200);
+        }, LIVE_DIST_DEBOUNCE_MS);
     }
 
     function scheduleRecompute() {
@@ -577,7 +636,12 @@
     function applyHeatAll(on) {
         rdT("toggle", { on: !!on, blocks: blocks.length });
         document.body.classList.toggle("nbx-rd-heatmap-active", on);
-        blocks.forEach(function (block) { applyHeat(block, on, true); });
+        // Detached: recolouring is a view change, not a layout change. Attached,
+        // it wrote a class onto every tile in every rack and so marked the whole
+        // design dirty -- turning a toggle into a full-design recompute.
+        withObserversDetached(function () {
+            blocks.forEach(function (block) { applyHeat(block, on, true); });
+        });
     }
 
     // ---- power-bar hover: compact popover + pull out the unconnected tiles --
@@ -674,13 +738,17 @@
             });
             if (toggle.checked) { applyHeatAll(true); }
         }
+
+
     }
 
     // Public hook: a feed change (define/copy a planned feed) mutates no tile, so
     // the MutationObserver never fires -- the dialogs call this to pull fresh
     // capacity + chips without a Save or a reload.
     window.NbxRdPowerHeatmap = {
-        refresh: function () { requestLiveDistribution(); recomputeAll(); },
+        // ``force``: a feed change alters the ANSWER without altering the layout,
+        // so it must bypass the payload-identity guard in recomputeDistribution.
+        refresh: function () { requestLiveDistribution(true); recomputeAll(); },
     };
 
     if (document.readyState === "loading") {

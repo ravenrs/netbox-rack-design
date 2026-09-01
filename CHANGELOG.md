@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.24.0] - 2026-09-01
+
+### Release Summary
+
+A feature release built around one idea: a design should be able to describe
+*what a device becomes*, not just where it goes. Deployments can now declare
+their own planning fields in `PLUGINS_CONFIG` — the plugin ships the mechanism
+and hardcodes no custom field name — and those values, along with role and
+tenant, apply to a device a design relocates as well as one it adds. The
+editor surfaces them in the toolbar, in a per-tile dialog, and on the hover
+card for every tile in the rack. The rest of the release is performance: the
+live per-bank recompute now costs one request per edit, scoped to the racks
+that actually changed, after a five-rack design was spending seconds
+re-answering questions the page had already asked.
+
+### Added
+
+- **Config-declared planning fields.** A planner could set a planned device's
+  role and tenant, but nothing else — every other attribute a team tracks is a
+  custom field, and the plugin will not hardcode one. Deployments now declare
+  their own fields in `PLUGINS_CONFIG["placement_fields"]`: each descriptor
+  names a key, a label, a scalar type (`text`, `number` or `choice`) and where
+  the value lands on the real device. The editor renders them from that schema —
+  as sticky defaults in the toolbar for fields flagged `rail`, and in a
+  per-tile **Planning attributes** dialog — and the values are stored on the new
+  `DesignPlacement.planning_data` field. They round-trip through the REST
+  serializer, the `save-layout` action and GraphQL, and are readable from a
+  naming template or script as `{device.cf[<name>]}`, keyed by the real custom
+  field name so one template serves planned and existing devices alike. A new
+  `GET /api/plugins/rack-design/placement-fields/` publishes the schema, since a
+  client has no other way to learn which keys exist. The device hover card
+  shows them as extra rows on **every** tile — existing gear, adds, moves,
+  ghosts, removals and chassis blades — reading a real device's own custom
+  field or a planned add's `planning_data`, whichever applies. Configure
+  nothing and nothing changes. See the [Planning fields](planning-fields.md)
+  guide.
+
+### Changed
+
+- **A design can now re-attribute a device it moves.** Role, tenant and the
+  config-declared planning fields were add-only: `DesignPlacement.clean()`
+  rejected them on any other kind, so a design could say where a device goes but
+  not what it becomes. They are now allowed on a `move` as planned overrides,
+  and the toolbar's sticky defaults apply to a relocated device as well as a
+  dragged-in one. Null still means "leave the device's own value alone", so a
+  move made with an empty toolbar is a plain reposition; bringing a device home
+  drops the overrides with it. The projection resolves override-first
+  throughout, so the tile's role colour and the hover card show the planned
+  attribution rather than the current one, with an "Old role" / "Old tenant"
+  line where the two differ. The editor stamps the same attributes onto the
+  tile the moment the move is made -- same-rack, cross-rack and
+  reclaimed-after-a-rejected-drop alike -- so the card answers with the planned
+  values immediately instead of waiting for a save and a reload. `remove` still
+  takes none of them.
+
+- In the editor, a tile's native browser tooltip is suppressed while the hover
+  card is showing. The two said much the same thing, and the tooltip's ~1s
+  delay meant it appeared *on top of* the card. The `title` attribute is handed
+  back the moment the pointer leaves, and a tile the card cannot describe keeps
+  its tooltip — so the read-only elevation, which never loads the editor
+  script, is unaffected.
+
+- **The projected elevation loads its power data in one pass.**
+  `_device_draw_w`, `_device_power_ports` and `_device_unconnected` each asked a
+  device for `powerports.all()`, and a related manager re-queries on every
+  access — three round trips per device. One live distribution recompute of a
+  five-rack design issued 1853 queries, most of them these. The elevation now
+  prefetches power ports and port templates for every device (bay occupants
+  included) before anything reads them: 1465 queries, and the projection's own
+  time roughly halved. No behavioural change.
+
+- **The editor runs one live distribution recompute at a time.** The endpoint
+  replays the whole save reconciliation, so a single drop costs seconds — and
+  one interaction produces several mutation bursts further apart than the
+  debounce (the drag, the settle pass, the rename dialog), each firing its own
+  request. Six of them queued behind each other turned a drop into ~17s of
+  waiting. Further requests made while one is in flight now collapse into a
+  single follow-up that reads the layout fresh when it runs, and the debounce
+  went from 200ms to 400ms.
+
+- The planning-field resolver reads a device's stored `custom_field_data`
+  rather than the `cf` merged view, which re-queries `CustomField` on every
+  access. Resolving one field per rack slot was costing 516 queries and ~0.7s
+  on a five-rack editor page.
+
+- The `planning_fields` custom-field resolver (`read_planning_field` /
+  `read_planning_fields`) was copy-pasted into each of the three shipped
+  distribution scripts. It now lives in the plugin, in the new
+  `netbox_rack_design.planning_fields` module, and the scripts import it —
+  re-exported under the same names, so a copied-out script keeps working. A
+  malformed descriptor now raises `ImproperlyConfigured` instead of being
+  silently skipped.
+
+- **The live per-bank recompute now costs one request per edit, scoped to the
+  racks that changed.** Three things made a single drop expensive. The editor
+  posted a recompute on every DOM mutation, and plenty of mutations change no
+  layout at all — a settle pass, a re-render, the heatmap recolouring every
+  tile — so it re-asked the server for numbers the page already had; the
+  request is now skipped when the layout is byte-identical to the last one
+  answered. The server then re-projected *every* rack in the design, running
+  the distribution engine once per rack, when one rack had been touched; the
+  `recompute-distribution` action accepts a `project_racks` list and the editor
+  derives it by diffing the outgoing layout against the last answered one, rack
+  by rack. Reconciliation deliberately stays whole-payload: a device that
+  leaves one rack is described by a placement filed under another, so scoping
+  that half would make the source rack still show the device. Omit
+  `project_racks` and every submitted rack is projected, as before. On a
+  five-rack design a cross-rack move now returns in ~1.2s instead of ~1.9s, and
+  a layout-neutral churn costs nothing.
+
+### Fixed
+
+- The editor's live recompute never applied `distribution_status`: the client
+  read `res.distribution_status`, but `recomputeDistribution()` returned only
+  `distributions` and `power`. The "why this rack has no distribution" notice
+  could therefore only change on a page reload, not when an edit broke the
+  engine — the opposite of what it is for.
+
+- Toggling the power heatmap wrote a class onto every tile in every rack with
+  the mutation observers still attached, so a recolouring — a pure view change —
+  registered as an edit to the whole design. The module's own renders now run
+  with the observers detached, via a single helper rather than one hand-rolled
+  detach/reattach pair.
+
 ## [0.23.0] - 2026-08-28
 
 ### Release Summary
