@@ -122,12 +122,47 @@ PLUGINS_CONFIG = {
 > safe custom status via NetBox's `FIELD_CHOICES` (for `dcim.Device.status`, e.g.
 > `to_decommission`) and point `removal_statuses` at it.
 
-Apply migrations and restart NetBox:
+Apply migrations, collect the plugin's static files, and restart NetBox:
 
 ```bash
 python manage.py migrate
+python manage.py collectstatic --no-input
 # then restart your NetBox services (e.g. systemctl restart netbox netbox-rq)
 ```
+
+## Upgrading
+
+```bash
+pip install --upgrade netbox-rack-design
+python manage.py migrate
+python manage.py collectstatic --no-input
+# then restart your NetBox services (e.g. systemctl restart netbox netbox-rq)
+```
+
+Run `migrate` **before** using the plugin again: most releases add or change
+model fields, and NetBox will raise a database error on any view that reads a
+column the upgrade introduced.
+
+Do not skip `collectstatic`. The rack editor is a JavaScript application served
+from the plugin's own static files, so an upgrade that ships new assets leaves
+the previous ones in place until they are collected — the editor then loads
+against stale CSS and JS, which shows up as broken layout or drags that do
+nothing rather than as an error.
+
+Two things to check before upgrading:
+
+- **[COMPATIBILITY.md](https://github.com/ravenrs/netbox-rack-design/blob/main/COMPATIBILITY.md)** — the
+  NetBox version range each plugin release supports. Upgrading the plugin does
+  not upgrade NetBox, and a plugin whose declared range excludes your NetBox
+  will refuse to load.
+- **[CHANGELOG.md](https://github.com/ravenrs/netbox-rack-design/blob/main/CHANGELOG.md)** — behaviour
+  changes are listed per release under `### Changed`, and anything that needs
+  action on your side is called out under a bold **Breaking Changes** heading.
+
+Designs, placements and power rows are ordinary NetBox objects, so a downgrade
+is only safe back to the release whose migrations your database still matches;
+`python manage.py migrate netbox_rack_design <number>` unapplies to a specific
+migration if you need to step back.
 
 ## Configuration
 
