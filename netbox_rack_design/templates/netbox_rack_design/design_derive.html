@@ -1,0 +1,44 @@
+{% extends 'generic/_base.html' %}
+{% load i18n %}
+
+{% comment %}
+Confirmation page for the "Derive design" action (PLAN-design-chains.md §5
+phase 1). Available only from an approved design -- Design.is_frozen -- see
+views.DesignDeriveView. GET renders this page; POST creates the child design.
+
+Context:
+  - object:     the parent Design being derived from
+  - return_url: where Cancel goes
+{% endcomment %}
+
+{% block title %}{% trans "Derive design from" %} {{ object }}{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <h5 class="card-header">{% trans "Derive design" %}</h5>
+    <div class="card-body">
+      {% if object.is_frozen %}
+        <p>
+          {% blocktrans trimmed with title=object %}
+            Create a new design based on <strong>{{ title }}</strong>? The new
+            design starts in draft status with its "based on" set to this
+            design, so it plans on top of everything {{ title }} left behind.
+          {% endblocktrans %}
+        </p>
+        <form method="post">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-primary">{% trans "Derive" %}</button>
+          <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Cancel" %}</a>
+        </form>
+      {% else %}
+        <p class="text-danger">
+          {% blocktrans trimmed with title=object %}
+            Only an approved design can be derived from. Approve {{ title }}
+            first.
+          {% endblocktrans %}
+        </p>
+        <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Back" %}</a>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

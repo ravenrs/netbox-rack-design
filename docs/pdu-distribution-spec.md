@@ -307,6 +307,14 @@ have the same view set as `DesignPlacement`:
 what a feed is worth. Deleting a feed unbinds the planned PDUs that pointed at
 it (`SET_NULL`), which the detail page names before you delete.
 
+**Design chains widen what counts (`PLAN-design-chains.md` G5).** A rack's
+capacity figure (`projection._rack_capacity_w`) sums not only this design's
+own `DesignPowerFeed` rows but every APPROVED ancestor's, resolved through the
+same all-or-nothing `resolve_baseline_chain()` the placement replay uses — a
+non-approved or `implemented` ancestor contributes nothing (and the refusal is
+reported once, by the projection's `conflicts`, not duplicated here). See
+`docs/design-chains.md`.
+
 ### 6.2 Binding — the PDU → feed link
 
 Two nullable FKs on `DesignPlacement` (avoids a GenericForeignKey; both queryable):
@@ -321,6 +329,11 @@ DesignPlacement
 - property `bound_feed` returns whichever is set, exposing a duck-typed
   `{voltage, amperage, phase, supply, name}` regardless of source.
 - One PDU binds to **one** feed (matches "one power port → one feed").
+- **A PDU may bind to an APPROVED ancestor's planned feed**, not only to a
+  real feed or one this design defined itself (`DesignPlacement.
+  _validate_planned_power_feed` accepts this design or any design in its
+  `baseline_chain()`) — the same rule that lets a placement act on an
+  ancestor's planned add (`base_placement`). See `docs/design-chains.md`.
 - A PDU's custom fields come from **one** of two sources, mutually exclusive:
   - **Live from a real device** — new FK `power_source_device` (see §6.5);
   - **Manual entry** — via `power_config` (see §6.5).
@@ -403,6 +416,16 @@ over `rack.cf` before the distribution runs (never written to `dcim.Rack`). This
 merge only matters for `distribution_mode = "script"` — a `distribution_script`
 reads it through the `planning_fields` config bridge; the builtin tier ignores
 `rack.cf` entirely. Now populated via the `planning_fields`-driven rack dialog.
+
+**Design chains merge oldest-first (`PLAN-design-chains.md` G5).**
+`DesignRackPower.effective_custom_fields(design, rack)` resolves the merge a
+`distribution_script` actually reads: every APPROVED ancestor's override for
+this rack, oldest first, then this design's own row last — so a nearer
+override wins over a farther one, and this design's own value always wins
+over anything inherited. Uses the same `resolve_baseline_chain()` all-or-
+nothing rule as everything else in the chain; a refused ancestor contributes
+nothing from its layer but never erases this design's own override. See
+`docs/design-chains.md`.
 
 ### 6.5 Planned-PDU custom fields — device reference vs manual entry
 

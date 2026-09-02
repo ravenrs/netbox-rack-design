@@ -92,6 +92,66 @@
            data-favorite-sets-url="{{ favorite_sets_url }}"
            data-csrf-token="{{ csrf_token }}">
 
+        {# ---- Persistent conflicts panel (PLAN-design-chains.md §8.3) ---- #}
+        {# ONE component for every "this design has a problem that isn't a   #}
+        {# slot" condition, not a toast: a toast is transient and both of     #}
+        {# these persist across sessions until someone acts (re-save the     #}
+        {# stale placement, or re-base onto a newer ancestor). Two rows:      #}
+        {#                                                                    #}
+        {# 1. Stale placements (device deleted from DCIM) -- inert everywhere #}
+        {#    in the editor (projection.py skips them, so they never render   #}
+        {#    as a tile); without this banner a planner would never learn a   #}
+        {#    planned move/removal silently stopped happening. See            #}
+        {#    DesignView's own "Stale placements" panel on the design detail  #}
+        {#    page for the fuller report; this just points them there.        #}
+        {# 2. Chain conflicts (`chain_conflicts`, an editor-context list of    #}
+        {#    {kind, severity, detail, rack_id, source_design_id,             #}
+        {#    source_design_name, slot_key} -- §8.2/§8.3): an upstream        #}
+        {#    condition that does not block save and that this design cannot #}
+        {#    fix by editing the flagged tile, only by re-basing. Read        #}
+        {#    defensively -- `chain_conflicts` may not exist yet on a         #}
+        {#    concurrently-landing server build; an absent/undefined value    #}
+        {#    is simply falsy here, same as `stale_placements` always was.    #}
+        {% if stale_placements or chain_conflicts %}
+        <div class="nbx-rd-conflicts-panel alert alert-warning" role="alert" data-rd-conflicts-panel>
+          <div class="nbx-rd-conflicts-header">
+            <i class="mdi mdi-alert-outline" aria-hidden="true"></i>
+            {% trans "Design conflicts" %}
+          </div>
+          {% if stale_placements %}
+          <div class="nbx-rd-conflicts-row">
+            {% blocktrans count counter=stale_placements|length %}
+              {{ counter }} planned placement can no longer happen because its device was deleted from DCIM:
+            {% plural %}
+              {{ counter }} planned placements can no longer happen because their devices were deleted from DCIM:
+            {% endblocktrans %}
+            {% for placement in stale_placements %}<strong>{{ placement.stale_device_name }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}.
+            <a href="{{ object.get_absolute_url }}">{% trans "See details on the design page" %}</a>.
+          </div>
+          {% endif %}
+          {% if chain_conflicts %}
+          <div class="nbx-rd-conflicts-row nbx-rd-chain-conflicts">
+            <div class="small text-muted mb-1">
+              {% trans "Upstream (chain) conflicts -- save is not blocked; re-base this design to resolve:" %}
+            </div>
+            <ul class="mb-0 ps-3">
+              {% for c in chain_conflicts %}
+              <li class="{% if c.severity == 'error' %}text-danger{% else %}text-warning-emphasis{% endif %}">
+                {{ c.detail }}
+                {% if c.source_design_name %}
+                <span class="text-muted small">
+                  ({% trans "from" %}
+                  {% if c.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=c.source_design_id %}">{{ c.source_design_name }}</a>{% else %}{{ c.source_design_name }}{% endif %})
+                </span>
+                {% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
         {# Custom-field bridge schema (docs/pdu-distribution-spec.md §5): read #}
         {# once by editor.js to render the rack-power dialog's fields          #}
         {# dynamically -- no cf name is ever hardcoded in JS/HTML.             #}
@@ -129,6 +189,20 @@
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+            {# ---- Phase 4 (PLAN-design-chains.md §8.4/§8.6) ---- #}
+            {# `inherited`/`conflict` are FLAGS on top of a state, not new    #}
+            {# states -- they get their OWN checkboxes (data-rd-flag, wired   #}
+            {# by legend_filter.js) that filter independently of, and         #}
+            {# combine by OR with, the five state checkboxes above.           #}
+            <label class="nbx-rd-filter" title="{% trans 'A tile carried over from an approved ancestor design' %}"><input type="checkbox" checked data-rd-flag="inherited"><span class="nbx-rd-swatch nbx-rd-flag-inherited"></span>{% trans "Inherited" %}</label>
+            <label class="nbx-rd-filter" title="{% trans 'An upstream design now disagrees with this placement -- does not block save' %}"><input type="checkbox" checked data-rd-flag="conflict"><span class="nbx-rd-swatch nbx-rd-flag-conflict"></span>{% trans "Conflict" %}</label>
+            {# Legend debt fix (§8.6): these two existing markers -- the      #}
+            {# displacement stripe and the save-rejection ring -- had NO      #}
+            {# legend entry at all. INFO-only keys (no checkbox): unchecking  #}
+            {# a state already hides that state's own stripe, and the error   #}
+            {# ring is a transient highlight, not something to filter.        #}
+            <span class="nbx-rd-key" title="{% trans 'A device leaving this slot, replaced by what you see here' %}"><span class="nbx-rd-swatch nbx-rd-info-displaced"></span>{% trans "Displaced (was here)" %}</span>
+            <span class="nbx-rd-key" title="{% trans 'The server rejected this placement on save' %}"><span class="nbx-rd-swatch nbx-rd-info-error"></span>{% trans "Rejected" %}</span>
           </div>
           <div class="vr nbx-rd-toolbar-sep d-none d-md-block" aria-hidden="true"></div>
           {# Power heatmap toggle (docs/power-projection-spec.md §3): recolor #}

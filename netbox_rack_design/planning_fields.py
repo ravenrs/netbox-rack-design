@@ -75,8 +75,33 @@ __all__ = (
 # --- reading a value off an existing object --------------------------------
 
 
+def _read_cf(obj, name):
+    """One custom field off ``obj``.
+
+    Prefer the stored dict over ``obj.cf``. The latter is a merged view that
+    re-queries CustomField for the object type on EVERY access -- three queries
+    a call, which a per-slot caller multiplies by the whole rack elevation
+    (measured: 516 queries to render one editor page). ``custom_field_data`` is
+    already on the instance and carries the same value. ``.cf`` stays as the
+    fallback for objects that only expose it, such as the proxy views the
+    distribution scripts build.
+    """
+    data = getattr(obj, "custom_field_data", None)
+    if isinstance(data, dict):
+        return data.get(name)
+    cf = getattr(obj, "cf", None) or {}
+    return cf.get(name)
+
+
 def resolve_source(obj, source):
     """Resolve a ``cf.<name>`` / dotted-attribute token against ``obj``.
+
+    A ``cf`` segment may appear ANYWHERE along the path, not only at the head:
+    ``cf.project`` reads a custom field off ``obj`` itself, and
+    ``design.cf.project`` walks to ``obj.design`` first. That is what lets a
+    caller declare a path rooted at a related object (the naming engine's
+    ``prefix_source``, which is declared relative to the design) through this
+    one resolver instead of a second, subtly different one.
 
     Returns ``None`` for a missing value or an unresolvable path -- a planning
     field is always optional from the reader's point of view.
@@ -84,26 +109,21 @@ def resolve_source(obj, source):
     if not source or obj is None:
         return None
     parts = source.split(".")
-    if parts[0] == "cf":
-        if len(parts) != 2:
-            return None
-        # Prefer the stored dict over ``obj.cf``. The latter is a merged view
-        # that re-queries CustomField for the object type on EVERY access --
-        # three queries a call, which a per-slot caller multiplies by the whole
-        # rack elevation (measured: 516 queries to render one editor page).
-        # ``custom_field_data`` is already on the instance and carries the same
-        # value. ``.cf`` stays as the fallback for objects that only expose it,
-        # such as the proxy views the distribution scripts build.
-        data = getattr(obj, "custom_field_data", None)
-        if isinstance(data, dict):
-            return data.get(parts[1])
-        cf = getattr(obj, "cf", None) or {}
-        return cf.get(parts[1])
     value = obj
-    for part in parts:
+    index = 0
+    while index < len(parts):
         if value is None:
             return None
+        part = parts[index]
+        if part == "cf":
+            if index + 1 >= len(parts):
+                # A dangling "cf" names no field.
+                return None
+            value = _read_cf(value, parts[index + 1])
+            index += 2
+            continue
         value = getattr(value, part, None)
+        index += 1
     return value
 
 

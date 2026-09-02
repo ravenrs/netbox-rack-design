@@ -12,7 +12,7 @@
   <a href="https://www.youtube.com/playlist?list=PLQrzYAZqdcXg"><b>▶ Full 10-part tutorial</b></a>
 </p>
 
-NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection and an auto-naming engine already built in — an explicit Apply step and conflict detection are still arriving in later stages.
+NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection, an auto-naming engine, and design chains (baselining one design on another approved one) already built in — an explicit Apply step is still arriving in a later stage.
 
 The plugin is fully generic and public — nothing organization-specific is hardcoded. Status names and behavior are driven entirely by `PLUGINS_CONFIG`, and only native NetBox mechanisms are used (change logging, tags, custom fields, permissions, REST + GraphQL APIs, global search).
 
@@ -21,7 +21,7 @@ The plugin is fully generic and public — nothing organization-specific is hard
 Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. The apply/conflict features are planned (see [Roadmap](#roadmap)).
 
 - **Three models** for capturing rack plans:
-  - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, and may optionally belong to a group. Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
+  - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, may optionally belong to a group, and may be **`based_on`** exactly one other approved design — forming a design chain (see [docs/design-chains.md](docs/design-chains.md)). Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
   - **DesignGroup** — an optional, hierarchical container that links related designs into a larger effort (multi-stage work or cross-site coordination). Purely organizational; never affects execution order.
   - **DesignPlacement** — a single proposed change within a design: **add** a new device from the device-type catalog (with an intended role and tenant), **move** an existing device, or **remove** (planned) one. Target slots are validated against NetBox's own `Rack.get_available_units()` collision logic. Real devices are never mutated.
 - **Interactive multi-rack visual editor** — a GridStack drag-and-drop editor that renders all of a design's racks side by side, across both front and rear faces, for composing adds/moves/removes. Includes a searchable **device-type catalog palette**, **per-user favorite device types** for quick access, and **per-user rack visibility** to focus the workspace. Every edit writes placements only — live devices are never touched.
@@ -30,6 +30,7 @@ Rack Design pairs a structured data model with an interactive visual editor for 
 - **Config-driven statuses** — which device statuses count as "planned" and which mark a planned removal are read from `PLUGINS_CONFIG`, never hardcoded.
 - **Naming convention engine** — auto-names planned devices via `naming_mode` = `sequence` / `template` / `script` (a dotted-path callable), with graceful fallback when a template or script fails. See [docs/device-naming.md](docs/device-naming.md).
 - **Power projection & PDU distribution** — a read-only power overlay: a per-rack capacity-vs-projected-consumption bar plus a per-device power heatmap, and per-PDU/per-bank power distribution (`distribution_mode` = `none` / `builtin` / `script`) with planned-PDU feed binding. See [docs/power-projection-spec.md](docs/power-projection-spec.md), [docs/power-distribution.md](docs/power-distribution.md), and [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md).
+- **Design chains** — baseline a design on another **approved** design (`based_on`), so one team's moves/removes/adds render as the starting world for the next team's plan, across placements, naming and power. Approval freezes a design so its children can trust it; an ancestor that regresses to draft or moves to `implemented` makes the chain refuse (with a clear re-base prompt) rather than render a guess. See [docs/design-chains.md](docs/design-chains.md).
 - Full **CRUD UI** with list/detail/edit/bulk views and a navigation menu.
 - **REST API** at `/api/plugins/rack-design/`.
 - **GraphQL API** integration.
@@ -76,7 +77,7 @@ More in the [documentation](https://ravenrs.github.io/netbox-rack-design/).
 | 0.16.0         | 4.4.0                  | 4.6.99                 | 3.12+     |
 | 0.15.x         | 4.4.0                  | 4.4.99                 | 3.12+     |
 
-The supported NetBox range is enforced at load time via the plugin's `min_version` / `max_version`. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full per-version matrix.
+The supported NetBox range is enforced at load time via the plugin's `min_version` / `max_version`. See [COMPATIBILITY.md](https://github.com/ravenrs/netbox-rack-design/blob/main/COMPATIBILITY.md) for the full per-version matrix.
 
 ## Dependencies
 
@@ -141,6 +142,7 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 | `naming_mode`       | `"sequence"`         | How a placement's proposed name is computed: `"sequence"` (`<design title>-<n>`), `"template"` (a `str.format` template over real model objects), or `"script"` (a dotted path to `fn(placement) -> str`). See [docs/device-naming.md](docs/device-naming.md). |
 | `naming_template`   | `"{design.name}-{n}"`| Template used when `naming_mode == "template"`. Dotted attribute paths on the real Design/Device objects; `{design.name}` aliases the design title. |
 | `naming_script`     | `""`                 | Dotted path to a callable used when `naming_mode == "script"`.                                                |
+| `naming`            | `{}`                 | Settled names across a design chain: `{"prefix_source": "", "settled_name": ""}`. `prefix_source` is a dotted path (relative to the design) to the planning-project token; empty derives it from the design title. `settled_name` optionally replaces the built-in prefix-strip with `fn(placement) -> str`. See [docs/design-chains.md](docs/design-chains.md). |
 | `distribution_mode` | `"none"`             | How per-PDU/bank load is distributed for the power heatmap: `"none"` (per-rack total only, per-device gradient), `"builtin"` (native distribution from bank = outlet port name segment + feed-leg = bound feed, zero config), or `"script"` (a dotted path to `fn(rack, devices) -> Distribution` dict). See [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md). |
 | `distribution_script` | `""`               | Dotted path to a callable used when `distribution_mode == "script"`.                                          |
 | `planning_fields`   | `{}`                 | Custom-field bridge mapping site custom fields into the rack/PDU planning dialogs. Empty by default; native fields (voltage/amperage/phase/supply, feed binding) are never listed here. |
@@ -162,11 +164,11 @@ The `power_*` keys are not listed in the plugin's `default_settings` (they have 
 - **Naming convention engine** — auto-names planned devices via `naming_mode` = `"sequence"` / `"template"` / `"script"`, with graceful fallback when a template or script fails.
 - **Power projection** — config-driven capacity vs. projected consumption per rack, rendered as a capacity bar plus a per-device power heatmap.
 - **PDU power distribution** — per-PDU/per-bank load distribution (`distribution_mode` = `"none"` / `"builtin"` / `"script"`), planned-PDU feed binding for greenfield racks, and a per-bank heatmap.
+- **Design chains** — baseline a design on another approved design (`based_on`), inheriting its placements, settled names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. See [docs/design-chains.md](docs/design-chains.md).
 
 **Planned for upcoming stages**
 
-- **Apply ("Make in NetBox")** — an explicit step that materializes an approved design into real planned devices and applies removal statuses.
-- **Conflict detection** — block approval of designs that conflict with an approved baseline, including dependency conflicts between designs.
+- **Apply ("Make in NetBox")** — an explicit step that materializes an approved design into real planned devices and applies removal statuses. Design chains already assume an ancestor can be applied outside the plugin (marking it `implemented` blocks its children until re-based); a built-in apply step, and reconciling *partially*-applied ancestors, remain future work.
 - **Template-driven export** — generate work documents from a design via NetBox's native Export Templates.
 
 ## Support
@@ -178,11 +180,11 @@ When reporting a bug, please include your NetBox version, plugin version, Python
 
 ## Contributing
 
-Contributions are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions are welcome. Please see [CONTRIBUTING.md](https://github.com/ravenrs/netbox-rack-design/blob/main/CONTRIBUTING.md) for guidelines.
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+Licensed under the [Apache License 2.0](https://github.com/ravenrs/netbox-rack-design/blob/main/LICENSE).
 
 ---
 

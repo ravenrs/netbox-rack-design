@@ -3,6 +3,7 @@
 import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from netbox.tables import NetBoxTable, columns
 
@@ -14,6 +15,7 @@ __all__ = (
     "DesignPlacementTable",
     "DesignPowerFeedTable",
     "ElevationTable",
+    "ChainHealthTable",
 )
 
 
@@ -114,17 +116,121 @@ class DesignPlacementTable(NetBoxTable):
     # are rack slots and would show three empty columns.
     target_bay = tables.Column(linkify=True)
     parent_placement = tables.Column(linkify=True, verbose_name="Planned chassis")
+    # The upstream (ancestor design's) placement a move/remove acts on when its
+    # device is not yet real (G2, PLAN-design-chains.md). Optional, like
+    # parent_placement -- most placements act on a real device and this stays
+    # empty for them.
+    base_placement = tables.Column(linkify=True, verbose_name=_("Base placement"))
+    # The ancestor-planned chassis a blade goes into (G2). Optional for the same
+    # reason as the two columns above: it is empty for every rack placement.
+    base_parent_placement = tables.Column(
+        linkify=True, verbose_name=_("Inherited chassis")
+    )
+    # A stale row's device column is empty, which on its own reads as a data
+    # glitch. These two say what actually happened, and ``stale`` is a default
+    # column so the loss is visible without configuring anything.
+    stale = columns.BooleanColumn(verbose_name=_("Device gone"))
+    stale_device_name = tables.Column(verbose_name=_("Deleted device"))
 
     class Meta(NetBoxTable.Meta):
         model = DesignPlacement
         fields = (
             "pk", "id", "design", "kind", "device", "device_type", "proposed_name",
             "target_rack", "target_position", "target_face",
-            "target_bay", "parent_placement", "target_bay_name", "actions",
+            "target_bay", "parent_placement", "target_bay_name", "base_placement",
+            "base_parent_placement",
+            "stale", "stale_device_name", "actions",
         )
         default_columns = (
             "design", "kind", "device", "device_type", "target_rack", "target_position", "target_face",
+            "stale",
         )
+
+
+class ChainHealthTable(tables.Table):
+    """
+    "Which of my designs need attention right now" -- the cross-design
+    staleness / re-base report (PLAN-design-chains.md G4's reporting half).
+
+    Like ``ElevationTable``, there is no model for a row: each is a dict built
+    by ``views._chain_health_rows``,
+        {"design", "reasons": [{"kind", "detail", "ancestor"}, ...], "stale_count"}
+    A design appears here ONLY when it needs attention -- see that function's
+    docstring for how it answers this for every design without one query per
+    ancestor hop per design.
+    """
+
+    design = tables.Column(linkify=lambda record: record["design"].get_absolute_url(), verbose_name=_("Design"))
+    site = tables.Column(
+        linkify=lambda record: record["site"].get_absolute_url() if record["site"] else None,
+        verbose_name=_("Site"), orderable=False,
+    )
+    status = tables.Column(empty_values=(), verbose_name=_("Status"), orderable=False)
+    chain_issue = tables.Column(empty_values=(), verbose_name=_("Chain issue"), orderable=False)
+    stale_count = tables.Column(empty_values=(), verbose_name=_("Stale placements"), orderable=False)
+    actions = tables.Column(empty_values=(), verbose_name=_("Actions"), orderable=False)
+
+    class Meta:
+        attrs = {"class": "table table-hover object-list"}
+        fields = ("design", "site", "status", "chain_issue", "stale_count", "actions")
+        empty_text = _("Nothing needs attention.")
+
+    def render_status(self, record):
+        design = record["design"]
+        return format_html(
+            '<span class="badge text-bg-{}">{}</span>',
+            design.get_status_color(),
+            design.get_status_display(),
+        )
+
+    def render_chain_issue(self, record):
+        reasons = record["reasons"]
+        if not reasons:
+            return mark_safe('<span class="text-muted">&mdash;</span>')
+        parts = []
+        for reason in reasons:
+            label = {
+                "ancestor_implemented": _("Ancestor implemented"),
+                "ancestor_not_approved": _("Ancestor not approved"),
+                "chain_broken": _("Lineage broken"),
+            }.get(reason["kind"], reason["kind"])
+            parts.append(format_html(
+                '<span class="badge text-bg-danger" title="{}">{}</span>',
+                reason["detail"], label,
+            ))
+        return mark_safe("".join(str(p) for p in parts))
+
+    def render_stale_count(self, record):
+        count = record["stale_count"]
+        if not count:
+            return mark_safe('<span class="text-muted">&mdash;</span>')
+        return format_html('<span class="badge text-bg-warning">{}</span>', count)
+
+    def render_actions(self, record):
+        design = record["design"]
+        buttons = []
+        if record["reasons"]:
+            rebase_url = reverse(
+                "plugins:netbox_rack_design:design_rebase", kwargs={"pk": design.pk},
+            )
+            buttons.append(format_html(
+                '<a href="{}" class="btn btn-sm btn-warning">'
+                '<i class="mdi mdi-swap-horizontal"></i> {}</a>',
+                rebase_url, _("Re-base"),
+            ))
+        if record["stale_count"]:
+            placements_url = reverse("plugins:netbox_rack_design:designplacement_list")
+            buttons.append(format_html(
+                '<a href="{}?design_id={}&stale=true" class="btn btn-sm btn-outline-secondary">'
+                '<i class="mdi mdi-alert-outline"></i> {}</a>',
+                placements_url, design.pk, _("Review placements"),
+            ))
+        buttons.append(format_html(
+            '<a href="{}" class="btn btn-sm btn-ghost-primary">'
+            '<i class="mdi mdi-eye"></i> {}</a>',
+            design.get_absolute_url(), _("Open design"),
+        ))
+        return mark_safe(" ".join(str(b) for b in buttons))
 
 
 class DesignPowerFeedTable(NetBoxTable):

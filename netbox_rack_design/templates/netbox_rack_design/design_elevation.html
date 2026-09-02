@@ -64,6 +64,20 @@
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_in"><span class="nbx-rd-swatch nbx-rd-state-move_in"></span>{% trans "Move in" %}</label>
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="move_out_ghost"><span class="nbx-rd-swatch nbx-rd-state-move_out_ghost"></span>{% trans "Move out (ghost)" %}</label>
             <label class="nbx-rd-filter"><input type="checkbox" checked data-rd-state="remove"><span class="nbx-rd-swatch nbx-rd-state-remove"></span>{% trans "Remove" %}</label>
+            {# ---- Phase 4 (PLAN-design-chains.md §8.4/§8.6) ---- #}
+            {# `inherited`/`conflict` are FLAGS on top of a state, not new    #}
+            {# states -- they get their OWN checkboxes (data-rd-flag, wired   #}
+            {# by legend_filter.js) that filter independently of, and         #}
+            {# combine by OR with, the five state checkboxes above.           #}
+            <label class="nbx-rd-filter" title="{% trans 'A tile carried over from an approved ancestor design' %}"><input type="checkbox" checked data-rd-flag="inherited"><span class="nbx-rd-swatch nbx-rd-flag-inherited"></span>{% trans "Inherited" %}</label>
+            <label class="nbx-rd-filter" title="{% trans 'An upstream design now disagrees with this placement -- does not block save' %}"><input type="checkbox" checked data-rd-flag="conflict"><span class="nbx-rd-swatch nbx-rd-flag-conflict"></span>{% trans "Conflict" %}</label>
+            {# Legend debt fix (§8.6): these two existing markers -- the      #}
+            {# displacement stripe and the save-rejection ring -- had NO      #}
+            {# legend entry at all. INFO-only keys (no checkbox): unchecking  #}
+            {# a state already hides that state's own stripe, and the error   #}
+            {# ring is a transient highlight, not something to filter.        #}
+            <span class="nbx-rd-key" title="{% trans 'A device leaving this slot, replaced by what you see here' %}"><span class="nbx-rd-swatch nbx-rd-info-displaced"></span>{% trans "Displaced (was here)" %}</span>
+            <span class="nbx-rd-key" title="{% trans 'The server rejected this placement on save' %}"><span class="nbx-rd-swatch nbx-rd-info-error"></span>{% trans "Rejected" %}</span>
           </div>
           <div class="vr nbx-rd-toolbar-sep d-none d-md-block" aria-hidden="true"></div>
           <label class="nbx-rd-filter" title="{% trans 'Color devices by power consumption (share of rack total)' %}">

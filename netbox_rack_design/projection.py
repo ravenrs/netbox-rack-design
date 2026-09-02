@@ -77,6 +77,78 @@ Each *slot* is a plain ``dict`` with the following keys (stable contract):
                                    full tile under the occupant.
     displaced_by  str | None       The occupant's label when displaced.
 
+    inherited     bool             True when the slot comes from an ANCESTOR
+                                   design's layer rather than from reality or
+                                   from this design (see "design chains"
+                                   below).
+    source_design_id int | None    The ancestor Design that last touched an
+                                   inherited slot's identity.
+    conflict      bool             True when something outside this design's
+                                   control is wrong about this slot (today:
+                                   its settled name could not be resolved).
+    conflict_reason str | None     Human-readable reason when ``conflict``.
+
+------------------------------------------------------------------------------
+DESIGN CHAINS  (PLAN-design-chains.md G1 / §9.2)
+------------------------------------------------------------------------------
+
+A design may be based on another (``Design.based_on``), and that one on a third:
+the transitive chain IS the layer stack. ``project_rack`` therefore composes
+THREE layers, in this order:
+
+    reality (dcim)  ->  each ancestor's layer, oldest first  ->  this design
+
+An ancestor's effects are BASELINE, not proposals. From the child's point of
+view they have already happened, so an ancestor ``add`` renders as an
+``existing`` slot flagged ``inherited`` -- never as an ``add``/``move_in``/
+``remove`` tile with this design's semantics. Replay semantics per ancestor
+placement: an ``add`` occupies its target U, a ``move`` vacates the source U
+*and* occupies the target, a ``remove`` frees the U.
+
+BAYS compose the same way, through a PARALLEL replay on the same identity keys
+(``_Baseline.bay_entries`` / ``bay_layer``): a blade is never a rack slot (core
+forbids a child device a position or a face), so an ancestor's bay-targeted
+placement is inherited INSIDE a chassis strip, and is structurally incapable of
+reaching a face or the tray. The bay layers compose in this order -- reality
+(minus whatever an ancestor moved or removed), the bay templates of a planned
+chassis, the inherited blades, then this design's own -- for all three bay
+surfaces: a rack elevation's strips (``_overlay_planned_blades``), which chassis
+exist at all (``chassis_in_scope``, which also drops a real chassis an ancestor
+removed or moved out of scope and adds one an ancestor planned), and one chassis
+as a column (``project_chassis``).
+
+A child may also plan a blade INTO an ancestor-planned chassis
+(``DesignPlacement.base_parent_placement``, G2): the third way a placement names
+its parent, and the only one that crosses designs in the parent direction
+(``parent_placement`` is same-design by construction, and ``base_placement``
+identifies the blade ITSELF, not its parent). Such a blade is the CHILD's own
+proposal -- an ``add``/``move`` with this design's state and flags, never
+``inherited`` -- sitting in a bay of an inherited chassis, and it renders in both
+bay surfaces. It resolves its parent through the SAME identity seam the replay
+uses: the field points at the originating ``add``, ``_chassis_identity_key``
+reduces whichever ancestor row last named the chassis to that same key, so a
+chassis a later ancestor re-planned is still the same parent. Claiming a bay an
+inherited blade already holds is the ordinary ``bay_occupied`` warning -- the
+child's tile still renders (§8.5.3) -- and a refused chain drops the inherited
+chassis, and therefore the blade with it, rather than drawing an orphan.
+
+A parent contributes its layer WHOLE or NOT AT ALL (§9.2), driven by
+``Design.status``: only ``approved`` replays. An ``implemented`` ancestor is
+refused -- reality may already contain part of its layer, so replaying it would
+double-count and draw a believable rack that is simply false; the projection
+drops the whole chain and reports it in ``conflicts`` instead (§9.5: the failure
+mode is a BLOCK, not a lie). Anything else (draft/rejected/superseded) is
+refused for the mirror-image reason: approval is what freezes a design (§2.2),
+so an unapproved parent's layer is still moving and a child inheriting it would
+render a world that changes under it with nothing on screen to say so.
+
+    conflicts     list[dict]       Problems that are not slots (§8.3), each
+                                   ``{kind, severity, slot, placement,
+                                   source_design, detail}``. Rendered by a
+                                   PERSISTENT panel, never a toast: an upstream
+                                   conflict is not this design's fault and
+                                   persists until someone re-bases.
+
 Slots whose ``state`` is ``existing`` come straight from the real rack and were
 not referenced by any placement. Slots touched by the design carry their
 originating ``placement``.
@@ -89,12 +161,13 @@ from dcim.choices import DeviceFaceChoices, SubdeviceRoleChoices
 from django.db.models import prefetch_related_objects
 from netbox.plugins import get_plugin_config
 
-from .choices import DesignPlacementKindChoices
+from .choices import DesignPlacementKindChoices, DesignStatusChoices
 
 __all__ = (
     "ProjectedSlotState",
     "ProjectedElevation",
     "project_rack",
+    "baseline_occupancy",
     "device_type_power_summary",
 )
 
@@ -140,6 +213,16 @@ class ProjectedElevation:
     # draw_w, capacity_w, util_pct, state, unconnected_count, unconnected_devices,
     # unknown_draw_count, unknown_devices, basis, warn_pct, critical_pct.
     power: dict = field(default_factory=dict)
+    # Problems with this design that are NOT a slot (PLAN-design-chains.md
+    # §8.3): before this list there was nowhere in the projection contract to
+    # hang "the chain this design is built on cannot be projected". Each entry
+    # is ``{kind, severity, slot, placement, source_design, detail}`` -- see
+    # ``_conflict()`` for what each key means and who fills it. Consumed by the
+    # persistent panel that already carries the stale-placement alert, NOT by a
+    # toast: an upstream conflict is not this design's fault, cannot be fixed by
+    # editing the tile, and persists across sessions until someone re-bases
+    # (§8.2). Ordered as produced -- chain-level entries first, then per-slot.
+    conflicts: list = field(default_factory=list)
 
 
 # The two things EVERY container's projection derives the same way, whatever its
@@ -187,6 +270,10 @@ def _slot(
     placement=None,
     opposite_face=False,
     display_label=None,
+    inherited=False,
+    source_design_id=None,
+    conflict=False,
+    conflict_reason=None,
 ):
     """Build a single projected-slot dict following the documented contract."""
     return {
@@ -226,10 +313,38 @@ def _slot(
         # Per-PSU detail for the hover card (name / draw / connected), filled by
         # _project_power() for draw-counting slots.
         "power_ports": [],
+        # PROVENANCE (PLAN-design-chains.md §8.4): a FLAG, deliberately not a new
+        # ProjectedSlotState member. True when this slot came from an ANCESTOR
+        # design's layer -- from the child's point of view the change has already
+        # happened, so the slot's ``state`` stays the plain ``existing`` of the
+        # world it describes and only its provenance differs. New states
+        # (base_existing, base_add, ...) would double the rendering matrix in
+        # docs/editor-behavior-spec.md §3 for every state and break the legend's
+        # one-checkbox-per-state filter model. ``source_design_id`` names the
+        # ancestor that LAST touched the identity (a three-deep chain reports the
+        # design whose move put the device where it now is, which is the one a
+        # planner needs to talk to). Consumers: the read-only elevation template
+        # and the editor's widget payload, which dim/outline such a tile and name
+        # the source design in its hover card.
+        "inherited": inherited,
+        "source_design_id": source_design_id,
+        # CONFLICT (§8.4), the same flag-not-state call: something outside this
+        # design's control is wrong about this slot. Today the only producer is a
+        # settled-name resolution failure (§3.3: an inherited slot must render
+        # under its settled name, and a failure must be SURFACED rather than
+        # quietly falling back to the ancestor's planning name). The slot still
+        # renders -- its U is not in doubt, only its name -- and the matching
+        # entry in ``ProjectedElevation.conflicts`` carries the detail for the
+        # panel. Never the hard-collision path: a conflict marker never blocks a
+        # save (§8.2).
+        "conflict": conflict,
+        "conflict_reason": conflict_reason,
         # Device bays of a PARENT device (a blade chassis), filled by
         # _attach_bays() in one pass over the finished elevation. Always a list:
         # empty for an ordinary device, so consumers never guard on the key.
-        # Each entry: {name, device, device_type, label, occupied}.
+        # Each entry: {name, device, device_type, label, occupied, state,
+        # placement, draw_*, and the same inherited / source_design_id /
+        # conflict / conflict_reason flags this slot carries}.
         "bays": [],
     }
 
@@ -262,6 +377,778 @@ def _is_full_depth(device_type):
     return bool(device_type is not None and device_type.is_full_depth)
 
 
+# ---------------------------------------------------------------------------
+# Baseline replay across a design chain -- PLAN-design-chains.md G1 / §9.2
+# ---------------------------------------------------------------------------
+
+
+def _conflict(kind, *, severity="error", slot=None, placement=None,
+              source_design=None, detail=""):
+    """One entry for ``ProjectedElevation.conflicts`` (§8.3).
+
+    * ``kind``          -- machine-readable category, so a renderer can pick an
+      icon/word without parsing ``detail``. Phase 3 produces five:
+      ``ancestor_implemented`` and ``ancestor_not_approved`` (the §9.2 refusal),
+      ``chain_broken`` (the lineage does not resolve), ``settled_name``, and
+      ``bay_occupied`` (this design claims a bay an ancestor's blade already
+      holds -- §8.5.3, marked and never blocking).
+    * ``severity``      -- ``"error"`` (this design cannot be trusted as drawn)
+      or ``"warning"``. Never blocks a save either way (§8.2).
+    * ``slot``          -- the slot dict this is about, or None for a
+      design-level problem. The SAME dict object that is in a face list, so a
+      renderer can match by identity.
+    * ``placement``     -- the DesignPlacement involved, or None.
+    * ``source_design`` -- the ANCESTOR design at fault, or None. This is what
+      makes the message actionable: "re-base off X", not "something upstream".
+    * ``detail``        -- the sentence a human reads.
+
+    Kept deliberately general: phase 4 adds producers (upstream vacated what you
+    built on, upstream now occupies your target U) into the same shape and the
+    same panel, rather than a parallel alert per kind.
+    """
+    return {
+        "kind": kind,
+        "severity": severity,
+        "slot": slot,
+        "placement": placement,
+        "source_design": source_design,
+        "detail": detail,
+    }
+
+
+@dataclass
+class _BaselineEntry:
+    """One identity in the inherited world, and where the replay left it.
+
+    An identity is either a REAL device (an ancestor moved it) or an
+    ancestor-PLANNED one (an ancestor added it, and it has no ``dcim.Device``
+    row -- PLAN-design-chains.md G2). ``key`` is what makes the replay
+    idempotent: successive ancestor placements acting on the same identity
+    overwrite this entry instead of adding a second slot, which is the whole
+    reason an ancestor `move` can vacate and occupy in one step.
+
+    ``rack_id``/``position``/``face`` are the identity's CURRENT baseline
+    location -- i.e. after every ancestor has had its say, not where reality
+    puts it. ``position is None`` means the tray (a position-less target).
+    """
+
+    key: tuple
+    # The placement that NAMES this identity: the originating add, unless a later
+    # ancestor layer re-planned the name. ``source_design`` tracks provenance
+    # separately, because the design that last MOVED a device is often not the
+    # one that named it.
+    placement: object
+    source_design: object
+    device: object
+    device_type: object
+    rack_id: object
+    position: object
+    face: str
+    # WHERE IN A CHASSIS, for an identity that lives in a BAY rather than at a U.
+    # A blade is never a rack slot (core forbids a child device a position or a
+    # face), so the bay replay addresses a location the three fields above cannot
+    # express. Exactly one of the two forms is set, mirroring the two ways a
+    # placement addresses a bay: ``parent_device_id`` + ``bay_name`` for a REAL
+    # chassis (``target_bay``), or ``parent_key`` + ``bay_name`` for one the
+    # ancestor itself planned (``parent_placement``). ``parent_key`` is an
+    # IDENTITY key, not a pk, so a chassis a later ancestor re-planned is still
+    # the same parent.
+    bay_id: object = None
+    bay_name: str = ""
+    parent_device_id: object = None
+    parent_key: tuple = None
+    label: str = None
+    display_label: str = None
+    conflict: bool = False
+    conflict_reason: str = None
+    named: bool = False
+
+
+def _identity_key(placement):
+    """The baseline identity a placement acts on, or None if it acts on nothing.
+
+    An ``add`` IS a new identity, so it keys on its own pk. A move/remove acts
+    on an EXISTING one: a real device (``device``) or the not-yet-real one an
+    ancestor planned (``base_placement``, always a ``kind=add`` row -- enforced
+    by ``DesignPlacement._validate_base_placement``), so the add's pk is the
+    identity and every downstream row acting on it keys to the same tuple.
+    """
+    if placement.kind == DesignPlacementKindChoices.KIND_ADD:
+        return ("pl", placement.pk)
+    if placement.base_placement_id:
+        return ("pl", placement.base_placement_id)
+    if placement.device_id:
+        return ("dev", placement.device_id)
+    return None
+
+
+def _ancestor_refusal(ancestor):
+    """The §9.2 conflict for an ancestor that must not be replayed, or None."""
+    status = ancestor.status
+    if status == DesignStatusChoices.STATUS_IMPLEMENTED:
+        return _conflict(
+            "ancestor_implemented",
+            source_design=ancestor,
+            detail=f"{ancestor} is marked implemented, so reality may already "
+                   f"contain part of its layer and replaying it would count "
+                   f"those changes twice. Nothing is inherited from this chain: "
+                   f"re-base this design onto the world as it now stands.",
+        )
+    if status != DesignStatusChoices.STATUS_APPROVED:
+        return _conflict(
+            "ancestor_not_approved",
+            source_design=ancestor,
+            detail=f"{ancestor} is {ancestor.get_status_display().lower()}, not "
+                   f"approved: its placements are still free to change, so a "
+                   f"design built on it would render a world that moves "
+                   f"underneath it. Nothing is inherited from this chain until "
+                   f"it is approved.",
+        )
+    return None
+
+
+def resolve_baseline_chain(design):
+    """``(chain, refusal)`` -- the §9.2 all-or-nothing answer for ``design``.
+
+    ``chain`` is ``design.baseline_chain()`` (oldest ancestor first, excluding
+    ``design`` itself) when every ancestor may be replayed WHOLE; otherwise
+    ``[]``. ``refusal`` is the :func:`_conflict` entry naming why, or ``None``
+    when there is nothing to refuse (no ``based_on`` at all, or every ancestor
+    approved).
+
+    Factored out of ``_Baseline._build`` so every consumer of "which ancestors
+    does this design's world include" -- the rack-face replay, the rack
+    capacity bar (G5 item 1), and the ``DesignRackPower`` inheritance rule (G5
+    item 2) -- asks the SAME question the SAME way. A second, slightly
+    different notion of "the chain" in each place is exactly how a stray
+    ancestor ends up counted where it should have been refused.
+    """
+    if not design.based_on_id:
+        return [], None
+    try:
+        chain = design.baseline_chain()
+    except ValueError as exc:
+        # A cycle in the lineage. baseline_chain() raises rather than looping;
+        # a projection must degrade to single-layer and SAY so, never 500 on a
+        # page the planner cannot fix from there.
+        return [], _conflict(
+            "chain_broken",
+            detail=f"This design's lineage cannot be resolved, so nothing is "
+                   f"inherited: {exc}",
+        )
+    for ancestor in chain:
+        refusal = _ancestor_refusal(ancestor)
+        if refusal is not None:
+            # §9.2: a layer is contributed WHOLE or not at all -- and a broken
+            # ancestor breaks every layer stacked on top of it too, because
+            # those layers were planned against ITS result. So the whole
+            # chain is dropped, not just the offending link.
+            return [], refusal
+    return chain, None
+
+
+class _Baseline:
+    """The world a design inherits from its ``based_on`` ancestors, for one rack.
+
+    Built once per :func:`project_rack` call and consumed three ways, which is
+    why it is an object rather than a parameter threaded through
+    ``_existing_slots``:
+
+    * ``suppressed_device_ids`` widens the exclusion set the plain reality pass
+      (``_existing_slots`` / ``_existing_tray_slots``) already takes, so a real
+      device an ancestor moved or removed stops rendering at its REAL U. That
+      needed no signature change anywhere -- reality is still reality; what
+      changed is which parts of it are still true.
+    * :meth:`emit` appends the inherited slots through the caller's own
+      ``_append``, so full-depth face mirroring, the tray split and the
+      top-of-rack sort are the ones already written for this design's layer,
+      not a second copy of them.
+    * :meth:`entry` answers "where is this identity now?" for the two callers
+      that must start from the baseline rather than from reality: this design's
+      own move/remove of an identity an ancestor already relocated, and
+      ``DesignPlacement._validate_target_slot`` (G1), which cannot see planned
+      occupancy through ``Rack.get_available_units``.
+
+    Deliberately NOT folded into ``_existing_slots``: that function's data
+    source is core's ``Rack.get_rack_units()``, an entirely different shape from
+    a placement replay, and a surface that needs the baseline (the tray, a
+    chassis's bays, the model-layer slot validation) would then have to re-enter
+    through a rack-face function that returns nothing it wants.
+    """
+
+    def __init__(self, design, rack=None):
+        self.design = design
+        # ``rack`` is optional: the BAY consumers (chassis_in_scope,
+        # project_chassis) are not per-rack, and a blade claims no U, so they
+        # build a rack-less baseline. Only ``claims()`` and ``emit()`` -- the two
+        # rack-face consumers -- need it.
+        self.rack = rack
+        self.conflicts = []
+        # Real devices whose REAL slot is no longer true, because an ancestor
+        # moved or removed them. Widens the exclusion set of the reality pass --
+        # and, for a real BLADE, empties the real DeviceBay it still sits in.
+        self.suppressed_device_ids = set()
+        # identity key -> _BaselineEntry, in replay order (dicts preserve it).
+        self.entries = {}
+        # The PARALLEL replay for identities that live in a bay rather than at a
+        # U, same keys and same names. Deliberately a second dict rather than a
+        # flag on ``entries``: every rack-face consumer (``emit``, ``claims``)
+        # iterates ``entries``, and a blade must be structurally incapable of
+        # reaching a face or the tray -- not merely filtered out of them.
+        self.bay_entries = {}
+        # Identities whose settled-name failure has already been reported, so a
+        # bay asked about by several consumers yields one panel row, not one per
+        # question.
+        self._reported_names = set()
+        self._build()
+
+    # -- construction -------------------------------------------------------
+
+    def _build(self):
+        from .models import DesignPlacement
+
+        design = self.design
+        chain, refusal = resolve_baseline_chain(design)
+        # Exposed for consumers OUTSIDE the rack-face replay that need the same
+        # approved-ancestors-or-nothing answer (G5): rack capacity and the
+        # DesignRackPower inheritance rule both resolve through this same list,
+        # rather than re-deriving it (and risking a second, divergent notion of
+        # "which ancestors count").
+        self.chain = chain
+        if refusal is not None:
+            self.conflicts.append(refusal)
+        if not chain:
+            return  # No chain (or refused): the baseline IS reality.
+
+        chain_order = {ancestor.pk: index for index, ancestor in enumerate(chain)}
+        placements = (
+            DesignPlacement.objects.filter(design_id__in=chain_order)
+            .select_related(
+                "design", "device", "device__device_type", "device_type",
+                "target_rack", "base_placement", "base_placement__device_type",
+                "target_bay", "device__parent_bay",
+            )
+        )
+        # OLDEST ANCESTOR FIRST, then pk within a design. The order is
+        # load-bearing, not cosmetic: A adds a device at U10 and B relocates it
+        # to U20, so replaying B before A would leave the device at U10 (or at
+        # both), a believable rack that is simply false.
+        for placement in sorted(
+            placements, key=lambda p: (chain_order[p.design_id], p.pk)
+        ):
+            # ONE replay per LOCATION KIND, one identity space across both. A
+            # bay-targeted row can never mean a U, and a U-targeted one can never
+            # mean a bay, so routing here (rather than filtering the query, as
+            # the rack-only replay did) is what lets a blade be inherited at all
+            # while keeping it out of the faces and the tray.
+            if self._is_bay_action(placement):
+                self._replay_bay(placement)
+            else:
+                self._replay(placement)
+
+    @staticmethod
+    def _is_bay_action_target(placement):
+        return bool(placement.target_bay_id or placement.parent_placement_id)
+
+    def _is_bay_action(self, placement):
+        """True when this placement acts INSIDE a chassis rather than at a U.
+
+        Three ways, and the last two are why this is a method and not the query
+        filter it replaces: a placement can address a bay explicitly, or act on
+        an identity the replay has ALREADY put in a bay, or -- a ``remove``,
+        which by model rule carries no target at all -- be recognisable only by
+        the real bay its device currently sits in.
+        """
+        if self._is_bay_action_target(placement):
+            return True
+        key = _identity_key(placement)
+        if key is not None and key in self.bay_entries:
+            return True
+        return bool(placement.device_id
+                    and getattr(placement.device, "parent_bay", None) is not None)
+
+    def _replay(self, placement):
+        """Fold ONE ancestor placement into the baseline.
+
+        The three verbs, exactly as G1 states them: an ``add`` occupies its
+        target U, a ``move`` vacates the source U *and* occupies the target, a
+        ``remove`` frees the U. "Vacates" is two different things depending on
+        what the identity is -- a real device stops rendering at its real slot
+        (``suppressed_device_ids``), a planned one simply moves its entry -- and
+        both are handled by keying on the identity rather than on a location.
+        """
+        if placement.stale:
+            return  # Whatever it referenced is gone; it projects nothing.
+        key = _identity_key(placement)
+        if key is None:
+            return
+        kind = placement.kind
+
+        if kind == DesignPlacementKindChoices.KIND_ADD:
+            self.entries[key] = _BaselineEntry(
+                key=key,
+                placement=placement,
+                source_design=placement.design,
+                device=None,
+                device_type=placement.device_type,
+                rack_id=placement.target_rack_id,
+                position=placement.target_position,
+                face=placement.target_face,
+            )
+            return
+
+        # A move/remove of a REAL device makes that device's real slot untrue,
+        # whichever rack it lands in (or none).
+        if placement.device_id:
+            self.suppressed_device_ids.add(placement.device_id)
+
+        if kind == DesignPlacementKindChoices.KIND_REMOVE:
+            self.entries.pop(key, None)
+            return
+
+        # KIND_MOVE. A relocation is not a re-creation: the entry is updated in
+        # place, so an identity an earlier ancestor already named and typed keeps
+        # both. Rebuilding it would silently drop an earlier layer's rename the
+        # moment a later layer nudged the device one U.
+        existing = self.entries.get(key)
+        if existing is None:
+            if placement.base_placement_id:
+                # The upstream add is not in the replay (cancelled, or it targeted
+                # a bay), so there is no identity to relocate. Reported as
+                # staleness on the design that owns the row, never invented here.
+                return
+            existing = self.entries[key] = _BaselineEntry(
+                key=key,
+                placement=placement,
+                source_design=placement.design,
+                device=placement.device,
+                device_type=_device_type_of(placement),
+                rack_id=None,
+                position=None,
+                face="",
+            )
+        existing.rack_id = placement.target_rack_id
+        existing.position = placement.target_position
+        existing.face = placement.target_face
+        # Provenance is the ancestor that LAST touched the identity -- the design
+        # a planner has to talk to about where this device now is.
+        existing.source_design = placement.design
+        if placement.device_id:
+            existing.device = placement.device
+            existing.device_type = _device_type_of(placement)
+        if placement.proposed_name:
+            # Only a layer that actually NAMES the identity becomes the naming
+            # placement; a plain reposition leaves the name where it was set.
+            existing.placement = placement
+            existing.named = False
+
+    def _replay_bay(self, placement):
+        """Fold ONE ancestor placement into the BAY baseline.
+
+        The same three verbs as :meth:`_replay`, against a bay instead of a U --
+        and deliberately the same identity keys, so an ancestor `move` of a blade
+        vacates one bay and occupies another in a single step, and a downstream
+        design acting on that blade resolves to the very same entry.
+
+        Freeing a bay is again two different things: a real blade stops rendering
+        in the real bay it still occupies (``suppressed_device_ids``, honoured by
+        ``_attach_bays`` and ``project_chassis``), while an ancestor-planned one
+        simply moves or drops its entry.
+        """
+        if placement.stale:
+            return
+        key = _identity_key(placement)
+        if key is None:
+            return
+        kind = placement.kind
+
+        if placement.device_id:
+            self.suppressed_device_ids.add(placement.device_id)
+
+        if kind == DesignPlacementKindChoices.KIND_REMOVE:
+            self.bay_entries.pop(key, None)
+            return
+
+        bay = placement.target_bay
+        address = {
+            "bay_id": placement.target_bay_id,
+            "bay_name": bay.name if bay is not None else placement.target_bay_name,
+            "parent_device_id": bay.device_id if bay is not None else None,
+            # A planned parent, addressed as an IDENTITY. Either route names one:
+            # ``parent_placement`` (the ancestor's own chassis) or
+            # ``base_parent_placement`` (a chassis planned FURTHER up the chain,
+            # G2) -- both always point at the originating ``add``, so the key is
+            # the same tuple whichever way this layer reached it.
+            "parent_key": (
+                ("pl", placement.parent_placement_id or placement.base_parent_placement_id)
+                if (placement.parent_placement_id or placement.base_parent_placement_id)
+                else None
+            ),
+        }
+
+        if kind == DesignPlacementKindChoices.KIND_ADD:
+            self.bay_entries[key] = _BaselineEntry(
+                key=key,
+                placement=placement,
+                source_design=placement.design,
+                device=None,
+                device_type=placement.device_type,
+                rack_id=placement.target_rack_id,
+                position=None,
+                face="",
+                **address,
+            )
+            return
+
+        # KIND_MOVE -- updated in place for the same reason the rack replay does
+        # it: a relocation is not a re-creation, so an earlier layer's rename and
+        # type survive a later layer nudging the blade one bay over.
+        existing = self.bay_entries.get(key)
+        if existing is None:
+            if placement.base_placement_id:
+                # The upstream add is not in the replay (cancelled, or it targeted
+                # a U). Nothing to relocate; reported as staleness on the design
+                # that owns the row, never invented here.
+                return
+            existing = self.bay_entries[key] = _BaselineEntry(
+                key=key,
+                placement=placement,
+                source_design=placement.design,
+                device=placement.device,
+                device_type=_device_type_of(placement),
+                rack_id=None,
+                position=None,
+                face="",
+            )
+        for attr, value in address.items():
+            setattr(existing, attr, value)
+        existing.rack_id = placement.target_rack_id
+        existing.source_design = placement.design
+        if placement.device_id:
+            existing.device = placement.device
+            existing.device_type = _device_type_of(placement)
+        if placement.proposed_name:
+            existing.placement = placement
+            existing.named = False
+
+    # -- names --------------------------------------------------------------
+
+    def _resolve_names(self, entry):
+        """Fill ``label``/``display_label`` on an entry, under §3.2 R1.
+
+        An inherited slot renders under its SETTLED name: the planning prefix is
+        the OWNING design's bookkeeping, so ``IDS-1234_srv-01`` in the ancestor
+        is ``srv-01`` in the child.
+
+        ``label`` vs ``display_label`` (the 2026-07-10 ruling documented in
+        ``_slot``) resolves differently for the two kinds of identity, and both
+        answers follow from ``label`` being the STABLE IDENTITY string:
+
+        * a REAL device keeps its real name as ``label`` -- that is what anchors
+          ghost pairing, harnesses and the read-model, and it is unchanged by an
+          ancestor planning to rename it -- while ``display_label`` shows the
+          settled name the ancestor gives it;
+        * an ancestor-PLANNED identity has no real name to be stable about. The
+          settled name is the only handle the child's world has for it, so it is
+          both. Using the ancestor's planning name as ``label`` would leak
+          ``IDS-1234_`` into ghost pairing and the read model, which is exactly
+          the coupling R1 exists to break.
+
+        A resolution failure must not break the render, so
+        ``settled_name_status`` (the non-raising variant) is used -- but it must
+        not silently produce a planning name either, so the fallback is flagged
+        ``conflict`` on the slot and reported in ``conflicts``.
+        """
+        if entry.named:
+            return
+        entry.named = True
+        placement = entry.placement
+        device = entry.device
+        real_name = (device.name or str(device)) if device is not None else None
+
+        if not placement.proposed_name:
+            # Nothing was ever named, so there is no prefix to strip and no
+            # settled name to fail at: the real device's name, or the catalog
+            # model for a planned add that was never named.
+            entry.label = real_name or _placement_label(placement, entry.device_type)
+            entry.display_label = entry.label
+            return
+
+        from .naming import settled_name_status
+
+        settled, status = settled_name_status(placement)
+        if settled is None:
+            entry.conflict = True
+            entry.conflict_reason = status["detail"]
+            entry.label = real_name or placement.proposed_name
+            entry.display_label = placement.proposed_name
+            return
+        entry.label = real_name or settled
+        entry.display_label = settled
+
+    # -- consumption --------------------------------------------------------
+
+    def _report_settled_name(self, entry):
+        """Surface an inherited BAY entry's settled-name failure, once (§3.3).
+
+        The rack path reports it from ``emit`` while building the slot; a bay
+        entry has no slot of its own and may be asked for by several consumers,
+        so the report is deduped on the identity instead.
+        """
+        if not entry.conflict or entry.key in self._reported_names:
+            return
+        self._reported_names.add(entry.key)
+        self.conflicts.append(_conflict(
+            "settled_name",
+            placement=entry.placement,
+            source_design=entry.source_design,
+            detail=f"The settled name of {entry.placement.proposed_name!r} "
+                   f"(planned by {entry.source_design}) could not be resolved, so "
+                   f"this bay is showing that design's PLANNING name: "
+                   f"{entry.conflict_reason}",
+        ))
+
+    def bay_entry(self, key):
+        """The baseline BAY entry for one identity, or None -- names resolved.
+
+        The bay twin of :meth:`entry`, for the caller that must read an inherited
+        blade's type and settled name off the baseline because its own row
+        (a ``base_placement`` move/remove) carries neither.
+        """
+        entry = self.bay_entries.get(key)
+        if entry is not None:
+            self._resolve_names(entry)
+        return entry
+
+    def entry(self, key):
+        """The baseline location of one identity, or None if it holds none.
+
+        Used by this design's own move/remove pass: a device an ancestor already
+        relocated must be vacated from where the ANCESTOR left it, not from
+        where reality still shows it, or the ghost lands on the wrong U.
+        """
+        entry = self.entries.get(key)
+        if entry is not None:
+            self._resolve_names(entry)
+        return entry
+
+    def bay_layer(self, *, device=None, parent_key=None, own=None):
+        """What this baseline puts in ONE chassis's bays: ``{bay name: payload}``.
+
+        The single seam every bay consumer goes through -- the rack elevation's
+        bay strips (``_overlay_planned_blades``) and the chassis layer's own
+        column (``project_chassis``) -- so the two cannot disagree about what an
+        inherited chassis holds. ``payload`` is the subset of the bay-entry
+        contract that occupancy determines, ready to ``dict.update()`` into
+        either shape.
+
+        Address the chassis by ``device`` (a real one) or ``parent_key`` (the
+        IDENTITY key of one an ancestor planned), exactly the two ways a
+        placement can target a bay.
+
+        ``own`` maps identity key -> the placement THIS design makes on that
+        identity, and it is what keeps the child in charge of its own proposals:
+
+        * a ``remove`` renders the inherited bay as this design's removal tile
+          (state ``remove``, not ``inherited``) -- the same treatment the rack
+          pass gives a child's remove of an ancestor-planned identity;
+        * a ``move`` FREES the bay and emits nothing: the target bay is drawn by
+          the design's own overlay, wherever that is;
+        * anything else leaves the bay inherited.
+        """
+        out = {}
+        for entry in self.bay_entries.values():
+            if not entry.bay_name:
+                continue
+            if device is not None:
+                if entry.parent_device_id != device.pk:
+                    continue
+            elif parent_key is not None:
+                if entry.parent_key != parent_key:
+                    continue
+            else:
+                continue
+            acting = (own or {}).get(entry.key)
+            if acting is not None and acting.kind != DesignPlacementKindChoices.KIND_REMOVE:
+                continue  # Freed by this design; its target draws the occupant.
+            self._resolve_names(entry)
+            self._report_settled_name(entry)
+            if acting is None:
+                out[entry.bay_name] = {
+                    "device": entry.device,
+                    "device_type": entry.device_type,
+                    # A bay entry has ONE name field and it is the visible one
+                    # (that is what ``_placement_label`` fills for this design's
+                    # own blades), so the settled name goes there -- §3.2 R1 by
+                    # the same ``_resolve_names`` the rack layer uses.
+                    "label": entry.display_label,
+                    "occupied": True,
+                    "state": ProjectedSlotState.EXISTING,
+                    "placement": entry.placement,
+                    "inherited": True,
+                    "source_design_id": entry.source_design.pk,
+                    "conflict": entry.conflict,
+                    "conflict_reason": entry.conflict_reason,
+                }
+            else:
+                out[entry.bay_name] = {
+                    "device": entry.device,
+                    "device_type": entry.device_type,
+                    "label": entry.display_label,
+                    "occupied": False,
+                    "state": ProjectedSlotState.REMOVE,
+                    "placement": acting,
+                    "inherited": False,
+                    "source_design_id": None,
+                    "conflict": False,
+                    "conflict_reason": None,
+                }
+        return out
+
+    def inherited_chassis(self, rack_ids):
+        """Ancestor-PLANNED chassis standing in ``rack_ids``, as scope rows.
+
+        ``chassis_in_scope``'s missing third source: a chassis an ancestor
+        planned is part of the child's world, so a blade may be planned into its
+        bays -- but it has no ``dcim.Device`` row for the real-parent query to
+        find and no placement in THIS design for the planned-parent query.
+
+        Rows are in ``chassis_in_scope``'s own shape, minus ``rack`` (the caller
+        holds the Rack objects) -- see there for the contract.
+        """
+        from dcim.models import DeviceBayTemplate
+
+        rows = []
+        for entry in self.bay_capable_chassis(rack_ids):
+            names = sorted(
+                DeviceBayTemplate.objects
+                .filter(device_type_id=entry.device_type.pk)
+                .values_list("name", flat=True),
+                key=_natural_bay_key,
+            )
+            if not names:
+                # No bay template means no bay will ever exist: the same
+                # "a bay is the only thing that makes a chassis a chassis" rule
+                # chassis_in_scope applies to this design's own planned adds.
+                continue
+            self._resolve_names(entry)
+            rows.append({
+                "key": f"pl-{entry.key[1]}",
+                "label": entry.display_label or entry.device_type.model,
+                "device": None,
+                "placement": entry.placement,
+                "rack_id": entry.rack_id,
+                "device_type": entry.device_type,
+                "bay_names": names,
+                "inherited": True,
+                "source_design_id": entry.source_design.pk,
+            })
+        return rows
+
+    def bay_capable_chassis(self, rack_ids):
+        """Baseline entries that are PLANNED parent devices inside ``rack_ids``."""
+        out = []
+        for entry in self.entries.values():
+            if entry.device is not None or entry.device_type is None:
+                continue
+            if entry.rack_id not in rack_ids:
+                continue
+            if not getattr(entry.device_type, "is_parent_device", False):
+                continue
+            out.append(entry)
+        return out
+
+    def claims(self):
+        """Every U this baseline claims in ``self.rack``, for slot validation.
+
+        Flat dicts rather than slots, because the consumer
+        (``DesignPlacement._validate_target_slot``) is doing interval arithmetic
+        against a proposed target, not rendering anything.
+        """
+        out = []
+        for entry in self.entries.values():
+            if entry.rack_id != self.rack.pk or entry.position is None:
+                continue
+            out.append({
+                "key": entry.key,
+                "u_position": entry.position,
+                "u_height": _u_height(entry.device_type),
+                "face": _normalize_face(entry.face),
+                "is_full_depth": _is_full_depth(entry.device_type),
+                "placement": entry.placement,
+                "source_design": entry.source_design,
+            })
+        return out
+
+    def emit(self, append, *, skip_keys=()):
+        """Append every inherited slot for this rack through ``append``.
+
+        ``append`` is ``project_rack``'s own ``_append``, so full-depth face
+        mirroring, the tray split and the sort are shared with this design's
+        layer rather than reimplemented -- the one place the two layers must
+        agree exactly, because a mirror rule fixed in one and not the other is
+        precisely the class of bug the container refactor was about.
+
+        ``skip_keys`` are the identities THIS design acts on: they are drawn by
+        the design's own move/remove pass as a ghost/removal, and an inherited
+        occupied slot at the same U would double them.
+        """
+        for entry in self.entries.values():
+            if entry.key in skip_keys:
+                continue
+            if entry.rack_id != self.rack.pk:
+                continue
+            self._resolve_names(entry)
+            slot = _slot(
+                u_position=Decimal(entry.position) if entry.position is not None else None,
+                u_height=_u_height(entry.device_type),
+                face=_normalize_face(entry.face),
+                label=entry.label,
+                display_label=entry.display_label,
+                state=ProjectedSlotState.EXISTING,
+                device=entry.device,
+                device_type=entry.device_type,
+                placement=entry.placement,
+                inherited=True,
+                source_design_id=entry.source_design.pk,
+                conflict=entry.conflict,
+                conflict_reason=entry.conflict_reason,
+            )
+            if entry.conflict:
+                self.conflicts.append(_conflict(
+                    "settled_name",
+                    slot=slot,
+                    placement=entry.placement,
+                    source_design=entry.source_design,
+                    detail=f"The settled name of {entry.placement.proposed_name!r} "
+                           f"(planned by {entry.source_design}) could not be "
+                           f"resolved, so this tile is showing that design's "
+                           f"PLANNING name: {entry.conflict_reason}",
+                ))
+            append(slot, full_depth=_is_full_depth(entry.device_type))
+
+
+def baseline_occupancy(design, rack):
+    """What ``design``'s ancestor chain claims in ``rack``: ``(claims, freed)``.
+
+    The model layer's window onto the replay (G1). ``DesignPlacement``'s slot
+    validation reuses ``Rack.get_available_units``, which knows only the REAL
+    rack -- an ancestor's planned add occupies no real U, and a real device an
+    ancestor moved still occupies its old one -- so without this a child could
+    drop a device straight onto an inherited tile and discover the collision
+    only by looking at the rendered elevation.
+
+    ``claims`` is the list from :meth:`_Baseline.claims`; ``freed`` is the set of
+    real device PKs the chain vacates, which the caller passes to
+    ``get_available_units(exclude=...)``.
+
+    Exposed as a function rather than the ``_Baseline`` object so the model layer
+    depends on an answer, not on the replay's internals.
+    """
+    baseline = _Baseline(design, rack)
+    return baseline.claims(), set(baseline.suppressed_device_ids)
+
+
 def _existing_slots(rack, face, excluded_device_ids):
     """
     Real installed devices on one face, as 'existing' slots.
@@ -269,6 +1156,13 @@ def _existing_slots(rack, face, excluded_device_ids):
     Uses ``Rack.get_rack_units(expand_devices=False)`` so each device appears once
     (at its bottom-most U) with a ``height``. Devices referenced by the design
     (moves/removes) are excluded here -- they get their own design-aware slots.
+
+    ``excluded_device_ids`` is also where a design CHAIN enters this function
+    (G1): a real device an ancestor moved or removed is no longer where reality
+    says it is, so ``_Baseline.suppressed_device_ids`` widens the same set. The
+    reality pass itself is unchanged -- reality is still reality; what a
+    baseline changes is which parts of it are still true -- and the inherited
+    slots are appended separately by ``_Baseline.emit``.
     """
     slots = []
     units = rack.get_rack_units(face=face, expand_devices=False)
@@ -300,7 +1194,7 @@ def _existing_slots(rack, face, excluded_device_ids):
     return slots
 
 
-def _attach_bays(slots_lists):
+def _attach_bays(slots_lists, suppressed_device_ids=()):
     """
     Fill each parent device's slot with its DeviceBays, in ONE query for the
     whole elevation.
@@ -313,6 +1207,12 @@ def _attach_bays(slots_lists):
     Done as a post-pass rather than inside ``_slot()`` because the racked slots
     come from core's ``Rack.get_rack_units()``, which we cannot add a prefetch
     to; a per-slot lookup would be N+1 across the rack.
+
+    ``suppressed_device_ids`` is the baseline's (G1): a real blade an ANCESTOR
+    already moved or removed still sits in its real bay in DCIM, and rendering it
+    there would contradict the very layer that moved it. The bay comes back
+    EMPTY, and the blade is drawn wherever the ancestor put it -- exactly the
+    treatment the same set gives a real device's rack slot.
     """
     from dcim.models import DeviceBay
 
@@ -336,6 +1236,8 @@ def _attach_bays(slots_lists):
     grouped = {}
     for bay in bays:
         installed = bay.installed_device
+        if installed is not None and installed.pk in suppressed_device_ids:
+            installed = None  # An ancestor already moved/removed it (G1).
         grouped.setdefault(bay.device_id, []).append({
             "name": bay.name,
             "bay": bay,
@@ -350,6 +1252,12 @@ def _attach_bays(slots_lists):
             "draw_w": 0.0,
             "draw_known": False,
             "draw_included_in_parent": False,
+            # PROVENANCE / CONFLICT, the §8.4 flags -- the same four keys the
+            # rack slot carries, for the same reason and read the same way.
+            "inherited": False,
+            "source_design_id": None,
+            "conflict": False,
+            "conflict_reason": None,
         })
     for device_pk, slots in by_device.items():
         entries = grouped.get(device_pk, [])
@@ -372,6 +1280,10 @@ def _empty_bay(name, bay=None):
         "draw_w": 0.0,
         "draw_known": False,
         "draw_included_in_parent": False,
+        "inherited": False,
+        "source_design_id": None,
+        "conflict": False,
+        "conflict_reason": None,
     }
 
 
@@ -383,6 +1295,13 @@ def _attach_planned_chassis_bays(slots_lists):
     type's DeviceBayTemplates only when the real device is created -- so the bays
     come from the templates, which is also what validates a blade's
     ``target_bay_name`` (models.DesignPlacement._validate_bay_target).
+
+    Covers an INHERITED planned chassis (G1) with no change: its slot is
+    device-less and carries the ANCESTOR's placement, which is exactly the
+    "device is None and a placement produced it" test below. A chassis planned
+    upstream therefore gets its bay strip from the same pass and the same
+    templates as one planned here -- the only difference is whose placement
+    named it.
     """
     from dcim.models import DeviceBayTemplate
 
@@ -406,44 +1325,190 @@ def _attach_planned_chassis_bays(slots_lists):
             slot["bays"] = [_empty_bay(n) for n in names.get(type_pk, [])]
 
 
-def _overlay_planned_blades(design, slots_lists):
+def _chassis_identity_key(slot):
+    """The identity key of the chassis a slot draws, when it is a PLANNED one.
+
+    Read through ``_identity_key`` rather than off the placement's pk, so a
+    chassis an ancestor planned and a LATER ancestor re-planned still resolves to
+    the identity its blades were addressed to.
+    """
+    placement = slot.get("placement")
+    if slot.get("device") is not None or placement is None:
+        return None
+    return _identity_key(placement)
+
+
+def _emit_baseline_bays(baseline, slots_lists, own):
+    """Fold the inherited blades (G1) into every chassis strip in an elevation.
+
+    Walks the strips ``_attach_bays`` / ``_attach_planned_chassis_bays`` have
+    already built and asks the baseline what it puts in each -- addressing a real
+    chassis by its device and a planned one by its identity key, the two ways a
+    placement can name a parent.
+    """
+    if not baseline.bay_entries:
+        return
+    for slots in slots_lists:
+        for slot in slots:
+            entries = slot.get("bays")
+            if not entries:
+                continue
+            layer = baseline.bay_layer(
+                device=slot.get("device"),
+                parent_key=_chassis_identity_key(slot),
+                own=own,
+            )
+            if not layer:
+                continue
+            for entry in entries:
+                payload = layer.get(entry["name"])
+                if payload is not None:
+                    entry.update(payload)
+
+
+def _bay_identity_map(placements):
+    """``{identity key: placement}`` for the rows a design makes on bay identities."""
+    out = {}
+    for placement in placements:
+        key = _identity_key(placement)
+        if key is not None:
+            out[key] = placement
+    return out
+
+
+def _bay_conflict(sink, entry, placement, seen):
+    """Flag a bay this design claims that the BASELINE already occupies (§8.5.3).
+
+    The child's own tile still renders -- it is its proposal and it is not the
+    hard-collision path (§8.2), which would reject the save and snap the drag
+    back for something the child did not cause and cannot fix by moving that
+    tile. It is marked instead, and the detail goes to the persistent panel.
+
+    ``entry`` is only ever still ``inherited`` here when it holds a DIFFERENT
+    identity: an inherited bay this design's own row acts on was already freed by
+    ``bay_layer(own=...)``. ``seen`` dedupes a full-depth chassis, whose strip is
+    emitted once per face.
+
+    ``sink`` is the conflicts list the caller publishes: the elevation's for a
+    rack (one list per rack, as for every other problem on it), a per-chassis one
+    for the chassis layer, so a column never reports a conflict that is in a
+    different chassis.
+    """
+    if not entry.get("inherited") or sink is None:
+        return None
+    occupant = entry.get("label") or "a device"
+    reason = f"{occupant} already occupies this bay upstream."
+    token = (placement.pk, entry.get("name"))
+    if token in seen:
+        # A full-depth chassis's strip is emitted once per face; both copies must
+        # carry the same flag, but the panel wants one row.
+        return reason
+    seen.add(token)
+    sink.append(_conflict(
+        "bay_occupied",
+        severity="warning",
+        placement=placement,
+        # The design at fault, so the message can say "re-base off X" -- read off
+        # the inherited placement itself rather than the flag, because
+        # ``_conflict`` carries the Design, not its pk.
+        source_design=getattr(entry.get("placement"), "design", None),
+        detail=f"Bay {entry.get('name')!r} is claimed by this design, but "
+               f"{occupant} is already planned into it upstream. This design's "
+               f"blade is still shown -- the two conflict until someone re-bases.",
+    ))
+    return reason
+
+
+def _overlay_planned_blades(design, slots_lists, baseline=None):
     """
     Fold this design's blade placements into the bay strips they target.
 
     A blade is never a rack slot: core forbids a child device a position or a
-    face, so a placement carrying ``target_bay`` (real chassis) or
-    ``parent_placement`` (chassis planned in this design) belongs INSIDE a
-    chassis's strip, not in the tray.
+    face, so a placement carrying ``target_bay`` (real chassis),
+    ``parent_placement`` (chassis planned in this design) or
+    ``base_parent_placement`` (chassis planned by an ANCESTOR, G2) belongs INSIDE
+    a chassis's strip, not in the tray.
+
+    The BASELINE's blades (G1) are folded in first, through
+    ``_Baseline.bay_layer``, so this design's own layer sits on top of them in
+    the bay strips exactly as it does on the rack faces. Ordering is the whole
+    point: reality (``_attach_bays``) -> bay templates for a planned chassis ->
+    the inherited layer -> this design.
     """
     from django.db.models import Q
 
     blades = list(
         design.placements.filter(
             Q(target_bay__isnull=False) | Q(parent_placement__isnull=False)
+            # The child's OWN blade in a chassis an ANCESTOR planned (G2): its
+            # parent is upstream, so neither of the two same-design routes above
+            # can see it.
+            | Q(base_parent_placement__isnull=False)
+            # A move/remove of an ancestor-PLANNED blade addresses the identity,
+            # not a bay: a remove carries no target at all (model rule), so the
+            # only thing that says "this row is about that inherited blade" is
+            # base_placement. Rows whose identity turns out to live at a U rather
+            # than in a bay simply match nothing below.
+            | Q(base_placement__isnull=False)
         ).select_related("device", "device__device_type", "device_type", "target_bay")
     )
+    own = _bay_identity_map(blades)
+    if baseline is not None:
+        _emit_baseline_bays(baseline, slots_lists, own)
     if not blades:
         return
 
     by_real_bay = {}
     by_planned = {}
+    # The cross-design parent route (G2), keyed on the chassis's IDENTITY rather
+    # than on a placement pk: the slot that draws an inherited chassis carries
+    # whichever ancestor layer last NAMED it, which is not necessarily the
+    # originating add this row points at. ``_chassis_identity_key`` collapses
+    # both to the same tuple.
+    by_base_parent = {}
     for placement in blades:
         if placement.target_bay_id:
             by_real_bay[placement.target_bay_id] = placement
         elif placement.parent_placement_id:
             by_planned[(placement.parent_placement_id, placement.target_bay_name)] = placement
+        elif placement.base_parent_placement_id:
+            key = ("pl", placement.base_parent_placement_id)
+            by_base_parent[(key, placement.target_bay_name)] = placement
+
+    seen_conflicts = set()
 
     def _apply(entry, placement):
         device_type = _device_type_of(placement) if placement.device_type_id else (
             placement.device.device_type if placement.device_id else None
         )
+        # A move/remove of an ancestor-PLANNED blade (base_placement, G2) carries
+        # neither a device nor a device type: the identity's type and name live in
+        # the baseline, and that is the only place to read them from.
+        base_entry = (
+            baseline.bay_entry(_identity_key(placement)) if baseline is not None else None
+        )
+        if device_type is None and base_entry is not None:
+            device_type = base_entry.device_type
+        label = placement.proposed_name or (
+            base_entry.display_label if base_entry is not None
+            else _placement_label(placement, device_type)
+        )
+        reason = _bay_conflict(
+            baseline.conflicts if baseline is not None else None,
+            entry, placement, seen_conflicts,
+        )
         entry.update({
-            "device": placement.device,
+            "device": placement.device or (
+                base_entry.device if base_entry is not None else None),
             "device_type": device_type,
-            "label": _placement_label(placement, device_type),
+            "label": label,
             "occupied": placement.kind != DesignPlacementKindChoices.KIND_REMOVE,
             "state": _placement_state(placement),
             "placement": placement,
+            "inherited": False,
+            "source_design_id": None,
+            "conflict": reason is not None,
+            "conflict_reason": reason,
         })
 
     for slots in slots_lists:
@@ -458,6 +1523,11 @@ def _overlay_planned_blades(design, slots_lists):
                     key = (parent_placement.pk, entry["name"])
                     if key in by_planned:
                         _apply(entry, by_planned[key])
+                        continue
+                if by_base_parent:
+                    key = (_chassis_identity_key(slot), entry["name"])
+                    if key in by_base_parent:
+                        _apply(entry, by_base_parent[key])
 
 
 def _mark_displaced(slots):
@@ -613,10 +1683,22 @@ def _rack_capacity_w(rack, default_w, design=None):
     left a planned rack pinned to the flat fallback and painted critical-red
     while its own per-bank chips read green: the two power views contradicting
     each other about the same rack. The flat ``default_w`` remains the fallback
-    only when neither kind of feed exists."""
+    only when neither kind of feed exists.
+
+    A design CHAIN (G5 item 1) widens which planned feeds count: an approved
+    ancestor's layer has already happened from this design's point of view, so
+    its planned feeds size the rack too -- the same §9.2 all-or-nothing rule
+    the placement replay uses, via :func:`resolve_baseline_chain`. A refusal
+    (broken lineage, or a non-approved/implemented ancestor) contributes
+    NOTHING from that chain; it does not fall back to erroring, because the
+    refusal is already reported as a conflict by the SAME ``project_rack``
+    call this feeds into (``_Baseline._build``) -- inventing a second one here
+    would just repeat it.
+    """
     from dcim.models import PowerFeed
 
     from .distribution import breaker_watts
+    from .models import DesignPowerFeed
 
     total = 0.0
     any_feed = False
@@ -633,7 +1715,14 @@ def _rack_capacity_w(rack, default_w, design=None):
         from netbox.config import get_config
 
         max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
-        for planned in design.planned_feeds.filter(rack=rack):
+        # ONE query over the union of design ids, never a per-design loop that
+        # could visit the same row twice: each DesignPowerFeed row belongs to
+        # exactly one design (its own FK), and baseline_chain() is cycle-guarded
+        # and excludes ``design`` itself, so the id set below names each design
+        # -- and therefore each feed row -- exactly once, structurally.
+        chain, _refusal = resolve_baseline_chain(design)
+        design_ids = {design.pk} | {ancestor.pk for ancestor in chain}
+        for planned in DesignPowerFeed.objects.filter(design_id__in=design_ids, rack=rack):
             watts = breaker_watts(planned)
             if watts:
                 total += float(round(watts * max_util / 100.0))
@@ -968,6 +2057,13 @@ def has_chassis_in_scope(design):
     """
     from dcim.models import Device
 
+    # A CHAINED design's answer comes from the full projection: the inherited
+    # world both adds chassis (an ancestor's planned one) and takes them away (a
+    # real one an ancestor removed), and neither is visible to the two cheap
+    # queries below. Only chained designs pay for it.
+    if design.based_on_id:
+        return bool(chassis_in_scope(design))
+
     if Device.objects.filter(
         rack__in=design.racks.all(),
         device_type__subdevice_role=SubdeviceRoleChoices.ROLE_PARENT,
@@ -981,11 +2077,11 @@ def has_chassis_in_scope(design):
     ).exists()
 
 
-def chassis_in_scope(design):
+def chassis_in_scope(design, baseline=None):
     """
     Every chassis the chassis layer should show for ``design`` (spec §10.3).
 
-    Two sources, mirroring the two parent kinds a blade can target:
+    Three sources, mirroring the parent kinds a blade can target:
 
     * REAL parent devices standing in the design's scoped racks -- they have bays
       whether or not this design touches them, and a blade may be planned into
@@ -998,11 +2094,25 @@ def chassis_in_scope(design):
     stable across reloads:
     ``{key, label, device, placement, rack, device_type, bay_names}``.
     ``key`` is what the visibility toggle and the save payload address a column
-    by: ``dev-<pk>`` for a real chassis, ``pl-<pk>`` for a planned one.
+    by: ``dev-<pk>`` for a real chassis, ``pl-<pk>`` for a planned one -- and for
+    an inherited one, ``pl-<identity pk>``, the ancestor's originating add, so
+    the key is stable however many later layers re-planned it.
+
+    The third source is the BASELINE (G1): a chassis an ancestor planned is part
+    of the world this design is built on, so its bays are plannable here. The
+    baseline also CORRECTS the first source, because a real chassis an ancestor
+    removed or moved out of scope no longer stands where DCIM still says it does
+    -- offering its bays would be a column nothing can ever be built into. Every
+    row carries ``inherited`` / ``source_design_id``, the same §8.4 flags a slot
+    does. ``baseline`` may be passed in when the caller already has one.
     """
     from dcim.models import Device, DeviceBayTemplate
 
     racks = list(design.racks.all())
+    rack_ids = {rack.pk for rack in racks}
+    racks_by_id = {rack.pk: rack for rack in racks}
+    if baseline is None:
+        baseline = _Baseline(design)
     out = []
 
     # A BAY IS THE ONLY THING THAT MAKES A CHASSIS A CHASSIS here. Matching on
@@ -1020,18 +2130,45 @@ def chassis_in_scope(design):
         .select_related("device_type", "rack")
         .order_by("rack__name", "name", "pk")
     )
-    for device in reals:
-        out.append({
+    def _real_row(device, rack):
+        return {
             "key": f"dev-{device.pk}",
             "label": device.name or str(device),
             "device": device,
             "placement": None,
-            "rack": device.rack,
+            "rack": rack,
             "device_type": device.device_type,
             "bay_names": sorted(
                 device.devicebays.values_list("name", flat=True), key=_natural_bay_key
             ),
-        })
+            "inherited": False,
+            "source_design_id": None,
+        }
+
+    for device in reals:
+        if device.pk in baseline.suppressed_device_ids:
+            moved = baseline.entry(("dev", device.pk))
+            if moved is None:
+                continue  # An ancestor removed it: it is not there to plan into.
+            if moved.rack_id not in rack_ids:
+                continue  # An ancestor moved it out of this design's scope.
+        out.append(_real_row(device, device.rack))
+
+    # A real chassis an ancestor moved INTO scope stands in a scoped rack in the
+    # inherited world while DCIM still has it elsewhere, so the query above
+    # cannot find it.
+    listed = {row["key"] for row in out}
+    for entry in baseline.entries.values():
+        device = entry.device
+        if device is None or entry.rack_id not in rack_ids:
+            continue
+        if f"dev-{device.pk}" in listed:
+            continue
+        if not getattr(device.device_type, "is_parent_device", False):
+            continue
+        if not device.devicebays.exists():
+            continue
+        out.append(_real_row(device, racks_by_id[entry.rack_id]))
 
     # Same rule for a PLANNED chassis, read off the type: no bay template means
     # no bay will exist once it is applied, so there is nothing to plan into.
@@ -1062,11 +2199,27 @@ def chassis_in_scope(design):
             "rack": placement.target_rack,
             "device_type": placement.device_type,
             "bay_names": template_names[dt_id],
+            "inherited": False,
+            "source_design_id": None,
         })
+
+    # ...and the same rule read off the BASELINE, for a chassis an ancestor
+    # planned. ``inherited_chassis`` applies the identical no-bay-template test.
+    for row in baseline.inherited_chassis(rack_ids):
+        row["rack"] = racks_by_id[row.pop("rack_id")]
+        out.append(row)
+
+    # The replay this scope was computed from, so ``project_chassis`` can reuse it
+    # instead of rebuilding one per column: a chassis layer is one page, and it
+    # must not re-derive the inherited world once per chassis on it. Private by
+    # name because it is an internal handoff between these two functions, not
+    # part of the row contract a template reads.
+    for row in out:
+        row["_baseline"] = baseline
     return out
 
 
-def project_chassis(design, entry):
+def project_chassis(design, entry, baseline=None):
     """
     Project ONE chassis as a column of bays -- the chassis layer's answer to
     ``project_rack`` (spec §10.3: a chassis IS a rack, bays in place of units).
@@ -1076,15 +2229,24 @@ def project_chassis(design, entry):
     language: index (1-based, the "unit"), name, and the occupying device/
     placement with its §3 state.
 
-    Occupancy comes from three layers, later ones overriding earlier:
-    reality (a real ``DeviceBay.installed_device``), then this design's blade
-    placements addressed by real bay, then those addressed by planned parent.
+    Occupancy comes from FOUR layers, later ones overriding earlier: reality (a
+    real ``DeviceBay.installed_device``, minus whatever an ancestor already moved
+    or removed), then the INHERITED blades (G1, via ``_Baseline.bay_layer`` --
+    the same seam the rack elevation's strips go through), then this design's
+    blade placements addressed by real bay, then those addressed by planned
+    parent. ``baseline`` may be passed in when the caller already has one, which
+    also lets a whole chassis layer share one replay.
+
+    The result carries ``conflicts`` for the same reason ``ProjectedElevation``
+    does (§8.3): a chain problem is not a bay, so there was nowhere to hang it.
     """
     from django.db.models import Q
 
     bay_names = list(entry["bay_names"])
     device = entry["device"]
     placement = entry["placement"]
+    if baseline is None:
+        baseline = entry.get("_baseline") or _Baseline(design)
 
     real_bays = {}
     if device is not None:
@@ -1101,10 +2263,32 @@ def project_chassis(design, entry):
         blade_query = Q(target_bay__device=device) | Q(device__parent_bay__device=device)
     else:
         blade_query = Q(parent_placement=placement)
+        # This design's OWN blades in a chassis an ANCESTOR planned (G2). The
+        # column is addressed by the chassis's IDENTITY, not by the placement pk
+        # that named it -- a later ancestor layer may have re-planned the chassis,
+        # in which case ``placement`` is that layer's row while the blade points
+        # at the originating add. ``_identity_key`` collapses both to one tuple,
+        # so this reads the identity's pk back out of it.
+        chassis_key = _identity_key(placement) if placement is not None else None
+        if chassis_key is not None and chassis_key[0] == "pl":
+            blade_query |= Q(base_parent_placement_id=chassis_key[1])
     blades = list(
         design.placements.filter(blade_query).select_related(
             "device", "device__device_type", "device_type", "target_bay")
     ) if (device is not None or placement is not None) else []
+    # This design's rows acting on an INHERITED blade (G2): a move/remove of an
+    # ancestor-planned identity carries no device and, for a remove, no target
+    # either, so ``base_placement`` is the only thing that identifies it. Queried
+    # only when there is an inherited world to act on.
+    own_rows = list(blades)
+    if baseline.bay_entries:
+        own_rows += list(
+            design.placements.exclude(kind=DesignPlacementKindChoices.KIND_ADD)
+            .filter(base_placement__isnull=False)
+            .select_related("device", "device__device_type", "device_type", "target_bay")
+        )
+    own = _bay_identity_map(own_rows)
+
     by_name = {}
     for blade in blades:
         if blade.target_bay_id:
@@ -1118,10 +2302,26 @@ def project_chassis(design, entry):
         if name:
             by_name[name] = blade
 
+    # The inherited layer for THIS chassis, addressed the way the chassis itself
+    # is: by device when it is real, by identity key when an ancestor planned it.
+    inherited = baseline.bay_layer(
+        device=device,
+        parent_key=_identity_key(placement) if (device is None and placement is not None)
+        else None,
+        own=own,
+    )
+    seen_conflicts = set()
+    # THIS chassis's own bay conflicts, kept out of the shared baseline: a column
+    # must never report a conflict that lives in a different chassis, which is
+    # what one design-wide list would do as soon as the layer shares a replay.
+    bay_conflicts = []
+
     slots = []
     for index, name in enumerate(bay_names, start=1):
         bay = real_bays.get(name)
         installed = bay.installed_device if bay is not None else None
+        if installed is not None and installed.pk in baseline.suppressed_device_ids:
+            installed = None  # An ancestor already moved/removed it (G1).
         slot = {
             "index": index,
             "name": name,
@@ -1133,17 +2333,37 @@ def project_chassis(design, entry):
             "placement": None,
             "draw_w": 0.0,
             "draw_known": False,
+            # The §8.4 flags, exactly as a rack slot and a bay strip entry carry
+            # them, so one renderer serves all three.
+            "inherited": False,
+            "source_design_id": None,
+            "conflict": False,
+            "conflict_reason": None,
         }
+        payload = inherited.get(name)
+        if payload is not None:
+            slot.update(payload)
         blade = by_name.get(name)
         if blade is not None:
             blade_type = blade.device_type or (
                 blade.device.device_type if blade.device_id else None)
+            base_entry = baseline.bay_entry(_identity_key(blade))
+            if blade_type is None and base_entry is not None:
+                blade_type = base_entry.device_type
+            reason = _bay_conflict(bay_conflicts, slot, blade, seen_conflicts)
             slot.update({
-                "device": blade.device,
+                "device": blade.device or (
+                    base_entry.device if base_entry is not None else None),
                 "device_type": blade_type,
-                "label": _placement_label(blade, blade_type),
+                "label": blade.proposed_name or (
+                    base_entry.display_label if base_entry is not None
+                    else _placement_label(blade, blade_type)),
                 "state": _placement_state(blade),
                 "placement": blade,
+                "inherited": False,
+                "source_design_id": None,
+                "conflict": reason is not None,
+                "conflict_reason": reason,
             })
         slots.append(slot)
     return {
@@ -1159,6 +2379,10 @@ def project_chassis(design, entry):
             1 for s in slots
             if s["label"] and s["state"] != ProjectedSlotState.REMOVE
         ),
+        # Chain-level problems first (a refused ancestor, an unresolvable
+        # settled name -- design-wide, so every column reports them), then this
+        # chassis's own bay conflicts.
+        "conflicts": list(baseline.conflicts) + bay_conflicts,
     }
 
 
@@ -1167,36 +2391,62 @@ def project_rack(design, rack):
     Compute the projected elevation of ``rack`` under ``design``.
 
     Returns a :class:`ProjectedElevation`. See the module docstring for the full
-    result/slot contract. Performs no writes.
+    result/slot contract, including how a design CHAIN composes (reality, then
+    each ancestor's layer oldest first, then this design). Performs no writes.
     """
-    # move/remove reference an existing device; include those whose device is in
+    from django.db.models import Q
+
+    # The inherited world (G1). Built first because everything below depends on
+    # it: which parts of reality are still true, where an identity this design
+    # moves currently sits, and what this design's own layer sits on top of. A
+    # design with no ``based_on`` builds an empty one and pays a single boolean.
+    baseline = _Baseline(design, rack)
+
+    # move/remove reference an existing identity; include those whose device is in
     # this rack (the target_rack for a move is also this rack for an in-rack move,
     # but the device's *current* rack is what anchors the ghost / removal).
+    #
+    # "Existing identity" is now two things (G2): a real ``device``, or an
+    # ancestor design's planned add (``base_placement``) that has no dcim row
+    # yet. A stale row has neither and is excluded by the same OR.
     moves_removes = list(
         design.placements.exclude(kind=DesignPlacementKindChoices.KIND_ADD)
-        .filter(device__isnull=False)
-        # As above: a move INTO a bay renders inside the chassis, not at a U.
-        .filter(target_bay__isnull=True, parent_placement__isnull=True)
-        .select_related("device", "device__device_type", "device_type", "target_rack")
+        .filter(Q(device__isnull=False) | Q(base_placement__isnull=False))
+        # As above: a move INTO a bay renders inside the chassis, not at a U --
+        # including a bay of a chassis an ANCESTOR planned (G2).
+        .filter(target_bay__isnull=True, parent_placement__isnull=True,
+                base_parent_placement__isnull=True)
+        .select_related("device", "device__device_type", "device_type", "target_rack",
+                        "base_placement", "base_placement__device_type")
     )
     adds = list(
         design.placements.filter(kind=DesignPlacementKindChoices.KIND_ADD)
         .filter(target_rack=rack)
-        # A blade is not a rack slot: a placement targeting a device bay (real or
-        # planned) is folded into its chassis's strip by _overlay_planned_blades()
-        # instead. Emitting it here too would double it into the tray.
-        .filter(target_bay__isnull=True, parent_placement__isnull=True)
+        # A blade is not a rack slot: a placement targeting a device bay -- real,
+        # planned here, or planned by an ANCESTOR (G2) -- is folded into its
+        # chassis's strip by _overlay_planned_blades() instead. Emitting it here
+        # too would double it into the tray.
+        .filter(target_bay__isnull=True, parent_placement__isnull=True,
+                base_parent_placement__isnull=True)
         .select_related("device_type", "target_rack")
     )
 
     # Devices whose real slot should be suppressed from the plain 'existing' pass
-    # because the design re-renders them (move_out_ghost / move_in / remove).
-    design_device_ids = set()
+    # because the design re-renders them (move_out_ghost / move_in / remove), or
+    # because an ANCESTOR already moved/removed them so reality is out of date.
+    design_device_ids = set(baseline.suppressed_device_ids)
     for placement in moves_removes:
         if placement.device_id and (
             placement.device.rack_id == rack.pk or placement.target_rack_id == rack.pk
         ):
             design_device_ids.add(placement.device_id)
+
+    # The identities THIS design acts on: the baseline must not also draw them as
+    # occupied, or a device would appear both where the ancestor left it and as
+    # this design's ghost of that same U.
+    own_keys = {
+        key for key in (_identity_key(p) for p in moves_removes) if key is not None
+    }
 
     front = _existing_slots(rack, DeviceFaceChoices.FACE_FRONT, design_device_ids)
     rear = _existing_slots(rack, DeviceFaceChoices.FACE_REAR, design_device_ids)
@@ -1236,6 +2486,13 @@ def project_rack(design, rack):
         else:
             front.append(slot)
 
+    # --- the ancestor layers (G1) ----------------------------------------------
+    # Emitted BEFORE this design's own layer, through the same ``_append``, so
+    # they are baseline for everything that follows: the displacement pass sees
+    # them as part of the world (an ancestor's occupancy never "displaces"), and
+    # the power pass counts them as consumers, which they are.
+    baseline.emit(_append, skip_keys=own_keys)
+
     # --- adds: virtual planned slots in this rack -------------------------------
     for placement in adds:
         device_type = placement.device_type
@@ -1257,21 +2514,42 @@ def project_rack(design, rack):
     # --- moves & removes --------------------------------------------------------
     for placement in moves_removes:
         device = placement.device
-        device_type = _device_type_of(placement)
+        # WHERE THE IDENTITY CURRENTLY IS -- the baseline's answer, not reality's,
+        # because an ancestor may already have moved it: A moves a device from U1
+        # to U10 and this design moves it on to U20, so the ghost belongs at U10.
+        # For an ancestor-PLANNED identity (base_placement, G2) the baseline is
+        # the only answer there is: nothing real exists to read a position off.
+        entry = baseline.entry(_identity_key(placement))
+        if placement.base_placement_id and entry is None:
+            # The upstream add is not in the projected baseline -- the chain was
+            # refused (§9.2), or the ancestor's add is gone. Drawing this row
+            # anyway would invent a device at a U nobody planned.
+            continue
+        if entry is not None:
+            device_type = entry.device_type
+            current_rack_id = entry.rack_id
+            current_position = entry.position
+            current_face = entry.face
+            identity_label = entry.label
+        else:
+            device_type = _device_type_of(placement)
+            current_rack_id = device.rack_id
+            current_position = device.position
+            current_face = device.face
+            identity_label = device.name or str(device)
         u_height = _u_height(device_type)
         full_depth = _is_full_depth(device_type)
 
         if placement.kind == DesignPlacementKindChoices.KIND_REMOVE:
-            # Flag the device's current slot (only if it lives in this rack).
-            if device.rack_id != rack.pk:
+            # Flag the identity's current slot (only if it lives in this rack).
+            if current_rack_id != rack.pk:
                 continue
-            current_face = _normalize_face(device.face)
             _append(
                 _slot(
-                    u_position=Decimal(device.position) if device.position else None,
+                    u_position=Decimal(current_position) if current_position is not None else None,
                     u_height=u_height,
-                    face=current_face,
-                    label=device.name or str(device),
+                    face=_normalize_face(current_face),
+                    label=identity_label,
                     state=ProjectedSlotState.REMOVE,
                     device=device,
                     device_type=device_type,
@@ -1283,13 +2561,13 @@ def project_rack(design, rack):
 
         # KIND_MOVE: ghost at the original spot (if currently in this rack) and a
         # move_in slot at the target (if the target is this rack).
-        if device.rack_id == rack.pk and device.position:
+        if current_rack_id == rack.pk and current_position is not None:
             _append(
                 _slot(
-                    u_position=Decimal(device.position),
+                    u_position=Decimal(current_position),
                     u_height=u_height,
-                    face=_normalize_face(device.face),
-                    label=device.name or str(device),
+                    face=_normalize_face(current_face),
+                    label=identity_label,
                     state=ProjectedSlotState.MOVE_OUT_GHOST,
                     device=device,
                     device_type=device_type,
@@ -1304,14 +2582,15 @@ def project_rack(design, rack):
                     u_position=Decimal(position) if position is not None else None,
                     u_height=u_height,
                     face=_normalize_face(placement.target_face),
-                    label=device.name or str(device),
+                    label=identity_label,
                     state=ProjectedSlotState.MOVE_IN,
                     device=device,
                     device_type=device_type,
                     placement=placement,
                     # The plan's new identity for the device (user ruling
                     # 2026-07-10): the tile SHOWS the assigned name; the
-                    # identity `label` above stays the device's real name.
+                    # identity `label` above stays the device's real name (or,
+                    # for an ancestor-planned identity, its settled name).
                     display_label=placement.proposed_name or None,
                 ),
                 full_depth=full_depth,
@@ -1322,9 +2601,12 @@ def project_rack(design, rack):
     # apply the SAME displaced treatment as the editor's live gesture flow.
     _mark_displaced(front)
     _mark_displaced(rear)
-    _attach_bays((front, rear, non_racked))
+    # The BAY layer, in the order the layers compose (G1): reality, minus the
+    # parts an ancestor already invalidated; bay templates for a planned chassis;
+    # the inherited blades; then this design's own.
+    _attach_bays((front, rear, non_racked), baseline.suppressed_device_ids)
     _attach_planned_chassis_bays((front, rear, non_racked))
-    _overlay_planned_blades(design, (front, rear, non_racked))
+    _overlay_planned_blades(design, (front, rear, non_racked), baseline=baseline)
     # One pass for the whole elevation, before anything reads a device's power.
     _prefetch_power((front, rear, non_racked))
 
@@ -1339,6 +2621,9 @@ def project_rack(design, rack):
         front=front,
         rear=rear,
         non_racked=non_racked,
+        # Whatever the replay could not do, in the order it hit it: the §9.2
+        # chain refusal first, then per-slot problems from ``emit``.
+        conflicts=baseline.conflicts,
     )
     # Power projection (docs/power-projection-spec.md): fills per-slot draw and
     # the rack-level summary over the planned world just built above.

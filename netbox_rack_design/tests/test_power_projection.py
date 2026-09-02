@@ -14,6 +14,7 @@ from dcim.models import (
     DeviceRole,
     DeviceType,
     Manufacturer,
+    PowerOutletTemplate,
     PowerPort,
     PowerPortTemplate,
     Rack,
@@ -21,7 +22,7 @@ from dcim.models import (
 )
 from django.test import TestCase, override_settings
 
-from ..choices import DesignPlacementKindChoices
+from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignPlacement, DesignPowerFeed
 from ..projection import project_rack
 
@@ -396,4 +397,156 @@ class BayPowerTestCase(TestCase):
         elev = project_rack(self.design, self.rack)
         slot = next(s for s in elev.front if s["label"] == "chassis-40")
         self.assertEqual(slot["draw_w"], 0.0)
+
+
+class ChainCapacityTestCase(TestCase):
+    """PLAN-design-chains.md G5 item 1: rack capacity across a design chain.
+
+    ``_rack_capacity_w`` must count an approved ancestor's planned feeds, not
+    just this design's own -- the same all-or-nothing rule the placement
+    replay uses (§9.2): a non-approved/implemented ancestor, or a broken
+    lineage, contributes nothing and the projection reports the refusal as a
+    conflict instead of a plausible number.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = Site.objects.create(name="PWR Chain Site", slug="pwr-chain-site")
+        cls.rack = Rack.objects.create(name="PWR Chain Rack", site=cls.site, u_height=42)
+
+    def _design(self, title, *, based_on=None):
+        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+
+    def _approve(self, design):
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+        return design
+
+    def _feed(self, design, name, **kw):
+        kw.setdefault("voltage", 230)
+        kw.setdefault("amperage", 32)
+        return DesignPowerFeed.objects.create(design=design, rack=self.rack, name=name, **kw)
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_ancestor_approved_feed_raises_child_capacity(self):
+        a = self._design("Network sweep IDS-1000")
+        self._feed(a, "Feed A")
+        self._approve(a)
+        b = self._design("Server build IDS-2000", based_on=a)
+
+        power = project_rack(b, self.rack).power
+        # 230V x 32A x 80% max utilization = 5888 W (mirrors PowerFeed.available_power).
+        self.assertEqual(power["capacity_w"], 5888)
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_refused_chain_contributes_no_capacity_and_a_conflict(self):
+        a = self._design("Network sweep IDS-1000")
+        self._feed(a, "Feed A")
+        # `a` stays draft -- never approved.
+        b = self._design("Server build IDS-2000", based_on=a)
+
+        elev = project_rack(b, self.rack)
+        # The ancestor's feed must NOT count: falls back to the flat default.
+        self.assertEqual(elev.power["capacity_w"], 1000)
+        self.assertIn("ancestor_not_approved", [c["kind"] for c in elev.conflicts])
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_implemented_ancestor_contributes_no_capacity_and_a_conflict(self):
+        a = self._design("Network sweep IDS-1000")
+        self._feed(a, "Feed A")
+        self._approve(a)
+        b = self._design("Server build IDS-2000", based_on=a)
+        a.status = DesignStatusChoices.STATUS_IMPLEMENTED
+        a.save()
+
+        elev = project_rack(b, self.rack)
+        self.assertEqual(elev.power["capacity_w"], 1000)
+        self.assertIn("ancestor_implemented", [c["kind"] for c in elev.conflicts])
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_own_and_ancestor_feed_both_count_without_double_counting(self):
+        a = self._design("Network sweep IDS-1000")
+        self._feed(a, "Feed A")
+        self._approve(a)
+        b = self._design("Server build IDS-2000", based_on=a)
+        self._feed(b, "Feed B")
+
+        power = project_rack(b, self.rack).power
+        # 2 x 5888 W: the ancestor's feed and the child's own feed are two
+        # DIFFERENT rows -- each must be counted exactly once.
+        self.assertEqual(power["capacity_w"], 11776)
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_three_deep_chain_sums_every_approved_ancestor_feed_once(self):
+        a = self._design("Network sweep IDS-1000")
+        self._feed(a, "Feed A")
+        self._approve(a)
+        b = self._design("Storage build IDS-2000", based_on=a)
+        self._feed(b, "Feed B")
+        self._approve(b)
+        c = self._design("Server build IDS-3000", based_on=b)
+
+        power = project_rack(c, self.rack).power
+        # A's feed + B's feed, each counted once: 2 x 5888 = 11776.
+        self.assertEqual(power["capacity_w"], 11776)
+
+    @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
+    def test_unchained_design_capacity_is_unchanged(self):
+        """Regression guard: a design with no `based_on` projects exactly as
+        before -- only its own feeds count, chain-awareness costs nothing."""
+        solo = self._design("Solo build IDS-9000")
+        self._feed(solo, "Feed A")
+
+        power = project_rack(solo, self.rack).power
+        self.assertEqual(power["capacity_w"], 5888)
+
+
+class ChainDistributionTestCase(TestCase):
+    """PLAN-design-chains.md G5 item 4: an inherited planned PDU must
+    contribute its banks to the per-bank distribution engine, the same as one
+    planned in this design -- it is part of the child's world (§9.2)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = Site.objects.create(name="PWR Chain Dist Site", slug="pwr-chain-dist-site")
+        cls.rack = Rack.objects.create(name="PWR Chain Dist Rack", site=cls.site, u_height=42)
+        mfr = Manufacturer.objects.create(name="PWR Chain Mfr", slug="pwr-chain-mfr")
+        cls.pdu_role = DeviceRole.objects.create(name="Chain PDU", slug="pdu")
+        cls.pdu_type = DeviceType.objects.create(
+            manufacturer=mfr, model="Chain PDU Type", slug="chain-pdu-type", u_height=0,
+        )
+        PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="1/1")
+        PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="2/1")
+
+    def _design(self, title, *, based_on=None):
+        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+
+    def _approve(self, design):
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+        return design
+
+    @override_settings(PLUGINS_CONFIG=_cfg(distribution_mode="builtin"))
+    def test_inherited_planned_pdu_contributes_its_banks(self):
+        a = self._design("Network sweep IDS-1000")
+        feed = DesignPowerFeed.objects.create(
+            design=a, rack=self.rack, name="Feed A", voltage=230, amperage=32,
+        )
+        DesignPlacement.objects.create(
+            design=a, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.pdu_type, device_role=self.pdu_role,
+            target_rack=self.rack, target_position=None,
+            proposed_name="chain-pdu-1", planned_power_feed=feed,
+        )
+        self._approve(a)
+        b = self._design("Server build IDS-2000", based_on=a)
+
+        elev = project_rack(b, self.rack)
+        dist = elev.power["distribution"]
+        self.assertIsNotNone(dist, elev.power.get("distribution_status"))
+        self.assertIn("chain-pdu-1", dist["pdus"])
+        entry = dist["pdus"]["chain-pdu-1"]
+        self.assertEqual(entry["feed_source"], "planned")
+        self.assertEqual(entry["allocated_draw"], 230 * 32)
+        self.assertTrue(entry["banks"])
         self.assertEqual(elev.power["draw_w"], 0.0)

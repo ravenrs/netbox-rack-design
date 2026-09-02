@@ -10,7 +10,7 @@ siblings" behaviour that keeps consecutive palette drops from colliding.
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 from django.test import TestCase, override_settings
 
-from ..choices import DesignPlacementKindChoices
+from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignPlacement
 from ..naming import generate_name
 from ..naming_example import build_name
@@ -109,3 +109,34 @@ class NamingExampleTestCase(TestCase):
     def test_engine_script_mode_uses_example(self):
         p = self._add(self.sw_type, self.sw_role)
         self.assertEqual(generate_name(p), "ams1-leaf-switch-1")
+
+    # --- chain-aware counting (PLAN-design-chains.md Sec 3.4) --------------
+
+    def test_family_continues_past_an_ancestor_designs_names(self):
+        """The example's counter is chain-aware too: a design baselined on an
+        APPROVED design continues its families instead of restarting them, and
+        the ancestor's row is matched by the name it SETTLES to (its stored
+        name carries that design's planning prefix)."""
+        base = Design.objects.create(
+            title="Base IDS-1000", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        child = Design.objects.create(
+            title="Child IDS-2000", site=self.site, based_on=base,
+        )
+        DesignPlacement.objects.create(
+            design=base,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.sw_type,
+            device_role=self.sw_role,
+            target_rack=self.rack,
+            target_position=20,
+            target_face="front",
+            proposed_name="IDS-1000_ams1-leaf-switch-4",
+        )
+        p = self._add(self.sw_type, self.sw_role)
+        p.design = child
+        self.assertEqual(build_name(p), "ams1-leaf-switch-5")
+        # A design of its own still starts at 1 -- nothing leaks sideways.
+        self.assertEqual(build_name(self._add(self.sw_type, self.sw_role)),
+                         "ams1-leaf-switch-1")

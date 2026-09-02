@@ -28,6 +28,13 @@ Two patterns worth stealing:
   :func:`netbox_rack_design.naming.pending_names`), so two quick drops get
   consecutive numbers instead of colliding.
 
+* **Chain-aware counting** (:func:`_family_names`) -- when this design is
+  baselined on another, the family must continue past what its ANCESTORS
+  reserved, under the names those placements settle to (via
+  :func:`netbox_rack_design.naming.chain_placement_names`). Any script that
+  counts a family should call that helper instead of querying one design's
+  placements.
+
 * **Phase pairs** (:func:`_next_pdu_slot`) -- PDUs run ``a1, b1, a2, b2, ...``
   (an A/B phase pair per index) instead of a flat counter.
 """
@@ -39,7 +46,7 @@ from extras.scripts import Script
 # ABSOLUTE imports (not ``from .naming``) so this file keeps working verbatim
 # when COPIED out of the package into NetBox's SCRIPTS_ROOT -- a relative import
 # would break there (there is no ``scripts.naming``). See docs/device-naming.md.
-from netbox_rack_design.naming import pending_names
+from netbox_rack_design.naming import chain_placement_names, pending_names
 
 
 class DeviceNamingScript(Script):
@@ -75,20 +82,24 @@ class DeviceNamingScript(Script):
 
 def _family_names(placement, prefix):
     """Every existing name in the ``<prefix>...`` family that matters for a
-    counter: persisted devices, this design's other placements, and unsaved
-    same-session siblings. Read-only."""
-    from dcim.models import Device
+    counter: persisted devices, the placements of this design and of every
+    design it is baselined on, and unsaved same-session siblings. Read-only.
 
-    from netbox_rack_design.models import DesignPlacement
+    The chain half is the third pattern worth stealing: ask
+    ``naming.chain_placement_names`` rather than querying
+    ``DesignPlacement.objects.filter(design=placement.design)`` yourself. It
+    spans ancestors + self, matches an ancestor's row by its SETTLED name (an
+    ancestor's stored name carries that design's own planning prefix, so a raw
+    comparison would silently miss it), and deliberately ignores SIBLING
+    designs -- a counter that scoped itself to one design hands a child a number
+    an ancestor already reserved.
+    """
+    from dcim.models import Device
 
     names = list(
         Device.objects.filter(name__startswith=prefix).values_list("name", flat=True)
     )
-    names += list(
-        DesignPlacement.objects.filter(design=placement.design)
-        .exclude(pk=placement.pk)
-        .values_list("proposed_name", flat=True)
-    )
+    names += list(chain_placement_names(placement))
     names += pending_names(placement)
     return names
 

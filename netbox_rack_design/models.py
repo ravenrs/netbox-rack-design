@@ -201,6 +201,84 @@ class Design(NetBoxModel):
         """The root design that groups this plan's versions (self if this is the root)."""
         return self.root or self
 
+    @property
+    def is_frozen(self):
+        """
+        True once this design is APPROVED.
+
+        Approving a design is a commitment, and approval is also what makes a
+        design derivable (another design may baseline on it via ``based_on``,
+        PLAN-design-chains.md §2.2) -- so from that point its content must stop
+        moving, or every downstream design silently rots. The escape hatch is
+        the status itself: take the design back to draft to edit it (subject to
+        the dependents guard in ``clean()`` below), or create a new version.
+        """
+        return self.status == DesignStatusChoices.STATUS_APPROVED
+
+    @property
+    def children(self):
+        """
+        Designs directly based on this one (``based_on`` pointing here),
+        ordered deterministically (``Meta.ordering``).
+
+        Named ``children`` rather than ``dependents``: ``dependents`` already
+        names the reverse of the ``depends_on`` M2M -- an unrelated,
+        informational "must run after" edge that does not affect baselining
+        (PLAN-design-chains.md §2.1) -- and reusing it here for the
+        ``based_on`` lineage would collide with that existing relation.
+
+        Backs the lineage panel, the freeze message, and the un-approve guard
+        in ``clean()`` below (dropping this design back to draft would move
+        the ground under everything derived from it).
+        """
+        return self.derived_designs.all()
+
+    def baseline_chain(self):
+        """
+        The ordered stack of ``based_on`` ancestors: oldest ancestor first,
+        immediate parent last, excluding self.
+
+        Consumed by a future layered projection (PLAN-design-chains.md G1): a
+        child design's baseline is "reality + replay(ancestors)", and this is
+        the replay order. Resolved live through the ``based_on`` FK chain
+        rather than copied -- an ancestor is frozen the moment it can be a
+        parent (``is_frozen``), so live inheritance and a snapshot are
+        equivalent (§2.2), and there is nothing to freshen and no snapshot to
+        go stale.
+
+        Raises ``ValueError``, not ``ValidationError``: existing rows could
+        already hold a cycle (nothing prevented one before ``clean()`` grew a
+        guard), so any caller walking the chain -- not just a form/clean()
+        context -- needs a plain exception naming every design in the loop,
+        never an infinite loop.
+        """
+        chain = []
+        seen = {self.pk}
+        current = self.based_on
+        while current is not None:
+            if current.pk in seen:
+                path = " -> ".join(str(d) for d in [*chain, current])
+                raise ValueError(f"Cycle detected in design lineage: {path}")
+            chain.append(current)
+            seen.add(current.pk)
+            current = current.based_on
+        chain.reverse()
+        return chain
+
+    @property
+    def stale_placements(self):
+        """Placements whose reference vanished: a real device deleted from DCIM,
+        or (G2) an ancestor design's planned 'add' that was itself cancelled.
+
+        These rows are inert -- projection skips them, so they neither render nor
+        collide -- but they are NOT nothing: each one is a change the planner
+        intended that can no longer happen. They survive precisely so this list
+        is answerable, and the design page reports it rather than letting the
+        plan quietly shrink (the placement FK used to CASCADE, which deleted the
+        rows outright and left no way to know anything was lost).
+        """
+        return self.placements.filter(stale=True).order_by("stale_device_name", "pk")
+
     def save(self, *args, **kwargs):
         # Auto-assign a gapped per-site execution sequence on first save.
         if self.sequence is None:
@@ -216,6 +294,50 @@ class Design(NetBoxModel):
         super().clean()
         if self.based_on_id and self.based_on_id == self.pk:
             raise ValidationError({"based_on": "A design cannot be based on itself."})
+        # Longer cycles (A -> B -> A, or deeper): baseline_chain() already walks
+        # the ancestor chain to detect one (G7), so reuse it rather than
+        # duplicating the walk here.
+        if self.based_on_id:
+            try:
+                self.baseline_chain()
+            except ValueError as exc:
+                raise ValidationError({"based_on": str(exc)}) from exc
+
+        # A chain across two sites is meaningless (PLAN-design-chains.md gap
+        # 1): a parent's placements are site-scoped, so a child in a different
+        # site could never actually replay them into its own racks. Mirrors
+        # the ``racks`` site check below, but -- unlike ``racks`` (a M2M) --
+        # ``based_on`` is a plain FK, so its value IS visible on an unsaved
+        # instance (no pk needed to read ``self.based_on``); this check does
+        # NOT have the M2M pk-timing caveat documented on the ``racks`` check,
+        # so it runs unconditionally and also covers CREATE, not just edits.
+        if self.based_on_id and self.site_id and self.based_on.site_id != self.site_id:
+            raise ValidationError(
+                {"based_on": "The parent design's site does not match this "
+                              "design's site."}
+            )
+
+        # depends_on cycle guard (G7): a many-to-many relation cannot be read on
+        # an unsaved instance (pk=None) -- Django raises before the through-rows
+        # exist -- so, mirroring the ``racks`` check below, this only runs once
+        # the design is persisted (i.e. on edits; a brand-new design has no
+        # dependents attached yet to form a cycle with).
+        if self.pk:
+            # DFS tracking the current recursion path's pks (not a flat "seen"
+            # set collected across branches) so a revisit within ONE path is a
+            # real cycle, an unrelated diamond (A depends on B and C, both
+            # depending on D) is not mistaken for one, and a cycle that does
+            # not happen to pass back through self (but is reachable from it)
+            # still terminates instead of recursing forever.
+            def _walk(node, path):
+                if node.pk in {p.pk for p in path}:
+                    chain = " -> ".join(str(d) for d in [*path, node])
+                    raise ValidationError({"depends_on": f"Cycle in 'depends_on': {chain}"})
+                for nxt in node.depends_on.all():
+                    _walk(nxt, [*path, node])
+
+            _walk(self, [])
+
         # At most one approved version per plan (root group). A brand-new, unsaved
         # root (pk=None, root=None) has no persisted version group yet, so there is
         # nothing it can conflict with -- and querying with an unsaved instance would
@@ -233,6 +355,30 @@ class Design(NetBoxModel):
                     "Only one version may be approved at a time."
                 )
 
+        # Leaving 'approved' is blocked once something depends on this design
+        # (§2.2): dropping it back to draft would silently move the ground
+        # under every design baselined on it via `based_on`. Detecting "was
+        # approved, now isn't" needs the pre-save state, which `self` (the
+        # in-memory, about-to-be-saved instance) does not carry -- a one-query
+        # refetch of the stored row by pk is the simplest way to get it, and it
+        # only runs when there IS a persisted row to compare against and the
+        # status is actually changing away from approved.
+        if self.pk and self.status != DesignStatusChoices.STATUS_APPROVED:
+            was_approved = (
+                Design.objects.filter(pk=self.pk, status=DesignStatusChoices.STATUS_APPROVED)
+                .exists()
+            )
+            if was_approved:
+                children = list(self.children)
+                if children:
+                    names = ", ".join(str(d) for d in children)
+                    raise ValidationError(
+                        {"status": f"Cannot leave 'approved' status: {names} "
+                                   "are based on this design and would silently lose their "
+                                   "baseline. Create a new version of this design and "
+                                   "re-base them onto it instead."}
+                    )
+
         # Every scoped rack must belong to this design's site (consistent with the
         # site-scoping of placements). M2M-timing caveat: a many-to-many relation
         # cannot be read on an unsaved instance (pk=None) -- Django raises before
@@ -247,6 +393,51 @@ class Design(NetBoxModel):
                 raise ValidationError(
                     {"racks": f"These racks are not in the design's site: {names}."}
                 )
+
+
+        # A design's `racks` scope is part of what was approved (§2.2/G4): the
+        # `add-rack`/`remove-rack` API actions already refuse to widen or
+        # narrow it on a frozen design, and this closes the same hole for
+        # every OTHER write path (the plain REST endpoint, bulk import, a
+        # script) at the model layer, rather than guarding N call sites by
+        # hand. Deliberately does NOT block `status`, `summary`, `link` or any
+        # other field here -- `status` is the escape hatch itself (drop back
+        # to draft, or approve a new version, per `is_frozen`'s docstring), and
+        # metadata like `summary`/`link` was never part of what got approved.
+        #
+        # Same M2M-timing trap as the site check just above -- clean() cannot
+        # see a many-to-many the way it sees a scalar field, because writing
+        # one goes straight to its own through-table with no clean() hook at
+        # all. There is exactly one channel that IS visible here:
+        # `self._m2m_values`, which NetBox's own `ValidatedModelSerializer`
+        # (netbox/api/serializers/base.py) stashes the INCOMING m2m values on
+        # the instance and calls `full_clean()` with BEFORE actually applying
+        # them -- i.e. exactly the REST API path. A direct `design.racks.set()`
+        # from a script, followed by `full_clean()`, has already committed the
+        # through-table write by the time clean() runs, so there is nothing
+        # left here to compare against and this check has nothing to catch --
+        # a known gap, mirroring the one the comment above already documents
+        # for the site check on CREATE. The HTML edit form has no
+        # `_m2m_values` either (Django's ModelForm never touches an instance's
+        # m2m before calling its `full_clean()`), so `DesignForm.clean()`
+        # (forms.py) carries the equivalent check for that path, using
+        # `self.instance`'s pre-edit field values.
+        if self.pk:
+            new_racks = getattr(self, "_m2m_values", {}).get("racks")
+            if new_racks is not None:
+                was_approved = Design.objects.filter(
+                    pk=self.pk, status=DesignStatusChoices.STATUS_APPROVED
+                ).exists()
+                if was_approved:
+                    new_ids = {rack.pk for rack in new_racks}
+                    old_ids = set(self.racks.values_list("pk", flat=True))
+                    if new_ids != old_ids:
+                        raise ValidationError(
+                            {"racks": "This design is approved, and approved designs "
+                                      "are frozen: its rack scope cannot be changed. "
+                                      "Set the design back to draft, or create a new "
+                                      "version of it, to make this change."}
+                        )
 
 
 class DesignPlacement(NetBoxModel):
@@ -264,10 +455,67 @@ class DesignPlacement(NetBoxModel):
     kind = models.CharField(max_length=20, choices=DesignPlacementKindChoices)
 
     # Existing device (move/remove); null for an add.
+    #
+    # SET_NULL, deliberately NOT CASCADE: deleting the real device must never
+    # delete the plan that referenced it. Under CASCADE, decommissioning a
+    # device in DCIM silently erased every placement pointing at it -- the
+    # planner reopened the design and the move was simply gone, with no error
+    # and nothing in the design to say why. Worse, applying a ``remove``
+    # deletes the device and would therefore destroy the very placement that
+    # recorded the removal, so a design erased its own history.
+    #
+    # On deletion the row now survives with ``device`` null and ``stale`` set
+    # (stamped by the ``pre_delete`` receiver in signals.py, which runs before
+    # Django's SET_NULL update), so the design can REPORT the loss instead of
+    # quietly shrinking.
     device = models.ForeignKey(
         to="dcim.Device",
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name="design_placements",
+        blank=True,
+        null=True,
+    )
+    # True when whatever this move/remove referenced -- a real device, OR (G2,
+    # below) an ancestor design's planned 'add' placement -- no longer exists.
+    # A stale placement is inert -- projection already skips reference-less
+    # move/remove rows -- but it stays visible and reportable until a planner
+    # re-points it at another device/placement or deletes it.
+    stale = models.BooleanField(default=False)
+    # The name of whatever vanished, captured at deletion time: a real device's
+    # name (dcim.Device pre_delete), or an ancestor placement's settled/proposed
+    # name (DesignPlacement pre_delete, G2). Without it a stale row could only
+    # say "something upstream is gone", which is not actionable.
+    stale_device_name = models.CharField(max_length=64, blank=True)
+    # The upstream placement this move/remove acts on, when the device being
+    # moved/removed is not yet real -- it only exists as an ancestor design's
+    # planned 'add' (PLAN-design-chains.md G2: "planned devices have no
+    # identity"). For a move/remove, exactly one of `device` / `base_placement`
+    # is set (never both), enforced in clean() below; neither is required when
+    # the row is `stale`. An 'add' never sets this -- it IS the new identity,
+    # not a reference to one.
+    #
+    # NOT the same relationship as `parent_placement` / `base_parent_placement`
+    # below, despite all three being self-FKs -- see the three-way distinction
+    # spelled out in the device-bay targeting block. In short: those two say
+    # WHERE a blade goes (into which chassis), this one says WHICH device the
+    # row is about. `base_placement` always crosses designs -- it
+    # points UP the `based_on` chain at an ancestor's row -- and clean() below
+    # requires it to be a `kind=add` placement in `self.design.baseline_chain()`
+    # (an ancestor move/remove already acts on a real device, which a
+    # downstream design references directly via `device` instead).
+    #
+    # SET_NULL, deliberately NOT CASCADE (G2 is explicit about this): cancelling
+    # or deleting an upstream 'add' must not silently delete the downstream work
+    # built on it. Mirrors the `device` FK's own SET_NULL rationale above --
+    # deleting a `DesignPlacement` that others reference here now goes through
+    # the analogous `pre_delete` receiver in signals.py (which stamps
+    # `stale`/`stale_device_name`, using the vanished placement's
+    # settled/proposed name, before the SET_NULL lands), so the loss is
+    # reported instead of silently absorbed.
+    base_placement = models.ForeignKey(
+        to="self",
+        on_delete=models.SET_NULL,
+        related_name="downstream_placements",
         blank=True,
         null=True,
     )
@@ -314,7 +562,7 @@ class DesignPlacement(NetBoxModel):
     # --- device-bay targeting (a blade into a chassis) -------------------------
     # Core forbids a child device from carrying a rack position or a face
     # (dcim.Device.clean), so a blade is never placed AT a U -- it is placed IN a
-    # parent's bay. Two cases, exactly one field each:
+    # parent's bay. THREE cases, exactly one field each:
     #
     #   A. the chassis already exists in DCIM -> ``target_bay`` names the real
     #      dcim.DeviceBay row.
@@ -323,9 +571,39 @@ class DesignPlacement(NetBoxModel):
     #      created), so the blade points at the chassis's placement via
     #      ``parent_placement`` and names its bay via ``target_bay_name``, which is
     #      validated against the parent type's DeviceBayTemplates.
+    #   C. the chassis is an 'add' in an ANCESTOR design -> same shape as B, but
+    #      the reference crosses designs, so it is a different field with
+    #      different deletion semantics: ``base_parent_placement``
+    #      (+ ``target_bay_name``).
     #
     # ``target_bay_name`` is also filled in case A (mirroring the bay's name) so a
     # consumer has one field to read for "which bay" regardless of case.
+    #
+    # THE THREE SELF-FKs, AND WHY NONE OF THEM SUBSTITUTES FOR ANOTHER. Two
+    # independent questions -- WHICH device is this row about, and WHERE does it
+    # go -- crossed with whether the answer lives in this design or upstream:
+    #
+    #   * ``base_placement``        -- WHICH: the upstream 'add' that IS this
+    #                                  blade's identity. Crosses designs.
+    #                                  SET_NULL + staleness.
+    #   * ``parent_placement``      -- WHERE: the chassis it goes into, planned
+    #                                  in THIS design. Same design only.
+    #                                  CASCADE is safe: the chassis and the
+    #                                  blade are one design's work, so deleting
+    #                                  the chassis legitimately deletes the
+    #                                  blades planned into it.
+    #   * ``base_parent_placement`` -- WHERE: the chassis it goes into, planned
+    #                                  by an ANCESTOR. Crosses designs.
+    #                                  SET_NULL + staleness, for the same reason
+    #                                  ``base_placement`` is: CASCADE here would
+    #                                  let an upstream design's deletion destroy
+    #                                  downstream work (G2 is explicit).
+    #
+    # So a move of an inherited blade into an inherited chassis legitimately
+    # carries ``base_placement`` AND ``base_parent_placement`` -- they answer
+    # different questions -- while ``parent_placement`` and
+    # ``base_parent_placement`` are mutually exclusive: a placement has exactly
+    # one parent, reached by exactly one route.
     parent_placement = models.ForeignKey(
         to="self",
         on_delete=models.CASCADE,
@@ -345,6 +623,29 @@ class DesignPlacement(NetBoxModel):
                   "already exists in DCIM.",
     )
     target_bay_name = models.CharField(max_length=64, blank=True)
+    # Case C: the chassis this blade goes into was planned by an ANCESTOR design
+    # (PLAN-design-chains.md G2 / the phase-3 bay gap). Named for the two
+    # references it sits between: ``base_`` marks the same up-the-chain crossing
+    # ``base_placement`` marks, and ``parent_placement`` is the thing being
+    # addressed -- the chassis. See the three-way distinction above.
+    #
+    # SET_NULL, deliberately NOT CASCADE, unlike the same-design
+    # ``parent_placement``: cancelling an ancestor's chassis must not delete the
+    # child's blades. The loss is REPORTED instead -- the ``DesignPlacement``
+    # ``pre_delete`` receiver in signals.py stamps ``stale`` +
+    # ``stale_device_name`` (the vanished chassis's name) on every downstream
+    # blade before the SET_NULL lands, exactly as it already does for
+    # ``base_placement``.
+    base_parent_placement = models.ForeignKey(
+        to="self",
+        on_delete=models.SET_NULL,
+        related_name="downstream_bay_children",
+        blank=True,
+        null=True,
+        help_text="The placement of the chassis this blade goes into, when the "
+                  "chassis is planned by an ancestor design in this design's "
+                  "baseline chain.",
+    )
 
     # Values for the deployment's own planning fields, declared in the
     # ``placement_fields`` plugin config and destined for the real device when
@@ -424,10 +725,31 @@ class DesignPlacement(NetBoxModel):
                 condition=models.Q(parent_placement__isnull=False),
                 name="%(app_label)s_%(class)s_unique_design_planned_bay",
             ),
+            # The same rule for the CROSS-DESIGN route (case C). A separate
+            # constraint rather than a widened one, because a partial index can
+            # only be conditioned on one nullable column: the reasoning is
+            # identical (a design must not contradict itself about one bay) and
+            # the triple is canonical, since ``base_parent_placement`` always
+            # points at the chassis's ORIGINATING 'add' (kind is enforced in
+            # clean()), so two rows naming the same inherited chassis
+            # necessarily name the same pk.
+            models.UniqueConstraint(
+                fields=("design", "base_parent_placement", "target_bay_name"),
+                condition=models.Q(base_parent_placement__isnull=False),
+                name="%(app_label)s_%(class)s_unique_design_base_parent_bay",
+            ),
         ]
 
     def __str__(self):
-        label = self.device or self.device_type or "?"
+        # A stale row has no device left to name itself with, so fall back to
+        # whatever it referenced -- an upstream placement (base_placement) or
+        # the name captured when the reference vanished.
+        label = (
+            self.device or self.device_type or self.base_placement
+            or self.stale_device_name or "?"
+        )
+        if self.stale:
+            return f"{self.get_kind_display()}: {label} (reference gone)"
         return f"{self.get_kind_display()}: {label}"
 
     def get_absolute_url(self):
@@ -456,6 +778,19 @@ class DesignPlacement(NetBoxModel):
         super().clean()
         kind = self.kind
 
+        # A design that is APPROVED is frozen (§2.2, Design.is_frozen): its
+        # placements are read-only, because approval is what makes the design
+        # derivable and downstream chains must be able to trust that a frozen
+        # layer stops moving. Checked before anything else in this method so
+        # a frozen design's placements reject a create/edit uniformly,
+        # regardless of what else about the placement would otherwise be valid.
+        if self.design_id and self.design.is_frozen:
+            raise ValidationError(
+                "This design is approved, and approved designs are frozen: "
+                "its placements cannot be created or edited. Set the design "
+                "back to draft, or create a new version of it, to make this change."
+            )
+
         # Config-declared planning fields: validated against the deployment's
         # ``placement_fields`` schema and normalised in place, so what reaches
         # the database is always type-correct and free of keys nothing reads.
@@ -467,6 +802,12 @@ class DesignPlacement(NetBoxModel):
                 "A placement cannot bind to both a real and a planned power feed."
             )
 
+        # A planned_power_feed (G5 item 3) must belong to THIS design or a
+        # true ancestor's layer -- that layer has already happened from this
+        # design's point of view (§9.2), same as base_placement.
+        if self.planned_power_feed_id:
+            self._validate_planned_power_feed()
+
         # A planned PDU's custom fields come from at most ONE source: a referenced
         # real device (cf read live) OR manual power_config -- never both (docs/
         # pdu-distribution-spec §6.5).
@@ -476,14 +817,83 @@ class DesignPlacement(NetBoxModel):
                 "manual power_config custom fields."
             )
 
+        # Re-pointing a stale placement at a real device makes it live again, so
+        # the flag clears itself rather than needing a separate "un-stale" action.
+        if self.device_id:
+            self.stale = False
+            self.stale_device_name = ""
+        # The same self-healing for an 'add' whose ancestor-planned chassis
+        # vanished: giving it any parent again -- a real bay, a chassis planned
+        # here, or another inherited one -- revives it. Scoped to 'add' so a
+        # move/remove that lost its identity is never revived by acquiring a
+        # mere TARGET, which says nothing about what is being moved.
+        #
+        # Scoped to an EXISTING row (``self.pk``) as well, because reviving is
+        # only meaningful for a row that already lost something: a brand-new add
+        # arriving with ``stale=True`` is not a survivor being re-pointed, it is
+        # a caller inventing an observation, and the check further down must be
+        # allowed to reject it rather than have it silently cleared here.
+        if kind == DesignPlacementKindChoices.KIND_ADD and self.pk and (
+            self.target_bay_id or self.parent_placement_id
+            or self.base_parent_placement_id
+        ):
+            self.stale = False
+            self.stale_device_name = ""
+
         if kind == DesignPlacementKindChoices.KIND_ADD:
             if not self.device_type:
                 raise ValidationError({"device_type": "An 'add' requires a device type."})
             if self.device:
                 raise ValidationError({"device": "An 'add' must not reference an existing device."})
+            # An add never references an upstream placement -- it IS the new
+            # identity a downstream design would reference, not a reference to
+            # one (see the field comment on base_placement above).
+            if self.base_placement_id:
+                raise ValidationError({
+                    "base_placement": "An 'add' must not reference a base_placement -- "
+                                       "it creates a NEW planned identity, it does not act "
+                                       "on an existing one.",
+                })
+            # An add never referenced a real DEVICE, so a device deletion can
+            # never make it stale. It CAN now lose one thing: the ancestor-planned
+            # chassis it was to be installed into (``base_parent_placement``,
+            # SET_NULL). That leaves a bay-named add with no bay target at all,
+            # and rejecting it here would hand back the very data loss SET_NULL
+            # exists to prevent -- so exactly that shape is tolerated, and
+            # nothing else is.
+            if self.stale and not (
+                self.target_bay_name
+                and not self.target_bay_id
+                and not self.parent_placement_id
+                and not self.base_parent_placement_id
+            ):
+                raise ValidationError({
+                    "stale": "An 'add' can only be stale when the ancestor-planned "
+                             "chassis it was to go into is gone.",
+                })
         else:
-            if not self.device:
-                raise ValidationError({"device": f"A '{kind}' requires an existing device."})
+            # A stale move/remove is device-less AND base_placement-less BY
+            # DEFINITION -- whatever it referenced (a real device, or an
+            # ancestor's still-planned 'add') is gone. Rejecting it here would
+            # make the row unsavable and hand back the data loss SET_NULL
+            # exists to prevent.
+            if not self.device_id and not self.base_placement_id and not self.stale:
+                raise ValidationError({
+                    "device": f"A '{kind}' requires either an existing device or a "
+                              f"base_placement (an ancestor design's planned 'add').",
+                })
+            # Exactly one of device / base_placement -- never both. A move/remove
+            # acts on ONE thing: a real device, or the not-yet-real identity an
+            # ancestor design planned. Allowing both would leave it ambiguous
+            # which one is authoritative.
+            if self.device_id and self.base_placement_id:
+                raise ValidationError({
+                    "base_placement": f"A '{kind}' cannot set both device and "
+                                       f"base_placement -- exactly one identifies what "
+                                       f"is being acted on.",
+                })
+            if self.base_placement_id:
+                self._validate_base_placement()
             if self.device_type:
                 raise ValidationError({"device_type": f"A '{kind}' must not set a device type."})
             # Role / tenant on a MOVE are planned OVERRIDES: the design says
@@ -497,12 +907,20 @@ class DesignPlacement(NetBoxModel):
                 if self.tenant:
                     raise ValidationError({"tenant": f"A '{kind}' must not set a tenant."})
 
+        # A stale placement is inert: it projects nothing (projection skips
+        # device-less move/remove rows), so validating its target against the
+        # live world is both meaningless and liable to fail -- there is no
+        # device type left to measure the slot with.
+        if self.stale:
+            return
+
         if kind == DesignPlacementKindChoices.KIND_REMOVE:
             return  # No target for a removal.
 
         # A bay target (blade into a chassis) is mutually exclusive with a rack
         # slot, and short-circuits the U/face validation below.
-        if self.target_bay_id or self.parent_placement_id:
+        if (self.target_bay_id or self.parent_placement_id
+                or self.base_parent_placement_id):
             self._validate_bay_target()
             return
         if self.target_bay_name:
@@ -523,22 +941,98 @@ class DesignPlacement(NetBoxModel):
 
         self._validate_target_slot()
 
+    def _validate_base_placement(self):
+        """A ``base_placement`` (G2) must point at a TRUE ancestor's 'add'.
+
+        Same design, an unrelated design, or a descendant is invalid -- only a
+        design in ``self.design.baseline_chain()`` has already happened from
+        this design's point of view. And it must be a ``kind=add`` row: only
+        an 'add' creates a NEW planned identity for this to reference; an
+        ancestor's own move/remove already acts on an already-real device,
+        which a downstream design references directly via ``device`` instead.
+        """
+        base = self.base_placement
+        if not self.design_id:
+            # Can't resolve an ancestor chain without a design yet; the
+            # required-fields validation elsewhere will catch a missing design.
+            return
+        try:
+            chain_design_ids = {d.pk for d in self.design.baseline_chain()}
+        except ValueError as exc:
+            raise ValidationError({"base_placement": str(exc)}) from exc
+        if base.design_id not in chain_design_ids:
+            raise ValidationError({
+                "base_placement": f"{base.design} is not an ancestor of "
+                                   f"{self.design} -- base_placement must reference a "
+                                   f"placement belonging to a design in this design's "
+                                   f"baseline chain.",
+            })
+        if base.kind != DesignPlacementKindChoices.KIND_ADD:
+            raise ValidationError({
+                "base_placement": "base_placement must reference an 'add' placement: "
+                                   "only an add creates a new planned identity for a "
+                                   "downstream design to act on; an ancestor move/remove "
+                                   "already acts on an already-real device, which this "
+                                   "design should reference through 'device' directly.",
+            })
+
+    def _validate_planned_power_feed(self):
+        """A ``planned_power_feed`` (G5 item 3) must belong to THIS design or a
+        TRUE ancestor -- unlike ``base_placement``, the SAME design is valid
+        too (a plain, unchained PDU binding to a feed its own design planned
+        is the ordinary case), only an unrelated design or a DESCENDANT is
+        rejected: a design must not depend on a layer that has not happened
+        from its own point of view. Mirrors ``_validate_base_placement``.
+        """
+        feed = self.planned_power_feed
+        if not self.design_id:
+            return
+        if feed.design_id == self.design_id:
+            return
+        try:
+            chain_design_ids = {d.pk for d in self.design.baseline_chain()}
+        except ValueError as exc:
+            raise ValidationError({"planned_power_feed": str(exc)}) from exc
+        if feed.design_id not in chain_design_ids:
+            raise ValidationError({
+                "planned_power_feed": f"{feed.design} is not this design or an "
+                                       f"ancestor of {self.design} -- a placement may "
+                                       f"only bind to a planned power feed belonging to "
+                                       f"itself or a design in its baseline chain.",
+            })
+
     def _placed_device_type(self):
-        """The DeviceType being placed: the add's own, or the moved device's."""
+        """The DeviceType being placed: the add's own, the moved device's, or --
+        for a move/remove acting on an ancestor's still-planned 'add' -- the
+        upstream placement's device type (G2: the referenced device is not
+        yet real, so there is nothing on ``self.device`` to read it from)."""
         if self.device_type_id:
             return self.device_type
-        return self.device.device_type if self.device_id else None
+        if self.device_id:
+            return self.device.device_type
+        if self.base_placement_id:
+            return self.base_placement.device_type
+        return None
 
     def _validate_bay_target(self):
         """
-        Validate a blade placement: into a real chassis bay (``target_bay``) or
-        into a bay of a chassis planned in this same design
-        (``parent_placement`` + ``target_bay_name``).
+        Validate a blade placement against the ONE parent it names, by exactly
+        one of the three routes the field comments above describe: a real chassis
+        bay (``target_bay``), a bay of a chassis planned in this same design
+        (``parent_placement`` + ``target_bay_name``), or a bay of a chassis
+        planned by an ANCESTOR design (``base_parent_placement`` +
+        ``target_bay_name``, PLAN-design-chains.md G2).
         """
-        if self.target_bay_id and self.parent_placement_id:
+        routes = [
+            bool(self.target_bay_id),
+            bool(self.parent_placement_id),
+            bool(self.base_parent_placement_id),
+        ]
+        if sum(routes) > 1:
             raise ValidationError(
-                "A placement targets either a real device bay or a planned "
-                "chassis, never both."
+                "A placement targets a real device bay, a chassis planned in "
+                "this design, or a chassis planned by an ancestor design -- "
+                "exactly one of the three, never more."
             )
         if self.target_position is not None or self.target_face:
             raise ValidationError({
@@ -574,7 +1068,17 @@ class DesignPlacement(NetBoxModel):
                     })
             return
 
-        # Planned chassis (case B).
+        # Planned chassis in an ANCESTOR design (case C, G2). Checked before
+        # case B so the same-design branch can keep assuming a non-null
+        # ``parent_placement``.
+        if self.base_parent_placement_id:
+            self._validate_base_parent_placement()
+            self._validate_planned_parent(
+                "base_parent_placement", self.base_parent_placement
+            )
+            return
+
+        # Planned chassis in THIS design (case B).
         parent_placement = self.parent_placement
         if parent_placement.pk == self.pk:
             raise ValidationError({"parent_placement": "A placement cannot be its own parent."})
@@ -582,11 +1086,65 @@ class DesignPlacement(NetBoxModel):
             raise ValidationError({
                 "parent_placement": "The chassis placement must belong to the same design.",
             })
+        self._validate_planned_parent("parent_placement", parent_placement)
+
+    def _validate_base_parent_placement(self):
+        """A ``base_parent_placement`` (G2) must be a TRUE ancestor's chassis 'add'.
+
+        The parent-side twin of :meth:`_validate_base_placement`, and
+        deliberately the same two rules for the same two reasons: only a design
+        in ``self.design.baseline_chain()`` has already happened from this
+        design's point of view (a sibling, a descendant or this design itself
+        has not), and only a ``kind=add`` creates the NEW planned identity whose
+        bays did not exist before -- an ancestor's move/remove acts on a chassis
+        that is already real, whose bays are real ``dcim.DeviceBay`` rows a blade
+        addresses through ``target_bay`` instead.
+        """
+        base_parent = self.base_parent_placement
+        if not self.design_id:
+            # No design yet, so no chain to resolve against; the required-field
+            # validation elsewhere reports the missing design.
+            return
+        try:
+            chain_design_ids = {d.pk for d in self.design.baseline_chain()}
+        except ValueError as exc:
+            raise ValidationError({"base_parent_placement": str(exc)}) from exc
+        if base_parent.design_id not in chain_design_ids:
+            raise ValidationError({
+                "base_parent_placement": f"{base_parent.design} is not an ancestor of "
+                                         f"{self.design} -- base_parent_placement must "
+                                         f"reference a chassis planned by a design in "
+                                         f"this design's baseline chain. A chassis "
+                                         f"planned in THIS design is addressed by "
+                                         f"parent_placement instead.",
+            })
+        if base_parent.kind != DesignPlacementKindChoices.KIND_ADD:
+            raise ValidationError({
+                "base_parent_placement": "base_parent_placement must reference an 'add' "
+                                         "placement: only an add creates a new planned "
+                                         "chassis whose bays do not exist yet. An "
+                                         "ancestor's move/remove acts on a chassis that "
+                                         "is already real, so its bays are real device "
+                                         "bays -- use target_bay.",
+            })
+
+    def _validate_planned_parent(self, field_name, parent_placement):
+        """The rules a PLANNED chassis parent shares, whichever route names it.
+
+        One implementation for ``parent_placement`` (case B) and
+        ``base_parent_placement`` (case C), reported against ``field_name``, so
+        the two routes cannot drift about what a chassis is, which bays it has,
+        or which rack it stands in. A planned chassis has no
+        ``dcim.DeviceBay`` rows -- core instantiates those from the type's
+        ``DeviceBayTemplate``s only when the real device is created -- so the
+        bay name is validated against the templates, exactly what
+        ``projection._attach_planned_chassis_bays`` later draws the strip from.
+        """
         parent_type = parent_placement._placed_device_type()
         if parent_type is None or not parent_type.is_parent_device:
             raise ValidationError({
-                "parent_placement": "The referenced placement is not a parent "
-                                    "(chassis) device type.",
+                field_name: "The referenced placement is not a parent "
+                            "(chassis) device type.",
             })
         if not self.target_bay_name:
             raise ValidationError({
@@ -628,13 +1186,27 @@ class DesignPlacement(NetBoxModel):
         ``_projected_vacated_device_ids``; absent that context we fall back to
         the design's persisted move/remove placements so the same rule holds for
         single-placement edits through the form/API.
+
+        A design CHAIN adds a second world to check against (G1): an ancestor's
+        planned add occupies no real U at all, and a real device an ancestor
+        moved still occupies its OLD one, so ``get_available_units`` alone would
+        happily let a child drop a device straight onto an inherited tile and
+        the collision would surface only in the rendered elevation. The
+        ancestor-baseline occupancy comes from the projection's replay
+        (``projection.baseline_occupancy``) rather than being re-derived here,
+        so the rule that validates a save and the rule that draws the rack can
+        never disagree.
         """
-        device_type = self.device_type or (self.device.device_type if self.device else None)
+        device_type = self._placed_device_type()
         if device_type is None:
             return
+        claims, baseline_freed = self._baseline_claims()
         rack_face = None if device_type.is_full_depth else (self.target_face or None)
         exclude = [self.device.pk] if self.device_id else []
         exclude += [pk for pk in self._vacated_device_ids() if pk not in exclude]
+        # Real devices the ancestor chain moves or removes are not where the
+        # physical rack still says they are, so they cannot block this target.
+        exclude += [pk for pk in baseline_freed if pk not in exclude]
         available = self.target_rack.get_available_units(
             u_height=device_type.u_height, rack_face=rack_face, exclude=exclude
         )
@@ -642,6 +1214,92 @@ class DesignPlacement(NetBoxModel):
             raise ValidationError(
                 {"target_position": f"U{self.target_position} is not available in {self.target_rack}."}
             )
+        self._validate_baseline_slot(device_type, claims)
+
+    def _baseline_claims(self):
+        """``(claims, freed_device_ids)`` from this design's ancestor chain (G1).
+
+        Empty and query-free for a design with no ``based_on``, which is the
+        overwhelmingly common case -- a single FK-id test, so the chain support
+        costs an unchained design nothing at validation time.
+        """
+        if not self.design_id or not self.design.based_on_id or self.target_rack_id is None:
+            return [], set()
+        from . import projection  # local: projection imports this module
+
+        return projection.baseline_occupancy(self.design, self.target_rack)
+
+    def _validate_baseline_slot(self, device_type, claims):
+        """Reject a target the ANCESTOR baseline already claims (G1).
+
+        Interval overlap on the same face, with the same full-depth rule
+        ``get_available_units`` applies: a full-depth device (on either side of
+        the comparison) spans both faces, so it collides with anything at those
+        rows regardless of face.
+
+        An identity THIS design moves or removes is excluded -- relocating an
+        ancestor-planned device frees the U the ancestor gave it, which is the
+        other half of what ``_vacated_device_ids`` does for real devices.
+        """
+        if not claims:
+            return
+        vacated = self._vacated_baseline_keys()
+        start = float(self.target_position)
+        end = start + float(device_type.u_height or 1)
+        face = self.target_face or ""
+        for claim in claims:
+            if claim["key"] in vacated:
+                continue
+            spans_both = device_type.is_full_depth or claim["is_full_depth"]
+            if not spans_both and claim["face"] != face:
+                continue
+            claim_start = float(claim["u_position"])
+            claim_end = claim_start + float(claim["u_height"])
+            if start < claim_end and claim_start < end:
+                raise ValidationError({
+                    "target_position": f"U{self.target_position} in "
+                                       f"{self.target_rack} is already claimed by "
+                                       f"{claim['source_design']}, which this design "
+                                       f"is based on.",
+                })
+
+    def _vacated_baseline_keys(self):
+        """Baseline identities this design frees, as ``projection`` identity keys.
+
+        The companion to ``_vacated_device_ids`` for the chain world. That method
+        can only ever answer in real device PKs, and an ancestor-planned identity
+        has none (G2) -- so relocating one could not be expressed there at all.
+        Keyed the same way the replay keys it (``("pl", <ancestor add pk>)`` /
+        ``("dev", <device pk>)``) so the two agree by construction.
+
+        Includes THIS row's own identity: a move of an ancestor-planned device
+        frees the U the ancestor put it at, exactly as excluding ``self.device``
+        does for a real one.
+        """
+        keys = set()
+        if self.base_placement_id:
+            keys.add(("pl", self.base_placement_id))
+        elif self.device_id:
+            keys.add(("dev", self.device_id))
+        if self.design_id is None:
+            return keys
+        rows = (
+            DesignPlacement.objects.filter(
+                design_id=self.design_id,
+                kind__in=(
+                    DesignPlacementKindChoices.KIND_MOVE,
+                    DesignPlacementKindChoices.KIND_REMOVE,
+                ),
+            )
+            .exclude(pk=self.pk)
+            .values_list("device_id", "base_placement_id")
+        )
+        for device_id, base_id in rows:
+            if base_id:
+                keys.add(("pl", base_id))
+            elif device_id:
+                keys.add(("dev", device_id))
+        return keys
 
     def _vacated_device_ids(self):
         """PKs of devices this design frees from their real slots, so they don't
@@ -650,6 +1308,12 @@ class DesignPlacement(NetBoxModel):
         Prefers the batch context the save-layout view injects (it knows every
         device the current submit moves/removes, including ones not yet
         persisted); otherwise reads the design's already-saved move/remove rows.
+
+        Deliberately answers ONLY in real device PKs, because that is all
+        ``get_available_units(exclude=...)`` understands. A base_placement-backed
+        row (G2) has no real device to vacate -- the identity it acts on is not
+        real yet -- so it is not expressible here at all and is handled by
+        ``_vacated_baseline_keys`` against the ancestor baseline instead.
         """
         injected = getattr(self, "_projected_vacated_device_ids", None)
         if injected is not None:
@@ -947,6 +1611,25 @@ class DesignPowerFeed(NetBoxModel):
     def docs_url(self):
         return DOCS_BASE_URL
 
+    def clean(self):
+        super().clean()
+        # A design that is APPROVED is frozen (§2.2, Design.is_frozen), and a
+        # planned feed is part of what an approved design claims -- it sizes
+        # its rack's capacity bar, so adding, resizing or deleting one changes
+        # what the plan means just as much as moving a placement does. Mirrors
+        # DesignPlacement.clean()'s freeze check (above) so REST create/update,
+        # the HTML views, bulk import and GraphQL are all covered from one
+        # place rather than guarding each call site by hand. (Delete never
+        # reaches clean() at all -- that half is guarded explicitly on the
+        # viewset / HTML delete views instead, same as for placements.)
+        if self.design_id and self.design.is_frozen:
+            raise ValidationError(
+                "This design is approved, and approved designs are frozen: "
+                "its planned power feeds cannot be created or edited. Set "
+                "the design back to draft, or create a new version of it, "
+                "to make this change."
+            )
+
     @property
     def derated_watts(self):
         """The usable watts this feed contributes to its rack's capacity.
@@ -1009,3 +1692,48 @@ class DesignRackPower(models.Model):
 
     def __str__(self):
         return f"{self.design}: power for {self.rack}"
+
+    @classmethod
+    def effective_custom_fields(cls, design, rack):
+        """The MERGED rack power custom fields ``design`` should read for
+        ``rack``, across its baseline chain (PLAN-design-chains.md G5 item 2).
+
+        The rule: a child INHERITS an approved ancestor's override for this
+        rack, and MAY OVERRIDE any key of its own -- the same shape as a child
+        re-planning an inherited placement (G2). This is safe to resolve LIVE,
+        never snapshotted, because an ancestor able to be inherited from is by
+        definition frozen (``Design.is_frozen``, §2.2): its row cannot change
+        underneath the child.
+
+        Ancestors are merged OLDEST FIRST so a nearer ancestor's key wins over
+        a farther one, then ``design``'s own row is merged last so it wins
+        over every ancestor -- mirroring ``_Baseline._replay``'s "last write
+        wins" rule for a relocated identity. Uses the SAME §9.2 all-or-nothing
+        chain resolution as the rack-face replay and the capacity bar
+        (``projection.resolve_baseline_chain``): a non-approved/implemented
+        ancestor, or a broken lineage, contributes nothing from ANY ancestor --
+        but ``design``'s own row is unaffected, exactly as an ancestor refusal
+        never erases this design's own placements.
+
+        Returns ``(merged: dict, conflict: dict | None)`` -- ``conflict`` is
+        the chain refusal (§8.3 shape), for a caller (e.g. a future
+        distribution-status surface) that wants to report WHY an ancestor's
+        override did not apply, rather than a plausible-but-wrong merge.
+        """
+        from . import projection  # local: projection imports this module
+
+        merged = {}
+        chain, conflict = projection.resolve_baseline_chain(design)
+        for ancestor in chain:
+            try:
+                row = cls.objects.get(design=ancestor, rack=rack)
+            except cls.DoesNotExist:
+                continue
+            merged.update((row.power_config or {}).get("custom_fields") or {})
+        try:
+            own = cls.objects.get(design=design, rack=rack)
+        except cls.DoesNotExist:
+            own = None
+        if own is not None:
+            merged.update((own.power_config or {}).get("custom_fields") or {})
+        return merged, conflict

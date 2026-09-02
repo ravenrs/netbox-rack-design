@@ -142,7 +142,28 @@ class DesignGroupForm(NetBoxModelForm):
 class DesignForm(NetBoxModelForm):
     site = DynamicModelChoiceField(queryset=Site.objects.all())
     group = DynamicModelChoiceField(queryset=DesignGroup.objects.all(), required=False)
-    based_on = DynamicModelChoiceField(queryset=Design.objects.all(), required=False)
+    # Only an approved design is derivable (PLAN-design-chains.md §2.2): its
+    # placements are frozen the moment it can be a parent, which is exactly
+    # what makes baselining on it safe. `query_params` additionally scopes the
+    # live picker to the chosen site (a chain across two sites is meaningless,
+    # since placements are site-scoped) and to approved status, mirroring the
+    # Python-side `queryset` restriction below so the API-backed widget agrees
+    # with what full_clean() will actually accept. The design being edited is
+    # excluded from its own options in __init__ (its pk isn't known here).
+    based_on = DynamicModelChoiceField(
+        queryset=Design.objects.filter(status=DesignStatusChoices.STATUS_APPROVED),
+        required=False,
+        label=_("Based on"),
+        help_text=_(
+            "An approved design whose result this design is planned on top of. "
+            "This design's baseline inherits every placement made by the "
+            "selected design, as if it had already happened."
+        ),
+        query_params={
+            "status": DesignStatusChoices.STATUS_APPROVED,
+            "site_id": "$site",
+        },
+    )
     depends_on = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False)
     # Racks this design plans across. Options are filtered live to the chosen
     # site via query_params (chained on the `site` field's value).
@@ -153,13 +174,18 @@ class DesignForm(NetBoxModelForm):
         query_params={"site_id": "$site"},
     )
 
+    # `based_on` sits in the primary "Design" fieldset, not "Lineage &
+    # scheduling": picking a parent is a structural choice made at creation
+    # time (PLAN-design-chains.md §5, "choosing what a design is based on is
+    # part of creating it"), not scheduling metadata like `depends_on` /
+    # `sequence`.
     fieldsets = (
         FieldSet(
-            "title", "site", "status", "summary", "link", "racks",
+            "title", "site", "based_on", "status", "summary", "link", "racks",
             name=_("Design"),
         ),
         FieldSet(
-            "group", "based_on", "depends_on", "sequence",
+            "group", "depends_on", "sequence",
             name=_("Lineage & scheduling"),
         ),
         FieldSet("description", "tags", name=_("Tags")),
@@ -172,6 +198,14 @@ class DesignForm(NetBoxModelForm):
             "group", "based_on", "depends_on", "sequence",
             "description", "comments", "tags",
         )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # A design must never be offered as its own parent.
+        if self.instance.pk:
+            self.fields["based_on"].queryset = (
+                self.fields["based_on"].queryset.exclude(pk=self.instance.pk)
+            )
 
     def clean(self):
         super().clean()
@@ -190,6 +224,47 @@ class DesignForm(NetBoxModelForm):
                     _("These racks are not in the design's site: %(names)s.")
                     % {"names": names},
                 )
+        # A chain across two sites is meaningless -- a parent's placements are
+        # site-scoped, so a child in a different site could never actually
+        # inherit them. `Design.clean()` now enforces this too (unlike the
+        # `racks` M2M check above, `based_on` is a plain FK with no pk-timing
+        # gap, so the model check alone already covers every layer: API,
+        # GraphQL, bulk import, this form). Kept here anyway because it names
+        # both sites in the message, which is a materially better field-level
+        # error than the model's generic one.
+        based_on = self.cleaned_data.get("based_on")
+        if site and based_on and based_on.site_id != site.pk:
+            self.add_error(
+                "based_on",
+                _("The parent design's site (%(parent_site)s) does not match "
+                  "this design's site (%(site)s).")
+                % {"parent_site": based_on.site, "site": site},
+            )
+
+        # A design's `racks` scope is part of what was approved
+        # (PLAN-design-chains.md §2.2/G4): `Design.clean()` enforces this too,
+        # but only sees a pending m2m change via `self._m2m_values` (the REST
+        # API's own side channel, netbox/api/serializers/base.py) -- Django's
+        # ModelForm never sets anything like that, so this form carries the
+        # equivalent check itself. `self.instance` still holds its PRE-edit
+        # field values here (`_post_clean()`, which applies the submitted
+        # ones, runs AFTER this method), so `self.instance.is_frozen` and
+        # `self.instance.racks.all()` both reflect what the design WAS before
+        # this submission -- exactly the state that matters. Skipped on
+        # CREATE (`self.instance.pk` is falsy): a brand-new design has no
+        # approved scope yet to protect.
+        if self.instance.pk and self.instance.is_frozen:
+            new_racks = set(self.cleaned_data.get("racks") or [])
+            old_racks = set(self.instance.racks.all())
+            if new_racks != old_racks:
+                self.add_error(
+                    "racks",
+                    _("This design is approved, and approved designs are "
+                      "frozen: its rack scope cannot be changed. Set the "
+                      "design back to draft, or create a new version of it, "
+                      "to make this change."),
+                )
+
         return self.cleaned_data
 
 
@@ -398,14 +473,42 @@ class DesignFilterForm(NetBoxModelFilterSetForm):
 
 class DesignPlacementFilterForm(NetBoxModelFilterSetForm):
     model = DesignPlacement
-    design_id = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False, label="Design")
-    target_rack_id = DynamicModelMultipleChoiceField(queryset=Rack.objects.all(), required=False, label="Target rack")
+    # Only device_role_id/tenant_id are surfaced here from the newer
+    # filtersets.py additions: they're the two planning attributes a user sets
+    # on every ADD, so "show me every planned compute node" / "every placement
+    # for Tenant X" are real filters-tab searches. The power FKs
+    # (power_source_device_id, real_power_feed_id, planned_power_feed_id) and
+    # the chain references (base_placement_id, base_parent_placement_id) stay
+    # off the form: they exist for {% htmx_table %} embeds and the REST API
+    # (scoping a related table to "this PDU" / "this ancestor placement" from
+    # the OTHER object's detail page), not for a planner filtering placements
+    # from this list by hand. target_position/target_face are plain
+    # exact-match Meta.fields filters (a decimal U and a short code) with no
+    # meaningful select widget -- nobody filters "give me everything at U12";
+    # they look at the rack elevation instead.
+    fieldsets = (
+        FieldSet("q", "filter_id"),
+        FieldSet("design_id", "kind", name=_("Placement")),
+        FieldSet("device_role_id", "tenant_id", name=_("Planning")),
+        FieldSet("target_rack_id", name=_("Rack slot")),
+        FieldSet("target_bay_id", "parent_placement_id", name=_("Device bay")),
+    )
+    design_id = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False, label=_("Design"))
     kind = forms.MultipleChoiceField(choices=DesignPlacementKindChoices, required=False)
+    device_role_id = DynamicModelMultipleChoiceField(
+        queryset=DeviceRole.objects.all(), required=False, label=_("Device role")
+    )
+    tenant_id = DynamicModelMultipleChoiceField(
+        queryset=Tenant.objects.all(), required=False, label=_("Tenant")
+    )
+    target_rack_id = DynamicModelMultipleChoiceField(
+        queryset=Rack.objects.all(), required=False, label=_("Target rack")
+    )
     target_bay_id = DynamicModelMultipleChoiceField(
-        queryset=DeviceBay.objects.all(), required=False, label="Target bay"
+        queryset=DeviceBay.objects.all(), required=False, label=_("Target bay")
     )
     parent_placement_id = DynamicModelMultipleChoiceField(
-        queryset=DesignPlacement.objects.all(), required=False, label="Planned chassis"
+        queryset=DesignPlacement.objects.all(), required=False, label=_("Planned chassis")
     )
 
 

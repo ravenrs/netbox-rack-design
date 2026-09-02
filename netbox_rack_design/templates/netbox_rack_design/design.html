@@ -98,6 +98,116 @@
         </tr>
       </table>
     </div>
+    {# ---------------------------------------------------------------- #}
+    {# LINEAGE (design chains, PLAN-design-chains.md §2). Distinct from   #}
+    {# the "Dependencies" card above: that card is the depends_on /       #}
+    {# dependents M2M, an informational "must run after" edge that does  #}
+    {# NOT affect projection. This card is the based_on tree -- the      #}
+    {# layer stack a design's projection actually inherits (§2.1) -- plus #}
+    {# the freeze / un-approve consequences of being part of one (§2.2)  #}
+    {# and the re-base warning of §9.2.                                  #}
+    {# ---------------------------------------------------------------- #}
+    <div class="card">
+      {% with ancestors=object.baseline_chain children=object.children %}
+      <h2 class="card-header">
+        {% trans "Design chain" %}
+        <span class="badge {% if children %}text-bg-info{% else %}text-bg-secondary{% endif %} ms-1">{{ children|length }}</span>
+        {% if perms.netbox_rack_design.add_design or perms.netbox_rack_design.change_design %}
+          <div class="card-actions">
+            {# Derive: only meaningful from an APPROVED design -- DesignDeriveView #}
+            {# itself refuses otherwise (§2.2) -- and only offered to a user who   #}
+            {# can create the resulting design (add_design).                       #}
+            {% if object.is_frozen and perms.netbox_rack_design.add_design %}
+              <a href="{% url 'plugins:netbox_rack_design:design_derive' pk=object.pk %}"
+                 class="btn btn-ghost-primary btn-sm">
+                <i class="mdi mdi-source-branch-plus" aria-hidden="true"></i> {% trans "Derive design" %}
+              </a>
+            {% endif %}
+            {# Re-base: edits THIS design's own based_on, so it only needs #}
+            {# change_design -- shown regardless of frozen state, since a  #}
+            {# draft design re-bases just as often as an approved one.     #}
+            {% if perms.netbox_rack_design.change_design %}
+              <a href="{% url 'plugins:netbox_rack_design:design_rebase' pk=object.pk %}"
+                 class="btn btn-ghost-primary btn-sm">
+                <i class="mdi mdi-swap-horizontal" aria-hidden="true"></i> {% trans "Re-base" %}
+              </a>
+            {% endif %}
+          </div>
+        {% endif %}
+      </h2>
+      {% if not ancestors and not children %}
+        <div class="card-body text-muted">
+          {% trans "This design stands alone — it has no parent and nothing is based on it." %}
+        </div>
+      {% else %}
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">{% trans "Parent" %}</th>
+            <td>
+              {% if object.based_on %}
+                {{ object.based_on|linkify }}
+                {% badge object.based_on.get_status_display bg_color=object.based_on.get_status_color %}
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Ancestor stack" %}</th>
+            <td>
+              {% if ancestors %}
+                <ol class="mb-0 ps-3">
+                  {% for ancestor in ancestors %}
+                    <li>
+                      {{ ancestor|linkify }}
+                      {% badge ancestor.get_status_display bg_color=ancestor.get_status_color %}
+                      {% if forloop.last %}
+                        <span class="text-muted small">{% trans "(immediate parent — the only editable relation)" %}</span>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ol>
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">{% trans "Children" %}</th>
+            <td>
+              {% if children %}
+                <ul class="list-unstyled mb-0">
+                  {% for child in children %}
+                    <li>{{ child|linkify }} {% badge child.get_status_display bg_color=child.get_status_color %}</li>
+                  {% endfor %}
+                </ul>
+              {% else %}
+                {{ ''|placeholder }}
+              {% endif %}
+            </td>
+          </tr>
+        </table>
+        {% for ancestor in ancestors %}
+          {% if ancestor.status == "implemented" %}
+            <div class="alert alert-warning mb-0 mt-0" role="alert">
+              {% trans "Ancestor" %} {{ ancestor|linkify }}
+              {% trans "is marked Implemented — the chain will refuse to project until this design is re-based past it." %}
+            </div>
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+      <div class="card-footer text-muted small">
+        {% if object.is_frozen %}
+          <p class="mb-1">{% trans "This design is approved: its placements are read-only. Set the status back to draft, or create a new version, to change them." %}</p>
+          {% if children %}
+            <p class="mb-0">{% trans "It cannot be un-approved while designs are based on it — re-base or remove them first." %}</p>
+          {% endif %}
+        {% else %}
+          <p class="mb-0">{% trans "Designs based on this one inherit its placements live, once it is approved." %}</p>
+        {% endif %}
+      </div>
+      {% endwith %}
+    </div>
     {% include 'inc/panels/tags.html' %}
     {% plugin_right_page object %}
   </div>
@@ -181,6 +291,66 @@
           {% endfor %}
         </tbody>
       </table>
+    </div>
+  </div>
+</div>
+
+{# ------------------------------------------------------------------------ #}
+{# STALE placements: their real device was deleted from DCIM. A stale row is #}
+{# inert (projection.py filters device__isnull=False for move/remove), so it #}
+{# renders nowhere else -- this panel is the only place the loss is visible. #}
+{# ------------------------------------------------------------------------ #}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">
+        {% trans "Stale placements" %}
+        <span class="badge {% if stale_placements %}text-bg-warning{% else %}text-bg-secondary{% endif %} ms-1">{{ stale_placements|length }}</span>
+      </h2>
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th>{% trans "Deleted device" %}</th>
+            <th>{% trans "Kind" %}</th>
+            <th>{% trans "Target rack" %}</th>
+            <th>{% trans "Proposed name" %}</th>
+            <th class="text-end">{% trans "Actions" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for placement in stale_placements %}
+            <tr>
+              <td>{{ placement.stale_device_name }}</td>
+              <td>{% badge placement.get_kind_display bg_color=placement.get_kind_color %}</td>
+              <td>{{ placement.target_rack|linkify|placeholder }}</td>
+              <td>{{ placement.proposed_name|placeholder }}</td>
+              <td class="text-end text-nowrap">
+                {% if perms.netbox_rack_design.change_designplacement %}
+                  <a href="{% url 'plugins:netbox_rack_design:designplacement_edit' pk=placement.pk %}?return_url={{ object.get_absolute_url }}"
+                     class="btn btn-sm btn-ghost-secondary" title="{% trans 'Edit' %}">
+                    <i class="mdi mdi-pencil" aria-hidden="true"></i>
+                  </a>
+                {% endif %}
+                {% if perms.netbox_rack_design.delete_designplacement %}
+                  <a href="{% url 'plugins:netbox_rack_design:designplacement_delete' pk=placement.pk %}?return_url={{ object.get_absolute_url }}"
+                     class="btn btn-sm btn-ghost-danger" title="{% trans 'Delete' %}">
+                    <i class="mdi mdi-trash-can-outline" aria-hidden="true"></i>
+                  </a>
+                {% endif %}
+              </td>
+            </tr>
+          {% empty %}
+            <tr>
+              <td colspan="5" class="text-muted">
+                {% trans "No stale placements — every planned device still exists in DCIM." %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="card-footer text-muted small">
+        {% trans "These placements reference a device that has since been deleted from DCIM. They no longer project into any rack elevation. Re-point each one at another device or delete it." %}
+      </div>
     </div>
   </div>
 </div>
