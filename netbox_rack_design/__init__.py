@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 
 from netbox.plugins import PluginConfig
@@ -49,6 +49,21 @@ class RackdesignConfig(PluginConfig):
         "naming_template": "{design.name}-{n}",
         # Dotted path to a callable used when naming_mode == "script".
         "naming_script": "",
+        # Settled names across a design chain (see naming.py, PLAN-design-
+        # chains.md Sec 3). A placement's proposed_name is a PLANNING name and
+        # carries the owning design's project prefix; a design that baselines on
+        # it must see the SETTLED name instead. No custom field is ever
+        # hardcoded in the plugin: a deployment points prefix_source at ITS OWN
+        # source, relative to the design. Example:
+        #   "naming": {
+        #     # where the planning prefix token comes from; empty => derive
+        #     # "IDS-<digits>" from the design title
+        #     "prefix_source": "cf.<your project field>",
+        #     # dotted path to fn(placement) -> str replacing the builtin
+        #     # prefix strip; empty => the builtin
+        #     "settled_name": "",
+        #   }
+        "naming": {},
         # --- Power distribution engine (see distribution.py, docs/pdu-           -
         # distribution-spec.md) ---------------------------------------------------
         # How per-PDU/bank load is distributed for the power heatmap.
@@ -90,6 +105,26 @@ class RackdesignConfig(PluginConfig):
         #   ]
         "placement_fields": [],
     }
+
+    @classmethod
+    def _rd_startup_checks(cls):
+        """Config validators run once at boot, in order.
+
+        A malformed option must fail the boot with a clear message rather than
+        be silently ignored and surface much later as a wrong name.
+        """
+        from .naming import validate_naming_config
+
+        return (validate_naming_config,)
+
+    def ready(self):
+        super().ready()
+        # Importing connects the pre_delete receiver that keeps a design's
+        # placements from going silently inert when a real device is deleted.
+        from . import signals  # noqa: F401
+
+        for check in self._rd_startup_checks():
+            check()
 
 
 config = RackdesignConfig

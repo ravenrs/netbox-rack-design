@@ -175,6 +175,14 @@ layers cannot drift.
 | `move_out_ghost` (origin marker) | **crossed-out / struck-through hatch** — clearly "leaving" | **also crossed-out hatch** — ⚠ today it renders like a normal live device (red), which is wrong | n/a (this *is* the origin) |
 | `remove` | remove style (red, struck) | crossed-out hatch | — |
 | **`displaced`** (new, see §4.3) | not rendered as a full tile — replaced by **side reservation stripe** | side stripe on opposite face too (full-depth) | — |
+| **`inherited`** (flag, not a state — design chains, §12) | renders as its underlying state (almost always `existing`) with a distinct dimmed/outlined treatment | follows the body's state per the table above | — |
+| **`conflict`** (flag, not a state — design chains §12) | tile keeps its normal state styling AND gains an amber conflict marker (stripe-bar geometry identical to `displaced`'s red stripe, but amber — red stays reserved for displacement) | mirrored on the opposite face for a full-depth device | — |
+
+`inherited` and `conflict` are **flags layered on top of a state**, exactly
+like `displaced` already was, not new `ProjectedSlotState` members (§12.4) —
+so every row of this table (`existing`/`add`/`move_in`/`move_out_ghost`/
+`remove`) may additionally carry either flag, and the legend gives each flag
+its own checkbox (§12.6) rather than doubling the state count.
 
 **Side reservation stripe (`displaced`):** rendered like NetBox core's rack
 reservation marker — a narrow vertical bar spanning exactly the displaced
@@ -303,6 +311,15 @@ Expected outcome:
 5. Undoing NEW's placement (moving NEW away again, or cancel) **restores OLD's ghost /
    remove rendering** — the stripe exists only while something else occupies the slot.
 
+**An upstream (design-chain) conflict follows NEITHER this path nor §4.7's.**
+An ancestor design occupying your target unit, or vacating a slot you built
+on, is not a live claim your OWN gesture is contending with — it is a
+standing disagreement between your design and a design you cannot edit from
+here. So there is no dialog, no snap-back, and Save is never blocked: the
+tile keeps rendering at the position you gave it, gains the amber `conflict`
+flag (§3, §12), and the condition is reported in the editor's persistent
+conflicts panel until the design is re-based. See §12.
+
 ### 4.4 Move within one face
 
 - D `placeAt` new units → origin gets Ghost (crossed-out body-style + crossed-out
@@ -337,6 +354,15 @@ Expected outcome:
 - Target blocked (live body/shadow): tile snaps back to its exact prior position.
   **Zero other tiles move.** No dialog, no console error, no residue (shadows/ghosts
   unchanged) — on any rack density. (Regression: isp26 → U2 on the packed 46U rack.)
+
+**An upstream (design-chain) conflict is never rejected this way either.** A
+hard collision here means YOUR gesture just tried to claim a unit a live
+claim already blocks, and the server would refuse the save the same way — so
+snap-back is correct: there is nothing to commit. An upstream conflict is the
+opposite shape: the placement was already valid when made, and only became
+disputed because an ancestor design's layer changed underneath it. Rejecting
+it on every render would make it impossible to ever look at the tile you are
+supposed to be fixing. See §4.3 and §12.
 
 ### 4.8 Palette add
 
@@ -712,3 +738,94 @@ for network)"), so it is always clear which list is being changed.
 The `<select>` carries `no-ts` so NetBox's TomSelect enhancement leaves it alone:
 its options are rebuilt after every set change, which a TomSelect wrapper would
 not pick up.
+
+## 12. Design chains: inherited & conflict flags (shipped)
+
+Status: **shipped**. See `docs/design-chains.md` for the user-facing workflow
+and `PLAN-design-chains.md` for the design record; this section covers only
+what changes in the rendering/legend contract of §3 and §4.
+
+### 12.1 What the two flags mean
+
+A design may baseline on an approved ancestor (`Design.based_on`). The
+ancestor's placements are replayed into this design's world as **baseline**,
+not as proposals — from this design's point of view they already happened.
+Two flags on a slot dict capture everything that changes:
+
+- **`inherited`** — this slot's identity/location came from an ancestor
+  design's layer, not from reality untouched or from this design's own
+  placements. `source_design_id` names which ancestor.
+- **`conflict`** — something outside this design's control disagrees with
+  this slot (an ancestor's settled name could not be resolved, an ancestor
+  now occupies a unit this design already claimed, or a downstream
+  placement's upstream reference is stale). `conflict_reason` is the
+  human-readable detail.
+
+### 12.2 Flags, not states (§8.4 of the plan)
+
+`inherited` and `conflict` are **flags layered on top of an existing state**,
+exactly as `displaced` already was — never new `ProjectedSlotState` members.
+Reasons this matters for rendering:
+
+- every row of the §3 table may carry either flag independently of its
+  state, so the state × part matrix does not double for every combination;
+- the legend's one-checkbox-per-state filter model stays intact — each flag
+  gets its **own** checkbox that filters by OR against the flag, combined
+  with the state checkboxes rather than multiplying them (§12.6).
+
+### 12.3 Rendering (extends §3)
+
+- **Inherited, no conflict**: draws as its underlying state — almost always
+  `existing`, since an ancestor's effects are baseline — with a dimmed/
+  outlined treatment distinguishing it from untouched reality. Hovering
+  names the source design.
+- **Inherited, in conflict**: same tile, PLUS the amber conflict marker —
+  the same stripe-bar geometry `displaced` uses (hanging outside the rack
+  frame on the right edge), recolored amber so it is never confused with a
+  live displacement (red stays reserved for that). Full-depth mirrors the
+  marker on the opposite face.
+- **Not inherited, in conflict**: this design's own placement can carry the
+  `conflict` flag too — e.g. its `base_placement` reference went stale, or
+  its target unit is now contested by an ancestor. Same amber marker,
+  attached to a tile that is otherwise rendered exactly as an ordinary
+  add/move/remove of this design.
+
+### 12.4 Movement rules that change (extends §4)
+
+Dragging an inherited tile does **not** edit the ancestor's (frozen)
+placement. It creates a **move in this design** referencing the upstream
+identity — the ordinary §4 pipeline (validate → confirm → commit) applies
+unchanged; only what gets created differs (a move keyed on the ancestor's
+identity rather than on a `dcim.Device`).
+
+An upstream conflict follows **neither** §4.3 (displacement) **nor** §4.7
+(rejected placement) — see those sections for why: it does not block Save,
+and it does not snap back on render. It is reported, persistently, in the
+editor's conflicts panel (§12.5) until the design is re-based.
+
+### 12.5 The conflicts panel (§8.3 of the plan)
+
+`ProjectedElevation` carries a `conflicts` list (`{kind, severity, slot,
+placement, source_design, detail}`) alongside the per-slot flags. The editor
+renders every entry in ONE persistent panel (`design_editor.html`, alongside
+the pre-existing stale-placements alert) — never a toast, because an upstream
+conflict outlives the session that surfaced it. The panel names the source
+design and links to it, so "re-base off X" is always the visible next step.
+
+### 12.6 Legend (extends the legend debt fix, §8.6 of the plan)
+
+The legend now carries two kinds of control on one row:
+
+- **State checkboxes** (`data-rd-state`): `Existing / Add / Move in / Move
+  out (ghost) / Remove` — unchanged, filter by state.
+- **Flag checkboxes** (`data-rd-flag`, new): `Inherited / Conflict` — filter
+  independently of, and combine by OR with, the state checkboxes.
+- **Info-only keys** (no checkbox, new): `Displaced (was here)` and
+  `Rejected` — these two markers existed before design chains but had NO
+  legend entry at all, so a user had to hover a stripe or trigger a save
+  rejection to learn what either meant. Both are fixed here rather than
+  replicated: `Displaced` documents the existing red side-stripe (§4.3),
+  `Rejected` documents the existing `.nbx-rd-error` ring (§4.7). Neither is
+  a checkbox because unchecking a state already hides that state's own
+  stripe, and the error ring is a transient highlight, not something to
+  filter.

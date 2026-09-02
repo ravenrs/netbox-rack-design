@@ -85,7 +85,10 @@ multi-rule corporate scheme built the same way.
 The example below implements a realistic multi-rule corporate convention and
 demonstrates the most valuable script-only trick: **continuing a numbered
 family** (`ams1-sw7050-3` → next device becomes `…-4`) by querying NetBox for
-the highest existing number — the lookup engineers otherwise do by hand.
+the highest existing number — the lookup engineers otherwise do by hand — via
+`naming.chain_placement_names()`, which also counts every APPROVED ancestor
+design's placements under their settled names, so the family counter stays
+correct when this design is part of a [design chain](design-chains.md).
 
 Save it anywhere importable by NetBox (e.g. next to `manage.py`) and set:
 
@@ -129,12 +132,15 @@ PROJECT_NUMBERED_ROLES = {"server", "disk-enclosure"}
 
 def _next_number(placement, prefix):
     """Continue a numbered family: find the highest existing <prefix><digits>
-    device name in NetBox — plus any names already proposed in this editing
-    session (the plugin passes them on the placement) — and return max + 1.
+    device name in NetBox — plus any names reserved by a design chain (see
+    below) and any names already proposed in this editing session (the plugin
+    passes them on the placement) — and return max + 1.
 
     This automates the manual "open NetBox and find the last number" step.
     """
     from dcim.models import Device
+
+    from netbox_rack_design.naming import chain_placement_names, pending_names
 
     tail = re.compile(r"^" + re.escape(prefix) + r"(\d+)$")
     highest = 0
@@ -145,9 +151,18 @@ def _next_number(placement, prefix):
         m = tail.match(name)
         if m:
             highest = max(highest, int(m.group(1)))
+    # This design's own placements PLUS every APPROVED ancestor's placements,
+    # matched under their SETTLED names (see docs/design-chains.md) — never
+    # query `DesignPlacement.objects.filter(design=placement.design)`
+    # yourself, or a design based on another one will hand out a number its
+    # ancestor already reserved:
+    for name in chain_placement_names(placement):
+        m = tail.match(name or "")
+        if m:
+            highest = max(highest, int(m.group(1)))
     # Names proposed by OTHER unsaved tiles in the same editor session, so two
     # pending adds get consecutive numbers instead of colliding:
-    for name in getattr(placement, "_rd_pending_names", []):
+    for name in pending_names(placement):
         m = tail.match(name or "")
         if m:
             highest = max(highest, int(m.group(1)))

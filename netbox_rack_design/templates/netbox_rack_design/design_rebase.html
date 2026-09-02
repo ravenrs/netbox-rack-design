@@ -1,0 +1,36 @@
+{% extends 'generic/_base.html' %}
+{% load i18n %}
+
+{% comment %}
+Confirmation/form page for the "Re-base" action (PLAN-design-chains.md
+§2.2/§9.2): re-point this design's based_on at a different approved design.
+See views.DesignRebaseView / DesignRebaseForm.
+
+Context:
+  - object:     the Design being re-based
+  - form:       DesignRebaseForm (a "based_on" ModelChoiceField)
+  - return_url: where Cancel goes
+{% endcomment %}
+
+{% block title %}{% trans "Re-base" %} {{ object }}{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <h5 class="card-header">{% trans "Re-base design" %}</h5>
+    <div class="card-body">
+      <p>
+        {% blocktrans trimmed with title=object %}
+          Re-point <strong>{{ title }}</strong>'s baseline at a different
+          approved design. Only an approved design may be chosen, and a
+          change that would create a cycle in the lineage is rejected.
+        {% endblocktrans %}
+      </p>
+      <form method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="btn btn-primary">{% trans "Re-base" %}</button>
+        <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Cancel" %}</a>
+      </form>
+    </div>
+  </div>
+{% endblock %}

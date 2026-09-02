@@ -2,9 +2,13 @@
 
 from decimal import Decimal
 
+from core.models import ObjectType
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import Rack, Site
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from users.models import ObjectPermission, User
 from utilities.testing import TestCase, ViewTestCases, create_tags
 
 from .. import views
@@ -173,6 +177,170 @@ class DesignFormTest(TestCase):
         form = DesignForm(data=self._form_data([self.foreign_rack]))
         self.assertFalse(form.is_valid())
         self.assertIn("racks", form.errors)
+
+
+class DesignFormFrozenRacksTest(TestCase):
+    """
+    The `racks` scope of an approved design must not change through the
+    generic edit form (PLAN-design-chains.md §2.2/G4, hole 2). The model's
+    `clean()` cannot see this the ordinary way -- Django's ModelForm never
+    touches an instance's m2m before calling its `full_clean()` -- so
+    `DesignForm.clean()` carries its own check, using `self.instance`'s
+    PRE-edit field values (still untouched at the point `clean()` runs,
+    before `_post_clean()` applies the submitted ones).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+
+    def _form_data(self, racks, status=DesignStatusChoices.STATUS_APPROVED, title="Approved"):
+        return {
+            "title": title,
+            "site": self.site.pk,
+            "status": status,
+            "racks": [r.pk for r in racks],
+        }
+
+    def test_rack_scope_change_rejected_on_approved_design(self):
+        design = Design.objects.create(
+            title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        design.racks.set([self.racks[0]])
+        form = DesignForm(data=self._form_data([self.racks[1]]), instance=design)
+        self.assertFalse(form.is_valid())
+        self.assertIn("racks", form.errors)
+
+    def test_rack_scope_unchanged_allowed_on_approved_design(self):
+        design = Design.objects.create(
+            title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        design.racks.set([self.racks[0]])
+        form = DesignForm(data=self._form_data([self.racks[0]]), instance=design)
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_rack_scope_change_allowed_on_draft_design(self):
+        design = Design.objects.create(title="Draft", site=self.site)
+        design.racks.set([self.racks[0]])
+        form = DesignForm(
+            data=self._form_data([self.racks[1]], status=DesignStatusChoices.STATUS_DRAFT),
+            instance=design,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_status_change_allowed_on_approved_design(self):
+        # Un-approving (the escape hatch) must still work when racks are
+        # resubmitted unchanged.
+        design = Design.objects.create(
+            title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        design.racks.set([self.racks[0]])
+        form = DesignForm(
+            data=self._form_data([self.racks[0]], status=DesignStatusChoices.STATUS_DRAFT),
+            instance=design,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_summary_and_link_editable_on_approved_design(self):
+        design = Design.objects.create(
+            title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        design.racks.set([self.racks[0]])
+        data = self._form_data([self.racks[0]])
+        data["summary"] = "Updated summary"
+        data["link"] = "https://example.com/ticket/1"
+        form = DesignForm(data=data, instance=design)
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_rack_scope_settable_on_create_of_approved_design(self):
+        form = DesignForm(data=self._form_data(self.racks, title="Brand new"))
+        self.assertTrue(form.is_valid(), form.errors)
+        design = form.save()
+        self.assertEqual(set(design.racks.all()), set(self.racks))
+
+
+class DesignFormBasedOnTest(TestCase):
+    """
+    DesignForm's `based_on` field expresses the chain rules from
+    PLAN-design-chains.md §2.1/§2.2: only an approved design is derivable, a
+    design cannot be offered as its own parent, and the model's cycle guard
+    must surface as an ordinary form error rather than a 500.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.other_site = Site.objects.create(name="Other Site 2", slug="other-site-2")
+
+        cls.approved = Design.objects.create(
+            title="Approved Parent", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft = Design.objects.create(
+            title="Draft Parent", site=cls.site, status=DesignStatusChoices.STATUS_DRAFT,
+        )
+        cls.approved_other_site = Design.objects.create(
+            title="Approved Elsewhere", site=cls.other_site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+
+    def _form_data(self, based_on=None, site=None, title="Child"):
+        data = {
+            "title": title,
+            "site": (site or self.site).pk,
+            "status": DesignStatusChoices.STATUS_DRAFT,
+        }
+        if based_on is not None:
+            data["based_on"] = based_on.pk
+        return data
+
+    def test_queryset_offers_only_approved_designs(self):
+        form = DesignForm()
+        queryset = form.fields["based_on"].queryset
+        self.assertIn(self.approved, queryset)
+
+    def test_draft_design_not_offered_as_parent(self):
+        form = DesignForm()
+        queryset = form.fields["based_on"].queryset
+        self.assertNotIn(self.draft, queryset)
+
+    def test_draft_parent_rejected_on_submit(self):
+        form = DesignForm(data=self._form_data(based_on=self.draft))
+        self.assertFalse(form.is_valid())
+        self.assertIn("based_on", form.errors)
+
+    def test_design_not_offered_as_its_own_parent(self):
+        form = DesignForm(instance=self.approved)
+        queryset = form.fields["based_on"].queryset
+        self.assertNotIn(self.approved, queryset)
+
+    def test_valid_parent_saves(self):
+        form = DesignForm(data=self._form_data(based_on=self.approved))
+        self.assertTrue(form.is_valid(), form.errors)
+        design = form.save()
+        self.assertEqual(design.based_on_id, self.approved.pk)
+
+    def test_cross_site_parent_rejected_on_submit(self):
+        form = DesignForm(data=self._form_data(based_on=self.approved_other_site))
+        self.assertFalse(form.is_valid())
+        self.assertIn("based_on", form.errors)
+
+    def test_cycle_error_surfaces_as_form_error(self):
+        # approved -> child (already saved), then try to re-point approved's
+        # based_on at child: a 2-node cycle. Must come back as a form error on
+        # `based_on`, never as an unhandled exception / 500.
+        child = Design.objects.create(
+            title="Child of approved",
+            site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+            based_on=self.approved,
+        )
+        data = self._form_data(based_on=child, title=self.approved.title)
+        data["status"] = DesignStatusChoices.STATUS_APPROVED
+        form = DesignForm(data=data, instance=self.approved)
+        self.assertFalse(form.is_valid())
+        self.assertIn("based_on", form.errors)
 
 
 class DesignPlacementTest(ViewTestCases.PrimaryObjectViewTestCase):
@@ -1432,3 +1600,685 @@ class RackDesignsPanelTest(TestCase):
             kwargs={"pk": self.design.pk, "rack_id": self.rack.pk},
         )
         self.assertIn(elevation_url, content)
+
+
+class FrozenDesignStillRendersTest(TestCase):
+    """
+    G4 says read paths stay open: an approved (frozen) design must still
+    render, project and be viewable everywhere. No GET is gated.
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.view_designplacement",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+        cls.design = Design.objects.create(title="Frozen render design", site=cls.site)
+        cls.design.racks.add(cls.rack)
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=10,
+            target_face="front",
+        )
+        cls.design.status = DesignStatusChoices.STATUS_APPROVED
+        cls.design.save()
+
+    def test_detail_page_still_renders(self):
+        url = reverse("plugins:netbox_rack_design:design", kwargs={"pk": self.design.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+
+    def test_elevation_still_renders(self):
+        url = reverse("plugins:netbox_rack_design:design_elevation", kwargs={"pk": self.design.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+
+    def test_editor_default_still_renders(self):
+        # Note: viewing the editor needs only view_design (change_design gates
+        # editing affordances client-side / on save-layout, not the page GET).
+        url = reverse(
+            "plugins:netbox_rack_design:design_editor_default", kwargs={"pk": self.design.pk}
+        )
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+
+
+class DesignPlacementFrozenWriteTest(TestCase):
+    """
+    DesignPlacement delete/bulk-delete never run ``clean()`` (Django's delete
+    path calls no clean()), so they need their own frozen check
+    (PLAN-design-chains.md §2.2/G4) -- unlike create/edit, which already get
+    it for free from ``DesignPlacement.clean()`` via the form's
+    ``full_clean()``.
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.view_designplacement",
+        "netbox_rack_design.delete_designplacement",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][1]
+        cls.design = Design.objects.create(title="Frozen placement design", site=cls.site)
+        cls.placement = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=5,
+            target_face="front",
+        )
+        # Set APPROVED after creating the placement: ORM .create() never runs
+        # clean(), so this reaches a frozen design with a placement already
+        # attached -- exactly the state delete must guard against.
+        cls.design.status = DesignStatusChoices.STATUS_APPROVED
+        cls.design.save()
+
+    def test_delete_rejected_when_frozen(self):
+        url = reverse(
+            "plugins:netbox_rack_design:designplacement_delete", kwargs={"pk": self.placement.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(DesignPlacement.objects.filter(pk=self.placement.pk).exists())
+
+    def test_bulk_delete_rejected_when_frozen(self):
+        url = reverse("plugins:netbox_rack_design:designplacement_bulk_delete")
+        response = self.client.post(url, {
+            "pk": [self.placement.pk], "_confirm": "1", "confirm": "true",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(DesignPlacement.objects.filter(pk=self.placement.pk).exists())
+
+
+class DesignPowerFeedFrozenWriteTest(TestCase):
+    """
+    DesignPowerFeed has NO ``clean()`` override at all, so every one of its
+    CRUD views needs an explicit frozen check (PLAN-design-chains.md §2.2/G4).
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.view_designpowerfeed",
+        "netbox_rack_design.add_designpowerfeed",
+        "netbox_rack_design.change_designpowerfeed",
+        "netbox_rack_design.delete_designpowerfeed",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.rack = env["racks"][0]
+        cls.design = Design.objects.create(title="Frozen feed design", site=cls.site)
+        cls.feed = DesignPowerFeed.objects.create(design=cls.design, rack=cls.rack, name="Feed A")
+        cls.design.status = DesignStatusChoices.STATUS_APPROVED
+        cls.design.save()
+
+    def test_edit_rejected_when_frozen(self):
+        url = reverse(
+            "plugins:netbox_rack_design:designpowerfeed_edit", kwargs={"pk": self.feed.pk}
+        )
+        response = self.client.post(url, {
+            "design": self.design.pk, "rack": self.rack.pk, "name": "Feed A renamed",
+            "voltage": 230, "amperage": 32,
+            "phase": PowerFeedPhaseChoices.PHASE_SINGLE, "supply": PowerFeedSupplyChoices.SUPPLY_AC,
+        })
+        self.assertEqual(response.status_code, 302)
+        self.feed.refresh_from_db()
+        self.assertEqual(self.feed.name, "Feed A")
+
+    def test_delete_rejected_when_frozen(self):
+        url = reverse(
+            "plugins:netbox_rack_design:designpowerfeed_delete", kwargs={"pk": self.feed.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(DesignPowerFeed.objects.filter(pk=self.feed.pk).exists())
+
+    def test_bulk_delete_rejected_when_frozen(self):
+        url = reverse("plugins:netbox_rack_design:designpowerfeed_bulk_delete")
+        response = self.client.post(url, {
+            "pk": [self.feed.pk], "_confirm": "1", "confirm": "true",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(DesignPowerFeed.objects.filter(pk=self.feed.pk).exists())
+
+
+class DesignDeriveViewTest(TestCase):
+    """"Derive design" action (PLAN-design-chains.md §5 phase 1)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.approved = Design.objects.create(
+            title="Approved parent", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft = Design.objects.create(title="Draft parent", site=cls.site)
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design_derive", kwargs={"pk": design.pk})
+
+    def test_derive_from_approved_creates_child_based_on_it(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.approved))
+        self.assertEqual(response.status_code, 302)
+        child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
+        self.assertEqual(child.based_on_id, self.approved.pk)
+        self.assertEqual(child.status, DesignStatusChoices.STATUS_DRAFT)
+
+    def test_derive_copies_parents_rack_scope_as_a_snapshot(self):
+        # G6: the child must open onto the parent's racks, not an empty scope.
+        self.approved.racks.set(self.racks)
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.approved))
+        self.assertEqual(response.status_code, 302)
+        child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
+        self.assertEqual(
+            set(child.racks.values_list("pk", flat=True)),
+            {r.pk for r in self.racks},
+        )
+
+    def test_derive_from_parent_with_no_racks_succeeds_with_empty_scope(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        self.assertEqual(self.approved.racks.count(), 0)
+        response = self.client.post(self._url(self.approved))
+        self.assertEqual(response.status_code, 302)
+        child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
+        self.assertEqual(child.racks.count(), 0)
+
+    def test_derive_rack_scope_is_a_snapshot_not_a_live_link(self):
+        # Later racks added to the parent must NOT retroactively appear on
+        # the child -- the child owns its own scope once derived (G6).
+        self.approved.racks.set([self.racks[0]])
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.approved))
+        self.assertEqual(response.status_code, 302)
+        child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
+        self.assertEqual(
+            set(child.racks.values_list("pk", flat=True)), {self.racks[0].pk}
+        )
+
+        self.approved.racks.add(self.racks[1])
+        child.refresh_from_db()
+        self.assertEqual(
+            set(child.racks.values_list("pk", flat=True)), {self.racks[0].pk}
+        )
+
+    def test_derive_from_draft_is_refused(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        before = set(Design.objects.values_list("pk", flat=True))
+        response = self.client.post(self._url(self.draft))
+        self.assertEqual(response.status_code, 302)
+        # No new design was created.
+        after = set(Design.objects.values_list("pk", flat=True))
+        self.assertEqual(before, after)
+
+    def test_derive_without_permission_denied(self):
+        response = self.client.get(self._url(self.approved))
+        self.assertIn(response.status_code, (403, 404))
+        response = self.client.post(self._url(self.approved))
+        self.assertIn(response.status_code, (403, 404))
+        self.assertEqual(Design.objects.count(), 2)
+
+
+class DesignRebaseViewTest(TestCase):
+    """"Re-base" action (PLAN-design-chains.md §2.2/§9.2)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.approved_a = Design.objects.create(
+            title="Approved A", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.approved_b = Design.objects.create(
+            title="Approved B", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft_target = Design.objects.create(title="Draft target", site=cls.site)
+        cls.child = Design.objects.create(
+            title="Child", site=cls.site, based_on=cls.approved_a,
+        )
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design_rebase", kwargs={"pk": design.pk})
+
+    def test_rebase_to_approved_target_succeeds(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
+        response = self.client.post(self._url(self.child), {"based_on": self.approved_b.pk})
+        self.assertEqual(response.status_code, 302)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, self.approved_b.pk)
+
+    def test_rebase_to_draft_target_refused(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
+        response = self.client.post(self._url(self.child), {"based_on": self.draft_target.pk})
+        self.assertEqual(response.status_code, 200)  # re-renders the form with an error
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, self.approved_a.pk)
+
+    def test_rebase_creating_a_cycle_is_refused(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
+        # approved_a based on nothing today; point it at `child` -> child -> a
+        # would only cycle if we then re-based `child` onto something that
+        # loops back to itself. Build A -> B -> child, then try to rebase A
+        # onto child (A -> B -> child -> A is a cycle).
+        self.approved_b.based_on = self.approved_a
+        self.approved_b.full_clean()
+        self.approved_b.save()
+        self.child.based_on = self.approved_b
+        self.child.full_clean()
+        self.child.save()
+        # Re-approve A isn't needed; try to rebase approved_a onto child --
+        # DesignRebaseForm restricts the queryset to APPROVED designs, so
+        # child (draft) cannot even be offered/selected -- approve it first
+        # to exercise the cycle guard itself, not the approved-only rule.
+        self.child.status = DesignStatusChoices.STATUS_APPROVED
+        self.child.save()
+        response = self.client.post(self._url(self.approved_a), {"based_on": self.child.pk})
+        self.assertEqual(response.status_code, 200)
+        self.approved_a.refresh_from_db()
+        self.assertIsNone(self.approved_a.based_on_id)
+
+    def test_rebase_without_permission_denied(self):
+        response = self.client.get(self._url(self.child))
+        self.assertIn(response.status_code, (403, 404))
+        response = self.client.post(self._url(self.child), {"based_on": self.approved_b.pk})
+        self.assertIn(response.status_code, (403, 404))
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, self.approved_a.pk)
+
+
+class DesignEditorChainWidgetTest(TestCase):
+    """
+    Phase 4 (PLAN-design-chains.md §5/G3): the editor payload must carry
+    provenance (``inherited``/``source_design_id``/``source_design_name``) and
+    conflict flags (``conflict``/``conflict_reason``) on every widget dict, and
+    the design-level ``conflicts`` a chain produces must reach the editor
+    context as ``chain_conflicts`` so the frontend can render one persistent
+    panel (§8.2/§8.3).
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.change_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+
+        cls.parent = Design.objects.create(title="Network sweep IDS-1000", site=cls.site)
+        cls.parent.racks.add(cls.rack)
+        cls.upstream_add = DesignPlacement.objects.create(
+            design=cls.parent,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=10,
+            target_face="front",
+            proposed_name="srv-a",
+        )
+        cls.parent.status = DesignStatusChoices.STATUS_APPROVED
+        cls.parent.save()
+
+        cls.child = Design.objects.create(
+            title="Server build IDS-2000", site=cls.site, based_on=cls.parent,
+        )
+        cls.child.racks.add(cls.rack)
+        # The child's OWN placement, so there is at least one non-inherited
+        # widget in the same rack to contrast against.
+        cls.own_add = DesignPlacement.objects.create(
+            design=cls.child,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=20,
+            target_face="front",
+            proposed_name="own-device",
+        )
+
+        # An unrelated, unchained design in the same scope for the "unchanged
+        # payload" assertion.
+        cls.plain = Design.objects.create(title="Plain design", site=cls.site)
+        cls.plain.racks.add(cls.rack)
+
+    def _editor_url(self, design):
+        return reverse(
+            "plugins:netbox_rack_design:design_editor_default",
+            kwargs={"pk": design.pk},
+        )
+
+    def _widget_by_placement(self, widgets, placement_id):
+        matches = [w for w in widgets if w["placement_id"] == placement_id]
+        self.assertEqual(len(matches), 1, widgets)
+        return matches[0]
+
+    def test_inherited_widget_carries_provenance(self):
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        block = response.context["all_rack_blocks"][0]
+        widget = self._widget_by_placement(block["widgets"], self.upstream_add.pk)
+        self.assertTrue(widget["inherited"])
+        self.assertEqual(widget["source_design_id"], self.parent.pk)
+        self.assertEqual(widget["source_design_name"], str(self.parent))
+        self.assertFalse(widget["conflict"])
+        self.assertIsNone(widget["conflict_reason"])
+
+    def test_own_widget_is_not_inherited(self):
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        block = response.context["all_rack_blocks"][0]
+        widget = self._widget_by_placement(block["widgets"], self.own_add.pk)
+        self.assertFalse(widget["inherited"])
+        self.assertIsNone(widget["source_design_id"])
+        self.assertIsNone(widget["source_design_name"])
+        self.assertFalse(widget["conflict"])
+        self.assertIsNone(widget["conflict_reason"])
+
+    def test_unchained_design_payload_unchanged(self):
+        # A design with no based_on gets the same five keys, all falsy/None,
+        # and an empty chain_conflicts -- the new keys must not perturb the
+        # existing single-layer case.
+        response = self.client.get(self._editor_url(self.plain))
+        self.assertHttpStatus(response, 200)
+        self.assertEqual(response.context["chain_conflicts"], [])
+        block = response.context["all_rack_blocks"][0]
+        self.assertTrue(block["widgets"])
+        for widget in block["widgets"]:
+            self.assertFalse(widget["inherited"])
+            self.assertIsNone(widget["source_design_id"])
+            self.assertIsNone(widget["source_design_name"])
+            self.assertFalse(widget["conflict"])
+            self.assertIsNone(widget["conflict_reason"])
+
+    def test_chain_conflicts_empty_for_a_clean_approved_chain(self):
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        self.assertEqual(response.context["chain_conflicts"], [])
+
+    def test_chain_conflicts_populated_for_an_implemented_ancestor(self):
+        self.parent.status = DesignStatusChoices.STATUS_IMPLEMENTED
+        self.parent.save()
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        conflicts = response.context["chain_conflicts"]
+        self.assertEqual(len(conflicts), 1, conflicts)
+        entry = conflicts[0]
+        self.assertEqual(entry["kind"], "ancestor_implemented")
+        self.assertEqual(entry["severity"], "error")
+        self.assertTrue(entry["detail"])
+        self.assertEqual(entry["rack_id"], self.rack.pk)
+        self.assertEqual(entry["source_design_id"], self.parent.pk)
+        self.assertEqual(entry["source_design_name"], str(self.parent))
+        # A chain-level refusal is not about any one tile.
+        self.assertIsNone(entry["slot_key"])
+        # And the inherited layer is gone entirely -- the upstream add no
+        # longer projects at all, so the refusal is visible instead of a
+        # silently-vanished rack (§9.5).
+        block = response.context["all_rack_blocks"][0]
+        placement_ids = [w["placement_id"] for w in block["widgets"]]
+        self.assertNotIn(self.upstream_add.pk, placement_ids)
+
+    def test_settled_name_conflict_surfaces_on_slot_and_in_chain_conflicts(self):
+        # A resolvable prefix source is not configured in these tests, so a
+        # named upstream placement whose name carries no derivable prefix
+        # still resolves cleanly (see naming.py) -- exercise the case that
+        # DOES fail: reuse the projection-level guarantee that a conflict flag
+        # on a slot always has a matching chain_conflicts row referencing the
+        # SAME placement (identity), by forcing settled_name resolution to
+        # fail via an unresolvable planning prefix token.
+        from unittest.mock import patch
+
+        with patch(
+            "netbox_rack_design.naming.settled_name_status",
+            return_value=(None, {"detail": "no prefix source configured"}),
+        ):
+            response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        block = response.context["all_rack_blocks"][0]
+        widget = self._widget_by_placement(block["widgets"], self.upstream_add.pk)
+        self.assertTrue(widget["conflict"])
+        self.assertIn("no prefix source configured", widget["conflict_reason"])
+
+        conflicts = response.context["chain_conflicts"]
+        matches = [c for c in conflicts if c["kind"] == "settled_name"]
+        self.assertEqual(len(matches), 1, conflicts)
+        entry = matches[0]
+        self.assertEqual(entry["slot_key"], self.upstream_add.pk)
+        self.assertEqual(entry["source_design_id"], self.parent.pk)
+
+
+class DesignChainHealthViewTest(TestCase):
+    """
+    The cross-design staleness / re-base REPORT (PLAN-design-chains.md G4's
+    reporting half): "which of my designs need attention right now" -- a
+    refused chain (an implemented or unapproved ancestor, or a broken
+    lineage) or inert (stale) placements. Distinct from the per-design cards
+    on design.html and the editor's ``chain_conflicts`` panel (which already
+    say all of this for ONE design): this is the across-every-design view,
+    reached from the nav, that must not re-derive its answer per row with a
+    naive per-design chain walk (that would be N designs * M ancestors deep
+    queries -- see the view's own docstring for the query-count story).
+    """
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+        cls.devices = env["devices"]
+
+        # 1. Implemented parent -> child's chain is refused until re-based.
+        cls.implemented_parent = Design.objects.create(
+            title="Implemented parent", site=cls.site,
+            status=DesignStatusChoices.STATUS_IMPLEMENTED,
+        )
+        cls.child_of_implemented = Design.objects.create(
+            title="Child of implemented", site=cls.site, based_on=cls.implemented_parent,
+        )
+
+        # 2. Draft (never-approved) parent -> chain refused the same way.
+        cls.draft_parent = Design.objects.create(title="Draft parent", site=cls.site)
+        cls.child_of_draft = Design.objects.create(
+            title="Child of draft", site=cls.site, based_on=cls.draft_parent,
+        )
+
+        # 3. A healthy chain: approved parent, nothing wrong -- must NOT appear.
+        cls.approved_parent = Design.objects.create(
+            title="Approved parent", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.healthy_child = Design.objects.create(
+            title="Healthy child", site=cls.site, based_on=cls.approved_parent,
+        )
+
+        # 4. Unchained, otherwise-fine design -- must NOT appear.
+        cls.unchained = Design.objects.create(title="Unchained design", site=cls.site)
+
+        # 5. Stale placements: two inert rows (their real devices were deleted).
+        cls.stale_design = Design.objects.create(title="Stale design", site=cls.site)
+        cls.stale_move = DesignPlacement.objects.create(
+            design=cls.stale_design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.devices[0],
+            target_rack=cls.rack,
+            target_position=3,
+        )
+        cls.stale_remove = DesignPlacement.objects.create(
+            design=cls.stale_design,
+            kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=cls.devices[1],
+        )
+        cls.devices[0].delete()
+        cls.devices[1].delete()
+        cls.stale_move.refresh_from_db()
+        cls.stale_remove.refresh_from_db()
+
+    @property
+    def _url(self):
+        return reverse("plugins:netbox_rack_design:design_chain_health")
+
+    def test_returns_200(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+
+    def test_implemented_parent_reported_with_reason_and_rebase_link(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(self.child_of_implemented.title, content)
+        self.assertIn("implemented", content.lower())
+        rebase_url = reverse(
+            "plugins:netbox_rack_design:design_rebase",
+            kwargs={"pk": self.child_of_implemented.pk},
+        )
+        self.assertIn(rebase_url, content)
+
+    def test_draft_parent_reported_with_reason(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(self.child_of_draft.title, content)
+        rebase_url = reverse(
+            "plugins:netbox_rack_design:design_rebase",
+            kwargs={"pk": self.child_of_draft.pk},
+        )
+        self.assertIn(rebase_url, content)
+
+    def test_healthy_chained_design_not_reported(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertNotIn(self.healthy_child.title, content)
+
+    def test_unchained_design_not_reported(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertNotIn(self.unchained.title, content)
+
+    def test_stale_placements_reported_with_count_and_fix_link(self):
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(self.stale_design.title, content)
+        self.assertIn("2", content)
+        placements_url = reverse("plugins:netbox_rack_design:designplacement_list")
+        self.assertIn(placements_url, content)
+        self.assertIn(f"design_id={self.stale_design.pk}", content)
+
+    def test_empty_state_when_nothing_needs_attention(self):
+        # Drop every flagged design/placement so the install is fully healthy.
+        Design.objects.filter(
+            pk__in=[
+                self.child_of_implemented.pk,
+                self.child_of_draft.pk,
+                self.stale_design.pk,
+            ]
+        ).delete()
+        response = self.client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        self.assertEqual(response.context["row_count"], 0)
+        content = response.content.decode()
+        self.assertIn("healthy", content.lower())
+
+    def test_without_permission_denied(self):
+        anonymous_client_response = self.client_class().get(self._url)
+        self.assertIn(anonymous_client_response.status_code, (302, 403))
+
+    def test_permission_restricted_user_only_sees_permitted_designs(self):
+        # A user whose ObjectPermission is CONSTRAINED to the (unflagged)
+        # healthy_child must see none of the flagged rows, even though they
+        # exist -- the report must never leak a design's existence to a user
+        # who cannot view it (task: "respect object permissions").
+        restricted = User.objects.create_user(username="restricted")
+        permission = ObjectPermission(
+            name="chain-health-restricted", actions=["view"],
+            constraints={"pk": self.healthy_child.pk},
+        )
+        permission.save()
+        permission.users.add(restricted)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
+        client = self.client_class()
+        client.force_login(restricted)
+
+        response = client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        self.assertEqual(response.context["row_count"], 0)
+        content = response.content.decode()
+        self.assertNotIn(self.child_of_implemented.title, content)
+        self.assertNotIn(self.stale_design.title, content)
+
+    def test_permission_restricted_user_sees_only_their_flagged_design(self):
+        restricted = User.objects.create_user(username="restricted2")
+        permission = ObjectPermission(
+            name="chain-health-restricted-2", actions=["view"],
+            constraints={"pk": self.stale_design.pk},
+        )
+        permission.save()
+        permission.users.add(restricted)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
+        client = self.client_class()
+        client.force_login(restricted)
+
+        response = client.get(self._url)
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(self.stale_design.title, content)
+        self.assertNotIn(self.child_of_implemented.title, content)
+        self.assertNotIn(self.child_of_draft.title, content)
+
+    def test_query_count_stays_bounded_as_design_count_grows(self):
+        # The whole point of resolving every design's chain in ONE batched
+        # graph walk (rather than one design.baseline_chain() -- itself one
+        # query per ancestor hop -- per row) is that the query count does NOT
+        # grow with how many designs exist. Prove it directly against the row
+        # builder (bypassing the surrounding HTTP request's own unrelated
+        # queries -- session, config-revision cache, notifications -- which
+        # are noise this test is not about and can shift for reasons that
+        # have nothing to do with the number of designs): snapshot the count
+        # with the fixture as built, add a pile of unrelated healthy designs,
+        # and assert the count is unchanged.
+        # Warm up any per-user permission cache first (``restrict()`` caches
+        # on the user instance), so it does not masquerade as a query-count
+        # difference driven by the design count added below.
+        views._chain_health_rows(self.user)
+        with CaptureQueriesContext(connection) as before:
+            views._chain_health_rows(self.user)
+        baseline_queries = len(before.captured_queries)
+
+        Design.objects.bulk_create([
+            Design(title=f"Bulk design {i}", site=self.site, sequence=1000 + i)
+            for i in range(25)
+        ])
+
+        with CaptureQueriesContext(connection) as after:
+            views._chain_health_rows(self.user)
+        self.assertEqual(
+            len(after.captured_queries), baseline_queries,
+            "query count must not scale with the total number of designs",
+        )
+        # And it should be small in absolute terms, not just stable.
+        self.assertLessEqual(baseline_queries, 6, before.captured_queries)

@@ -1228,18 +1228,51 @@
                 var rows = feeds.map(function (f) {
                     var checked = (source === "real" && currentReal === f.id)
                         || (source === "planned" && currentPlanned === f.id);
-                    return '<label class="form-check">'
+                    // A design-chain child sees its approved ancestors' planned
+                    // feeds too (docs/design-chains.md); those entries carry
+                    // `inherited`/`design_id`/`design_name` (absent for own
+                    // feeds and for an unchained design's whole response), so a
+                    // planner can tell "Feed A from the network design" apart
+                    // from an identically-named feed of their own.
+                    var inheritedTag = f.inherited
+                        ? ' <span class="text-muted small nbx-rd-feed-inherited-tag">— from '
+                            + String(f.design_name || "another design").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                            + "</span>"
+                        : "";
+                    return '<label class="form-check' + (f.inherited ? " nbx-rd-feed-inherited" : "") + '">'
                         + '<input class="form-check-input" type="radio" name="nbx-rd-feed-pick" '
                         + 'data-source="' + source + '" data-id="' + f.id + '"'
                         + (checked ? " checked" : "") + ">"
-                        + '<span class="form-check-label">' + feedRowLabel(f) + "</span>"
+                        + '<span class="form-check-label">' + feedRowLabel(f) + inheritedTag + "</span>"
                         + "</label>";
                 }).join("");
                 return '<div class="nbx-rd-feed-section"><div class="text-muted small text-uppercase">'
                     + title + "</div>" + rows + "</div>";
             }
             html += section("Real feeds", real, "real");
-            html += section("Planned feeds", planned, "planned");
+            // Own planned feeds render exactly as before, unconditionally
+            // first (the API already puts them first). Inherited feeds --
+            // absent entirely for an unchained design -- get their own
+            // section per source ancestor, oldest-first, so the boundary
+            // between "mine" and "inherited" is a section break rather than
+            // something to spot within one flat list.
+            var ownPlanned = planned.filter(function (f) { return !f.inherited; });
+            var inheritedPlanned = planned.filter(function (f) { return !!f.inherited; });
+            html += section("Planned feeds", ownPlanned, "planned");
+            var inheritedGroups = [];
+            var byDesign = {};
+            inheritedPlanned.forEach(function (f) {
+                var key = String(f.design_id);
+                if (!byDesign[key]) {
+                    byDesign[key] = { name: f.design_name, feeds: [] };
+                    inheritedGroups.push(byDesign[key]);
+                }
+                byDesign[key].feeds.push(f);
+            });
+            inheritedGroups.forEach(function (g) {
+                var safeName = String(g.name || "ancestor design").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+                html += section("Planned feeds — inherited from " + safeName, g.feeds, "planned");
+            });
             listEl.innerHTML = html;
             listEl.querySelectorAll("input[name=nbx-rd-feed-pick]").forEach(function (r) {
                 r.addEventListener("change", function () {
@@ -2495,6 +2528,17 @@
             }
         });
 
+        // Chain-conflict markers (PLAN-design-chains.md §8.2/§8.5): rendered
+        // server-side (inc/rack_block.html) as a sibling `.nbx-rd-conflict-
+        // stripe`, stamped with the SAME widget index as the tile it
+        // describes. Indexed here once so refreshGhosts can hide/show it as
+        // that tile moves through the session (see the atOrigin pass above).
+        var conflictMarkerEls = {};
+        block.querySelectorAll(".nbx-rd-conflict-stripe[data-widget-index]").forEach(function (m) {
+            var widx = parseInt(m.getAttribute("data-widget-index"), 10);
+            if (!isNaN(widx)) { conflictMarkerEls[widx] = m; }
+        });
+
         // Config-declared planning attributes: an `add` rehydrated on load gets
         // its attributes button back, pre-filled from the server-delivered
         // widget.planning_data (views.py _slot_to_widget). No-op for a
@@ -2967,7 +3011,15 @@
                     if (!st) { return; }
                     var w = st.widget;
                     if (w.opposite_face) { return; }
-                    if (w.device_id == null) { return; }
+                    // PLAN-design-chains.md §8.4/G2/G3: an INHERITED slot with
+                    // no real dcim.Device (an ancestor's planned `add`,
+                    // rendered here as state="existing" + the `inherited`
+                    // flag) must still go through the atOrigin/move_in
+                    // machinery below -- dragging it is what CREATES a move
+                    // in this design (base_placement is exactly for this).
+                    // Without this relaxation the move-out ghost / move_in
+                    // styling never appeared for such a drag.
+                    if (w.device_id == null && !w.inherited) { return; }
                     if (w.kind !== "existing") { return; }
                     if (st.removed) { return; }
 
@@ -3008,6 +3060,17 @@
                         var mvContent = itemEl.querySelector(".grid-stack-item-content");
                         stampAttributionAttrs(w, mvContent);
                         attachPlacementFieldsButton(w, mvContent, "move");
+                    }
+
+                    // Chain-conflict marker (PLAN-design-chains.md §8.5.3):
+                    // its geometry is fixed at load time from the server's
+                    // projection, so it visually detaches from a tile the
+                    // planner just relocated -- hide it while away from
+                    // origin (a conflict mid-resolution is not the same
+                    // conflict any more) and restore it on return.
+                    var marker = conflictMarkerEls[idx];
+                    if (marker) {
+                        marker.classList.toggle("nbx-rd-hidden-during-move", !atOrigin);
                     }
                 });
                 syncOwnedShadows();
@@ -5229,7 +5292,11 @@
                 }
                 return;
             }
-            if (st.widget.device_id == null) { return; }
+            // Relaxed for an inherited slot with no real device (an
+            // ancestor's planned `add`, base_placement-backed, §8.4/G2): the
+            // remove button must still work so the planner can flag it,
+            // exactly as for a real device.
+            if (st.widget.device_id == null && !st.widget.inherited) { return; }
             if (isMoveTile(itemEl, idx, st)) {
                 cancelMove(itemEl, idx, st);
             } else {
@@ -5372,6 +5439,49 @@
                 if (st.removed && isAdd) {
                     item.kind = "add";
                     item.cancel = true;
+                    buckets[frame.bucketFor(faceKey)].push(withAddress(item));
+                    return;
+                }
+
+                // PLAN-design-chains.md §8.5.1/G2/G3: an INHERITED slot with
+                // no real device (an ancestor's still-planned 'add', rendered
+                // as state="existing" + the `inherited` flag) has no device
+                // to be "at rest" at -- the server's own at_real() check
+                // (api/views.py's _reconcile_item) can therefore never
+                // confirm "unchanged" the way it does for a real device, and
+                // would otherwise silently promote every untouched inherited
+                // tile into a phantom move on every save. So this branch,
+                // unlike the generic "existing" fallback below:
+                //   - sends an EXPLICIT "move"/"remove" kind (never
+                //     "existing") whenever the planner actually touched it --
+                //     that explicitness is exactly what api/views.py's
+                //     _reconcile_item requires before it will resolve
+                //     base_placement (it never does so for the "existing"
+                //     fallback, on purpose: an unmodified inherited tile must
+                //     never be silently promoted into a new placement).
+                //   - sends NOTHING at all when untouched: the ancestor's own
+                //     placement already covers it.
+                if (w.inherited && item.device_id == null) {
+                    if (st.removed) {
+                        item.kind = "remove";
+                        item.u_position = null;
+                        item.face = "";
+                        buckets[frame.bucketFor(faceKey)].push(item);
+                        return;
+                    }
+                    var inhGsH = Math.round((w.u_height || 1) * 2);
+                    var atOriginNow;
+                    if (faceKey === "other") {
+                        atOriginNow = st.origFace === "";
+                    } else {
+                        var inhNode = itemEl.gridstackNode;
+                        var inhGsY = (inhNode && inhNode.y != null)
+                            ? inhNode.y : parseInt(itemEl.getAttribute("gs-y"), 10);
+                        atOriginNow = (faceKey === st.origFace)
+                            && (inhGsY === uPositionToGsY(st.origUPosition, inhGsH));
+                    }
+                    if (atOriginNow) { return; }
+                    item.kind = "move";
                     buckets[frame.bucketFor(faceKey)].push(withAddress(item));
                     return;
                 }
@@ -6990,6 +7100,14 @@
             var newName = content.getAttribute("data-new-name");
             var movedTo = content.getAttribute("data-moved-to");
             var power = content.getAttribute("data-power");
+            // Chain provenance/conflict (PLAN-design-chains.md §8.4/§8.5): an
+            // inherited tile's hover card names the source design (the whole
+            // point of the marking -- it draws like a normal device, so the
+            // card is where the "this came from upstream" story lives); a
+            // conflict tile's card explains WHY, in the planner's own words
+            // from the server (never blocking, per §8.2).
+            var sourceDesignName = content.getAttribute("data-source-design-name");
+            var conflictReason = content.getAttribute("data-conflict-reason");
             // Chassis occupancy (spec §10.4): the rack view answers "what is in
             // there / is there room" without trying to edit it.
             var baysUsed = content.getAttribute("data-bays-used");
@@ -7004,7 +7122,7 @@
             try { planning = JSON.parse(content.getAttribute("data-planning") || "[]"); }
             catch (e) { planning = []; }
             if (!name && !deviceType && !role && !tenant && !power && !baysTotal
-                && !planning.length) { return false; }
+                && !planning.length && !sourceDesignName && !conflictReason) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -7022,6 +7140,8 @@
                 ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
                 ["To", movedTo],
                 ["Bays", baysTotal ? (baysUsed + " of " + baysTotal + " used") : null],
+                ["Source", sourceDesignName],
+                ["Conflict", conflictReason],
             ].concat(planning).forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");

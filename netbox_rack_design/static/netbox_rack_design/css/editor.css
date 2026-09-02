@@ -1063,6 +1063,78 @@
     );
 }
 
+/* ---- Phase 4: chain-conflict marker (PLAN-design-chains.md §8.2/§8.5) ---- */
+/* An upstream conflict ("your ancestor now occupies the U you planned onto,
+   or is itself implemented/broken") does NOT block save and is not the
+   planner's fault to fix by editing this tile, so it reuses the stripe-bar
+   GEOMETRY (same outside-the-frame bar as .nbx-rd-stripe above) but in a
+   DISTINCT colour -- amber/warning, never the red reserved for displacement
+   -- so the two are never visually confused. The occupying tile itself is
+   untouched (no collapse, no z-index games): the marker is purely additive.
+   Unlike .nbx-rd-stripe (which only ever renders for a genuinely vacated
+   slot), a conflict marker sits ALONGSIDE a live, still-rendered tile. */
+.nbx-rd-conflict-stripe {
+    position: absolute;
+    left: calc(100% + 2px);
+    width: 10px;
+    z-index: 5;
+    pointer-events: auto;
+    cursor: default;
+    border: 1px solid var(--tblr-warning, #f59f00);
+    border-radius: 2px;
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0,
+        transparent 4px,
+        var(--tblr-warning, #f59f00) 4px,
+        var(--tblr-warning, #f59f00) 8px
+    );
+}
+
+/* When two markers would land on the same right edge (a displaced ghost AND
+   a live conflict both hanging off the same grid), offset the conflict bar
+   further out so neither hides the other. */
+.nbx-rd-grid-wrap .nbx-rd-stripe ~ .nbx-rd-conflict-stripe,
+.nbx-rd-grid-wrap .nbx-rd-conflict-stripe ~ .nbx-rd-stripe {
+    left: calc(100% + 14px);
+}
+
+/* Hidden while the planner is actively relocating the tile it describes (see
+   editor.js's refreshGhosts): a conflict marker's geometry is fixed at load
+   time from the SERVER's projection and would otherwise visually detach from
+   a tile the user just dragged elsewhere, misreporting a conflict that is
+   mid-resolution. Reappears if the tile returns to its original slot. */
+.nbx-rd-conflict-stripe.nbx-rd-hidden-during-move {
+    display: none;
+}
+
+/* ---- Phase 4: inherited tile (PLAN-design-chains.md §8.4/§8.5) ---------- */
+/* An inherited slot ("existing" + inherited flag, never a new state) draws
+   like the normal device it represents -- it IS the world from this design's
+   point of view -- with a light provenance marking layered on top: a dashed
+   indigo outline (distinct from the amber "dirty"/red "error" outlines
+   already in use) plus a small corner flag so the eye can tell "this came
+   from upstream" without needing to hover. The hover card (editor.js
+   fillCard) names the source design for the full story. */
+.grid-stack-item.nbx-rd-flag-inherited > .grid-stack-item-content {
+    outline: 2px dashed var(--tblr-indigo, #4263eb);
+    outline-offset: -2px;
+}
+
+.grid-stack-item.nbx-rd-flag-inherited > .grid-stack-item-content::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 7px 7px 0 0;
+    border-color: var(--tblr-indigo, #4263eb) transparent transparent transparent;
+    pointer-events: none;
+    z-index: 2;
+}
+
 /* ---- Device hover card (name / role / tenant) -------------------------- */
 /* A floating card appended to <body> and absolutely positioned by editor.js on
    hover. pointer-events:none guarantees it never blocks dragging a tile or the
@@ -1589,4 +1661,97 @@
     box-shadow: -7px 0 9px -3px rgba(0, 0, 0, 0.35),
                 3px 2px 8px rgba(0, 0, 0, 0.3);
     transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* ---- Phase 4: legend entries (PLAN-design-chains.md §8.6) --------------- */
+/* Legend debt fixed here: `displaced` and the `.nbx-rd-error` ring used to
+   appear in the legend NOWHERE (a user had to hover a stripe to learn what
+   it meant). These four swatches live in editor.css rather than
+   rack_design.css only because that is the stylesheet this phase owns --
+   rack_design.css's existing five state swatches are untouched.
+
+   `.nbx-rd-swatch.nbx-rd-flag-inherited` / `-conflict` are REAL filter
+   swatches (their legend checkboxes carry data-rd-flag, wired by
+   legend_filter.js). `.nbx-rd-swatch.nbx-rd-info-displaced` /
+   `-info-error` are INFO-ONLY keys with no checkbox: `displaced` is not an
+   independently-filterable thing (unchecking the underlying state already
+   hides its stripe, since the stripe carries that state's own class) and
+   `.nbx-rd-error` is a transient server-rejection highlight, not a
+   persisted flag -- there is nothing to filter, only something to explain. */
+.nbx-rd-swatch.nbx-rd-flag-inherited {
+    background-color: transparent;
+    border: 2px dashed var(--tblr-indigo, #4263eb);
+}
+.nbx-rd-swatch.nbx-rd-flag-conflict {
+    background-color: transparent;
+    border: 1px solid var(--tblr-warning, #f59f00);
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0,
+        transparent 3px,
+        var(--tblr-warning, #f59f00) 3px,
+        var(--tblr-warning, #f59f00) 6px
+    );
+}
+.nbx-rd-swatch.nbx-rd-info-displaced {
+    background-color: transparent;
+    border: 1px solid var(--tblr-danger, #d63939);
+    background-image: repeating-linear-gradient(
+        45deg,
+        transparent 0,
+        transparent 3px,
+        var(--tblr-danger, #d63939) 3px,
+        var(--tblr-danger, #d63939) 6px
+    );
+}
+.nbx-rd-swatch.nbx-rd-info-error {
+    background-color: transparent;
+    border: 2px solid var(--tblr-danger, #d63939);
+}
+
+/* A legend entry with no checkbox (the two info-only keys above): same
+   layout as a .nbx-rd-filter label, minus the pointer/cursor affordance. */
+.nbx-rd-legend .nbx-rd-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0;
+    font-weight: normal;
+}
+
+/* See .nbx-rd-conflict-stripe.nbx-rd-hidden-during-move above: shared
+   utility for "temporarily suppress this marker while its tile moves". */
+.nbx-rd-hidden-during-move {
+    display: none;
+}
+
+/* ---- Persistent conflicts panel (PLAN-design-chains.md §8.3) ----------- */
+/* ONE alert holding both the stale-placement report and the chain-conflict
+   list -- see design_editor.html. Rows stack with a little breathing room;
+   the header carries the icon so neither row needs to repeat it. */
+.nbx-rd-conflicts-header {
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+
+.nbx-rd-conflicts-row + .nbx-rd-conflicts-row {
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(var(--tblr-warning-rgb, 245, 159, 0), 0.35);
+}
+
+/* ---- Bind-to-feed picker: inherited planned feeds (PLAN-design-chains.md /
+   docs/design-chains.md) ------------------------------------------------- */
+/* A child design in a chain sees its approved ancestors' planned feeds
+   alongside its own; a faint left accent + the "— from <design>" tag (added
+   in editor.js) keep an inherited row from reading as one of this design's
+   own, even when two designs share a feed name like "Feed A". Absent for an
+   unchained design -- rows with no .nbx-rd-feed-inherited class are
+   untouched by this rule. */
+.nbx-rd-feed-inherited {
+    padding-left: 0.4rem;
+    border-left: 2px solid var(--tblr-blue, #4263eb);
+}
+.nbx-rd-feed-inherited-tag {
+    font-style: italic;
 }

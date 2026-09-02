@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-02
+
+### Release Summary
+
+A feature release built around one idea: a design should be able to plan on the
+world another design *leaves behind*. Network gear moves out over weeks, and
+until now the planner who wants to put servers in the space it vacates had to
+wait for the physical work to finish — the plugin could only project one design
+over live DCIM. An approved design can now be declared as another design's
+base, forming a chain: the child sees the parent's result as its starting
+world, inherits its racks, names, planned PDUs and feed bindings, and can move
+or remove devices the parent only *planned*. Approval is what makes this safe —
+an approved design is read-only, so the ground under a child cannot shift
+without someone explicitly un-approving, which is refused while children exist.
+The release also fixes a data-loss bug that predates chains: deleting a device
+in DCIM used to silently delete every design placement referring to it.
+
+### Added
+
+- **Design chains.** A design can declare an approved design as its base
+  (`Design.based_on`), and its elevation then renders that design's result
+  before its own placements: an ancestor `add` occupies a unit, a `move`
+  vacates the source and occupies the target, a `remove` frees it. Lineage is a
+  tree — one base per design, many children — and each design's baseline is the
+  linear stack of its own ancestors. Chains are declarable from the design
+  create form, from a **Derive design** action on an approved parent (which
+  seeds the child with a snapshot of the parent's rack scope), and re-pointable
+  afterwards with a **Re-base** action, which is the resolution mechanism when
+  two children of one parent conflict: they are blind to each other by design,
+  so the first one approved wins and the other re-bases. Real ancestor-walk
+  cycle guards now cover both `based_on` and the informational `depends_on`.
+  See the [Design chains](https://github.com/ravenrs/netbox-rack-design/blob/main/docs/design-chains.md)
+  guide.
+
+- **Downstream references to upstream planned devices.** An ancestor's planned
+  device has no `dcim.Device` to point at, so a child could not move or remove
+  it. `DesignPlacement` gained `base_placement` — the upstream placement a
+  downstream `move` or `remove` acts on — and `clean()` now requires *device
+  XOR base_placement* for those kinds. A blade planned into a chassis an
+  ancestor planned is a separate relation again (`base_parent_placement`), with
+  a uniqueness constraint per (design, chassis, bay). All three are
+  `SET_NULL`, never `CASCADE`: cancelling upstream work must not delete
+  downstream work.
+
+- **Inherited tiles in the editor.** A tile the baseline contributed is drawn
+  with a distinct dashed outline and its hover card names the design it came
+  from. Dragging one creates a move *in the current design* referencing the
+  ancestor's placement rather than editing the ancestor. Provenance and
+  conflict are flags on a slot (`inherited`, `source_design_id`, `conflict`),
+  not new slot states, so the rendering matrix and the legend's per-state
+  filter keep their shape — and the legend gained the entries for
+  **Displaced** and **Rejected** it had always been missing.
+
+- **A persistent conflicts panel**, merged with the stale-placement alert
+  rather than added beside it. An upstream conflict is not the planner's to
+  fix by editing a tile, so it must neither block saving nor vanish with a
+  toast: it stays on screen until someone re-bases. `ProjectedElevation` now
+  carries a `conflicts` list, and a **Chain health** report lists every design
+  that needs attention with a re-base or review link, in four queries
+  regardless of how many designs exist.
+
+- **Power, feeds and names span the chain.** A child sees its ancestors'
+  planned PDUs and their bank bindings, can bind its own PDU to an *ancestor's*
+  planned feed — the bind dialog groups feeds into real, own planned, and
+  planned-inherited-from-`<design>`, so two feeds with the same name are
+  distinguishable — and merges per-rack power custom fields oldest-first with
+  its own row winning. Family name counters (`_next_number`,
+  `_next_pdu_slot`) now count the whole chain, so a child cannot reserve a
+  number an ancestor already took.
+
+- **Settled names.** `proposed_name` conflates the planning name
+  (`IDS-1234_srv-01`) with the name the device will actually carry
+  (`srv-01`). Inherited placements render under the settled name, prefixes
+  never stack, and each layer is de-prefixed exactly once. The prefix token
+  comes from a config-declared path (`naming.prefix_source`) or is derived from
+  the design title — the plugin hardcodes no custom field name. No new column:
+  the settled name is a hook, computed where it is needed.
+
+- **REST, GraphQL and filters for lineage.** `chain`, `derive` and `rebase`
+  actions on the design endpoint; `ancestors`, `children` and `is_frozen` on
+  the GraphQL type; and filters for staleness, the new relations and
+  parentless designs.
+
+### Fixed
+
+- **Deleting a device in DCIM silently destroyed design history.**
+  `DesignPlacement.device` was `CASCADE`, so removing a device deleted every
+  placement that referenced it — including the `remove` row that recorded the
+  deletion, leaving a design quietly missing work with nothing to explain it.
+  This was reachable by hand long before chains existed; chains only make it
+  catastrophic, since applying an upstream removal would take the downstream
+  plan with it. The FK is now `SET_NULL`, paired with a `stale` flag and
+  `stale_device_name` captured at deletion time ("some device is gone" is not
+  actionable), stamped by a `pre_delete` receiver through `snapshot()` +
+  `save()` so the transition is changelogged. A stale placement is surfaced on
+  the design page, in the placement list and table, as an always-visible alert
+  in the editor, and through a filter and the chain-health report; re-pointing
+  it at a device clears the flag with no separate action. Staleness is an
+  observation, never client input, so the API exposes it read-only.
+
+- **The name-collision warning could not see collisions that mattered.**
+  `name_exists_in_site` compared literal `proposed_name` values, so two
+  placements destined to become the *same* device name did not register — and
+  the mechanism the family counters explicitly rely on to catch sibling
+  collisions was therefore unreachable, since two siblings' differing prefixes
+  make their planning names differ while their settled names match. The check
+  now also matches on the settled plane, in both directions, at a fixed three
+  queries regardless of chain depth. It remains a non-blocking warning. One
+  documented limitation: its SQL prefilter is exact for the built-in
+  strip-prefix scheme but can miss a collision under a custom `settled_name`
+  callable that returns something unrelated to `proposed_name`.
+
+### Changed
+
+- **An approved design is read-only.** Approval is what lets a child trust its
+  baseline, so placements, power rows and feeds all refuse writes on an
+  approved design, across the UI, the API and the `save-layout` action (which
+  answers `409`). The escape hatch is the status itself — move it back to
+  draft — and that is refused once children exist. Only `racks` is frozen on
+  the design record; status, summary and link stay editable.
+
+- **A chain projects only from `approved` ancestors, or not at all.** An
+  ancestor in any other state — including `implemented` — refuses the whole
+  chain with a panel row telling the planner to re-base, rather than rendering
+  a believable rack built on a guess. There is no apply step to verify against
+  yet, so a partially-built parent cannot be reconciled; the failure mode is
+  deliberately a block rather than a plausible lie, consistent with how the
+  distribution and naming engines already behave. Measured cost of an
+  inherited layer is roughly 1.9× at depth 3 — linear in placements, not in
+  depth — and an unchained design pays a single boolean check.
+
+- Real blades an ancestor has already moved no longer render in their old
+  chassis bay, which drew them twice.
+
 ## [0.24.0] - 2026-09-01
 
 ### Release Summary
@@ -41,7 +175,7 @@ re-answering questions the page had already asked.
   shows them as extra rows on **every** tile — existing gear, adds, moves,
   ghosts, removals and chassis blades — reading a real device's own custom
   field or a planned add's `planning_data`, whichever applies. Configure
-  nothing and nothing changes. See the [Planning fields](planning-fields.md)
+  nothing and nothing changes. See the [Planning fields](https://github.com/ravenrs/netbox-rack-design/blob/main/docs/planning-fields.md)
   guide.
 
 ### Changed

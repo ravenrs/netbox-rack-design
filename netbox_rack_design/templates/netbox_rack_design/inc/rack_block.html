@@ -115,7 +115,7 @@
             {# tile composited under the occupant. Editable mode keeps the     #}
             {# tile: editor.js collapses it and owns the bar (displaceOne).    #}
             {% if editable or not slot.displaced %}
-            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
                  gs-x="0"
@@ -138,6 +138,12 @@
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                    {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
                    {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   {# Chain provenance/conflict (PLAN-design-chains.md §8.4): flags on top of the existing state, never a new state. Coded defensively -- the server agent is landing these keys concurrently. #}
+                   {% if slot.inherited %}data-inherited="1"{% endif %}
+                   {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
+                   {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
+                   {% if slot.conflict %}data-conflict="1"{% endif %}
+                   {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
@@ -163,6 +169,22 @@
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}></div>
         {% endif %}{% endfor %}{% endif %}
+        {# Chain-conflict marker (PLAN-design-chains.md §8.2/§8.5): rendered  #}
+        {# in BOTH modes (unlike the displaced stripe above) -- a conflict   #}
+        {# never collapses the tile it sits beside, so there is no editor-   #}
+        {# only collapse/z-index dance for editor.js to own; the marker is   #}
+        {# purely additive and its geometry never changes after load. In     #}
+        {# editable mode it's stamped with the SAME widget index as its      #}
+        {# tile so editor.js can hide it while that tile is mid-drag (see    #}
+        {# refreshGhosts's conflict-marker pass). Amber, never red -- red    #}
+        {# stays reserved for displacement (§8.5.3). #}
+        {% for slot in front %}{% if slot.conflict %}
+        <div class="nbx-rd-conflict-stripe"
+             style="top: {{ slot|stripe_top_pct:rack|floatformat:3 }}%; height: {{ slot|stripe_height_pct:rack|floatformat:3 }}%;"
+             title="{% trans 'Chain conflict' %}: {{ slot.conflict_reason|default:slot.label }}"
+             data-conflict-reason="{{ slot.conflict_reason }}"
+             {% if editable %}data-widget-index="{{ forloop.counter0 }}"{% endif %}></div>
+        {% endif %}{% endfor %}
         </div>{# /.nbx-rd-grid-wrap #}
       </div>
     </div>
@@ -185,7 +207,7 @@
              gs-min-row="{{ rack.u_height|mul2 }}">
           {% for slot in rear %}
             {% if editable or not slot.displaced %}
-            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}"
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
                  gs-x="0"
@@ -208,6 +230,11 @@
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                    {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
                    {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   {% if slot.inherited %}data-inherited="1"{% endif %}
+                   {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
+                   {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
+                   {% if slot.conflict %}data-conflict="1"{% endif %}
+                   {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
@@ -231,6 +258,14 @@
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}></div>
         {% endif %}{% endfor %}{% endif %}
+        {# Chain-conflict marker, both modes -- see the front face for the full comment. #}
+        {% for slot in rear %}{% if slot.conflict %}
+        <div class="nbx-rd-conflict-stripe"
+             style="top: {{ slot|stripe_top_pct:rack|floatformat:3 }}%; height: {{ slot|stripe_height_pct:rack|floatformat:3 }}%;"
+             title="{% trans 'Chain conflict' %}: {{ slot.conflict_reason|default:slot.label }}"
+             data-conflict-reason="{{ slot.conflict_reason }}"
+             {% if editable %}data-widget-index="{{ forloop.counter0|add:front_len }}"{% endif %}></div>
+        {% endif %}{% endfor %}
         </div>{# /.nbx-rd-grid-wrap #}
       </div>
     </div>
@@ -254,7 +289,7 @@
         {# every tray tile is a fixed gs-h="2") so items never overlap and  #}
         {# the container grows to fit -- server-render order first, session #}
         {# drops append after (see editor.js's tray "dropped" handler).     #}
-        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}"
+        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}"
              gs-w="1"
              gs-h="2"
              gs-x="0"
@@ -273,6 +308,11 @@
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · tray"{% endif %}
+               {% if slot.inherited %}data-inherited="1"{% endif %}
+               {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
+               {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
+               {% if slot.conflict %}data-conflict="1"{% endif %}
+               {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
                title="{{ slot.display_label }} ({{ slot.state }})">
             {% if editable %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                     aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}

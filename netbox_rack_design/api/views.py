@@ -9,13 +9,13 @@ from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import status, views, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
 from .. import filtersets, naming, planning_fields, projection
-from ..choices import DesignPlacementKindChoices
+from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
     DesignGroup,
@@ -33,12 +33,14 @@ from .serializers import (
     DesignPlacementSerializer,
     DesignPowerFeedSerializer,
     DesignRackScopeSerializer,
+    DesignRebaseSerializer,
     DesignSerializer,
     FavoriteSetWriteSerializer,
     FavoriteToggleSerializer,
     HiddenChassisToggleSerializer,
     HiddenRackShowAllSerializer,
     HiddenRackToggleSerializer,
+    NestedDesignSerializer,
     PlannedFeedDeleteSerializer,
     PlannedFeedSerializer,
     PlannedFeedUpsertSerializer,
@@ -184,6 +186,41 @@ def _retarget_feed_name(name, source_rack_name, target_rack_name):
     return name[:100]
 
 
+def _frozen_design_rest_message(design):
+    """
+    The message body for a REST 409 against a FROZEN design
+    (PLAN-design-chains.md §2.2/G4): an approved design's placements, planned
+    power feeds and rack power are read-only, because approval is what makes
+    the design derivable and every downstream chain must be able to trust
+    that a frozen layer stops moving. Mirrors what ``DesignPlacement.clean()``
+    / ``DesignPowerFeed.clean()`` raise for the same reason (models.py), so a
+    user sees one consistent explanation regardless of which write path
+    caught it. Split out from ``_reject_frozen_design`` below so a caller that
+    can't use a ``Response`` directly (``perform_destroy``, whose return
+    value is discarded) can still raise the SAME wording instead of
+    duplicating it by hand.
+    """
+    return (
+        f"{design} is approved, and approved designs are frozen: its "
+        "placements, planned power feeds and rack power cannot be "
+        "changed. Set the design back to draft, or create a new "
+        "version of it, to make this change."
+    )
+
+
+def _reject_frozen_design(design):
+    """
+    A 409 ``Response`` for a write against a FROZEN design. Callers invoke
+    this BEFORE any reconciliation/mutation work starts, so a submit against
+    a frozen design fails fast rather than tripping ``DesignPlacement.clean()``
+    deep inside a loop.
+    """
+    return Response(
+        {"detail": _frozen_design_rest_message(design)},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 class ChangeDesignPermissions(TokenPermissions):
     """
     These detail @actions (save-layout, add-rack, remove-rack) are writes that
@@ -230,9 +267,17 @@ class DesignViewSet(NetBoxModelViewSet):
     def get_permissions(self):
         action = getattr(self, "action", None)
         if action in ("save_layout", "add_rack", "remove_rack", "rack_power",
-                      "planned_feed", "copy_feeds"):
+                      "planned_feed", "copy_feeds", "rebase"):
+            # ``rebase`` re-points THIS design's own ``based_on`` -- an edit
+            # to an existing Design, not a create -- so it needs
+            # ``change_design`` rather than the ``add_design`` TokenPermissions
+            # maps POST to by default (PLAN-design-chains.md §5/G9). ``derive``
+            # is the opposite case -- it CREATES a new Design -- so it is
+            # deliberately left out of this list: the default POST ->
+            # ``add_design`` mapping is already exactly the rule §5 wants.
             return [ChangeDesignPermissions()]
-        if action in ("preview_name", "power_source", "feeds", "recompute_distribution"):
+        if action in ("preview_name", "power_source", "feeds", "recompute_distribution",
+                      "chain"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -305,7 +350,9 @@ class DesignViewSet(NetBoxModelViewSet):
         placement._rd_pending_names = data.get("pending_names") or []
 
         name = naming.generate_name(placement, index=data.get("index"))
-        exists = naming.name_exists_in_site(name, design.site, exclude_placement=None)
+        exists = naming.name_exists_in_site(
+            name, design.site, exclude_placement=None, design=design
+        )
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
         )
@@ -451,9 +498,13 @@ class DesignViewSet(NetBoxModelViewSet):
         Add a rack to this design's planning scope (the ``design.racks`` M2M).
 
         Enforces the same-site rule (a rack from another site is rejected),
-        mirroring ``Design.clean()`` / the design form. Respects NetBox object
-        permissions for editing the Design. Idempotent: re-adding a rack already
-        in scope is a no-op. Returns the updated rack scope (``rack_ids``).
+        mirroring ``Design.clean()`` / the design form. Refuses with a 409 on a
+        FROZEN (approved) design (PLAN-design-chains.md §2.2/G4): the rack
+        scope is part of what was approved, so widening it after the fact
+        would silently change what the approved plan means. Respects NetBox
+        object permissions for editing the Design. Idempotent: re-adding a
+        rack already in scope is a no-op. Returns the updated rack scope
+        (``rack_ids``).
 
         URL name: plugins-api:netbox_rack_design-api:design-add-rack
         Path:     /api/plugins/rack-design/designs/<pk>/add-rack/
@@ -462,6 +513,13 @@ class DesignViewSet(NetBoxModelViewSet):
         if request.user.is_authenticated:
             self.queryset = Design.objects.restrict(request.user, "change")
         design = self.get_object()
+
+        # A design's rack scope is part of what was approved (PLAN-design-
+        # chains.md §2.2/G4): silently widening it would change what the
+        # approved plan means, exactly like narrowing it via remove-rack
+        # already refuses. Checked before anything else is touched.
+        if design.is_frozen:
+            return _reject_frozen_design(design)
 
         body = DesignRackScopeSerializer(data=request.data)
         body.is_valid(raise_exception=True)
@@ -529,6 +587,12 @@ class DesignViewSet(NetBoxModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Removing a rack from scope DELETES the placements targeting it
+        # (below), so a frozen design must reject this before anything is
+        # touched (PLAN-design-chains.md §2.2/G4).
+        if design.is_frozen:
+            return _reject_frozen_design(design)
+
         # Placements made meaningless by the removal: strictly those targeting R.
         affected = DesignPlacement.objects.filter(design=design, target_rack=rack)
 
@@ -590,6 +654,9 @@ class DesignViewSet(NetBoxModelViewSet):
         design = self.get_object()
 
         if request.method == "POST":
+            if design.is_frozen:
+                return _reject_frozen_design(design)
+
             body = RackPowerSerializer(data=request.data)
             body.is_valid(raise_exception=True)
             rack_id = body.validated_data["rack_id"]
@@ -735,6 +802,8 @@ class DesignViewSet(NetBoxModelViewSet):
         if request.user.is_authenticated:
             self.queryset = Design.objects.restrict(request.user, "change")
         design = self.get_object()
+        if design.is_frozen:
+            return _reject_frozen_design(design)
 
         body = CopyFeedsSerializer(data=request.data)
         body.is_valid(raise_exception=True)
@@ -822,14 +891,37 @@ class DesignViewSet(NetBoxModelViewSet):
         """
         Read-only lookup for the bind-to-feed picker (docs/pdu-distribution-
         spec.md §6.3/§8): this rack's real ``dcim.PowerFeed``s plus this
-        design's planned ``DesignPowerFeed``s, each in the uniform feed shape
+        design's OWN planned ``DesignPowerFeed``s plus -- G5, "a child's PDU
+        may bind an ancestor's planned feed" -- every APPROVED ancestor's
+        planned feeds for this rack, each in the uniform feed shape
         (``_feed_dict``) so the picker can list real feeds first, then
         planned. Performs NO writes.
+
+        The ancestor chain is resolved through
+        ``projection.resolve_baseline_chain`` -- the same §9.2 all-or-nothing
+        answer the rack projection itself uses -- so this picker can never
+        offer a feed the rack's own render disagrees with. A refused chain
+        (a non-approved or ``implemented`` ancestor) contributes NOTHING;
+        the design's own feeds are unaffected by a refusal.
+
+        An inherited entry carries two extra keys beyond the base
+        ``_feed_dict`` shape so two identically-named feeds from different
+        designs stay distinguishable: ``"inherited": True``, ``"design_id"``
+        and ``"design_name"`` naming the ancestor that owns it. The design's
+        OWN feeds keep the exact original shape (no extra keys) -- for an
+        unchained design this makes the response byte-for-byte unchanged.
+
+        Ordering is deterministic: the design's own feeds first (model
+        default ordering, i.e. by name), then each ancestor's feeds in
+        oldest-ancestor-first chain order (by name within an ancestor) --
+        never a set/dict merge that could reshuffle between requests.
 
         GET .../designs/<pk>/feeds/?rack_id=<id>
           -> {"real": [{"id","name","voltage","amperage","phase","supply",
                         "source":"real"}, ...],
-              "planned": [{..., "source":"planned"}, ...]}
+              "planned": [{..., "source":"planned"},
+                          {..., "source":"planned", "inherited": True,
+                           "design_id":<id>, "design_name":<str>}, ...]}
 
         URL name: plugins-api:netbox_rack_design-api:design-feeds
         Path:     /api/plugins/rack-design/designs/<pk>/feeds/
@@ -853,6 +945,16 @@ class DesignViewSet(NetBoxModelViewSet):
             _feed_dict(f, "planned")
             for f in DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
         ]
+        chain, _refusal = projection.resolve_baseline_chain(design)
+        for ancestor in chain:
+            for f in DesignPowerFeed.objects.filter(
+                design=ancestor, rack_id=rack_id
+            ):
+                entry = _feed_dict(f, "planned")
+                entry["inherited"] = True
+                entry["design_id"] = ancestor.pk
+                entry["design_name"] = str(ancestor)
+                planned_feeds.append(entry)
         logger.debug(
             "api.feeds: design=%s rack_id=%s real=%d planned=%d",
             design.pk, rack_id, len(real_feeds), len(planned_feeds),
@@ -890,6 +992,9 @@ class DesignViewSet(NetBoxModelViewSet):
             perm = "view" if request.method == "GET" else "change"
             self.queryset = Design.objects.restrict(request.user, perm)
         design = self.get_object()
+
+        if request.method in ("POST", "DELETE") and design.is_frozen:
+            return _reject_frozen_design(design)
 
         if request.method == "POST":
             body = PlannedFeedUpsertSerializer(data=request.data)
@@ -998,6 +1103,13 @@ class DesignViewSet(NetBoxModelViewSet):
                 raise PermissionDenied(
                     "This user does not have permission to modify design placements."
                 )
+
+        # Frozen check BEFORE any reconciliation starts (PLAN-design-chains.md
+        # §2.2/G4): an approved design's placements are read-only, and the
+        # editor's bulk save path must fail fast rather than tripping this
+        # deep inside the reconciliation loop.
+        if design.is_frozen:
+            return _reject_frozen_design(design)
 
         body = SaveLayoutSerializer(data=request.data)
         body.is_valid(raise_exception=True)
@@ -1468,6 +1580,30 @@ class DesignViewSet(NetBoxModelViewSet):
         device_id = item.get("device_id")
         device_type_id = item.get("device_type_id")
         placement_id = item.get("placement_id")
+        # The submitted kind, captured before the "existing" branch below may
+        # rewrite the local ``kind`` to "move" as an unmoved-tile fallback.
+        # Chain identity resolution (below) only ever applies to an EXPLICIT
+        # move/remove -- never to that fallback -- so an unmodified inherited
+        # tile that round-trips as "existing" cannot be silently promoted into
+        # a new placement in this design.
+        submitted_kind = kind
+
+        # PLAN-design-chains.md G3/§8.5.1: a placement_id belonging to a
+        # DIFFERENT design is never this design's own row to edit in place --
+        # editing it would mutate an ancestor's (frozen, approved) placement
+        # through the back door. Resolved once, up front, for both the guard
+        # below (an 'add' item can only ever mean an add THIS design owns) and
+        # the inherited-tile move/remove path (§8.5, G2), which is the one
+        # sanctioned way a placement_id may legitimately name a placement
+        # outside this design.
+        foreign_placement = None
+        if placement_id:
+            foreign_placement = (
+                DesignPlacement.objects.filter(pk=placement_id)
+                .exclude(design=design)
+                .select_related("design")
+                .first()
+            )
 
         target = self._resolve_target(design, rack, face_key, item, ref_map, errors)
         if target is None:
@@ -1488,6 +1624,27 @@ class DesignViewSet(NetBoxModelViewSet):
         # matching on (device, position, face) missed every full-depth row and
         # would delete-and-recreate them), while buying nothing.
         full_depth = self._item_is_full_depth(item)
+
+        if foreign_placement is not None and kind == "add":
+            # An inherited slot NEVER renders with kind="add" (it is always
+            # "existing" + inherited -- see projection.py's baseline replay),
+            # so a client sending kind="add" against a foreign placement_id is
+            # either stale or malformed either way. Refuse it explicitly
+            # rather than the old silent no-op (falling through the
+            # design=design-scoped lookup below to "add is None -> return
+            # None"), which looked like nothing happened but gave no feedback
+            # that the edit was rejected.
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": _norm_pos(u_position),
+                "device_id": None,
+                "detail": (
+                    f"placement {placement_id} belongs to {foreign_placement.design}, "
+                    f"not this design ({design}), and cannot be edited or cancelled "
+                    f"here."
+                ),
+            })
+            return None
 
         # An 'add' tile is a catalog-add placement projected into this rack. When
         # it carries a placement_id (no device_id) it re-asserts an EXISTING add:
@@ -1677,6 +1834,34 @@ class DesignViewSet(NetBoxModelViewSet):
                 })
                 return None
 
+        # PLAN-design-chains.md G3/G2, §8.5.1: dragging an INHERITED tile whose
+        # identity has no real device yet (an ancestor's still-planned 'add')
+        # creates a move/remove in THIS design referencing base_placement,
+        # never device. The item carries the SAME placement_id the widget
+        # rendered -- the ancestor's 'add' pk, or (a later ancestor having
+        # renamed it) a later ancestor's move that itself points at that same
+        # add via its own base_placement_id -- and no device_id, since the
+        # identity is not real. Only an EXPLICIT move/remove is eligible
+        # (``submitted_kind``, not the "existing" fallback below): an
+        # untouched inherited tile must never be silently promoted into a new
+        # placement just because it lacks a real device to be "at rest" at.
+        resolved_base_placement_id = None
+        if (
+            foreign_placement is not None
+            and not device_id
+            and submitted_kind in ("move", "remove")
+        ):
+            if foreign_placement.kind == DesignPlacementKindChoices.KIND_ADD:
+                resolved_base_placement_id = foreign_placement.pk
+            elif foreign_placement.base_placement_id:
+                resolved_base_placement_id = foreign_placement.base_placement_id
+            # Neither: `foreign_placement` names something that is not a
+            # resolvable planned identity (e.g. a real-device move whose
+            # device_id the item should have carried instead, but didn't).
+            # Leave base_placement unset -- full_clean() below then reports
+            # the ordinary "needs a device or a base_placement" validation
+            # error, the same per-item error shape as any other collision.
+
         # Locate an existing placement to reconcile against.
         existing = None
         if placement_id:
@@ -1725,11 +1910,15 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.target_bay = None
             placement.parent_placement = None
             placement.target_bay_name = ""
+            if resolved_base_placement_id:
+                placement.base_placement_id = resolved_base_placement_id
         else:  # move
             placement = existing or DesignPlacement(design=design)
             placement.kind = DesignPlacementKindChoices.KIND_MOVE
             placement.device = device
             placement.device_type = None
+            if resolved_base_placement_id:
+                placement.base_placement_id = resolved_base_placement_id
             # Planned re-attribution (role / tenant / the deployment's own
             # planning fields): a move may state what the device BECOMES when it
             # lands, not just where it goes. Assigned only when the editor
@@ -1807,6 +1996,205 @@ class DesignViewSet(NetBoxModelViewSet):
         desired_placement_ids.add(placement.pk)
         return placement
 
+    # -----------------------------------------------------------------------
+    # Design chains (PLAN-design-chains.md §5 phase 1 / G9): REST equivalents
+    # of the ancestor/children lineage, the "Derive" HTML action, and the
+    # "Re-base" HTML action.
+    # -----------------------------------------------------------------------
+
+    @action(detail=True, methods=["get"], url_path="chain")
+    def chain(self, request, pk=None):
+        """
+        Read-only view of this design's lineage: its ``based_on`` ancestors
+        (oldest first), its ``children`` (designs based on it), and whether the
+        chain currently RESOLVES for projection -- reusing
+        ``projection.resolve_baseline_chain`` (the §9.2 all-or-nothing rule)
+        rather than re-deriving it, so this answers the SAME question the
+        rack-face replay asks.
+
+        ``ancestors`` is the raw ``based_on`` walk (``Design.baseline_chain()``)
+        -- shown even when the chain is refused, so a client can see WHERE the
+        break is, not just that there is one. A cycle degrades ``ancestors`` to
+        ``[]`` (the walk cannot be ordered) but is still reported in
+        ``refusal``.
+
+        GET .../designs/<pk>/chain/
+          -> {"ancestors": [<brief Design>, ...],
+              "children": [<brief Design>, ...],
+              "resolves": <bool>,
+              "refusal": {"kind", "severity", "detail", "source_design"} | null}
+
+        URL name: plugins-api:netbox_rack_design-api:design-chain
+        Path:     /api/plugins/rack-design/designs/<pk>/chain/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        try:
+            ancestors = design.baseline_chain()
+        except ValueError:
+            # A cycle: the walk itself cannot be ordered. resolve_baseline_chain
+            # (below) reports the SAME break as ``refusal``; this just avoids
+            # crashing the endpoint that displays it.
+            ancestors = []
+        children = list(design.children)
+        _, refusal = projection.resolve_baseline_chain(design)
+
+        context = {"request": request}
+        refusal_data = None
+        if refusal is not None:
+            refusal_data = {
+                "kind": refusal["kind"],
+                "severity": refusal["severity"],
+                "detail": refusal["detail"],
+                "source_design": (
+                    NestedDesignSerializer(refusal["source_design"], context=context).data
+                    if refusal["source_design"] is not None else None
+                ),
+            }
+
+        return Response(
+            {
+                "ancestors": NestedDesignSerializer(ancestors, many=True, context=context).data,
+                "children": NestedDesignSerializer(children, many=True, context=context).data,
+                "resolves": refusal is None,
+                "refusal": refusal_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="derive")
+    def derive(self, request, pk=None):
+        """
+        Create a new design whose ``based_on`` points at this one -- the REST
+        equivalent of ``DesignDeriveView`` (views.py), same rule: only an
+        APPROVED (frozen) design may be derived from, because approval is what
+        makes its placements trustworthy as a baseline (§2.2). Requires
+        ``add_design`` (this CREATES a Design) -- the default TokenPermissions
+        mapping for POST already gives exactly that, so ``get_permissions``
+        does not override it for this action.
+
+        POST .../designs/<pk>/derive/  (no body)
+          -> 201 {<full Design representation of the new child>}
+          -> 400 when this design is not approved
+
+        URL name: plugins-api:netbox_rack_design-api:design-derive
+        Path:     /api/plugins/rack-design/designs/<pk>/derive/
+        """
+        # Restrict by "add" (not "view"): the required permission for this
+        # action IS add_design (it creates a Design), matching how add_rack /
+        # remove_rack restrict by "change" -- the permission the action
+        # actually needs, not a stricter or looser one.
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "add")
+        design = self.get_object()
+
+        if not design.is_frozen:
+            return Response(
+                {
+                    "detail": (
+                        f"Only an approved design can be derived from: approval "
+                        f"is what makes a design's placements read-only, so a "
+                        f"child can trust its baseline (PLAN-design-chains.md "
+                        f"§2.2). {design} is "
+                        f"{design.get_status_display().lower()}, not approved."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        child = Design(
+            title=f"{design.title} (derived)",
+            site=design.site,
+            group=design.group,
+            based_on=design,
+            status=DesignStatusChoices.STATUS_DRAFT,
+        )
+        with transaction.atomic():
+            child.full_clean()
+            child.save()
+            # G6: seed the child's rack scope with a SNAPSHOT of the parent's
+            # racks at derive time, not a live link -- a rack added to the
+            # parent later does NOT retroactively appear on the child, which
+            # owns and edits its own scope from here on. This is safe because
+            # baseline replay is per-rack: a rack present on the child but
+            # absent from the parent simply has no inherited layer. Must run
+            # after save() (the M2M needs a pk) and inside the same
+            # transaction as the create, so a child can never exist with a
+            # half-copied scope.
+            child.racks.set(design.racks.all())
+        logger.debug("api.derive: design=%s -> child=%s", design.pk, child.pk)
+        return Response(
+            DesignSerializer(child, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"], url_path="rebase")
+    def rebase(self, request, pk=None):
+        """
+        Re-point this design's ``based_on`` at a different (approved) design --
+        the REST equivalent of ``DesignRebaseView`` (views.py). The documented
+        way out of two situations (§2.2/§9.2): a parent later marked
+        ``implemented`` (the chain refuses to project past it, so the child
+        must re-base to render again), and a sibling that got approved first
+        (§2.1 -- "first approved wins, the other re-bases"). Requires
+        ``change_design`` (this edits THIS design's own field). Reuses the
+        model's own cycle guard via ``full_clean()`` rather than
+        re-implementing it -- only the "target must be approved" rule is
+        checked here, because ``Design.clean()`` does not enforce it (that
+        restriction lives only in the HTML form's queryset today).
+
+        POST .../designs/<pk>/rebase/  body {"based_on": <pk>}
+          -> 200 {<full Design representation, re-based>}
+          -> 400 when the target does not exist, is not approved, or the
+             resulting lineage is invalid (self-reference, cycle, cross-site)
+
+        URL name: plugins-api:netbox_rack_design-api:design-rebase
+        Path:     /api/plugins/rack-design/designs/<pk>/rebase/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+
+        body = DesignRebaseSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        target_id = body.validated_data["based_on"]
+
+        target = Design.objects.filter(pk=target_id).first()
+        if target is None:
+            return Response(
+                {"based_on": ["Design does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if target.status != DesignStatusChoices.STATUS_APPROVED:
+            return Response(
+                {
+                    "based_on": [
+                        f"Only an approved design may be a base "
+                        f"(PLAN-design-chains.md §2.2). {target} is "
+                        f"{target.get_status_display().lower()}."
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_based_on_id = design.based_on_id
+        design.based_on = target
+        try:
+            design.full_clean()
+        except ValidationError as exc:
+            design.based_on_id = previous_based_on_id
+            errors = exc.message_dict if hasattr(exc, "message_dict") else {"based_on": [str(exc)]}
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        design.save()
+        logger.debug("api.rebase: design=%s -> based_on=%s", design.pk, target.pk)
+        return Response(
+            DesignSerializer(design, context={"request": request}).data,
+            status=status.HTTP_200_OK,
+        )
+
 
 class DesignPlacementViewSet(NetBoxModelViewSet):
     # Every FK below is rendered as a nested brief by DesignPlacementSerializer, so
@@ -1834,6 +2222,28 @@ class DesignPowerFeedViewSet(NetBoxModelViewSet):
     ).prefetch_related("tags", "bound_placements")
     serializer_class = DesignPowerFeedSerializer
     filterset_class = filtersets.DesignPowerFeedFilterSet
+
+    def perform_destroy(self, instance):
+        """
+        ``DesignPowerFeed.clean()`` (models.py) now rejects a frozen design's
+        create/update, but ``clean()`` never runs on delete -- exactly the
+        gap the HTML delete/bulk-delete views (views.py) already guard
+        explicitly for the same reason. ``perform_destroy`` is the one hook
+        both DRF's single-object ``destroy()`` AND ``BulkDestroyModelMixin``'s
+        ``bulk_destroy()`` funnel every deletion through, so overriding it
+        here covers both with one check.
+
+        ``_reject_frozen_design``'s ``Response`` isn't reusable AS-IS here:
+        neither ``destroy()`` nor ``perform_bulk_destroy()`` do anything with
+        this method's return value, so the only way to surface a 409 is to
+        raise. Reuses its message text via ``_frozen_design_rest_message``
+        rather than duplicating it by hand.
+        """
+        if instance.design.is_frozen:
+            exc = APIException(_frozen_design_rest_message(instance.design))
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc
+        super().perform_destroy(instance)
 
 
 class FavoriteSetViewSet(viewsets.ViewSet):

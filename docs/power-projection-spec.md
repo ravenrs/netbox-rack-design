@@ -123,6 +123,17 @@ When **ON**:
 When **OFF**: normal styling is restored exactly (the heatmap is a pure view
 layer over the same tiles — no state change, no dirty flag, nothing saved).
 
+## 3.1 Design chains
+
+When a design is based on an approved ancestor (`docs/design-chains.md`),
+projection is no longer single-layer: `capacity_w` above (and the per-bank
+figures in `docs/pdu-distribution-spec.md`) also count every approved
+ancestor's planned power feeds and rack-power overrides, resolved by the same
+all-or-nothing rule (`Design.status`) the placement replay uses. An ancestor
+that is not approved, or is `implemented`, contributes nothing to power
+either — refused as a whole layer, reported once as a projection conflict,
+never silently under- or over-counted.
+
 ## 4. Where the numbers come from / surfaces
 
 - Computed **server-side in `projection.py`**, returned as a `power` block on the

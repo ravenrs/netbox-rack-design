@@ -29,6 +29,14 @@
           <th scope="row">{% trans "Proposed name" %}</th>
           <td>{{ object.proposed_name|placeholder }}</td>
         </tr>
+        <tr>
+          <th scope="row">{% trans "Stale" %}</th>
+          <td>{% checkmark object.stale %}</td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "Deleted device name" %}</th>
+          <td>{{ object.stale_device_name|placeholder }}</td>
+        </tr>
       </table>
     </div>
     {% include 'inc/panels/custom_fields.html' %}
@@ -54,7 +62,7 @@
     </div>
     {# Device-bay targeting: shown only for a bay placement, since a rack-slot   #}
     {# placement would otherwise render three empty rows.                        #}
-    {% if object.target_bay or object.parent_placement %}
+    {% if object.target_bay or object.parent_placement or object.base_parent_placement %}
     <div class="card">
       <h2 class="card-header">{% trans "Device bay" %}</h2>
       <table class="table table-hover attr-table">
@@ -62,6 +70,9 @@
           <th scope="row">{% trans "Chassis" %}</th>
           <td>
             {% if object.target_bay %}{{ object.target_bay.device|linkify }}
+            {% elif object.base_parent_placement %}{{ object.base_parent_placement|linkify }}
+              <span class="badge text-bg-purple">{% trans "planned upstream" %}</span>
+              <div class="text-muted">{{ object.base_parent_placement.design|linkify }}</div>
             {% else %}{{ object.parent_placement|linkify }}
               <span class="badge text-bg-blue">{% trans "planned" %}</span>{% endif %}
           </td>

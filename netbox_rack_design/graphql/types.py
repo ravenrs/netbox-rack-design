@@ -51,6 +51,40 @@ class DesignType(NetBoxObjectType):
     root: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     depends_on: list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]
 
+    # --- design chains (PLAN-design-chains.md G9) ----------------------------
+    # ``children`` is a reverse-relation property (Design.children), not a
+    # Django field, so ``fields="__all__"`` never picks it up -- it needs an
+    # explicit resolver like every other non-field attribute on this type.
+    @strawberry_django.field
+    def children(self) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
+        return list(self.children)
+
+    # ``is_frozen`` (Design.is_frozen) is a plain bool property.
+    @strawberry_django.field
+    def is_frozen(self) -> bool:
+        return self.is_frozen
+
+    @strawberry_django.field
+    def ancestors(self) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
+        """
+        The ordered ``based_on`` chain (oldest first), i.e.
+        ``Design.baseline_chain()`` surfaced over GraphQL.
+
+        ``baseline_chain()`` raises ``ValueError`` on a cycle in the lineage
+        (a row saved before ``clean()`` grew its guard could already hold
+        one) -- a GraphQL field must never 500 on that, so this degrades to
+        an empty list exactly the way ``projection.resolve_baseline_chain``
+        already degrades projection: an unresolvable lineage inherits
+        nothing rather than crashing the query. A client that needs to
+        distinguish "no parent" from "broken lineage" already has
+        ``based_on`` for that -- a non-null ``based_on`` with empty
+        ``ancestors`` says exactly that.
+        """
+        try:
+            return self.baseline_chain()
+        except ValueError:
+            return []
+
 
 # A PLANNED power feed. Now a queryable object in its own right (it became a
 # NetBoxModel when it got its own list/detail/delete views), as well as the
@@ -87,5 +121,17 @@ class DesignPlacementType(NetBoxObjectType):
     # GraphQL test queries.
     target_bay: Annotated["DeviceBayType", strawberry.lazy("dcim.graphql.types")] | None
     parent_placement: Annotated[
+        "DesignPlacementType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None
+    # base_placement (G2, PLAN-design-chains.md): same self-referential FK
+    # situation as parent_placement above, same fix.
+    base_placement: Annotated[
+        "DesignPlacementType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None
+    # base_parent_placement (G2): the ancestor-planned chassis a blade goes into
+    # -- a third self-referential FK, so it needs the same explicit lazy
+    # annotation or the generated GraphQL tests break on a fieldless
+    # DjangoModelType.
+    base_parent_placement: Annotated[
         "DesignPlacementType", strawberry.lazy("netbox_rack_design.graphql.types")
     ] | None

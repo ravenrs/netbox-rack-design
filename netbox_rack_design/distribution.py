@@ -274,30 +274,31 @@ def apply_rack_power_override(elevation):
     over the in-memory rack's ``cf``, so the distribution script reads the
     effective planned values via ``rack.cf`` (docs/pdu-distribution-spec.md).
 
-    Looks up ``DesignRackPower`` for ``(elevation.design, elevation.rack)``; when
-    found and it carries a non-empty ``custom_fields`` dict, sets
-    ``elevation.rack.__dict__["cf"] = {**rack.cf, **custom_fields}`` -- ``Rack.cf``
-    is a ``cached_property``, so overriding the instance ``__dict__`` shadows it
-    for the lifetime of this in-memory object only. Never persisted; never
-    touches ``dcim``. A no-op when no override exists.
+    Resolves via ``DesignRackPower.effective_custom_fields(elevation.design,
+    elevation.rack)`` (PLAN-design-chains.md G5 item 2), which merges an
+    approved ancestor's override under this design's own -- the SAME
+    all-or-nothing chain rule the rest of the projection uses, so a script in
+    a chained design sees an inherited ``power_limitation``/``pdu_location``
+    exactly as a single-layer design sees its own. This is the one change G5
+    item 4 makes to this module: still a plain dict merge, still gated to
+    "script" mode only (the caller in ``generate_distribution_status`` never
+    calls this in "builtin" mode) -- the builtin engine keeps reading NO
+    custom fields at all, chain or no chain.
+
+    When the merge is non-empty, sets
+    ``elevation.rack.__dict__["cf"] = {**rack.cf, **custom_fields}`` --
+    ``Rack.cf`` is a ``cached_property``, so overriding the instance
+    ``__dict__`` shadows it for the lifetime of this in-memory object only.
+    Never persisted; never touches ``dcim``. A no-op when no override exists
+    anywhere in the chain (mirrors the ``DoesNotExist`` no-op this replaced).
     """
     from .models import DesignRackPower
 
     rack = elevation.rack
-    try:
-        rack_power = DesignRackPower.objects.get(design=elevation.design, rack=rack)
-    except DesignRackPower.DoesNotExist:
-        logger.debug(
-            "distribution.apply_rack_power_override: rack=%r design=%r no override found",
-            getattr(rack, "name", None), getattr(elevation.design, "pk", None),
-        )
-        return
-
-    config = rack_power.power_config or {}
-    custom_fields = config.get("custom_fields") or {}
+    custom_fields, _conflict = DesignRackPower.effective_custom_fields(elevation.design, rack)
     if not custom_fields:
         logger.debug(
-            "distribution.apply_rack_power_override: rack=%r design=%r override found but no custom_fields",
+            "distribution.apply_rack_power_override: rack=%r design=%r no override found",
             getattr(rack, "name", None), getattr(elevation.design, "pk", None),
         )
         return

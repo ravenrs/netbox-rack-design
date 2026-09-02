@@ -37,6 +37,7 @@ __all__ = (
     "PlannedFeedSerializer",
     "PlannedFeedDeleteSerializer",
     "PlannedFeedUpsertSerializer",
+    "DesignRebaseSerializer",
 )
 
 
@@ -104,13 +105,19 @@ class DesignSerializer(NetBoxModelSerializer):
         required=False,
         many=True,
     )
+    # Read-only (PLAN-design-chains.md G9): a write against a frozen design
+    # already gets a 409 from every design-scoped write action
+    # (``_reject_frozen_design``) -- this lets a client know that in advance,
+    # rather than discovering it by failing a write.
+    is_frozen = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Design
         fields = (
             "id", "url", "display", "title", "site", "status", "summary", "link",
             "version", "root", "based_on", "sequence", "depends_on", "racks", "group",
-            "description", "comments", "tags", "custom_fields", "created", "last_updated",
+            "description", "comments", "is_frozen", "tags", "custom_fields",
+            "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "title", "version", "status")
 
@@ -139,6 +146,15 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
     # placement of a chassis planned in the same design.
     target_bay = DeviceBaySerializer(nested=True, required=False, allow_null=True)
     parent_placement = NestedDesignPlacementSerializer(required=False, allow_null=True)
+    # The upstream placement this move/remove acts on when the device it
+    # targets is not yet real -- only an ancestor design's planned 'add' (G2,
+    # PLAN-design-chains.md). Round-trips like parent_placement: a raw pk on
+    # write, a nested object on read.
+    base_placement = NestedDesignPlacementSerializer(required=False, allow_null=True)
+    # The ancestor-planned CHASSIS this blade goes into (G2, the parent-side twin
+    # of base_placement). Same round-trip shape: a raw pk on write, a nested
+    # object on read.
+    base_parent_placement = NestedDesignPlacementSerializer(required=False, allow_null=True)
 
     class Meta:
         model = DesignPlacement
@@ -147,9 +163,15 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
             "proposed_name", "device_role", "tenant",
             "target_rack", "target_position", "target_face",
             "parent_placement", "target_bay", "target_bay_name",
-            "planning_data",
+            "base_placement", "base_parent_placement",
+            "planning_data", "stale", "stale_device_name",
             "tags", "custom_fields", "created", "last_updated",
         )
+        # Staleness is an OBSERVATION, never a client input: it is stamped when
+        # the referenced device is deleted and cleared by re-pointing the
+        # placement at a real one. A writable flag would let a client claim a
+        # device-less move/remove is legitimate and bypass validation.
+        read_only_fields = ("stale", "stale_device_name")
         brief_fields = ("id", "url", "display", "kind")
 
 
@@ -266,9 +288,21 @@ class SaveLayoutItemSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"kind": "An 'add' item requires either a placement_id or a device_type_id."}
             )
-        if kind in ("move", "remove") and not data.get("device_id"):
+        if (
+            kind in ("move", "remove")
+            and not data.get("device_id")
+            and not data.get("placement_id")
+        ):
+            # Ordinarily a move/remove addresses a real device (device_id).
+            # PLAN-design-chains.md G3/§8.5.1: dragging an INHERITED tile whose
+            # ancestor identity has no real device yet carries no device_id at
+            # all -- the widget's own placement_id (the ancestor's 'add') is
+            # the only handle on that identity, and the viewset resolves it to
+            # base_placement. So a placement_id alone is also acceptable here;
+            # the viewset itself refuses one that turns out not to name a true
+            # ancestor 'add'.
             raise serializers.ValidationError(
-                {"device_id": f"A '{kind}' item requires a device_id."}
+                {"device_id": f"A '{kind}' item requires a device_id or a placement_id."}
             )
         return data
 
@@ -492,3 +526,21 @@ class PlannedFeedUpsertSerializer(serializers.Serializer):
     amperage = serializers.IntegerField(required=False)
     phase = serializers.ChoiceField(choices=PowerFeedPhaseChoices, required=False)
     supply = serializers.ChoiceField(choices=PowerFeedSupplyChoices, required=False)
+
+
+# ---------------------------------------------------------------------------
+# Design-chain request serializer (PLAN-design-chains.md §5 phase 1 / G9)
+#
+# Validates only the shape of the POST body for .../designs/<pk>/rebase/. The
+# viewset re-points ``based_on`` and runs the model's own ``full_clean()`` --
+# same cycle guard and same site check the HTML DesignRebaseView reuses --
+# rather than re-implementing either here.
+# ---------------------------------------------------------------------------
+
+
+class DesignRebaseSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/rebase/."""
+
+    based_on = serializers.IntegerField(
+        help_text="PK of the new base design. Must be APPROVED (§2.2).",
+    )

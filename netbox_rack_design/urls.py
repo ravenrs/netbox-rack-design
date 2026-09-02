@@ -14,6 +14,9 @@ urlpatterns = (
     path("designs/<int:pk>/", include(get_model_urls("netbox_rack_design", "design"))),
     # Standalone, non-model-bound Elevations browser page.
     path("elevations/", views.ElevationBrowserView.as_view(), name="elevation_browser"),
+    # Standalone, non-model-bound cross-design chain health report
+    # (PLAN-design-chains.md G4's reporting half).
+    path("chain-health/", views.DesignChainHealthView.as_view(), name="design_chain_health"),
     path("placements/", include(get_model_urls("netbox_rack_design", "designplacement", detail=False))),
     path("placements/<int:pk>/", include(get_model_urls("netbox_rack_design", "designplacement"))),
     path("power-feeds/", include(get_model_urls("netbox_rack_design", "designpowerfeed", detail=False))),

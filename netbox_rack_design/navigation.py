@@ -51,6 +51,14 @@ menu = PluginMenu(
                     link_text="Elevations",
                     permissions=["netbox_rack_design.view_design"],
                 ),
+                # Cross-design "which of my designs need attention" report
+                # (PLAN-design-chains.md G4's reporting half): a refused
+                # chain, or inert (stale) placements.
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:design_chain_health",
+                    link_text="Chain Health",
+                    permissions=["netbox_rack_design.view_design"],
+                ),
             ),
         ),
     ),
