@@ -447,12 +447,21 @@
         var newRadio = overlay.querySelector("#nbx-rd-move-new");
         var newInput = overlay.querySelector(".nbx-rd-move-new-input");
         var newWarn = overlay.querySelector(".nbx-rd-move-new-warning");
-        newInput.value = (currentName && currentName !== keepName) ? currentName : "";
+        var hasCustomName = !!(currentName && currentName !== keepName);
+        newInput.value = hasCustomName ? currentName : "";
 
         // Mirrors widget.nameUserSet from the add path (editor.js ~5948): once
         // the user has typed into the field, no preview response may overwrite
-        // it again, no matter how many times the radios get toggled.
-        var userEdited = false;
+        // it again, no matter how many times the radios get toggled. A value
+        // loaded from an EARLIER session's rename (currentName, prefilled
+        // above) must count as "user-set" from the start too -- the add
+        // path's nameUserSet lives on the widget and survives a reopen for
+        // free, but this dialog is rebuilt fresh every open, so there is no
+        // other signal that currentName was a human's choice, not a blank
+        // slate. Without this, opening the dialog on an already-renamed
+        // placement silently replaced that name with a fresh engine
+        // suggestion (bug caught in review, phase 3).
+        var userEdited = hasCustomName;
         // Guards against firing the same preview request twice in a row (e.g.
         // keep -> rename -> keep -> rename without an edit in between).
         var previewRequested = false;

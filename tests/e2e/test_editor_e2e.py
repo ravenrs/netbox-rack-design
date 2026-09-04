@@ -1178,6 +1178,70 @@ class EditorE2ETestCase(unittest.TestCase):
                          "a keep-name move must never call preview-name")
         self.assert_no_console_errors()
 
+    # =====================================================================
+    # 12. A placement that ALREADY carries a custom rename (from an earlier
+    # decision -- widget.proposed_name is never cleared by returning a tile
+    # to its origin, only st.moveDialogShown is, so re-dragging it off origin
+    # reopens the §4a dialog with that name as `currentName`) must keep that
+    # name when the dialog reopens: no engine suggestion may overwrite it,
+    # selecting the rename radio included. This is the exact bug reported in
+    # review -- `userEdited` started false on every open, so a currentName
+    # prefill was defenseless against the very first requestPreview() call.
+    # =====================================================================
+    def test_12_move_rename_dialog_preserves_existing_custom_name(self):
+        idx = self.widx(kind="existing", face="front", device_id=self._untouched_id)
+        before = self.tile_info(idx)
+        orig_gsY = before["y"]
+        free_gsY = self.page.evaluate(
+            f"() => window.__rdE2E.uPositionToGsY({self._live_free_u}, {before['h']})")
+
+        calls = self._stub_preview_name(name="engine-suggested-name")
+
+        # First drag off origin: currentName is empty, so this prefill
+        # legitimately comes from the engine (covered by test_08 already;
+        # done here only to GET a custom name onto the widget for real).
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_function(
+            "() => document.querySelector('.nbx-rd-move-new-input').value === "
+            "'engine-suggested-name'",
+            timeout=5000)
+        self.page.fill(".nbx-rd-move-new-input", "custom-from-earlier-session")
+        self.page.click("[data-rd-move-apply]")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(len(calls), 1,
+                         "sanity: exactly one preview call for the first, "
+                         "empty-currentName open")
+
+        # Return to origin (editor.js's atOrigin branch resets
+        # st.moveDialogShown but deliberately never clears
+        # widget.proposed_name), then drag off again -- this reopens the
+        # dialog, now with a NON-empty currentName.
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {orig_gsY})")
+        self.page.wait_for_timeout(100)
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+
+        # The custom name is already in the field (keep-name is the
+        # preselected radio, but the input is prefilled regardless), and
+        # selecting rename must not replace it or call preview-name again.
+        prefilled = self.page.eval_on_selector(".nbx-rd-move-new-input", "el => el.value")
+        self.assertEqual(prefilled, "custom-from-earlier-session",
+                         "reopening the dialog must prefill the EXISTING custom "
+                         "name, not blank/reset it")
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_timeout(200)  # let any (unwanted) fetch round-trip settle
+        after_select = self.page.eval_on_selector(".nbx-rd-move-new-input", "el => el.value")
+        self.assertEqual(after_select, "custom-from-earlier-session",
+                         "selecting rename on a placement that already has a "
+                         "custom name must not overwrite it with a fresh "
+                         "engine suggestion")
+        self.assertEqual(len(calls), 1,
+                         "reopening on an already-custom-named placement must "
+                         "not call preview-name again")
+        self.assert_no_console_errors()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
