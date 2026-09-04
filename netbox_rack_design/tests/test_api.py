@@ -2067,6 +2067,53 @@ class PreviewNameTest(APITestCase):
         # {device.site.name} for an 'add' resolves to the design's site name.
         self.assertEqual(response.data["name"], "Site 1-3")
 
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template",
+            naming_template="{device.role.name}-{device.tenant.name}",
+        )
+    )
+    def test_preview_move_honours_role_and_tenant_overrides(self):
+        """A 'move' preview with device_role/tenant overrides must render the
+        OVERRIDE, not the source device's own role/tenant (PLAN-move-naming.md)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {
+            "kind": "move",
+            "device": self.devices[0].pk,
+            "device_role": self.device_role.pk,
+            "tenant": self.tenant.pk,
+            "target_rack": self.racks[1].pk,
+            "target_position": 10,
+            "target_face": "front",
+            "index": 1,
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "Role 1-Tenant 1")
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template",
+            naming_template="{device.role.name}-{device.tenant.name}",
+        )
+    )
+    def test_preview_move_without_overrides_uses_source_device_values(self):
+        """The same call with no device_role/tenant supplied must reflect the
+        source device's OWN values (devices[0] has role "Device Role 1" and no
+        tenant, per create_dcim_environment)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {
+            "kind": "move",
+            "device": self.devices[0].pk,
+            "target_rack": self.racks[1].pk,
+            "target_position": 10,
+            "target_face": "front",
+            "index": 1,
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "Device Role 1-")
+
     @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
     def test_pending_names_prevent_same_session_duplicates(self):
         """User bug 2026-07-10: two palette adds in one session both got the

@@ -396,7 +396,12 @@
         }
     }
 
-    function showMoveNameDialog(oldName, currentName, onConfirm, onCancel) {
+    // `previewCtx`, when given, is the body the naming engine needs to
+    // suggest a name for this move: { device, device_role, tenant,
+    // target_rack, target_position, target_face }. Passing null/undefined
+    // (or omitting it) disables the auto-fill entirely -- the dialog still
+    // works, the user just types a name by hand.
+    function showMoveNameDialog(oldName, currentName, previewCtx, onConfirm, onCancel) {
         var keepName = (designTitle ? designTitle + "-" : "") + (oldName || "");
 
         var overlay = document.createElement("div");
@@ -419,8 +424,13 @@
             + '<input class="form-check-input" type="radio" name="nbx-rd-move-name" id="nbx-rd-move-new" value="new">'
             + '<label class="form-check-label" for="nbx-rd-move-new">Set a new name</label>'
             + "</div>"
-            + '<input type="text" class="form-control form-control-sm mt-1 nbx-rd-move-new-input" '
+            + '<div class="input-group input-group-sm mt-1">'
+            + '<input type="text" class="form-control nbx-rd-move-new-input" '
             + 'placeholder="New name" disabled>'
+            + '<span class="input-group-text nbx-rd-move-new-warning" '
+            + 'style="display:none" title="A device with this name already exists in the site.">'
+            + '<i class="mdi mdi-alert" aria-hidden="true"></i></span>'
+            + "</div>"
             + '<div class="form-text">Template tokens are dotted model paths, e.g. '
             + "<code>{design.name}</code>, <code>{device.site.name}</code>.</div>"
             + "</div>"
@@ -436,11 +446,58 @@
         var keepRadio = overlay.querySelector("#nbx-rd-move-keep");
         var newRadio = overlay.querySelector("#nbx-rd-move-new");
         var newInput = overlay.querySelector(".nbx-rd-move-new-input");
-        newInput.value = (currentName && currentName !== keepName) ? currentName : "";
+        var newWarn = overlay.querySelector(".nbx-rd-move-new-warning");
+        var hasCustomName = !!(currentName && currentName !== keepName);
+        newInput.value = hasCustomName ? currentName : "";
+
+        // Mirrors widget.nameUserSet from the add path (editor.js ~5948): once
+        // the user has typed into the field, no preview response may overwrite
+        // it again, no matter how many times the radios get toggled. A value
+        // loaded from an EARLIER session's rename (currentName, prefilled
+        // above) must count as "user-set" from the start too -- the add
+        // path's nameUserSet lives on the widget and survives a reopen for
+        // free, but this dialog is rebuilt fresh every open, so there is no
+        // other signal that currentName was a human's choice, not a blank
+        // slate. Without this, opening the dialog on an already-renamed
+        // placement silently replaced that name with a fresh engine
+        // suggestion (bug caught in review, phase 3).
+        var userEdited = hasCustomName;
+        // Guards against firing the same preview request twice in a row (e.g.
+        // keep -> rename -> keep -> rename without an edit in between).
+        var previewRequested = false;
+
+        function applyWarn(exists) {
+            if (!newWarn) { return; }
+            newWarn.style.display = exists ? "" : "none";
+        }
+
+        function requestPreview() {
+            if (!previewCtx || userEdited || previewRequested) { return; }
+            previewRequested = true;
+            previewName({
+                kind: "move",
+                device: previewCtx.device,
+                device_role: previewCtx.device_role,
+                tenant: previewCtx.tenant,
+                target_rack: previewCtx.target_rack,
+                target_position: previewCtx.target_position,
+                target_face: previewCtx.target_face,
+            }).then(function (data) {
+                // A null result (unreachable endpoint, no permission, any
+                // failure) leaves the field exactly as it was -- never
+                // blanked, never a placeholder.
+                if (!data || userEdited) { return; }
+                if (data.name) { newInput.value = data.name; }
+                applyWarn(!!data.exists_in_site);
+            });
+        }
 
         function syncEnabled() {
             newInput.disabled = !newRadio.checked;
-            if (newRadio.checked) { newInput.focus(); }
+            if (newRadio.checked) {
+                newInput.focus();
+                requestPreview();
+            }
         }
         keepRadio.addEventListener("change", syncEnabled);
         newRadio.addEventListener("change", syncEnabled);
@@ -448,6 +505,15 @@
             newRadio.checked = true;
             syncEnabled();
         });
+        newInput.addEventListener("input", function () {
+            userEdited = true;
+            applyWarn(false);
+        });
+        // Selecting rename with it already checked (dialog opened with rename
+        // preselected) never runs the "change" handler above, so fire once
+        // up front too. Keep-name preselected/confirmed issues NO request at
+        // all -- requestPreview() only ever runs from this rename-only path.
+        if (newRadio.checked) { requestPreview(); }
 
         var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
         var modal = ctor ? new ctor(overlay) : null;
@@ -3864,7 +3930,22 @@
                 if (st.moveDialogShown) { return; }
                 st.moveDialogShown = true;
                 var oldName = w.label || "";
-                showMoveNameDialog(oldName, w.proposed_name || "", function (name) {
+                // Same attribution the naming engine gets on an add: the
+                // widget's resolved role/tenant (already stamped by
+                // applyRailToMove before this point -- see the move-in-place
+                // "change" handler above and adoptForeignTile) plus the
+                // drop's target rack/position/face. `device` identifies the
+                // real device being moved. There is no add-path equivalent
+                // of `index` for a move -- omitted.
+                var renamePreviewCtx = (w.device_id != null) ? {
+                    device: w.device_id,
+                    device_role: w.device_role_id,
+                    tenant: w.tenant_id,
+                    target_rack: serverRackId,
+                    target_position: gsYToUPosition(curGsY, gsH),
+                    target_face: curFace,
+                } : null;
+                showMoveNameDialog(oldName, w.proposed_name || "", renamePreviewCtx, function (name) {
                     w.proposed_name = name;
                     st.needsRename = false;
                     var content = itemEl.querySelector(".grid-stack-item-content");

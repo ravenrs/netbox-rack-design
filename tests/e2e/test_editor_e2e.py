@@ -196,6 +196,17 @@ window.__rdE2E = (function () {
             } else if (w.proposed_name) {
                 item.proposed_name = w.proposed_name;
             }
+            // The editor's REAL widget.proposed_name (set by the §4a rename
+            // dialog's onConfirm, or by an add's name input) is private
+            // in-memory state this harness can't reach into -- but both
+            // paths stamp the same value onto the tile's `data-name`
+            // attribute (editor.js setTileDisplayName/promptRename/
+            // finishAdd), so read it from there when present. This is the
+            // ONLY way a rename made THIS session (not merely the base
+            // widget JSON) surfaces in buildRackPayload.
+            var contentEl = itemEl.querySelector(".grid-stack-item-content");
+            var liveName = contentEl ? contentEl.getAttribute("data-name") : null;
+            if (liveName) { item.proposed_name = liveName; }
 
             var removed = isFlaggedRemoved(itemEl, w);
             if (removed && isAdd) {
@@ -1048,6 +1059,187 @@ class EditorE2ETestCase(unittest.TestCase):
             all(g["face"] == "rear" for g in ghost),
             f"any ghost-shadow should sit on the rear face (opposite the "
             f"front-face move-out ghost): {ghost}")
+        self.assert_no_console_errors()
+
+    # =====================================================================
+    # 8-11. The move-rename dialog (showMoveNameDialog) auto-fills from the
+    # naming engine, same as an `add`. The preview-name endpoint is stubbed
+    # via Playwright request routing so the assertions are deterministic
+    # (a real deployment's naming_mode/templates are not this suite's
+    # concern -- see PreviewNameSerializer/preview_name in api/views.py) and
+    # so the request COUNT itself can be asserted on.
+    # =====================================================================
+    def _stub_preview_name(self, name="engine-suggested-name", exists_in_site=False):
+        """Intercept POST .../preview-name/, always answering with a fixed
+        {name, exists_in_site} and appending each request's JSON body to the
+        returned list -- so len(calls) after an action is the call count and
+        calls[-1] is what the dialog actually sent."""
+        calls = []
+
+        def handler(route):
+            body = route.request.post_data or "{}"
+            calls.append(json.loads(body))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"name": name, "exists_in_site": exists_in_site}),
+            )
+
+        self.page.route("**/preview-name/", handler)
+        return calls
+
+    def _drag_existing_off_origin(self):
+        """Move the fixture's untouched `existing` device to the free U the
+        fixture reserved, via the same dragstart/change/dragstop event
+        sequence a real drag fires (see moveTile) -- this is what makes
+        maybePromptMove open the §4a rename dialog. Returns the widget index."""
+        idx = self.widx(kind="existing", face="front", device_id=self._untouched_id)
+        h = self.tile_info(idx)["h"]
+        free_gsY = self.page.evaluate(
+            f"() => window.__rdE2E.uPositionToGsY({self._live_free_u}, {h})")
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+        return idx
+
+    def test_08_move_rename_dialog_prefills_from_engine(self):
+        calls = self._stub_preview_name(name="engine-suggested-name")
+        self._drag_existing_off_origin()
+
+        # Keep-name is the default selection: no request yet.
+        self.assertEqual(len(calls), 0,
+                         "opening the dialog with keep-name preselected should "
+                         "not call preview-name")
+
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_function(
+            "() => document.querySelector('.nbx-rd-move-new-input').value === "
+            "'engine-suggested-name'",
+            timeout=5000)
+        self.assertEqual(len(calls), 1, "selecting rename should call preview-name once")
+        sent = calls[0]
+        self.assertEqual(sent.get("kind"), "move")
+        self.assertEqual(sent.get("device"), self._untouched_id)
+        self.assert_no_console_errors()
+
+    def test_09_move_rename_hand_edit_survives_radio_toggle(self):
+        calls = self._stub_preview_name(name="engine-suggested-name")
+        self._drag_existing_off_origin()
+
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_function(
+            "() => document.querySelector('.nbx-rd-move-new-input').value === "
+            "'engine-suggested-name'",
+            timeout=5000)
+        self.assertEqual(len(calls), 1)
+
+        # Hand-edit the field, then toggle keep -> rename -> keep -> rename.
+        # Neither the toggling nor any lingering preview response may
+        # resurrect the engine's suggestion over what the user typed.
+        self.page.fill(".nbx-rd-move-new-input", "hand-typed-name")
+        self.page.click("#nbx-rd-move-keep")
+        self.page.click("#nbx-rd-move-new")
+        self.page.click("#nbx-rd-move-keep")
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_timeout(150)  # let any (unwanted) fetch round-trip settle
+        value = self.page.eval_on_selector(".nbx-rd-move-new-input", "el => el.value")
+        self.assertEqual(value, "hand-typed-name",
+                         "a hand-edited value must survive toggling the radios")
+        self.assertEqual(len(calls), 1,
+                         "no further preview-name calls once the field is hand-edited")
+        self.assert_no_console_errors()
+
+    def test_10_move_rename_typed_value_saved(self):
+        self._stub_preview_name(name="engine-suggested-name")
+        idx = self._drag_existing_off_origin()
+
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_function(
+            "() => document.querySelector('.nbx-rd-move-new-input').value === "
+            "'engine-suggested-name'",
+            timeout=5000)
+        self.page.fill(".nbx-rd-move-new-input", "hand-typed-name")
+        self.page.click("[data-rd-move-apply]")
+
+        w = self.base_widgets()[idx]
+        item = self.find_item(self.payload()["front"], device_id=w.get("device_id"))
+        self.assertIsNotNone(item, "moved device missing from the payload")
+        self.assertEqual(item.get("proposed_name"), "hand-typed-name",
+                         "the typed value should be exactly what is saved")
+        self.assert_no_console_errors()
+
+    def test_11_move_keep_name_issues_no_preview_request(self):
+        calls = self._stub_preview_name(name="engine-suggested-name")
+        self._drag_existing_off_origin()
+
+        # Keep-name is preselected; confirm without ever touching the rename
+        # radio.
+        self.page.click("[data-rd-move-apply]")
+        self.assertEqual(len(calls), 0,
+                         "a keep-name move must never call preview-name")
+        self.assert_no_console_errors()
+
+    # =====================================================================
+    # 12. A placement that ALREADY carries a custom rename (from an earlier
+    # decision -- widget.proposed_name is never cleared by returning a tile
+    # to its origin, only st.moveDialogShown is, so re-dragging it off origin
+    # reopens the §4a dialog with that name as `currentName`) must keep that
+    # name when the dialog reopens: no engine suggestion may overwrite it,
+    # selecting the rename radio included. This is the exact bug reported in
+    # review -- `userEdited` started false on every open, so a currentName
+    # prefill was defenseless against the very first requestPreview() call.
+    # =====================================================================
+    def test_12_move_rename_dialog_preserves_existing_custom_name(self):
+        idx = self.widx(kind="existing", face="front", device_id=self._untouched_id)
+        before = self.tile_info(idx)
+        orig_gsY = before["y"]
+        free_gsY = self.page.evaluate(
+            f"() => window.__rdE2E.uPositionToGsY({self._live_free_u}, {before['h']})")
+
+        calls = self._stub_preview_name(name="engine-suggested-name")
+
+        # First drag off origin: currentName is empty, so this prefill
+        # legitimately comes from the engine (covered by test_08 already;
+        # done here only to GET a custom name onto the widget for real).
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_function(
+            "() => document.querySelector('.nbx-rd-move-new-input').value === "
+            "'engine-suggested-name'",
+            timeout=5000)
+        self.page.fill(".nbx-rd-move-new-input", "custom-from-earlier-session")
+        self.page.click("[data-rd-move-apply]")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(len(calls), 1,
+                         "sanity: exactly one preview call for the first, "
+                         "empty-currentName open")
+
+        # Return to origin (editor.js's atOrigin branch resets
+        # st.moveDialogShown but deliberately never clears
+        # widget.proposed_name), then drag off again -- this reopens the
+        # dialog, now with a NON-empty currentName.
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {orig_gsY})")
+        self.page.wait_for_timeout(100)
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+
+        # The custom name is already in the field (keep-name is the
+        # preselected radio, but the input is prefilled regardless), and
+        # selecting rename must not replace it or call preview-name again.
+        prefilled = self.page.eval_on_selector(".nbx-rd-move-new-input", "el => el.value")
+        self.assertEqual(prefilled, "custom-from-earlier-session",
+                         "reopening the dialog must prefill the EXISTING custom "
+                         "name, not blank/reset it")
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_timeout(200)  # let any (unwanted) fetch round-trip settle
+        after_select = self.page.eval_on_selector(".nbx-rd-move-new-input", "el => el.value")
+        self.assertEqual(after_select, "custom-from-earlier-session",
+                         "selecting rename on a placement that already has a "
+                         "custom name must not overwrite it with a fresh "
+                         "engine suggestion")
+        self.assertEqual(len(calls), 1,
+                         "reopening on an already-custom-named placement must "
+                         "not call preview-name again")
         self.assert_no_console_errors()
 
 

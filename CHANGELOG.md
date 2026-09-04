@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-04
+
+### Release Summary
+
+A naming release for `move` placements. Renaming a device as part of a move now
+gets the same engine-generated suggestion an `add` gets -- script, template or
+the built-in sequence, per the deployment's `naming_mode` -- prefilled into the
+rename dialog and always editable. Keeping the device's name stays completely
+inert: nothing is generated and no request is made. Underneath, a move's
+planned role and tenant overrides finally reach the naming engine: they were
+always stored as overrides ("null means leave the device's own value alone"),
+but the engine was handed the source device verbatim, so a template or script
+composing a name from role or tenant saw the value the device was moving *away*
+from rather than the one it will have when it lands.
+
+### Added
+
+- **Move-rename suggestions come from the naming engine.** Selecting "rename"
+  in the move dialog prefills the field from the read-only `preview-name`
+  endpoint with `kind=move`, using the placement's resolved role and tenant and
+  the drop's target rack, position and face. The suggestion is always editable
+  and whatever is left in the field is what gets saved. Choosing to keep the
+  device's name issues no request at all. A name the placement already carries
+  from an earlier session counts as a human's choice and is never overwritten
+  by a suggestion. Site name collisions surface in the dialog the way they do
+  on the add path.
+- `DesignPlacement.resolved_role()` and `DesignPlacement.resolved_tenant()` --
+  the supported way for a naming script to read what a moved device's role and
+  tenant will actually be. Each returns the placement's override when set,
+  otherwise the source device's own value, recursing into `base_placement` for
+  a move acting on an ancestor design's still-planned `add`.
+
+### Fixed
+
+- A move's planned role and tenant overrides are now visible to the naming
+  engine. Previously `{device.role}` and `{device.tenant}` in a naming template
+  rendered the source device's values on a move, silently ignoring the
+  overrides the placement carried.
+- `naming_example`'s role slug now derives from `resolved_role()` instead of
+  duplicating the override logic, which also fixes it falling through to a
+  default for a move acting on an ancestor's planned `add` (no real device to
+  read a role from).
+
+### **Changed**
+
+- **`{device.rack}`, `{device.position}` and `{device.face}` on a `move` now
+  resolve to the move's TARGET, not to where the device currently sits.** This
+  is the intended meaning -- a device is named for where it is going -- but any
+  deployment whose naming template or script uses those tokens on move
+  placements will produce different names than it did before this release.
+  Review your `naming_template` / `naming_script` before upgrading if it names
+  moved devices by location. Nothing changes for `add` placements.
+
 ## [0.26.0] - 2026-09-04
 
 ### Release Summary

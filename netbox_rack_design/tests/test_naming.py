@@ -191,10 +191,12 @@ class NamingEngineTestCase(TestCase):
         )
     )
     def test_template_dotted_device_paths_for_move(self):
-        # A real dcim.Device resolves the same dotted paths.
+        # A real dcim.Device resolves the same dotted paths, but {device.rack}
+        # resolves to the move's TARGET rack (Rack 2), never the source rack
+        # the device currently sits in (Rack 1) -- see _MoveDeviceProxy.
         self.assertEqual(
             generate_name(self.p_move, index=2),
-            "Site 1-Rack 1-Device Type 1-2",
+            "Site 1-Rack 2-Device Type 1-2",
         )
 
     @override_settings(
@@ -304,6 +306,254 @@ class NamingEngineTestCase(TestCase):
             generate_name(p)
             name_exists_in_site(p.proposed_name or "x", self.site, exclude_placement=p)
         self.assertEqual(Device.objects.count(), before)
+
+
+def resolved_attrs_naming_fn(placement):
+    """Module-level callable (script mode) that reads the RESOLVED role/tenant
+    off the placement -- exactly what a real naming script is expected to do
+    per PLAN-move-naming.md -- rather than duplicating the override/carry-over
+    logic itself."""
+    role = placement.resolved_role()
+    tenant = placement.resolved_tenant()
+    return f"{role.name if role else ''}:{tenant.name if tenant else ''}"
+
+
+class MoveResolvedAttributesTestCase(TestCase):
+    """Phase 2 (PLAN-move-naming.md): a 'move' placement's role/tenant are
+    planned OVERRIDES (null means carry over the device's own value), and its
+    rack/position/face are the TARGET, not the source. The naming engine --
+    template mode's ``{device.*}`` context and any script handed the
+    placement directly -- must see the RESOLVED values, never the raw
+    device/override split."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+        cls.device_role = env["device_role"]
+        cls.tenant = env["tenant"]
+        cls.devices = env["devices"]
+
+        cls.pdu_role = DeviceRole.objects.create(name="PDU Role", slug="pdu-role")
+
+        cls.design = Design.objects.create(title="Move-Naming", site=cls.site)
+
+        # devices[0]: real device, own role "Device Role 1", no tenant,
+        # currently Rack 1 / U1 / front (see create_dcim_environment).
+        cls.p_move_plain = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.devices[0],
+            target_rack=cls.racks[1],
+            target_position=15,
+            target_face="front",
+        )
+        cls.p_move_override = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.devices[1],
+            device_role=cls.device_role,
+            tenant=cls.tenant,
+            target_rack=cls.racks[1],
+            target_position=16,
+            target_face="front",
+        )
+        cls.p_move_pdu_override = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.devices[0],
+            device_role=cls.pdu_role,
+            target_rack=cls.racks[1],
+            target_position=18,
+            target_face="front",
+        )
+        cls.p_add = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            device_role=cls.device_role,
+            tenant=cls.tenant,
+            target_rack=cls.racks[1],
+            target_position=17,
+            target_face="front",
+            proposed_name="planned-add-1",
+        )
+
+        # base_placement fallback (G2): a move acting on an ancestor design's
+        # still-planned 'add', with no override of its own -- the carry-over
+        # source is that ancestor placement's own role/tenant.
+        cls.parent_design = Design.objects.create(title="Parent-Naming", site=cls.site)
+        cls.upstream_add = DesignPlacement.objects.create(
+            design=cls.parent_design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            device_role=cls.device_role,
+            tenant=cls.tenant,
+            target_rack=cls.racks[0],
+            target_position=5,
+            proposed_name="upstream-node",
+        )
+        cls.parent_design.status = DesignStatusChoices.STATUS_APPROVED
+        cls.parent_design.save()
+        cls.child_design = Design.objects.create(
+            title="Child-Naming", site=cls.site, based_on=cls.parent_design
+        )
+        cls.p_move_base_placement = DesignPlacement.objects.create(
+            design=cls.child_design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            base_placement=cls.upstream_add,
+            target_rack=cls.racks[1],
+            target_position=19,
+            target_face="front",
+        )
+
+    # --- resolved_role() / resolved_tenant() model methods ------------------
+
+    def test_resolved_role_and_tenant_use_the_override_when_set(self):
+        self.assertEqual(self.p_move_override.resolved_role(), self.device_role)
+        self.assertEqual(self.p_move_override.resolved_tenant(), self.tenant)
+
+    def test_resolved_role_and_tenant_carry_over_the_device_when_omitted(self):
+        self.assertEqual(self.p_move_plain.resolved_role(), self.devices[0].role)
+        self.assertIsNone(self.devices[0].tenant)
+        self.assertIsNone(self.p_move_plain.resolved_tenant())
+
+    def test_resolved_role_and_tenant_for_add_is_the_planned_value_itself(self):
+        # An 'add' has no device to fall back on -- the field IS the value
+        # (regression guard: unaffected by the move override machinery).
+        self.assertEqual(self.p_add.resolved_role(), self.device_role)
+        self.assertEqual(self.p_add.resolved_tenant(), self.tenant)
+
+    def test_resolved_role_and_tenant_fall_back_to_base_placement(self):
+        # No override on the child move -> the ancestor's own planned add
+        # supplies the carry-over value.
+        self.assertEqual(
+            self.p_move_base_placement.resolved_role(), self.device_role
+        )
+        self.assertEqual(
+            self.p_move_base_placement.resolved_tenant(), self.tenant
+        )
+
+    def test_resolved_role_and_tenant_none_with_nothing_to_fall_back_on(self):
+        detached = DesignPlacement(design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE)
+        self.assertIsNone(detached.resolved_role())
+        self.assertIsNone(detached.resolved_tenant())
+
+    # --- template mode -------------------------------------------------------
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template",
+            naming_template="{device.role.name}|{device.tenant.name}",
+        )
+    )
+    def test_template_move_override_role_and_tenant(self):
+        self.assertEqual(
+            generate_name(self.p_move_override, index=1), "Role 1|Tenant 1"
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template",
+            naming_template="{device.role.name}|{device.tenant.name}",
+        )
+    )
+    def test_template_move_carries_over_role_and_tenant_when_omitted(self):
+        self.assertEqual(
+            generate_name(self.p_move_plain, index=1), "Device Role 1|"
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template",
+            naming_template="{device.rack.name}-{device.position}-{device.face}",
+        )
+    )
+    def test_template_move_location_is_the_target_not_the_source(self):
+        # devices[0] currently sits in Rack 1 / U1 / front -- the template
+        # must render the TARGET (Rack 2 / U15 / front), never the source.
+        self.assertEqual(
+            generate_name(self.p_move_plain, index=1), "Rack 2-15-front"
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template",
+            naming_template="{device.role.name}|{device.tenant.name}",
+        )
+    )
+    def test_template_move_base_placement_role_and_tenant(self):
+        self.assertEqual(
+            generate_name(self.p_move_base_placement, index=1), "Role 1|Tenant 1"
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="template", naming_template="{device.name}"
+        )
+    )
+    def test_add_template_context_unaffected(self):
+        # Regression guard: an 'add' still uses the placeholder proxy exactly
+        # as before -- {device.name} is the proposed name, not any move logic.
+        self.assertEqual(
+            generate_name(self.p_add, index=1), "planned-add-1"
+        )
+
+    # --- script mode -----------------------------------------------------
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="script",
+            naming_script=(
+                "netbox_rack_design.tests.test_naming.resolved_attrs_naming_fn"
+            ),
+        )
+    )
+    def test_script_mode_move_sees_resolved_role_and_tenant(self):
+        # _run_script hands the PLACEMENT straight to the script, so the
+        # script itself must be able to call resolved_role()/resolved_tenant()
+        # to get what the device WILL be.
+        self.assertEqual(
+            generate_name(self.p_move_override), "Role 1:Tenant 1"
+        )
+        self.assertEqual(
+            generate_name(self.p_move_plain), "Device Role 1:"
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="script",
+            naming_script="netbox_rack_design.naming_example.build_name",
+        )
+    )
+    def test_script_mode_naming_example_move_role_override_selects_pdu_branch(self):
+        # naming_example._role_slug reads placement.device_role directly for
+        # the override case, so this passes either way -- included as a
+        # regression guard that the PDU override still steers the phase-pair
+        # branch even though the source device's own role is not a PDU role.
+        self.assertEqual(
+            generate_name(self.p_move_pdu_override),
+            "site-1-pdu-rrack2-a1",
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="script",
+            naming_script="netbox_rack_design.naming_example.build_name",
+        )
+    )
+    def test_script_mode_naming_example_move_base_placement_role(self):
+        # naming_example._role_slug is written against resolved_role(): a move
+        # acting on a base_placement (no real device, no override of its own)
+        # must resolve to the ANCESTOR placement's own planned role ("Role 1",
+        # slug "role-1"), not fall through to "dev" for lack of a device to
+        # read .role off of.
+        self.assertEqual(
+            generate_name(self.p_move_base_placement),
+            "site-1-role-1-1",
+        )
 
 
 class SettledNameCollisionTestCase(TestCase):

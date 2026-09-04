@@ -133,11 +133,12 @@ def _next_pdu_slot(placement, prefix):
 
 
 def _role_slug(placement):
-    """The placement's role slug: the chosen role for an add, the real device's
-    role for a move/remove. Empty string when none is set."""
-    role = placement.device_role or (
-        placement.device.role if placement.device else None
-    )
+    """The placement's RESOLVED role slug (``DesignPlacement.resolved_role()``):
+    the chosen role for an add, the override-or-carried-over role for a
+    move/remove -- including a move acting on an ancestor design's
+    still-planned 'add' (no real device to read ``.role`` off of yet). Empty
+    string when none is set."""
+    role = placement.resolved_role()
     return (role.slug if role else "").lower()
 
 

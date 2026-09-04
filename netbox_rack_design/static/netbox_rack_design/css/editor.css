@@ -499,6 +499,17 @@
     box-shadow: inset 0 0 0 1px rgba(var(--tblr-danger-rgb, 214, 57, 57), 0.7);
 }
 
+/* Same "name already exists in site" signal as .nbx-rd-name-warning above, but
+   for the move-rename dialog's input-group addon rather than a tile badge --
+   no absolute positioning, it just sits at the end of the input. */
+.nbx-rd-move-new-warning {
+    color: var(--tblr-danger, #d63939);
+}
+
+.nbx-rd-move-new-warning .mdi {
+    font-size: 0.85rem;
+}
+
 /* The discoverability hint under the catalog search (template-token note). */
 .nbx-rd-naming-hint code {
     font-size: 0.72rem;

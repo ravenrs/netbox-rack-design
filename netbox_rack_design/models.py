@@ -529,8 +529,12 @@ class DesignPlacement(NetBoxModel):
     )
     proposed_name = models.CharField(max_length=64, blank=True)
 
-    # Intended role/tenant for a planned new device (add). Only meaningful for
-    # kind=add; applied to the real device when the design is later executed.
+    # Role/tenant. For an 'add', the planned new device's role/tenant,
+    # applied when the design is later executed. For a 'move', a planned
+    # OVERRIDE: set means the device becomes that role/tenant when it lands,
+    # null means "leave the device's own value alone" (see clean() below and
+    # resolved_role()/resolved_tenant()). Never set for a 'remove' (enforced
+    # in clean()).
     device_role = models.ForeignKey(
         to="dcim.DeviceRole",
         on_delete=models.PROTECT,
@@ -773,6 +777,46 @@ class DesignPlacement(NetBoxModel):
         real-vs-planned branch (docs/pdu-distribution-spec §6.2).
         """
         return self.real_power_feed or self.planned_power_feed
+
+    def resolved_role(self):
+        """The role this placement's device will actually have.
+
+        Null on ``device_role`` means "leave the device's own value alone" (see
+        the field comment and clean()): so this returns the override
+        (``device_role``) when one is set, and otherwise falls back to the
+        carry-over source's own role -- the real ``device``'s role for a
+        move/remove acting on one, or (recursively) the ancestor design's
+        planned role for a move acting on a ``base_placement`` (an ancestor's
+        still-planned 'add' has no real device yet, but its ``device_role`` IS
+        its own planned role, so the recursion terminates there). Returns
+        ``None`` when there is no device or base_placement to fall back on
+        (an 'add' with no role chosen, or a stale row).
+        """
+        if self.device_role_id:
+            return self.device_role
+        if self.device_id:
+            return self.device.role
+        if self.base_placement_id:
+            return self.base_placement.resolved_role()
+        return None
+
+    def resolved_tenant(self):
+        """The tenant this placement's device will actually have.
+
+        Same override/carry-over rule as :meth:`resolved_role`: null on
+        ``tenant`` means "leave the device's own value alone", so this returns
+        the override (``tenant``) when set, else the carry-over source's own
+        tenant (the real ``device``'s tenant, or -- recursively -- a
+        ``base_placement``'s own planned tenant), else ``None`` when there is
+        nothing to fall back on.
+        """
+        if self.tenant_id:
+            return self.tenant
+        if self.device_id:
+            return self.device.tenant
+        if self.base_placement_id:
+            return self.base_placement.resolved_tenant()
+        return None
 
     def clean(self):
         super().clean()
