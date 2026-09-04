@@ -2075,9 +2075,16 @@ class DesignViewSet(NetBoxModelViewSet):
         mapping for POST already gives exactly that, so ``get_permissions``
         does not override it for this action.
 
-        POST .../designs/<pk>/derive/  (no body)
+        POST .../designs/<pk>/derive/  {"title": "..."}  (title optional)
           -> 201 {<full Design representation of the new child>}
-          -> 400 when this design is not approved
+          -> 400 when this design is not approved, or when "title" is present
+             but blank/whitespace-only
+
+        An omitted "title" keeps the old generated "<parent> (derived)"
+        default, so existing clients that POST no body don't break. A
+        supplied title is used verbatim -- the UI form (DesignDeriveForm,
+        views.py) always supplies one, since the title must be typed by the
+        user, not generated.
 
         URL name: plugins-api:netbox_rack_design-api:design-derive
         Path:     /api/plugins/rack-design/designs/<pk>/derive/
@@ -2104,8 +2111,17 @@ class DesignViewSet(NetBoxModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        title = request.data.get("title")
+        if title is None:
+            title = f"{design.title} (derived)"
+        elif not title.strip():
+            return Response(
+                {"title": ["This field may not be blank."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         child = Design(
-            title=f"{design.title} (derived)",
+            title=title,
             site=design.site,
             group=design.group,
             based_on=design,

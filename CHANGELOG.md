@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-04
+
+### Release Summary
+
+A small usability release: deriving a design no longer generates the child's
+title for you. The **Derive design** action now asks for a title, prefilled
+with the old `"<parent> (derived)"` suggestion so the common case is still one
+click away, but a blank title is rejected instead of silently falling back.
+The REST API's `derive` action gained the same optional `title` field —
+existing clients that POST no body are unaffected, since omitting `title`
+still produces the previous generated default.
+
+### Added
+
+- **Design derive: user-supplied title.** The `Derive design` view now shows
+  a form with a required `title` field, prefilled with a
+  `"<parent> (derived)"` suggestion. `POST /api/plugins/rack-design/designs/<pk>/derive/`
+  accepts an optional `"title"` in the request body; a blank or
+  whitespace-only value is rejected with `400`.
+
+### Fixed
+
+- Invalid input while deriving a design (from either the form or a
+  `full_clean()` failure) now re-renders the page with the error attached to
+  the form, instead of the form's invalid-input path raising an unhandled
+  500.
+
+### Changed
+
+- The REST API's `derive` action is backward compatible: omitting `"title"`
+  from the request body keeps the previous generated `"<parent> (derived)"`
+  default, so existing API clients that POST no body do not break.
+
 ## [0.25.0] - 2026-09-02
 
 ### Release Summary

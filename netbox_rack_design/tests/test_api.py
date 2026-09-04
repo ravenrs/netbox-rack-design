@@ -342,6 +342,42 @@ class DesignChainActionsTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
         self.assertFalse(Design.objects.filter(based_on=parent).exists())
 
+    def test_derive_with_explicit_title_is_honoured(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        parent = Design.objects.create(
+            title="Parent3", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(
+            self._derive_url(parent), {"title": "Explicit child title"}, **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        child = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(child.title, "Explicit child title")
+
+    def test_derive_with_omitted_title_keeps_generated_default(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        parent = Design.objects.create(
+            title="Parent4", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(self._derive_url(parent), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        child = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(child.title, "Parent4 (derived)")
+
+    def test_derive_with_blank_title_rejected(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        parent = Design.objects.create(
+            title="Parent5", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(
+            self._derive_url(parent), {"title": "   "}, **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Design.objects.filter(based_on=parent).exists())
+
     # --- rebase ---------------------------------------------------------------
 
     def test_rebase_to_approved_target_succeeds(self):
