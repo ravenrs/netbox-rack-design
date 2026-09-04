@@ -13,6 +13,7 @@ from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
 from django.views.generic import View
 from django_tables2 import RequestConfig
 from netbox.plugins import get_plugin_config
@@ -1243,6 +1244,24 @@ class DesignRebaseForm(django_forms.Form):
     )
 
 
+class DesignDeriveForm(django_forms.Form):
+    """
+    Standalone (not in forms.py -- owned by this view) form for
+    :class:`DesignDeriveView`: the user must type the child design's title
+    themselves (Petr: "the title must be entered by the user, not
+    generated"). ``initial`` is set by the view to a suggested
+    "<parent> (derived)" string so the common case is one keystroke away,
+    but the field is a plain required CharField -- nothing falls back to a
+    generated name if it's left blank.
+    """
+
+    title = django_forms.CharField(
+        max_length=200,
+        label=_("Title"),
+        help_text=_("Title for the new derived design."),
+    )
+
+
 @register_model_view(models.Design, "derive", path="derive")
 class DesignDeriveView(generic.ObjectView):
     """
@@ -1267,8 +1286,10 @@ class DesignDeriveView(generic.ObjectView):
 
     def get(self, request, pk):
         design = self.get_object(pk=pk)
+        form = DesignDeriveForm(initial={"title": f"{design.title} (derived)"})
         return render(request, self.template_name, {
             "object": design,
+            "form": form,
             "return_url": design.get_absolute_url(),
         })
 
@@ -1284,26 +1305,42 @@ class DesignDeriveView(generic.ObjectView):
             )
             return redirect(design.get_absolute_url())
 
+        form = DesignDeriveForm(data=request.POST)
+        if not form.is_valid():
+            return render(request, self.template_name, {
+                "object": design,
+                "form": form,
+                "return_url": design.get_absolute_url(),
+            })
+
         child = models.Design(
-            title=f"{design.title} (derived)",
+            title=form.cleaned_data["title"],
             site=design.site,
             group=design.group,
             based_on=design,
             status=DesignStatusChoices.STATUS_DRAFT,
         )
-        with transaction.atomic():
-            child.full_clean()
-            child.save()
-            # G6: seed the child's rack scope with a SNAPSHOT of the parent's
-            # racks at derive time, not a live link -- a rack added to the
-            # parent later does NOT retroactively appear on the child, which
-            # owns and edits its own scope from here on. This is safe because
-            # baseline replay is per-rack: a rack present on the child but
-            # absent from the parent simply has no inherited layer. Must run
-            # after save() (the M2M needs a pk) and inside the same
-            # transaction as the create, so a child can never exist with a
-            # half-copied scope.
-            child.racks.set(design.racks.all())
+        try:
+            with transaction.atomic():
+                child.full_clean()
+                child.save()
+                # G6: seed the child's rack scope with a SNAPSHOT of the
+                # parent's racks at derive time, not a live link -- a rack
+                # added to the parent later does NOT retroactively appear on
+                # the child, which owns and edits its own scope from here on.
+                # This is safe because baseline replay is per-rack: a rack
+                # present on the child but absent from the parent simply has
+                # no inherited layer. Must run after save() (the M2M needs a
+                # pk) and inside the same transaction as the create, so a
+                # child can never exist with a half-copied scope.
+                child.racks.set(design.racks.all())
+        except ValidationError as e:
+            form.add_error(None, e)
+            return render(request, self.template_name, {
+                "object": design,
+                "form": form,
+                "return_url": design.get_absolute_url(),
+            })
         messages.success(request, f"Created {child} based on {design}.")
         return redirect(child.get_absolute_url())
 

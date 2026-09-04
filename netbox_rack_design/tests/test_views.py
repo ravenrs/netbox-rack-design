@@ -1777,17 +1777,42 @@ class DesignDeriveViewTest(TestCase):
 
     def test_derive_from_approved_creates_child_based_on_it(self):
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
-        response = self.client.post(self._url(self.approved))
+        response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertEqual(response.status_code, 302)
         child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
         self.assertEqual(child.based_on_id, self.approved.pk)
         self.assertEqual(child.status, DesignStatusChoices.STATUS_DRAFT)
+        self.assertEqual(child.title, "Derived child")
+
+    def test_derive_get_renders_form_prefilled_with_suggested_title(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Approved parent (derived)")
+        self.assertEqual(
+            response.context["form"].initial["title"], "Approved parent (derived)"
+        )
+
+    def test_derive_with_custom_title_uses_it_exactly(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.approved), {"title": "My custom title"})
+        self.assertEqual(response.status_code, 302)
+        child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
+        self.assertEqual(child.title, "My custom title")
+
+    def test_derive_with_empty_title_creates_nothing_and_shows_error(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        count_before = Design.objects.count()
+        response = self.client.post(self._url(self.approved), {"title": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Design.objects.count(), count_before)
+        self.assertTrue(response.context["form"].errors.get("title"))
 
     def test_derive_copies_parents_rack_scope_as_a_snapshot(self):
         # G6: the child must open onto the parent's racks, not an empty scope.
         self.approved.racks.set(self.racks)
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
-        response = self.client.post(self._url(self.approved))
+        response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertEqual(response.status_code, 302)
         child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
         self.assertEqual(
@@ -1798,7 +1823,7 @@ class DesignDeriveViewTest(TestCase):
     def test_derive_from_parent_with_no_racks_succeeds_with_empty_scope(self):
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
         self.assertEqual(self.approved.racks.count(), 0)
-        response = self.client.post(self._url(self.approved))
+        response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertEqual(response.status_code, 302)
         child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
         self.assertEqual(child.racks.count(), 0)
@@ -1808,7 +1833,7 @@ class DesignDeriveViewTest(TestCase):
         # the child -- the child owns its own scope once derived (G6).
         self.approved.racks.set([self.racks[0]])
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
-        response = self.client.post(self._url(self.approved))
+        response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertEqual(response.status_code, 302)
         child = Design.objects.exclude(pk=self.approved.pk).exclude(pk=self.draft.pk).get()
         self.assertEqual(
@@ -1824,7 +1849,7 @@ class DesignDeriveViewTest(TestCase):
     def test_derive_from_draft_is_refused(self):
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
         before = set(Design.objects.values_list("pk", flat=True))
-        response = self.client.post(self._url(self.draft))
+        response = self.client.post(self._url(self.draft), {"title": "Derived child"})
         self.assertEqual(response.status_code, 302)
         # No new design was created.
         after = set(Design.objects.values_list("pk", flat=True))
@@ -1833,7 +1858,7 @@ class DesignDeriveViewTest(TestCase):
     def test_derive_without_permission_denied(self):
         response = self.client.get(self._url(self.approved))
         self.assertIn(response.status_code, (403, 404))
-        response = self.client.post(self._url(self.approved))
+        response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertIn(response.status_code, (403, 404))
         self.assertEqual(Design.objects.count(), 2)
 

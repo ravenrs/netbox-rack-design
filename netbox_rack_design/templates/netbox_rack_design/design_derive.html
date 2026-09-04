@@ -8,6 +8,9 @@ views.DesignDeriveView. GET renders this page; POST creates the child design.
 
 Context:
   - object:     the parent Design being derived from
+  - form:       DesignDeriveForm (a required "title" CharField, prefilled
+                with a "<parent> (derived)" suggestion) -- only present when
+                object.is_frozen
   - return_url: where Cancel goes
 {% endcomment %}
 
@@ -27,6 +30,7 @@ Context:
         </p>
         <form method="post">
           {% csrf_token %}
+          {{ form.as_p }}
           <button type="submit" class="btn btn-primary">{% trans "Derive" %}</button>
           <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Cancel" %}</a>
         </form>
