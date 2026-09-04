@@ -106,6 +106,7 @@ from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
 
 from . import planning_fields
+from .choices import DesignPlacementKindChoices
 
 logger = logging.getLogger("netbox_rack_design.naming")
 
@@ -293,9 +294,60 @@ class _AddDevicePlaceholderProxy:
         return out
 
 
+class _MoveDeviceProxy:
+    """
+    A move-placement-backed stand-in for the device once it LANDS, mirroring
+    :class:`_AddDevicePlaceholderProxy`'s shape but for ``kind=move``.
+
+    ``{device.role}`` / ``{device.tenant}`` must resolve to what the device
+    WILL be -- the placement's override when set, the carry-over source's own
+    value otherwise (:meth:`DesignPlacement.resolved_role` /
+    :meth:`.resolved_tenant`) -- and ``{device.rack}`` / ``{device.position}``
+    / ``{device.face}`` must resolve to WHERE it is going (the placement's
+    ``target_*``), never where it is now. Everything else (``name``,
+    ``device_type``, ``site``, ...) delegates to the real device -- or, for a
+    move acting on an ancestor design's still-planned 'add' (no real device
+    yet), to that ancestor placement via the same add-placeholder proxy.
+    """
+
+    def __init__(self, placement):
+        self._placement = placement
+        if placement.device_id:
+            self._identity = placement.device
+        else:
+            self._identity = _AddDevicePlaceholderProxy(placement.base_placement)
+
+    @property
+    def role(self):
+        return self._placement.resolved_role()
+
+    @property
+    def tenant(self):
+        return self._placement.resolved_tenant()
+
+    @property
+    def rack(self):
+        return self._placement.target_rack
+
+    @property
+    def position(self):
+        return self._placement.target_position
+
+    @property
+    def face(self):
+        return self._placement.target_face
+
+    def __getattr__(self, item):
+        return getattr(self._identity, item)
+
+
 def _build_context(placement, n):
     """Build the template render context for a placement."""
-    if placement.device_id:
+    if placement.kind == DesignPlacementKindChoices.KIND_MOVE and (
+        placement.device_id or placement.base_placement_id
+    ):
+        device = _MoveDeviceProxy(placement)
+    elif placement.device_id:
         device = placement.device
     else:
         device = _AddDevicePlaceholderProxy(placement)
