@@ -2229,6 +2229,22 @@ class DesignPlacementViewSet(NetBoxModelViewSet):
     serializer_class = DesignPlacementSerializer
     filterset_class = filtersets.DesignPlacementFilterSet
 
+    def perform_destroy(self, instance):
+        """
+        ``DesignPlacement.clean()`` (models.py) now rejects a frozen design's
+        create/update, but ``clean()`` never runs on delete -- exactly the
+        gap the HTML delete/bulk-delete views (views.py) already guard
+        explicitly for the same reason. ``perform_destroy`` is the one hook
+        both DRF's single-object ``destroy()`` AND ``BulkDestroyModelMixin``'s
+        ``bulk_destroy()`` funnel every deletion through, so overriding it
+        here covers both with one check.
+        """
+        if instance.design.is_frozen:
+            exc = APIException(_frozen_design_rest_message(instance.design))
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc
+        super().perform_destroy(instance)
+
 
 class DesignPowerFeedViewSet(NetBoxModelViewSet):
     """A design's PLANNED power feeds -- the REST twin of the new UI views."""

@@ -728,6 +728,84 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
             [r["id"] for r in filtered.data["results"]], [placement.pk]
         )
 
+    # --- frozen design placement delete guard (§2.2/G4, hole 2) ----
+    # `DesignPlacementViewSet` has no `perform_destroy` guard, so REST DELETE
+    # on a frozen design's placement succeeds, bypassing the freeze that protects
+    # create/update. Single and bulk delete both funnel through `perform_destroy`,
+    # so one override covers both.
+
+    def _placement_url(self):
+        """Helper: URL data for creating a placement in the test design."""
+        design = DesignPlacement.objects.first().design
+        device_type = DesignPlacement.objects.first().device_type
+        rack = DesignPlacement.objects.first().target_rack
+        return {
+            "design": design.pk,
+            "kind": DesignPlacementKindChoices.KIND_ADD,
+            "device_type": device_type.pk,
+            "target_rack": rack.pk,
+            "target_position": 20.0,
+        }
+
+    def test_single_delete_rejected_on_approved_design(self):
+        """DELETE a placement from an approved design → 409, row remains."""
+        self.add_permissions("netbox_rack_design.delete_designplacement")
+        placement = DesignPlacement.objects.first()
+        design = placement.design
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+        url = reverse(
+            "plugins-api:netbox_rack_design-api:designplacement-detail",
+            kwargs={"pk": placement.pk},
+        )
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertTrue(DesignPlacement.objects.filter(pk=placement.pk).exists())
+
+    def test_bulk_delete_rejected_on_approved_design(self):
+        """Bulk DELETE placements from an approved design → 409, rows remain."""
+        self.add_permissions("netbox_rack_design.delete_designplacement")
+        design = DesignPlacement.objects.first().design
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+        placements = list(DesignPlacement.objects.filter(design=design)[:2])
+        placement_ids = [p.pk for p in placements]
+        url = reverse("plugins-api:netbox_rack_design-api:designplacement-list")
+        # NetBox bulk delete expects a list of dicts with "id" key
+        response = self.client.delete(url, [{"id": pk} for pk in placement_ids], format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        # Both rows must still exist
+        for pk in placement_ids:
+            self.assertTrue(DesignPlacement.objects.filter(pk=pk).exists())
+
+    def test_single_delete_allowed_on_draft_design(self):
+        """DELETE a placement from a draft design → 204, row is gone."""
+        self.add_permissions("netbox_rack_design.delete_designplacement")
+        placement = DesignPlacement.objects.first()
+        # Design is draft by default (status not set to APPROVED)
+        url = reverse(
+            "plugins-api:netbox_rack_design-api:designplacement-detail",
+            kwargs={"pk": placement.pk},
+        )
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(DesignPlacement.objects.filter(pk=placement.pk).exists())
+
+    def test_bulk_delete_allowed_on_draft_design(self):
+        """Bulk DELETE placements from a draft design → success, rows gone."""
+        self.add_permissions("netbox_rack_design.delete_designplacement")
+        # Use placements from the existing draft design (all except the last one
+        # which we'll use for the single delete test)
+        placements = list(DesignPlacement.objects.all()[:2])
+        placement_ids = [p.pk for p in placements]
+        url = reverse("plugins-api:netbox_rack_design-api:designplacement-list")
+        response = self.client.delete(url, [{"id": pk} for pk in placement_ids], format="json", **self.header)
+        # Bulk delete returns 204
+        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        # Both rows must be gone
+        for pk in placement_ids:
+            self.assertFalse(DesignPlacement.objects.filter(pk=pk).exists())
+
 
 class SaveLayoutTest(APITestCase):
     """Tests for the DesignViewSet save-layout action (Stage 2, increment 2a)."""
