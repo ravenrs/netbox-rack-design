@@ -351,7 +351,7 @@ class DesignViewSet(NetBoxModelViewSet):
 
         name = naming.generate_name(placement, index=data.get("index"))
         exists = naming.name_exists_in_site(
-            name, design.site, exclude_placement=None, design=design
+            name, design.site, exclude_placement=None
         )
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK

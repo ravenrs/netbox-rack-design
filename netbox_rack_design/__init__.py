@@ -49,20 +49,9 @@ class RackdesignConfig(PluginConfig):
         "naming_template": "{design.name}-{n}",
         # Dotted path to a callable used when naming_mode == "script".
         "naming_script": "",
-        # Settled names across a design chain (see naming.py, PLAN-design-
-        # chains.md Sec 3). A placement's proposed_name is a PLANNING name and
-        # carries the owning design's project prefix; a design that baselines on
-        # it must see the SETTLED name instead. No custom field is ever
-        # hardcoded in the plugin: a deployment points prefix_source at ITS OWN
-        # source, relative to the design. Example:
-        #   "naming": {
-        #     # where the planning prefix token comes from; empty => derive
-        #     # "IDS-<digits>" from the design title
-        #     "prefix_source": "cf.<your project field>",
-        #     # dotted path to fn(placement) -> str replacing the builtin
-        #     # prefix strip; empty => the builtin
-        #     "settled_name": "",
-        #   }
+        # Reserved for future per-design naming options (see naming.py). No
+        # options are currently defined; an unrecognised key still fails
+        # loudly rather than being silently ignored.
         "naming": {},
         # --- Power distribution engine (see distribution.py, docs/pdu-           -
         # distribution-spec.md) ---------------------------------------------------

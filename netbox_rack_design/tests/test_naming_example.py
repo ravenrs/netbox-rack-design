@@ -114,9 +114,10 @@ class NamingExampleTestCase(TestCase):
 
     def test_family_continues_past_an_ancestor_designs_names(self):
         """The example's counter is chain-aware too: a design baselined on an
-        APPROVED design continues its families instead of restarting them, and
-        the ancestor's row is matched by the name it SETTLES to (its stored
-        name carries that design's planning prefix)."""
+        APPROVED design continues its families instead of restarting them --
+        the ancestor's row is matched by its own stored name directly, with no
+        planning prefix to strip first (a name is stored only when a plan
+        actually changes it)."""
         base = Design.objects.create(
             title="Base IDS-1000", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -132,7 +133,7 @@ class NamingExampleTestCase(TestCase):
             target_rack=self.rack,
             target_position=20,
             target_face="front",
-            proposed_name="IDS-1000_ams1-leaf-switch-4",
+            proposed_name="ams1-leaf-switch-4",
         )
         p = self._add(self.sw_type, self.sw_role)
         p.design = child

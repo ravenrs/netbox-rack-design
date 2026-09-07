@@ -2064,35 +2064,6 @@ class DesignEditorChainWidgetTest(TestCase):
         placement_ids = [w["placement_id"] for w in block["widgets"]]
         self.assertNotIn(self.upstream_add.pk, placement_ids)
 
-    def test_settled_name_conflict_surfaces_on_slot_and_in_chain_conflicts(self):
-        # A resolvable prefix source is not configured in these tests, so a
-        # named upstream placement whose name carries no derivable prefix
-        # still resolves cleanly (see naming.py) -- exercise the case that
-        # DOES fail: reuse the projection-level guarantee that a conflict flag
-        # on a slot always has a matching chain_conflicts row referencing the
-        # SAME placement (identity), by forcing settled_name resolution to
-        # fail via an unresolvable planning prefix token.
-        from unittest.mock import patch
-
-        with patch(
-            "netbox_rack_design.naming.settled_name_status",
-            return_value=(None, {"detail": "no prefix source configured"}),
-        ):
-            response = self.client.get(self._editor_url(self.child))
-        self.assertHttpStatus(response, 200)
-        block = response.context["all_rack_blocks"][0]
-        widget = self._widget_by_placement(block["widgets"], self.upstream_add.pk)
-        self.assertTrue(widget["conflict"])
-        self.assertIn("no prefix source configured", widget["conflict_reason"])
-
-        conflicts = response.context["chain_conflicts"]
-        matches = [c for c in conflicts if c["kind"] == "settled_name"]
-        self.assertEqual(len(matches), 1, conflicts)
-        entry = matches[0]
-        self.assertEqual(entry["slot_key"], self.upstream_add.pk)
-        self.assertEqual(entry["source_design_id"], self.parent.pk)
-
-
 class DesignChainHealthViewTest(TestCase):
     """
     The cross-design staleness / re-base REPORT (PLAN-design-chains.md G4's

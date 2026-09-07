@@ -182,6 +182,29 @@ class ReadPlanningFieldsTest(TestCase):
         self.assertIsNone(planning_fields.resolve_source(self.rack, "site.nope"))
         self.assertIsNone(planning_fields.resolve_source(None, "site.name"))
 
+    def test_source_grammar_walks_a_cf_segment_anywhere_along_the_path(self):
+        # A ``cf`` segment may appear ANYWHERE along the path, not only at the
+        # head: "cf.project" reads a custom field off the object itself, and
+        # "design.cf.project" walks to ``obj.design`` first -- what lets a
+        # descriptor's ``source``/``target`` root itself at a related object
+        # through this ONE resolver instead of a second, subtly different one.
+        design = Design.objects.create(
+            title="D-cf", site=self.site, custom_field_data={"project": "IDS-1000"},
+        )
+        self.assertEqual(planning_fields.resolve_source(design, "cf.project"), "IDS-1000")
+
+        placement = DesignPlacement(
+            design=design, kind=DesignPlacementKindChoices.KIND_MOVE,
+        )
+        self.assertEqual(
+            planning_fields.resolve_source(placement, "design.cf.project"), "IDS-1000"
+        )
+        # A dangling "cf" (nothing after it) and a missing key both resolve to
+        # None rather than raising.
+        self.assertIsNone(planning_fields.resolve_source(design, "cf"))
+        self.assertIsNone(planning_fields.resolve_source(design, "cf.nope"))
+        self.assertIsNone(planning_fields.resolve_source(None, "cf.project"))
+
 
 class _PlacementFixture:
     """A design + rack + device type, enough to build a valid `add`."""
