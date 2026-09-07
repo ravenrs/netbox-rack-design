@@ -27,13 +27,15 @@ class RackdesignConfig(PluginConfig):
     max_version = "4.6.99"
     graphql_schema = "graphql.schema"
     default_settings = {
-        # Device statuses the plugin treats as "planned".
-        "planned_statuses": ["planned"],
-        # Device statuses that mark a planned removal. Default uses native
+        # The device status the plugin treats as "planned". Writing a status
+        # needs exactly one value, and recognition needs that same one, so
+        # this is a single string rather than a list.
+        "planned_status": "planned",
+        # The device status that marks a planned removal. Default uses native
         # 'decommissioning'. Environments where that status is destructive
         # (auto-delete / inventory dismantle) should override with a custom
         # status added via FIELD_CHOICES (e.g. 'to_decommission').
-        "removal_statuses": ["decommissioning"],
+        "removal_status": "decommissioning",
         # Default lifecycle status for a new Design.
         "default_status": "draft",
         # Show the rack-page panel listing designs that touch a rack.

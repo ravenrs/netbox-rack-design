@@ -10,10 +10,12 @@ from dcim.models import DeviceType, PowerFeed, PowerPanel, Rack, Site
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from users.models import User
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
+    DesignApply,
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
@@ -1843,6 +1845,126 @@ class DesignRackPowerTestCase(TestCase):
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 DesignRackPower.objects.create(design=self.design, rack=self.racks[0])
+
+
+class DesignApplyTestCase(TestCase):
+    """``DesignApply`` records that an apply run materialized a placement as a
+    real device -- every FK is SET_NULL so the row survives whichever side is
+    deleted, paired with a ``design_title``/``device_name`` snapshot
+    (``snapshot_names()``, called from ``save()``) so it stays readable once
+    a FK goes null."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]
+        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.placement = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.devices[0],
+            target_rack=cls.racks[1],
+            target_position=5,
+        )
+        cls.user = User.objects.create_user(username="apply_user")
+
+    def test_create_snapshots_design_title_and_device_name(self):
+        apply = DesignApply.objects.create(
+            design=self.design,
+            placement=self.placement,
+            device=self.devices[0],
+            applied_by=self.user,
+        )
+        self.assertEqual(apply.design_title, str(self.design))
+        self.assertEqual(apply.device_name, self.devices[0].name)
+
+    def test_deleting_device_nulls_fk_and_keeps_snapshot(self):
+        apply = DesignApply.objects.create(
+            design=self.design,
+            placement=self.placement,
+            device=self.devices[0],
+        )
+        device_name = self.devices[0].name
+        self.devices[0].delete()
+
+        apply.refresh_from_db()
+        self.assertIsNone(apply.device_id)
+        self.assertEqual(apply.device_name, device_name)
+
+    def test_deleting_placement_nulls_fk(self):
+        apply = DesignApply.objects.create(
+            design=self.design,
+            placement=self.placement,
+            device=self.devices[0],
+        )
+        self.placement.delete()
+
+        apply.refresh_from_db()
+        self.assertIsNone(apply.placement_id)
+
+    def test_deleting_design_nulls_fk_and_keeps_title_snapshot(self):
+        apply = DesignApply.objects.create(
+            design=self.design,
+            placement=self.placement,
+            device=self.devices[0],
+        )
+        design_title = str(self.design)
+        self.design.delete()
+
+        apply.refresh_from_db()
+        self.assertIsNone(apply.design_id)
+        self.assertEqual(apply.design_title, design_title)
+
+    def test_unique_constraint_rejects_second_row_for_same_placement(self):
+        DesignApply.objects.create(design=self.design, placement=self.placement)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DesignApply.objects.create(design=self.design, placement=self.placement)
+
+    def test_unique_constraint_permits_several_rows_with_null_placement(self):
+        DesignApply.objects.create(design=self.design, placement=None)
+        DesignApply.objects.create(design=self.design, placement=None)
+        self.assertEqual(
+            DesignApply.objects.filter(design=self.design, placement__isnull=True).count(),
+            2,
+        )
+
+    def test_str_is_sensible_with_every_fk_null(self):
+        apply = DesignApply.objects.create(
+            design=self.design,
+            placement=self.placement,
+            device=self.devices[0],
+        )
+        self.design.delete()
+        self.placement.delete()
+        self.devices[0].delete()
+        apply.refresh_from_db()
+
+        text = str(apply)
+        self.assertIn(str(self.design), text)
+        self.assertIn(self.devices[0].name, text)
+
+
+class PlannedStatusConfigTestCase(TestCase):
+    """The ``planned_status``/``removal_status`` plugin config keys (renamed
+    from the never-read ``planned_statuses``/``removal_statuses`` lists) read
+    back as single strings, and the old plural keys are gone."""
+
+    def test_planned_status_and_removal_status_are_single_strings(self):
+        from netbox.plugins import get_plugin_config
+
+        self.assertEqual(get_plugin_config("netbox_rack_design", "planned_status"), "planned")
+        self.assertEqual(
+            get_plugin_config("netbox_rack_design", "removal_status"), "decommissioning"
+        )
+
+    def test_old_plural_keys_are_gone(self):
+        from netbox.plugins import get_plugin_config
+
+        self.assertIsNone(get_plugin_config("netbox_rack_design", "planned_statuses"))
+        self.assertIsNone(get_plugin_config("netbox_rack_design", "removal_statuses"))
 
 
 class BaselineSlotValidationTestCase(TestCase):

@@ -107,20 +107,20 @@ PLUGINS = [
 # Optional — defaults shown. Only include keys you want to override.
 PLUGINS_CONFIG = {
     "netbox_rack_design": {
-        "planned_statuses": ["planned"],
-        "removal_statuses": ["decommissioning"],
+        "planned_status": "planned",
+        "removal_status": "decommissioning",
         "default_status": "draft",
         "enable_rack_panel": True,
     },
 }
 ```
 
-> **Note on `removal_statuses`.** The default `decommissioning` is the only native
+> **Note on `removal_status`.** The default `decommissioning` is the only native
 > removal-oriented device status on a vanilla install. If `decommissioning` is
 > *destructive* in your environment (e.g. it auto-deletes devices or triggers an
 > external dismantle workflow), do **not** use it for planned removals. Instead add a
 > safe custom status via NetBox's `FIELD_CHOICES` (for `dcim.Device.status`, e.g.
-> `to_decommission`) and point `removal_statuses` at it.
+> `to_decommission`) and point `removal_status` at it.
 
 Apply migrations, collect the plugin's static files, and restart NetBox:
 
@@ -170,8 +170,8 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 
 | Key                 | Default              | Description                                                                                                  |
 |---------------------|----------------------|--------------------------------------------------------------------------------------------------------------|
-| `planned_statuses`  | `["planned"]`        | Device statuses the plugin treats as "planned".                                                              |
-| `removal_statuses`  | `["decommissioning"]`| Device statuses that mark a planned removal. Override with a safe custom status where `decommissioning` is destructive (see note above). |
+| `planned_status`    | `"planned"`          | The device status the plugin treats as "planned".                                                             |
+| `removal_status`    | `"decommissioning"`  | The device status that marks a planned removal. Override with a safe custom status where `decommissioning` is destructive (see note above). |
 | `default_status`    | `"draft"`            | Default lifecycle status for a new Design.                                                                    |
 | `enable_rack_panel` | `True`               | Show the rack-page panel listing designs that touch a rack.                                                  |
 | `naming_mode`       | `"sequence"`         | How a placement's proposed name is computed: `"sequence"` (`<design title>-<n>`), `"template"` (a `str.format` template over real model objects), or `"script"` (a dotted path to `fn(placement) -> str`). See [docs/device-naming.md](docs/device-naming.md). |
