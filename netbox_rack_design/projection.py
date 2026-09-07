@@ -2525,6 +2525,20 @@ def project_rack(design, rack):
             # refused (§9.2), or the ancestor's add is gone. Drawing this row
             # anyway would invent a device at a U nobody planned.
             continue
+        # PROVENANCE (PLAN-design-chains.md §8.4, defect fix): `entry` is the
+        # ancestor's baseline row for this identity, if any. The ghost tile
+        # depicts where the ANCESTOR's layer left the identity, so it is drawn
+        # BECAUSE of the ancestor -- it gets the full `inherited=True` flag.
+        # The move_in tile, though, is drawn because THIS design chose to move
+        # the identity here -- that is this design's own act, not the
+        # ancestor's, so it must not be styled/flagged as inherited. It still
+        # gets `source_design_id` (when the entry came from an ancestor) so the
+        # hover card can name where the identity came from without the tile
+        # claiming to be ancestor-planned. When `entry` is None (a plain real
+        # device with no ancestor involvement) both stay unset, unchanged.
+        ancestor_source_design_id = None
+        if entry is not None and entry.source_design.pk != placement.design_id:
+            ancestor_source_design_id = entry.source_design.pk
         if entry is not None:
             device_type = entry.device_type
             current_rack_id = entry.rack_id
@@ -2561,7 +2575,28 @@ def project_rack(design, rack):
 
         # KIND_MOVE: ghost at the original spot (if currently in this rack) and a
         # move_in slot at the target (if the target is this rack).
-        if current_rack_id == rack.pk and current_position is not None:
+        #
+        # NO-OP MOVE GUARD (defect fix): when the move's target is the exact
+        # rack+position+face the identity is already at (per the baseline),
+        # the move vacates nothing -- drawing a ghost there stacks it directly
+        # under the move_in tile, same rect, unreadable overlapping labels.
+        # Positions are compared numerically (not by object identity): the
+        # target is a Decimal field while the baseline's current_position may
+        # be a plain int/Decimal read off a real device, so a naive `!=` can
+        # be fooled by e.g. Decimal("13.0") vs 13.0. Faces go through the same
+        # `_normalize_face()` used everywhere else in this loop. The guard
+        # only ever suppresses the ghost -- the move_in is drawn exactly as
+        # before, and whether such a placement should even be allowed to exist
+        # is a separate question this fix does not decide.
+        same_location = (
+            current_rack_id == rack.pk
+            and current_position is not None
+            and placement.target_rack_id == rack.pk
+            and placement.target_position is not None
+            and float(current_position) == float(placement.target_position)
+            and _normalize_face(current_face) == _normalize_face(placement.target_face)
+        )
+        if current_rack_id == rack.pk and current_position is not None and not same_location:
             _append(
                 _slot(
                     u_position=Decimal(current_position),
@@ -2572,6 +2607,13 @@ def project_rack(design, rack):
                     device=device,
                     device_type=device_type,
                     placement=placement,
+                    # PROVENANCE: the ghost depicts where the ANCESTOR's layer
+                    # left the identity, so when an ancestor is involved (and
+                    # it is not this design's own layer) it is fully flagged
+                    # as inherited -- see the comment above `entry` for why
+                    # this differs from the move_in below.
+                    inherited=ancestor_source_design_id is not None,
+                    source_design_id=ancestor_source_design_id,
                 ),
                 full_depth=full_depth,
             )
@@ -2592,6 +2634,11 @@ def project_rack(design, rack):
                     # identity `label` above stays the device's real name (or,
                     # for an ancestor-planned identity, its settled name).
                     display_label=placement.proposed_name or None,
+                    # PROVENANCE: this tile is THIS design's own act (it chose
+                    # to move the identity here), so it must never claim
+                    # `inherited` -- only `source_design_id` is set, so the
+                    # hover card can still name where the identity came from.
+                    source_design_id=ancestor_source_design_id,
                 ),
                 full_depth=full_depth,
             )
