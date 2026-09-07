@@ -1781,3 +1781,133 @@ class DesignRackPower(models.Model):
         if own is not None:
             merged.update((own.power_config or {}).get("custom_fields") or {})
         return merged, conflict
+
+
+class DesignApply(models.Model):
+    """
+    A record that an apply run materialized one placement as a real
+    ``dcim.Device`` -- what makes apply idempotent (find/create/update rather
+    than duplicate this row's device on a re-apply), gives the external
+    automation an exact target, and survives whichever side is later deleted
+    so the history of "this design produced that device" is never silently
+    lost.
+
+    Plain ``models.Model`` (like ``DesignRackPower`` above), NOT a
+    ``NetBoxModel``: contrast ``DesignPowerFeed``, which IS one because a team
+    reads, edits and deletes planned feeds directly and needs a list view, a
+    detail page and its own changelog for that. A ``DesignApply`` row is
+    written only by the apply process, never hand-edited -- and the
+    attribution that matters (who/when the device was created or changed) is
+    already recorded on the device's OWN changelog, not on this bookkeeping
+    row. So no cf/tags/changelog of its own is needed here.
+    """
+
+    design = models.ForeignKey(
+        to="netbox_rack_design.Design",
+        on_delete=models.SET_NULL,
+        related_name="applies",
+        blank=True,
+        null=True,
+    )
+    # Snapshot of design.title, filled by snapshot_names() on every save() so
+    # it cannot drift from the live design -- kept so this row still reads
+    # "which design did this" after that design is deleted.
+    design_title = models.CharField(max_length=200, blank=True)
+
+    placement = models.ForeignKey(
+        to="netbox_rack_design.DesignPlacement",
+        on_delete=models.SET_NULL,
+        related_name="applies",
+        blank=True,
+        null=True,
+    )
+
+    device = models.ForeignKey(
+        to="dcim.Device",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+    # Snapshot of device.name, filled by snapshot_names() on every save() --
+    # kept so this row still reads "which device did this apply" after that
+    # device is deleted (e.g. the device this row recorded a REMOVAL of).
+    device_name = models.CharField(max_length=64, blank=True)
+
+    # The device's status BEFORE this apply changed it -- meaningful only for
+    # a removal, where apply itself moves the device to a decommissioned-style
+    # status. Captured so a later revert restores the EXACT prior status
+    # rather than guessing "active": a device removed from `offline` must not
+    # come back as `active`.
+    prior_device_status = models.CharField(max_length=50, blank=True)
+
+    applied_by = models.ForeignKey(
+        to=settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+
+    created = models.DateTimeField(auto_now_add=True)
+    last_updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created",)
+        verbose_name = "design apply"
+        verbose_name_plural = "design applies"
+        constraints = [
+            # One row per placement -- a re-apply of the same placement must
+            # find this row rather than create a second one. Conditioned on
+            # placement__isnull=False so a row whose placement was later
+            # deleted (and this FK nulled) never blocks anything, and several
+            # such orphaned rows may legitimately coexist.
+            models.UniqueConstraint(
+                fields=("placement",),
+                condition=models.Q(placement__isnull=False),
+                name="%(app_label)s_%(class)s_unique_placement",
+            ),
+        ]
+
+    def snapshot_names(self):
+        """Refresh ``design_title`` / ``device_name`` from the live FKs.
+
+        Called from ``save()`` so the snapshots can never drift from what
+        ``design``/``device`` pointed at when this row was last written.  A
+        null FK is left alone: the point of the snapshot is to survive
+        exactly the moment the FK it mirrors goes null, so once that happens
+        overwriting it with an empty string would destroy the one thing this
+        field exists to keep.
+
+        No ``pre_delete`` receiver mirrors this model the way ``signals.py``
+        mirrors ``DesignPlacement``. Those receivers exist because
+        ``stale_device_name`` is captured ONLY at the moment of deletion --
+        there is no earlier point where a placement snapshots the name of a
+        device it merely references. Here it is the opposite: this row is
+        never saved without its FKs already set (an apply run creates it with
+        ``design``/``placement``/``device`` populated), so ``snapshot_names()``
+        already ran at creation and the snapshot is sitting in the row long
+        before any later deletion. Django's SET_NULL pass on a deleted
+        ``dcim.Device``/``Design``/``DesignPlacement`` nulls this row's FK
+        columns directly by SQL (``Collector.delete``'s ``field_updates``
+        pass) without going through ``save()`` -- but by then there is
+        nothing left to snapshot; the value this field exists to preserve was
+        already written. A ``pre_delete`` receiver would only be needed if a
+        ``DesignApply`` row could exist with a set FK and an unpopulated
+        snapshot, which ``save()`` here never allows.
+        """
+        if self.design_id:
+            self.design_title = str(self.design)
+        if self.device_id:
+            self.device_name = str(self.device)
+
+    def save(self, *args, **kwargs):
+        self.snapshot_names()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        # Prefer the live FKs, fall back to the snapshots -- the case the
+        # snapshots exist for is precisely a null design/device here.
+        design_label = self.design or self.design_title or "?"
+        device_label = self.device or self.device_name or "?"
+        return f"{design_label}: apply of {device_label}"

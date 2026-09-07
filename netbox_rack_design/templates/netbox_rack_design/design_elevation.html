@@ -71,6 +71,9 @@
             {# combine by OR with, the five state checkboxes above.           #}
             <label class="nbx-rd-filter" title="{% trans 'A tile carried over from an approved ancestor design' %}"><input type="checkbox" checked data-rd-flag="inherited"><span class="nbx-rd-swatch nbx-rd-flag-inherited"></span>{% trans "Inherited" %}</label>
             <label class="nbx-rd-filter" title="{% trans 'An upstream design now disagrees with this placement -- does not block save' %}"><input type="checkbox" checked data-rd-flag="conflict"><span class="nbx-rd-swatch nbx-rd-flag-conflict"></span>{% trans "Conflict" %}</label>
+            {# Apply markers (apply-projection phase): same flag-not-state pattern. #}
+            <label class="nbx-rd-filter" title="{% trans 'This design already applied it -- pressing apply again is a no-op' %}"><input type="checkbox" checked data-rd-flag="applied"><span class="nbx-rd-swatch nbx-rd-flag-applied"></span>{% trans "Applied" %}</label>
+            <label class="nbx-rd-filter" title="{% trans 'Another design already applied this device' %}"><input type="checkbox" checked data-rd-flag="reserved"><span class="nbx-rd-swatch nbx-rd-flag-reserved"></span>{% trans "Reserved" %}</label>
             {# Legend debt fix (§8.6): these two existing markers -- the      #}
             {# displacement stripe and the save-rejection ring -- had NO      #}
             {# legend entry at all. INFO-only keys (no checkbox): unchecking  #}

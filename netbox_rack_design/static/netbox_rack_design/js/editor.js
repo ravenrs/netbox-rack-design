@@ -7251,6 +7251,12 @@
             // from the server (never blocking, per §8.2).
             var sourceDesignName = content.getAttribute("data-source-design-name");
             var conflictReason = content.getAttribute("data-conflict-reason");
+            // Apply markers (apply-projection phase): the same "explain the
+            // marking on hover" pattern -- an ordinary existing device this
+            // design did not create, but some OTHER design's apply already
+            // holds, names that design so a planner who did not create it
+            // can see whose plan holds the slot.
+            var reservedByDesignTitle = content.getAttribute("data-reserved-by-design-title");
             // Chassis occupancy (spec §10.4): the rack view answers "what is in
             // there / is there room" without trying to edit it.
             var baysUsed = content.getAttribute("data-bays-used");
@@ -7265,7 +7271,8 @@
             try { planning = JSON.parse(content.getAttribute("data-planning") || "[]"); }
             catch (e) { planning = []; }
             if (!name && !deviceType && !role && !tenant && !power && !baysTotal
-                && !planning.length && !sourceDesignName && !conflictReason) { return false; }
+                && !planning.length && !sourceDesignName && !conflictReason
+                && !reservedByDesignTitle) { return false; }
             hcard.textContent = "";
             if (name) {
                 var n = document.createElement("div");
@@ -7285,6 +7292,7 @@
                 ["Bays", baysTotal ? (baysUsed + " of " + baysTotal + " used") : null],
                 ["Source", sourceDesignName],
                 ["Conflict", conflictReason],
+                ["Reserved by", reservedByDesignTitle],
             ].concat(planning).forEach(function (pair) {
                 if (!pair[1]) { return; }
                 var row = document.createElement("div");

@@ -22,6 +22,7 @@ from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
+from . import apply as apply_engine
 from . import filtersets, forms, models, planning_fields, projection, tables
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
@@ -37,7 +38,7 @@ __all__ = (
     "DesignEditorView", "DesignEditorDefaultView", "ElevationBrowserView",
     "DesignPlacementView", "DesignPlacementListView", "DesignPlacementEditView", "DesignPlacementDeleteView",
     "DesignPlacementBulkImportView", "DesignPlacementBulkEditView", "DesignPlacementBulkDeleteView",
-    "DesignDeriveView", "DesignRebaseView", "DesignChainHealthView",
+    "DesignDeriveView", "DesignRebaseView", "DesignApplyView", "DesignChainHealthView",
 )
 
 
@@ -1402,6 +1403,61 @@ class DesignRebaseView(generic.ObjectView):
         return render(request, self.template_name, {
             "object": design,
             "form": form,
+            "return_url": design.get_absolute_url(),
+        })
+
+
+@register_model_view(models.Design, "apply", path="apply")
+class DesignApplyView(generic.ObjectView):
+    """
+    Confirm-page flow for applying a design: the engine in ``apply.py``
+    (:func:`apply.plan`/:func:`apply.run`), which this view exposes but never
+    re-implements. GET renders a dry run (what would be created, updated,
+    flagged for removal, deleted -- called out as irreversible -- or
+    reverted, plus every problem); POST executes it.
+
+    Not gated on ``Design.is_frozen`` here: :func:`apply.plan` itself reports
+    "not approved" as a problem like any other (see the module docstring), so
+    a draft design's confirm page simply shows that one problem, with the
+    submit button withheld the same way it is withheld for any other problem
+    (a button that cannot work is worse than none).
+
+    URL: /plugins/rack-design/designs/<pk>/apply/
+    Name: plugins:netbox_rack_design:design_apply  (kwargs: pk)
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_apply.html"
+
+    def get_required_permission(self):
+        # Applying writes real dcim.Device rows for what this design already
+        # describes -- an edit, not a create.
+        return "netbox_rack_design.change_design"
+
+    def get(self, request, pk):
+        design = self.get_object(pk=pk)
+        result = apply_engine.plan(design, request.user)
+        return render(request, self.template_name, {
+            "object": design,
+            "result": result,
+            "return_url": design.get_absolute_url(),
+        })
+
+    def post(self, request, pk):
+        design = self.get_object(pk=pk)
+        result = apply_engine.run(design, request.user)
+        if result.ok:
+            messages.success(
+                request,
+                f"Applied {design}: {len(result.created)} created, "
+                f"{len(result.updated)} updated, {len(result.removed)} flagged "
+                f"for removal, {len(result.deleted)} deleted, "
+                f"{len(result.reverted)} reverted.",
+            )
+            return redirect(design.get_absolute_url())
+        return render(request, self.template_name, {
+            "object": design,
+            "result": result,
             "return_url": design.get_absolute_url(),
         })
 

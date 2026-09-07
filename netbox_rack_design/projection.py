@@ -187,6 +187,7 @@ from django.db.models import prefetch_related_objects
 from netbox.plugins import get_plugin_config
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
+from .models import DesignApply
 
 __all__ = (
     "ProjectedSlotState",
@@ -299,6 +300,9 @@ def _slot(
     source_design_id=None,
     conflict=False,
     conflict_reason=None,
+    applied=False,
+    reserved_by_design_id=None,
+    reserved_by_design_title="",
 ):
     """Build a single projected-slot dict following the documented contract."""
     return {
@@ -363,6 +367,22 @@ def _slot(
         # (§8.2).
         "conflict": conflict,
         "conflict_reason": conflict_reason,
+        # APPLY MARKERS (apply-projection phase, the same §8.4 flag-not-state
+        # call): whether ``apply.run()`` has already materialized THIS slot's
+        # identity as a real ``dcim.Device`` -- found via the ``DesignApply``
+        # rows keyed by placement/device, never by name (see
+        # ``project_rack``'s single query). ``applied`` is set on an add's or
+        # move's OWN tile (the DCIM copy apply created is suppressed instead
+        # of drawn a second time) and doubles as the honest "pressing apply
+        # again would be a no-op" signal. ``reserved_by_design_id`` /
+        # ``reserved_by_design_title`` mark the opposite case: an ORDINARY
+        # existing/tray slot (this design did not create it) whose device
+        # some OTHER design's apply produced -- title falls back to the
+        # ``DesignApply.design_title`` snapshot once that design is deleted
+        # (``design`` FK is ``SET_NULL`` precisely so this still reads).
+        "applied": applied,
+        "reserved_by_design_id": reserved_by_design_id,
+        "reserved_by_design_title": reserved_by_design_title,
         # Device bays of a PARENT device (a blade chassis), filled by
         # _attach_bays() in one pass over the finished elevation. Always a list:
         # empty for an ordinary device, so consumers never guard on the key.
@@ -1119,7 +1139,26 @@ def baseline_occupancy(design, rack):
     return baseline.claims(), set(baseline.suppressed_device_ids)
 
 
-def _existing_slots(rack, face, excluded_device_ids):
+def _reservation_of(device, applies_by_device_id, design):
+    """``(reserved_by_design_id, reserved_by_design_title)`` for one real device.
+
+    ``applies_by_device_id`` is the single-query map built by ``project_rack``
+    (``device_id -> DesignApply``). A row belonging to THIS design never
+    reaches here -- ``project_rack`` already routes that case into
+    ``design_device_ids`` so the device is suppressed from the plain
+    existing/tray pass and marked ``applied`` on its own add/move tile
+    instead. Anything left is some OTHER design's apply (or one whose design
+    has since been deleted, ``design_id is None``), which is exactly the
+    "reserved by design X" case -- title falls back to the snapshot so it
+    still reads once that design is gone.
+    """
+    apply_row = applies_by_device_id.get(device.pk) if applies_by_device_id else None
+    if apply_row is None or apply_row.design_id == (design.pk if design else None):
+        return None, ""
+    return apply_row.design_id, apply_row.design_title
+
+
+def _existing_slots(rack, face, excluded_device_ids, applies_by_device_id=None, design=None):
     """
     Real installed devices on one face, as 'existing' slots.
 
@@ -1133,6 +1172,10 @@ def _existing_slots(rack, face, excluded_device_ids):
     reality pass itself is unchanged -- reality is still reality; what a
     baseline changes is which parts of it are still true -- and the inherited
     slots are appended separately by ``_Baseline.emit``.
+
+    ``applies_by_device_id`` (apply-projection phase) marks a device some
+    OTHER design's apply produced as ``reserved_by_design_*`` -- see
+    ``_reservation_of``.
     """
     slots = []
     units = rack.get_rack_units(face=face, expand_devices=False)
@@ -1149,6 +1192,9 @@ def _existing_slots(rack, face, excluded_device_ids):
         # else -> blocked hatch. (Non-full-depth devices only ever come back on
         # their own face, so this is never True for them.)
         opposite = _is_full_depth(device.device_type) and (device.face or "") != face
+        reserved_by_design_id, reserved_by_design_title = _reservation_of(
+            device, applies_by_device_id, design
+        )
         slots.append(
             _slot(
                 u_position=Decimal(unit["id"]),
@@ -1159,6 +1205,8 @@ def _existing_slots(rack, face, excluded_device_ids):
                 device=device,
                 device_type=device.device_type,
                 opposite_face=opposite,
+                reserved_by_design_id=reserved_by_design_id,
+                reserved_by_design_title=reserved_by_design_title,
             )
         )
     return slots
@@ -1542,7 +1590,7 @@ def _mark_displaced(slots):
                 break
 
 
-def _existing_tray_slots(rack, excluded_device_ids):
+def _existing_tray_slots(rack, excluded_device_ids, applies_by_device_id=None, design=None):
     """
     Real devices associated with this rack but not mounted at a U (DCIM
     ``Device.rack == rack`` and ``Device.position is None``), as 'existing'
@@ -1563,6 +1611,10 @@ def _existing_tray_slots(rack, excluded_device_ids):
     front/rear/blank, e.g. from a full-depth-agnostic 0U accessory) carries no
     layout meaning here and must not leak into the slot's own face, which the
     editor JS treats as a location identifier equivalent to "front"/"rear".
+
+    ``applies_by_device_id`` (apply-projection phase) marks a device some
+    OTHER design's apply produced as ``reserved_by_design_*`` -- see
+    ``_reservation_of``.
     """
     slots = []
     devices = (
@@ -1572,6 +1624,9 @@ def _existing_tray_slots(rack, excluded_device_ids):
         .order_by("name", "pk")
     )
     for device in devices:
+        reserved_by_design_id, reserved_by_design_title = _reservation_of(
+            device, applies_by_device_id, design
+        )
         slots.append(
             _slot(
                 u_position=None,
@@ -1581,6 +1636,8 @@ def _existing_tray_slots(rack, excluded_device_ids):
                 state=ProjectedSlotState.EXISTING,
                 device=device,
                 device_type=device.device_type,
+                reserved_by_design_id=reserved_by_design_id,
+                reserved_by_design_title=reserved_by_design_title,
             )
         )
     return slots
@@ -2410,6 +2467,32 @@ def project_rack(design, rack):
         ):
             design_device_ids.add(placement.device_id)
 
+    # APPLY MARKERS (apply-projection phase). ONE query for every DesignApply
+    # row whose device lives in THIS rack -- covers both directions at once:
+    # a device THIS design's own apply created (suppress the DCIM copy below,
+    # flag the placement's own add/move_in tile `applied`) and a device some
+    # OTHER design's apply created (flag it `reserved_by_design_*` in
+    # `_existing_slots`/`_existing_tray_slots`). Keyed by the rack, not by
+    # placement or by name, so the query count is independent of how many
+    # devices are applied.
+    apply_rows = list(
+        DesignApply.objects.filter(device__rack_id=rack.pk, device__isnull=False)
+        .only("design_id", "design_title", "placement_id", "device_id")
+    )
+    applies_by_device_id = {row.device_id: row for row in apply_rows}
+    applies_by_placement_id = {
+        row.placement_id: row for row in apply_rows if row.placement_id is not None
+    }
+    # A device THIS design's own apply already created at the very slot the
+    # placement's own add/move_in tile draws must not ALSO come back through
+    # the plain existing/tray pass -- that is exactly the two-tiles defect
+    # (0.27.1's ghost/move_in overlap, now for apply). Suppress it here and
+    # flag the placement's own tile `applied` where it is drawn, below.
+    for placement in adds + moves_removes:
+        own_apply = applies_by_placement_id.get(placement.pk)
+        if own_apply is not None:
+            design_device_ids.add(own_apply.device_id)
+
     # The identities THIS design acts on: the baseline must not also draw them as
     # occupied, or a device would appear both where the ancestor left it and as
     # this design's ghost of that same U.
@@ -2417,12 +2500,21 @@ def project_rack(design, rack):
         key for key in (_identity_key(p) for p in moves_removes) if key is not None
     }
 
-    front = _existing_slots(rack, DeviceFaceChoices.FACE_FRONT, design_device_ids)
-    rear = _existing_slots(rack, DeviceFaceChoices.FACE_REAR, design_device_ids)
+    front = _existing_slots(
+        rack, DeviceFaceChoices.FACE_FRONT, design_device_ids,
+        applies_by_device_id=applies_by_device_id, design=design,
+    )
+    rear = _existing_slots(
+        rack, DeviceFaceChoices.FACE_REAR, design_device_ids,
+        applies_by_device_id=applies_by_device_id, design=design,
+    )
     # Real position-less devices (the tray's "reality" layer, spec §9.1) come
     # first; design-driven non_racked entries (adds/moves with no target
     # position) are appended below by the _append() helper.
-    non_racked = _existing_tray_slots(rack, design_device_ids)
+    non_racked = _existing_tray_slots(
+        rack, design_device_ids,
+        applies_by_device_id=applies_by_device_id, design=design,
+    )
 
     def _append(slot, full_depth=False):
         # A position-less slot (e.g. a target-less add/move) is never face-mirrored.
@@ -2476,6 +2568,12 @@ def project_rack(design, rack):
                 state=ProjectedSlotState.ADD,
                 device_type=device_type,
                 placement=placement,
+                # APPLY MARKER: this placement's ``DesignApply`` row (found
+                # above, in the same query as every other applied device in
+                # the rack) means apply already created the planned device --
+                # its DCIM copy is suppressed via ``design_device_ids`` above,
+                # so only this tile is drawn, flagged as the applied one.
+                applied=placement.pk in applies_by_placement_id,
             ),
             full_depth=_is_full_depth(device_type),
         )
@@ -2537,6 +2635,10 @@ def project_rack(design, rack):
                     device=device,
                     device_type=device_type,
                     placement=placement,
+                    # APPLY MARKER: apply has already flagged the real
+                    # device's status for this removal -- pressing apply
+                    # again would be a no-op.
+                    applied=placement.pk in applies_by_placement_id,
                 ),
                 full_depth=full_depth,
             )
@@ -2616,6 +2718,10 @@ def project_rack(design, rack):
                     # `inherited` -- only `source_design_id` is set, so the
                     # hover card can still name where the identity came from.
                     source_design_id=ancestor_source_design_id,
+                    # APPLY MARKER: apply already created the planned device
+                    # at this move's target -- its DCIM copy is suppressed via
+                    # ``design_device_ids`` above, so only this tile is drawn.
+                    applied=placement.pk in applies_by_placement_id,
                 ),
                 full_depth=full_depth,
             )

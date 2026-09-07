@@ -30,6 +30,11 @@ Rack Design pairs a structured data model with an interactive visual editor for 
 - **Config-driven statuses** — which device statuses count as "planned" and which mark a planned removal are read from `PLUGINS_CONFIG`, never hardcoded.
 - **Naming convention engine** — auto-names planned devices via `naming_mode` = `sequence` / `template` / `script` (a dotted-path callable), with graceful fallback when a template or script fails. See [docs/device-naming.md](docs/device-naming.md).
 - **Power projection & PDU distribution** — a read-only power overlay: a per-rack capacity-vs-projected-consumption bar plus a per-device power heatmap, and per-PDU/per-bank power distribution (`distribution_mode` = `none` / `builtin` / `script`) with planned-PDU feed binding. See [docs/power-projection-spec.md](docs/power-projection-spec.md), [docs/power-distribution.md](docs/power-distribution.md), and [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md).
+- **Apply a design** — materialize an approved design in NetBox as *planned* devices: each target slot is
+  reserved so nobody else can take it, planned cabling has real ports to attach to, and removals are flagged
+  with a configured status. Safe to press twice (it reconciles rather than duplicating), all-or-nothing in one
+  transaction, ordered along a chain, and run entirely with your own DCIM permissions. Available as a button and
+  as an API action with a read-only dry run. See [docs/apply.md](docs/apply.md).
 - **Design chains** — baseline a design on another **approved** design (`based_on`), so one team's moves/removes/adds render as the starting world for the next team's plan, across placements, naming and power. Approval freezes a design so its children can trust it; an ancestor that regresses to draft or moves to `implemented` makes the chain refuse (with a clear re-base prompt) rather than render a guess. See [docs/design-chains.md](docs/design-chains.md).
 - Full **CRUD UI** with list/detail/edit/bulk views and a navigation menu.
 - **REST API** at `/api/plugins/rack-design/`.
@@ -107,20 +112,20 @@ PLUGINS = [
 # Optional — defaults shown. Only include keys you want to override.
 PLUGINS_CONFIG = {
     "netbox_rack_design": {
-        "planned_statuses": ["planned"],
-        "removal_statuses": ["decommissioning"],
+        "planned_status": "planned",
+        "removal_status": "decommissioning",
         "default_status": "draft",
         "enable_rack_panel": True,
     },
 }
 ```
 
-> **Note on `removal_statuses`.** The default `decommissioning` is the only native
+> **Note on `removal_status`.** The default `decommissioning` is the only native
 > removal-oriented device status on a vanilla install. If `decommissioning` is
 > *destructive* in your environment (e.g. it auto-deletes devices or triggers an
 > external dismantle workflow), do **not** use it for planned removals. Instead add a
 > safe custom status via NetBox's `FIELD_CHOICES` (for `dcim.Device.status`, e.g.
-> `to_decommission`) and point `removal_statuses` at it.
+> `to_decommission`) and point `removal_status` at it.
 
 Apply migrations, collect the plugin's static files, and restart NetBox:
 
@@ -170,8 +175,8 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 
 | Key                 | Default              | Description                                                                                                  |
 |---------------------|----------------------|--------------------------------------------------------------------------------------------------------------|
-| `planned_statuses`  | `["planned"]`        | Device statuses the plugin treats as "planned".                                                              |
-| `removal_statuses`  | `["decommissioning"]`| Device statuses that mark a planned removal. Override with a safe custom status where `decommissioning` is destructive (see note above). |
+| `planned_status`    | `"planned"`          | The device status the plugin treats as "planned".                                                             |
+| `removal_status`    | `"decommissioning"`  | The device status that marks a planned removal. Override with a safe custom status where `decommissioning` is destructive (see note above). |
 | `default_status`    | `"draft"`            | Default lifecycle status for a new Design.                                                                    |
 | `enable_rack_panel` | `True`               | Show the rack-page panel listing designs that touch a rack.                                                  |
 | `naming_mode`       | `"sequence"`         | How a placement's proposed name is computed: `"sequence"` (`<design title>-<n>`), `"template"` (a `str.format` template over real model objects), or `"script"` (a dotted path to `fn(placement) -> str`). See [docs/device-naming.md](docs/device-naming.md). |
@@ -200,10 +205,10 @@ The `power_*` keys are not listed in the plugin's `default_settings` (they have 
 - **Power projection** — config-driven capacity vs. projected consumption per rack, rendered as a capacity bar plus a per-device power heatmap.
 - **PDU power distribution** — per-PDU/per-bank load distribution (`distribution_mode` = `"none"` / `"builtin"` / `"script"`), planned-PDU feed binding for greenfield racks, and a per-bank heatmap.
 - **Design chains** — baseline a design on another approved design (`based_on`), inheriting its placements, names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. See [docs/design-chains.md](docs/design-chains.md).
+- **Apply** — materialize an approved design in NetBox as planned devices, reserving each target slot and flagging removals with a configured status. Reports every problem up front, runs all-or-nothing in one transaction, is safe to re-run (reconciles rather than duplicating), is ordered along a chain, and uses the acting user's own DCIM permissions. Button plus API action with a read-only dry run. See [docs/apply.md](docs/apply.md).
 
 **Planned for upcoming stages**
 
-- **Apply ("Make in NetBox")** — an explicit step that materializes an approved design into real planned devices and applies removal statuses. Design chains already assume an ancestor can be applied outside the plugin (marking it `implemented` blocks its children until re-based); a built-in apply step, and reconciling *partially*-applied ancestors, remain future work.
 - **Template-driven export** — generate work documents from a design via NetBox's native Export Templates.
 
 ## Support

@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
+from netbox.plugins import get_plugin_config
 from rest_framework import status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, PermissionDenied
@@ -14,6 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
+from .. import apply as apply_engine
 from .. import filtersets, naming, planning_fields, projection
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
@@ -208,6 +210,87 @@ def _frozen_design_rest_message(design):
     )
 
 
+def _serialize_change_value(key, value):
+    """One ``UpdatedDevice.changes`` value, JSON-safe.
+
+    ``apply.py``'s ``_diff_device`` stores the actual objects/Decimals it
+    diffed against (a ``Rack``/``DeviceRole``/``Tenant`` instance, a
+    ``Decimal`` position) -- this is presentation only, turning those into
+    the plain pk/str a REST response can carry, never a rule apply.py owns.
+    """
+    if key in ("rack", "role", "tenant"):
+        return value.pk if value is not None else None
+    if key == "position":
+        return None if value is None else str(value)
+    return value
+
+
+def _serialize_apply_result(result):
+    """
+    The stable JSON shape for an :class:`apply.ApplyResult` -- shared by the
+    ``apply`` action's GET (dry run, from :func:`apply.plan`) and POST
+    (executed, from :func:`apply.run`) responses, so a client sees the exact
+    same shape either way.
+
+    ``removed`` reports the target status every entry is being moved TO
+    (``removal_status``, the plugin-config value apply.py itself writes) --
+    not read off ``entry.device.status``, since on a dry run that still reads
+    the CURRENT status (nothing has been written yet).
+    """
+    removal_status = get_plugin_config("netbox_rack_design", "removal_status")
+    return {
+        "ok": result.ok,
+        "problems": list(result.problems),
+        "created": [
+            {
+                "placement": entry.placement.pk,
+                "device": entry.device.pk if entry.device else None,
+                "name": entry.name,
+                "rack": entry.rack.pk if entry.rack else None,
+                "position": None if entry.position is None else str(entry.position),
+                "face": entry.face or "",
+                "recreated": entry.recreated,
+            }
+            for entry in result.created
+        ],
+        "updated": [
+            {
+                "placement": entry.placement.pk,
+                "device": entry.device.pk,
+                "changes": {
+                    k: _serialize_change_value(k, v) for k, v in entry.changes.items()
+                },
+            }
+            for entry in result.updated
+        ],
+        "removed": [
+            {
+                "placement": entry.placement.pk,
+                "device": entry.device.pk,
+                "status": removal_status,
+                "prior_status": entry.prior_status,
+            }
+            for entry in result.removed
+        ],
+        "deleted": [
+            {
+                "device": entry.device.pk if entry.device else None,
+                "device_name": entry.device_name,
+                "design_title": entry.design_title,
+            }
+            for entry in result.deleted
+        ],
+        "reverted": [
+            {
+                "device": entry.device.pk if entry.device else None,
+                "device_name": entry.device_name,
+                "prior_status": entry.prior_status,
+            }
+            for entry in result.reverted
+        ],
+    }
+
+
 def _reject_frozen_design(design):
     """
     A 409 ``Response`` for a write against a FROZEN design. Callers invoke
@@ -267,7 +350,7 @@ class DesignViewSet(NetBoxModelViewSet):
     def get_permissions(self):
         action = getattr(self, "action", None)
         if action in ("save_layout", "add_rack", "remove_rack", "rack_power",
-                      "planned_feed", "copy_feeds", "rebase"):
+                      "planned_feed", "copy_feeds", "rebase", "apply"):
             # ``rebase`` re-points THIS design's own ``based_on`` -- an edit
             # to an existing Design, not a create -- so it needs
             # ``change_design`` rather than the ``add_design`` TokenPermissions
@@ -275,6 +358,12 @@ class DesignViewSet(NetBoxModelViewSet):
             # is the opposite case -- it CREATES a new Design -- so it is
             # deliberately left out of this list: the default POST ->
             # ``add_design`` mapping is already exactly the rule §5 wants.
+            # ``apply`` materializes real dcim.Device rows for this design --
+            # an edit to what the design already describes, not a create --
+            # so its POST needs ``change_design`` the same way; its GET (the
+            # dry run) still resolves to ``view_design`` via the default GET
+            # mapping ChangeDesignPermissions leaves untouched, exactly like
+            # ``rack_power``'s split below.
             return [ChangeDesignPermissions()]
         if action in ("preview_name", "power_source", "feeds", "recompute_distribution",
                       "chain"):
@@ -696,6 +785,62 @@ class DesignViewSet(NetBoxModelViewSet):
             {"power_config": rack_power.power_config if rack_power else None},
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["get", "post"], url_path="apply")
+    def apply(self, request, pk=None):
+        """
+        Materialize an approved design's placements as real ``dcim.Device``
+        rows -- the engine in ``apply.py`` (:func:`apply.plan`/:func:`apply.run`),
+        exposed as one action with two methods, mirroring ``rack_power``'s
+        per-request permission split above.
+
+        GET  is a DRY RUN: calls :func:`apply.plan` and returns what applying
+             the design would do, plus every problem that would stop it.
+             Performs NO writes. Requires only ``view_design``.
+        POST EXECUTES: calls :func:`apply.run`, which itself calls
+             :func:`apply.plan` and refuses -- writing nothing -- on any
+             problem. Requires ``change_design``: this writes real dcim
+             rows for an existing design's world, it does not create a
+             Design, so the default POST -> ``add_design`` mapping
+             (``get_permissions`` above) would be wrong.
+
+        DCIM permissions (``dcim.add_device`` / per-object change|delete) are
+        checked BY THE ENGINE, not here: a missing one is reported as a
+        problem in the response body like any other, never a bare 403.
+
+        Response, both methods (see ``_serialize_apply_result``):
+          {"ok": bool,
+           "problems": [str, ...],
+           "created":  [{"placement","device","name","rack","position","face",
+                         "recreated"}, ...],
+           "updated":  [{"placement","device","changes"}, ...],
+           "removed":  [{"placement","device","status","prior_status"}, ...],
+           "deleted":  [{"device","device_name","design_title"}, ...],
+           "reverted": [{"device","device_name","prior_status"}, ...]}
+        ``deleted``/``reverted`` (the cleanup lists) are present on BOTH
+        methods: a deletion is the only irreversible step in the whole flow,
+        so a dry run must show it before the button is ever pressed.
+
+        Status codes: 200 on a dry run and on a successful POST; 409
+        Conflict on a refused POST (same body -- the problems are the
+        point), mirroring ``_reject_frozen_design``'s style.
+
+        URL name: plugins-api:netbox_rack_design-api:design-apply
+        Path:     /api/plugins/rack-design/designs/<pk>/apply/
+        """
+        if request.user.is_authenticated:
+            perm = "change" if request.method == "POST" else "view"
+            self.queryset = Design.objects.restrict(request.user, perm)
+        design = self.get_object()
+
+        if request.method == "POST":
+            result = apply_engine.run(design, request.user)
+            body = _serialize_apply_result(result)
+            code = status.HTTP_200_OK if result.ok else status.HTTP_409_CONFLICT
+            return Response(body, status=code)
+
+        result = apply_engine.plan(design, request.user)
+        return Response(_serialize_apply_result(result), status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="power-source")
     def power_source(self, request, pk=None):

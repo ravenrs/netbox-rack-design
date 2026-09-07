@@ -18,9 +18,13 @@ stripe treatment without re-deriving the knowledge client-side.
 from decimal import Decimal
 
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
+from users.models import User
 from utilities.testing import create_test_device
 
+from .. import apply
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignPlacement
 from ..projection import (
@@ -2051,3 +2055,186 @@ class ChainBayProjectionTestCase(TestCase):
         column = self._column(solo, f"pl-{chassis_p.pk}")
         self.assertEqual(self._bay(column, "c3")["placement"], own)
         self.assertEqual(column["conflicts"], [])
+
+
+class ApplyMarkerProjectionTestCase(TestCase):
+    """Apply-projection phase (PLAN §A4): once ``apply.run()`` has materialized
+    a placement as a real ``dcim.Device``, projection must draw exactly ONE
+    tile for it (the plan's own tile, flagged ``applied``) rather than that
+    tile plus the DCIM copy apply just created -- the same defect shape as
+    the 0.27.1 ghost/move_in overlap, now for apply. In any OTHER design
+    whose scope includes the rack, the applied device renders as an ordinary
+    existing device but flagged ``reserved_by_design_id``/
+    ``reserved_by_design_title`` (falling back to the ``DesignApply`` row's
+    name snapshot once the creating design is deleted).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.devices = env["devices"]  # Device 1 @ Rack1/U1/front, Device 2 @ U2/front
+        cls.device_type = env["device_type"]
+        cls.device_role = env["device_role"]
+        cls.superuser = User.objects.create_superuser(username="apply-marker-super")
+
+    def _design(self, title, *, based_on=None):
+        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+
+    def _approve(self, design):
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+        return design
+
+    def _add(self, design, position, *, name="new-srv", rack=None, device_type=None, face="front"):
+        return DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=device_type or self.device_type,
+            target_rack=rack or self.racks[0],
+            target_position=position,
+            target_face=face,
+            proposed_name=name,
+            device_role=self.device_role,
+        )
+
+    def _move(self, design, device, position, *, rack=None, face="front"):
+        return DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=device,
+            target_rack=rack or self.racks[0],
+            target_position=position,
+            target_face=face,
+        )
+
+    def _at(self, slots, position):
+        return [s for s in slots if s["u_position"] is not None and int(s["u_position"]) == position]
+
+    def test_own_design_add_draws_exactly_one_tile_flagged_applied(self):
+        design = self._design("Apply IDS-1000")
+        self._add(design, 10, name="new-srv")
+        self._approve(design)
+        result = apply.run(design, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        projected = project_rack(design, self.racks[0])
+        at10 = self._at(projected.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.ADD)
+        self.assertTrue(at10[0]["applied"])
+        self.assertIsNone(at10[0]["reserved_by_design_id"])
+
+    def test_own_design_move_draws_exactly_one_tile_flagged_applied(self):
+        design = self._design("Apply IDS-2000")
+        self._move(design, self.devices[0], 10)
+        self._approve(design)
+        result = apply.run(design, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        projected = project_rack(design, self.racks[0])
+        at10 = self._at(projected.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.MOVE_IN)
+        self.assertTrue(at10[0]["applied"])
+        self.assertIsNone(at10[0]["reserved_by_design_id"])
+        # Device 1's OWN ghost at its original U1 is untouched by apply
+        # (the real device a move acts on is left completely alone).
+        at1 = self._at(projected.front, 1)
+        self.assertEqual(len(at1), 1, at1)
+        self.assertEqual(at1[0]["state"], ProjectedSlotState.MOVE_OUT_GHOST)
+        self.assertFalse(at1[0]["applied"])
+
+    def test_other_design_sees_the_applied_device_reserved_by_the_creating_design(self):
+        creator = self._design("Apply IDS-3000")
+        self._add(creator, 10, name="new-srv")
+        self._approve(creator)
+        result = apply.run(creator, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        other = self._design("Other IDS-4000")
+        projected = project_rack(other, self.racks[0])
+        at10 = self._at(projected.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.EXISTING)
+        self.assertFalse(at10[0]["applied"])
+        self.assertEqual(at10[0]["reserved_by_design_id"], creator.pk)
+        self.assertEqual(at10[0]["reserved_by_design_title"], str(creator))
+
+    def test_reservation_survives_the_creating_design_being_deleted(self):
+        creator = self._design("Apply IDS-5000")
+        self._add(creator, 10, name="new-srv")
+        self._approve(creator)
+        result = apply.run(creator, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+        creator.refresh_from_db()
+        creator_title = str(creator)
+        creator.delete()
+
+        other = self._design("Other IDS-6000")
+        projected = project_rack(other, self.racks[0])
+        at10 = self._at(projected.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertIsNone(at10[0]["reserved_by_design_id"])
+        self.assertEqual(at10[0]["reserved_by_design_title"], creator_title)
+
+    def test_device_not_created_by_any_apply_is_unaffected(self):
+        other = self._design("Other IDS-7000")
+        projected = project_rack(other, self.racks[0])
+        at1 = self._at(projected.front, 1)  # Device 1, plain real device
+        self.assertEqual(len(at1), 1, at1)
+        self.assertFalse(at1[0]["applied"])
+        self.assertIsNone(at1[0]["reserved_by_design_id"])
+        self.assertEqual(at1[0]["reserved_by_design_title"], "")
+
+    def test_full_depth_mirror_carries_the_applied_flag(self):
+        fd_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.create(name="FD MF Apply", slug="fd-mf-apply"),
+            model="FD Type Apply", slug="fd-type-apply",
+            u_height=2, is_full_depth=True,
+        )
+        design = self._design("Apply IDS-8000")
+        self._add(design, 15, name="fd-new-srv", device_type=fd_type)
+        self._approve(design)
+        result = apply.run(design, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        projected = project_rack(design, self.racks[0])
+        front15 = self._at(projected.front, 15)
+        rear15 = self._at(projected.rear, 15)
+        self.assertEqual(len(front15), 1, front15)
+        self.assertEqual(len(rear15), 1, rear15)
+        self.assertTrue(front15[0]["applied"])
+        self.assertTrue(rear15[0]["applied"], "the _append mirror must carry the flag too")
+
+    def test_query_count_does_not_grow_with_the_number_of_applied_devices(self):
+        design = self._design("Apply IDS-9000")
+        self._add(design, 10, name="new-srv-a")
+        self._approve(design)
+        result = apply.run(design, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        # Warm up any caches unrelated to the count we're proving.
+        project_rack(design, self.racks[0])
+        with CaptureQueriesContext(connection) as before:
+            project_rack(design, self.racks[0])
+        baseline_queries = len(before.captured_queries)
+
+        # A pile of MORE applied devices, in the SAME rack being projected
+        # (each its own design, so ``design`` is one query but device rows
+        # returned by it are many) must not change the query count -- proving
+        # the apply-marker lookup is one query regardless of row count.
+        for i in range(15):
+            bulk_design = self._design(f"Bulk apply IDS-{9100 + i}")
+            self._add(bulk_design, 20 + i, name=f"bulk-{i}")
+            self._approve(bulk_design)
+            bulk_result = apply.run(bulk_design, self.superuser)
+            self.assertTrue(bulk_result.ok, bulk_result.problems)
+
+        with CaptureQueriesContext(connection) as after:
+            project_rack(design, self.racks[0])
+        self.assertEqual(
+            len(after.captured_queries), baseline_queries,
+            "query count must not scale with the number of applied devices",
+        )

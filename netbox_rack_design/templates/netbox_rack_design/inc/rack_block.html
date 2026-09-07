@@ -115,7 +115,7 @@
             {# tile composited under the occupant. Editable mode keeps the     #}
             {# tile: editor.js collapses it and owns the bar (displaceOne).    #}
             {% if editable or not slot.displaced %}
-            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}"
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
                  gs-x="0"
@@ -144,6 +144,10 @@
                    {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
                    {% if slot.conflict %}data-conflict="1"{% endif %}
                    {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
+                   {# Apply markers (apply-projection phase): a device THIS design's own apply already created (`applied`, this tile IS it -- pressing apply again is a no-op), or a device some OTHER design's apply created and holds (`reserved-by`). Mutually exclusive in practice: an applied tile is this design's own placement, a reserved tile is a plain existing slot. #}
+                   {% if slot.applied %}data-applied="1"{% endif %}
+                   {% if slot.reserved_by_design_id %}data-reserved-by-design-id="{{ slot.reserved_by_design_id }}"{% endif %}
+                   {% if slot.reserved_by_design_title %}data-reserved-by-design-title="{{ slot.reserved_by_design_title }}"{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
@@ -207,7 +211,7 @@
              gs-min-row="{{ rack.u_height|mul2 }}">
           {% for slot in rear %}
             {% if editable or not slot.displaced %}
-            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}"
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
                  gs-x="0"
@@ -235,6 +239,10 @@
                    {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
                    {% if slot.conflict %}data-conflict="1"{% endif %}
                    {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
+                   {# Apply markers (apply-projection phase): see the front face for the full comment. #}
+                   {% if slot.applied %}data-applied="1"{% endif %}
+                   {% if slot.reserved_by_design_id %}data-reserved-by-design-id="{{ slot.reserved_by_design_id }}"{% endif %}
+                   {% if slot.reserved_by_design_title %}data-reserved-by-design-title="{{ slot.reserved_by_design_title }}"{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
@@ -289,7 +297,7 @@
         {# every tray tile is a fixed gs-h="2") so items never overlap and  #}
         {# the container grows to fit -- server-render order first, session #}
         {# drops append after (see editor.js's tray "dropped" handler).     #}
-        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}"
+        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}"
              gs-w="1"
              gs-h="2"
              gs-x="0"
@@ -313,6 +321,10 @@
                {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
                {% if slot.conflict %}data-conflict="1"{% endif %}
                {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
+               {# Apply markers (apply-projection phase): see the front face for the full comment. #}
+               {% if slot.applied %}data-applied="1"{% endif %}
+               {% if slot.reserved_by_design_id %}data-reserved-by-design-id="{{ slot.reserved_by_design_id }}"{% endif %}
+               {% if slot.reserved_by_design_title %}data-reserved-by-design-title="{{ slot.reserved_by_design_title }}"{% endif %}
                title="{{ slot.display_label }} ({{ slot.state }})">
             {% if editable %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                     aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}

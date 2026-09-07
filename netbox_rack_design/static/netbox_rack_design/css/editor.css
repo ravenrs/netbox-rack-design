@@ -1146,6 +1146,59 @@
     z-index: 2;
 }
 
+/* ---- Apply markers (apply-projection phase) ----------------------------- */
+/* `applied`: THIS design's OWN add/move tile once apply.run() has already
+   materialized it as a real (planned-status) device -- the DCIM copy apply
+   just created is suppressed server-side (projection.py's project_rack), so
+   this tile alone stands in for both. Solid teal outline (vs. inherited's
+   dashed indigo) reads as "already real", not "borrowed from upstream"; the
+   corner flag sits top-RIGHT so it can never collide with the inherited
+   flag's top-left one. Doubles as the honest "pressing apply again would be
+   a no-op" signal. */
+.grid-stack-item.nbx-rd-flag-applied > .grid-stack-item-content {
+    outline: 2px solid var(--tblr-teal, #0ca678);
+    outline-offset: -2px;
+}
+
+.grid-stack-item.nbx-rd-flag-applied > .grid-stack-item-content::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 7px 7px 0;
+    border-color: transparent var(--tblr-teal, #0ca678) transparent transparent;
+    pointer-events: none;
+    z-index: 2;
+}
+
+/* `reserved`: an ordinary existing device this design did NOT create -- some
+   OTHER design's apply already holds the slot (DesignApply.design, or its
+   design_title snapshot once that design is gone). Dashed, like inherited
+   (both read as "not this design's own"), but a distinct violet hue and a
+   bottom-left corner flag so the two provenance stories are never mistaken
+   for one another. */
+.grid-stack-item.nbx-rd-flag-reserved > .grid-stack-item-content {
+    outline: 2px dashed var(--tblr-purple, #7048e8);
+    outline-offset: -2px;
+}
+
+.grid-stack-item.nbx-rd-flag-reserved > .grid-stack-item-content::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 0 7px 7px;
+    border-color: transparent transparent var(--tblr-purple, #7048e8) transparent;
+    pointer-events: none;
+    z-index: 2;
+}
+
 /* ---- Device hover card (name / role / tenant) -------------------------- */
 /* A floating card appended to <body> and absolutely positioned by editor.js on
    hover. pointer-events:none guarantees it never blocks dragging a tile or the
@@ -1703,6 +1756,17 @@
         var(--tblr-warning, #f59f00) 3px,
         var(--tblr-warning, #f59f00) 6px
     );
+}
+/* `applied` / `reserved` (apply-projection phase): same REAL-filter swatch
+   pattern as inherited/conflict above, matching the solid teal / dashed
+   violet outlines their tiles carry. */
+.nbx-rd-swatch.nbx-rd-flag-applied {
+    background-color: transparent;
+    border: 2px solid var(--tblr-teal, #0ca678);
+}
+.nbx-rd-swatch.nbx-rd-flag-reserved {
+    background-color: transparent;
+    border: 2px dashed var(--tblr-purple, #7048e8);
 }
 .nbx-rd-swatch.nbx-rd-info-displaced {
     background-color: transparent;
