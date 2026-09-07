@@ -199,7 +199,7 @@ The `power_*` keys are not listed in the plugin's `default_settings` (they have 
 - **Naming convention engine** — auto-names planned devices via `naming_mode` = `"sequence"` / `"template"` / `"script"`, with graceful fallback when a template or script fails.
 - **Power projection** — config-driven capacity vs. projected consumption per rack, rendered as a capacity bar plus a per-device power heatmap.
 - **PDU power distribution** — per-PDU/per-bank load distribution (`distribution_mode` = `"none"` / `"builtin"` / `"script"`), planned-PDU feed binding for greenfield racks, and a per-bank heatmap.
-- **Design chains** — baseline a design on another approved design (`based_on`), inheriting its placements, settled names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. See [docs/design-chains.md](docs/design-chains.md).
+- **Design chains** — baseline a design on another approved design (`based_on`), inheriting its placements, names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. See [docs/design-chains.md](docs/design-chains.md).
 
 **Planned for upcoming stages**
 

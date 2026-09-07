@@ -140,56 +140,30 @@ checked against that result.
 
 ## Naming across a chain
 
-A placement's `proposed_name` is a **planning** name — inside the design that
-owns the change, it typically carries a project marker (`IDS-1234_old-name`
-if your organisation tags work by ticket). That marker is bookkeeping for the
-design that made the change, not part of the device's identity, so a design
-built on top of it must never see it.
+A placement's `proposed_name` means exactly one thing: **the new name the plan
+gives the device**. It is written only when the plan actually renames
+something. A move that keeps the device's name stores nothing at all.
 
-- **An inherited placement renders under its settled name** — the planning
-  prefix stripped off, once. `IDS-1234_old-name` inherits as `old-name`.
-- **Prefixes never stack.** If your design moves that same device again, it
-  gets *your* design's prefix, not both: `IDS-5678_old-name`, never
-  `IDS-5678_IDS-1234_old-name`.
-- **Family counters span the whole chain.** If your naming convention
-  continues a numbered family (`ams1-sw-4` → next is `-5`), the counter
-  counts your own design's placements *and* every ancestor's placements
-  (matched under their **settled** names) — so you never hand out a number an
-  ancestor already reserved. Siblings are deliberately excluded (see above).
+The `<design title>-<device name>` string you see on a tile is a **render-time
+decoration**, never stored. It marks the design's own pending move, so you can
+tell at a glance which devices this design is relocating:
 
-### Configuring the settled-name resolver
+- **Inside the design that owns the move**, a keep-name move renders as
+  `IDS-1234-old-name` and a rename renders as the new name, verbatim.
+- **In a design built on top of it**, the same kept-name move renders as plain
+  `old-name`. In the child's world the device has already moved and carries its
+  own name; the parent's marker was bookkeeping for the parent.
+- **Decorations never stack**, because nothing is stored to stack — the string
+  is composed once, at render time, from the design currently being drawn.
+- **Family counters span the whole chain.** If your naming convention continues
+  a numbered family (`ams1-sw-4` -> next is `-5`), the counter counts your own
+  design's placements *and* every ancestor's, so you never hand out a number an
+  ancestor already reserved. A keep-name move counts under the device's real
+  name. Siblings are deliberately excluded (see above).
 
-The planning prefix is a **project name** — it is not reliably derivable from
-the design title, and it usually lives in a custom field that is specific to
-your deployment. The plugin never hardcodes that field. Configure where the
-prefix comes from under the `naming` key:
-
-```python
-PLUGINS_CONFIG = {
-    "netbox_rack_design": {
-        "naming": {
-            # A dotted path, resolved relative to the design, to the field
-            # that holds the planning-project token. Left empty, the token is
-            # derived from the design title instead (an "IDS-<digits>" pattern).
-            "prefix_source": "cf.<your project field>",
-
-            # Optional: a dotted path to fn(placement) -> str replacing the
-            # built-in prefix strip entirely. Left empty, the built-in strip
-            # is used.
-            "settled_name": "",
-        },
-    },
-}
-```
-
-`prefix_source` (and `settled_name`, if you supply one) use the same dotted
-attribute-path grammar as the naming templates and the planning-fields
-bridge — see [Device naming](device-naming.md) and
-[Planning fields](planning-fields.md). If a `prefix_source` is configured but
-resolves to nothing for a design whose placements are being inherited, that
-is reported as an error rather than falling back to a plausible-but-wrong
-name — the same no-silent-failure rule that governs the naming and
-distribution engines.
+There is nothing to configure. The decoration uses the design's `title`
+verbatim, so no prefix source, no token derivation and no resolver hook are
+involved.
 
 ## Power across a chain
 
