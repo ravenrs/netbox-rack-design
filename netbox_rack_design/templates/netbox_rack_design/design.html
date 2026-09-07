@@ -7,7 +7,22 @@
 <div class="row mb-3">
   <div class="col col-12 col-md-6">
     <div class="card">
-      <h2 class="card-header">{% trans "Design" %}</h2>
+      <h2 class="card-header">
+        {% trans "Design" %}
+        {# Apply: materializes this design's placements in DCIM (apply.py). #}
+        {# Only meaningful once approved -- Design.is_frozen -- and only     #}
+        {# offered to a user who can edit the design's world (change_design; #}
+        {# apply.py itself checks the underlying dcim permissions and       #}
+        {# reports a missing one as a problem on the confirm page).          #}
+        {% if object.is_frozen and perms.netbox_rack_design.change_design %}
+          <div class="card-actions">
+            <a href="{% url 'plugins:netbox_rack_design:design_apply' pk=object.pk %}"
+               class="btn btn-ghost-primary btn-sm">
+              <i class="mdi mdi-check-bold" aria-hidden="true"></i> {% trans "Apply" %}
+            </a>
+          </div>
+        {% endif %}
+      </h2>
       <table class="table table-hover attr-table">
         <tr>
           <th scope="row">{% trans "Title" %}</th>

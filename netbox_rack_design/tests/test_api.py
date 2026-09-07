@@ -5093,3 +5093,142 @@ class SaveLayoutChainTest(APITestCase):
         self.upstream_move.refresh_from_db()
         self.assertEqual(self.upstream_move.design_id, self.parent.pk)
         self.assertEqual(float(self.upstream_move.target_position), 15.0)
+
+
+class ApplyActionTest(APITestCase):
+    """
+    Tests for the DesignViewSet ``apply`` action: GET dry run / POST execute,
+    exposing ``apply.py``'s ``plan()``/``run()`` pair (mirrors ``rack_power``'s
+    per-request permission split -- GET needs only ``view_design``, POST needs
+    ``change_design``). The engine's own rules (approval, occupancy, name
+    conflicts, idempotency) are proven in ``test_apply.py``; these tests only
+    prove the REST wiring around them.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+        cls.device_role = env["device_role"]
+
+    def _url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-apply", kwargs={"pk": design.pk}
+        )
+
+    def _design_with_add(self, title, *, position=10, name="apply-srv-1", approve=True):
+        design = Design.objects.create(title=title, site=self.site)
+        DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            device_role=self.device_role,
+            target_rack=self.racks[0],
+            target_position=position,
+            target_face="front",
+            proposed_name=name,
+        )
+        if approve:
+            design.status = DesignStatusChoices.STATUS_APPROVED
+            design.save()
+        return design
+
+    def test_get_dry_run_with_view_permission_writes_nothing(self):
+        # A view-only user is deliberately NOT given dcim.add_device here: the
+        # point of this test is the 200/no-write contract, not whether the
+        # engine's own dcim-permission problem fires (that is test_apply.py's
+        # concern) -- so the created list is asserted, not result["ok"].
+        self.add_permissions("netbox_rack_design.view_design")
+        design = self._design_with_add("Dry run")
+        response = self.client.get(self._url(design), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["created"]), 1)
+        self.assertFalse(Device.objects.filter(name="apply-srv-1").exists())
+
+    def test_get_reports_cleanup_lists_for_an_orphaned_apply_row(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+            "dcim.add_device",
+        )
+        design = self._design_with_add("Orphan cleanup")
+        placement = DesignPlacement.objects.get(design=design)
+
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        device_pk = response.data["created"][0]["device"]
+
+        placement.delete()  # cancels the plan -- the apply row goes orphaned (SET_NULL)
+
+        response = self.client.get(self._url(design), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["deleted"]), 1)
+        self.assertEqual(response.data["deleted"][0]["device"], device_pk)
+        # Still a dry run: nothing has actually been deleted yet.
+        self.assertTrue(Device.objects.filter(pk=device_pk).exists())
+
+    def test_post_without_change_permission_denied(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        design = self._design_with_add("No change perm")
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Device.objects.filter(name="apply-srv-1").exists())
+
+    def test_post_on_clean_approved_design_creates_the_device(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+            "dcim.add_device",
+        )
+        design = self._design_with_add("Clean approved")
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["ok"])
+        self.assertTrue(Device.objects.filter(name="apply-srv-1").exists())
+
+    def test_post_with_a_problem_refused_409_and_writes_nothing(self):
+        # An occupied slot (Rack1/U1/front already holds a real device from
+        # create_dcim_environment) -- a problem distinct from "not approved".
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+            "dcim.add_device",
+        )
+        design = self._design_with_add(
+            "Occupied slot", position=1, name="conflict-srv",
+        )
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertTrue(response.data["problems"])
+        self.assertFalse(Device.objects.filter(name="conflict-srv").exists())
+
+    def test_post_twice_is_a_no_op_the_second_time(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+            "dcim.add_device",
+        )
+        design = self._design_with_add("Idempotent")
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["created"]), 1)
+        self.assertEqual(Device.objects.filter(name="apply-srv-1").count(), 1)
+
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["created"], [])
+        self.assertEqual(response.data["updated"], [])
+        self.assertEqual(Device.objects.filter(name="apply-srv-1").count(), 1)
+
+    def test_post_on_draft_design_refused_naming_the_approval_problem(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Still draft", approve=False)
+        response = self.client.post(self._url(design), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertTrue(
+            any("not approved" in p for p in response.data["problems"]),
+            response.data["problems"],
+        )
+        self.assertFalse(Device.objects.filter(name="apply-srv-1").exists())

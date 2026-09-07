@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from core.models import ObjectType
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
-from dcim.models import Rack, Site
+from dcim.models import Device, Rack, Site
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -1861,6 +1861,97 @@ class DesignDeriveViewTest(TestCase):
         response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertIn(response.status_code, (403, 404))
         self.assertEqual(Design.objects.count(), 2)
+
+
+class DesignApplyViewTest(TestCase):
+    """"Apply design" confirm-page flow (apply.py's plan()/run() pair)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+        cls.device_role = env["device_role"]
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design_apply", kwargs={"pk": design.pk})
+
+    def _design_with_add(self, title, *, position=10, name="apply-view-srv", approve=True):
+        design = Design.objects.create(title=title, site=self.site)
+        DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            device_role=self.device_role,
+            target_rack=self.racks[0],
+            target_position=position,
+            target_face="front",
+            proposed_name=name,
+        )
+        if approve:
+            design.status = DesignStatusChoices.STATUS_APPROVED
+            design.save()
+        return design
+
+    def test_get_confirm_page_shows_the_intended_action(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Confirm page")
+        response = self.client.get(self._url(design))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "apply-view-srv")
+
+    def test_get_with_problems_shows_them_and_hides_the_submit_button(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Has a problem", approve=False)  # draft: refused
+        response = self.client.get(self._url(design))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "not approved")
+        # Not a bare 'type="submit"' check: the page chrome's own search box
+        # carries one of those regardless of this page's content.
+        self.assertNotContains(
+            response, '<button type="submit" class="btn btn-primary">Apply</button>'
+        )
+
+    def test_post_applies_and_redirects(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+            "dcim.add_device",
+        )
+        design = self._design_with_add("Post apply")
+        response = self.client.post(self._url(design))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, design.get_absolute_url())
+        self.assertTrue(Device.objects.filter(name="apply-view-srv").exists())
+
+    def test_button_appears_for_approved_design_with_change_permission(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Button visible")
+        response = self.client.get(design.get_absolute_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self._url(design))
+
+    def test_button_absent_for_draft_design(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Button absent draft", approve=False)
+        response = self.client.get(design.get_absolute_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, self._url(design))
+
+    def test_button_absent_without_change_permission(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        design = self._design_with_add("Button absent no perm")
+        response = self.client.get(design.get_absolute_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, self._url(design))
 
 
 class DesignRebaseViewTest(TestCase):

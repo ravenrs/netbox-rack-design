@@ -1,0 +1,150 @@
+{% extends 'generic/_base.html' %}
+{% load i18n %}
+
+{% comment %}
+Confirm page for the "Apply design" action: apply.py's plan()/run() pair.
+GET renders the dry run (this template, driven by `result` = plan()); a
+successful POST redirects away, a refused one re-renders this same template
+with the refusal (run() returns the SAME ApplyResult shape) -- see
+views.DesignApplyView.
+
+Context:
+  - object:     the Design being applied
+  - result:     an apply.ApplyResult -- .problems/.created/.updated/.removed/
+                .deleted/.reverted (see apply.py's dataclasses)
+  - return_url: where Cancel/Back goes
+{% endcomment %}
+
+{% block title %}{% trans "Apply design" %} {{ object }}{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <h5 class="card-header">{% trans "Apply design" %}</h5>
+    <div class="card-body">
+      <p>
+        {% blocktrans trimmed with title=object %}
+          Applying <strong>{{ title }}</strong> materializes its placements in
+          DCIM: a planned device is created (or updated) for every add/move,
+          and the real device behind every remove is flagged for
+          decommissioning. The design's own status is not changed here.
+        {% endblocktrans %}
+      </p>
+
+      {% if result.problems %}
+        <div class="alert alert-danger" role="alert">
+          <strong>{% trans "This design cannot be applied yet:" %}</strong>
+          <ul class="mb-0">
+            {% for problem in result.problems %}
+              <li>{{ problem }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      {% if result.deleted %}
+        <div class="alert alert-warning" role="alert">
+          <strong>
+            {% trans "This will permanently delete the following planned devices" %}
+          </strong>
+          {% trans "-- their placement no longer exists. This is the only irreversible step in the whole flow:" %}
+          <ul class="mb-0">
+            {% for entry in result.deleted %}
+              <li>
+                {{ entry.device_name }}
+                <span class="text-muted">({{ entry.design_title }})</span>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th>{% trans "Action" %}</th>
+            <th class="text-end">{% trans "Count" %}</th>
+            <th>{% trans "Detail" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{% trans "Create" %}</td>
+            <td class="text-end">{{ result.created|length }}</td>
+            <td>
+              {% for entry in result.created %}
+                <div>
+                  {{ entry.name }}
+                  {% if entry.rack %}
+                    &rarr; {{ entry.rack }} U{{ entry.position }} {{ entry.face }}
+                  {% endif %}
+                  {% if entry.recreated %}
+                    <span class="badge text-bg-secondary">{% trans "recreated" %}</span>
+                  {% endif %}
+                </div>
+              {% empty %}
+                <span class="text-muted">{% trans "none" %}</span>
+              {% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <td>{% trans "Update" %}</td>
+            <td class="text-end">{{ result.updated|length }}</td>
+            <td>
+              {% for entry in result.updated %}
+                <div>{{ entry.device }}: {{ entry.changes.keys|join:", " }}</div>
+              {% empty %}
+                <span class="text-muted">{% trans "none" %}</span>
+              {% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <td>{% trans "Flag for removal" %}</td>
+            <td class="text-end">{{ result.removed|length }}</td>
+            <td>
+              {% for entry in result.removed %}
+                <div>
+                  {{ entry.device }}
+                  <span class="text-muted">({% trans "was" %} {{ entry.prior_status }})</span>
+                </div>
+              {% empty %}
+                <span class="text-muted">{% trans "none" %}</span>
+              {% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <td class="text-danger">{% trans "Delete" %}</td>
+            <td class="text-end">{{ result.deleted|length }}</td>
+            <td>
+              {% for entry in result.deleted %}
+                <div class="text-danger">{{ entry.device_name }}</div>
+              {% empty %}
+                <span class="text-muted">{% trans "none" %}</span>
+              {% endfor %}
+            </td>
+          </tr>
+          <tr>
+            <td>{% trans "Revert" %}</td>
+            <td class="text-end">{{ result.reverted|length }}</td>
+            <td>
+              {% for entry in result.reverted %}
+                <div>{{ entry.device_name }} &rarr; {{ entry.prior_status }}</div>
+              {% empty %}
+                <span class="text-muted">{% trans "none" %}</span>
+              {% endfor %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      {% if not result.problems %}
+        <form method="post">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-primary">{% trans "Apply" %}</button>
+          <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Cancel" %}</a>
+        </form>
+      {% else %}
+        <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Back" %}</a>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
