@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-09-07
+
+### Release Summary
+
+A projection fix release. Two defects made a child design's elevation
+misrepresent devices its ancestor had already moved: the tile lost the
+provenance that says where it came from, and a move landing on the cell the
+device was already in drew a vacating ghost directly underneath the arriving
+tile, so the two labels painted on top of each other and neither was readable.
+
+### Fixed
+
+- **An ancestor's provenance now reaches a move's slots.** The moves loop
+  already resolved the ancestor's baseline row for the identity it was acting
+  on, but never forwarded that provenance into the slots it built, so the tiles
+  carried neither `inherited` nor `source_design_id` and the elevation showed
+  no sign that the device's position came from another design. The vacating
+  ghost -- which exists only because the ancestor put the device there -- is now
+  flagged `inherited` and names its source design; the arriving tile carries
+  the source design too, but is deliberately NOT flagged inherited, because
+  moving the device there is this design's own act, not the ancestor's.
+- **A move onto the cell the device already occupies no longer draws a ghost.**
+  Such a move vacates nothing, and the ghost was emitted at the same rack,
+  position and face as the arriving tile -- identical geometry, two labels
+  superimposed. The ghost is now suppressed, along with its full-depth mirror
+  on the opposite face. The arriving tile is unchanged, and the placement
+  itself is still allowed: whether a no-op move should be rejected at save time
+  is a separate question this release does not decide.
+
 ## [0.27.0] - 2026-09-04
 
 ### Release Summary
