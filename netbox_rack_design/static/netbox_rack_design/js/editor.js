@@ -447,7 +447,12 @@
         var newRadio = overlay.querySelector("#nbx-rd-move-new");
         var newInput = overlay.querySelector(".nbx-rd-move-new-input");
         var newWarn = overlay.querySelector(".nbx-rd-move-new-warning");
-        var hasCustomName = !!(currentName && currentName !== keepName);
+        // `currentName` is `w.proposed_name` (the STORED value): empty means
+        // either "never touched" or "keep-name was chosen" -- both prefill
+        // blank, so there is nothing left to compare against `keepName` for
+        // (that comparison used to matter when keep-name stored the decorated
+        // string itself; it no longer does).
+        var hasCustomName = !!currentName;
         newInput.value = hasCustomName ? currentName : "";
 
         // Mirrors widget.nameUserSet from the add path (editor.js ~5948): once
@@ -535,10 +540,17 @@
             if (shownDone) { modal.hide(); } else { hidePending = true; }
         }
 
-        function finishConfirm(name) {
+        // `stored` is what reaches `proposed_name`: empty for keep-name, the
+        // typed value verbatim for a rename. `display` is what the tile
+        // SHOWS: the decorated "<design>-<old name>" for keep-name, the same
+        // typed value for a rename. They diverge on keep-name -- that is the
+        // whole point of this phase (contract: empty proposed_name means
+        // "keep the device's current name"; the decoration is a render-time
+        // detail, never stored).
+        function finishConfirm(stored, display) {
             if (decided) { return; }
             decided = true;
-            if (typeof onConfirm === "function") { onConfirm(name); }
+            if (typeof onConfirm === "function") { onConfirm(stored, display); }
         }
         function finishCancel() {
             if (decided) { return; }
@@ -547,8 +559,12 @@
         }
 
         overlay.querySelector("[data-rd-move-apply]").addEventListener("click", function () {
-            var chosen = newRadio.checked ? newInput.value.trim() : keepName;
-            finishConfirm(chosen || keepName);
+            // A blank rename input (rename selected but nothing typed) falls
+            // back to the same keep-name outcome as the keep radio: stored
+            // empty, displayed decorated. An empty string is a legitimate,
+            // meaningful stored value now -- never coerced back to keepName.
+            var typed = newRadio.checked ? newInput.value.trim() : "";
+            finishConfirm(typed, typed || keepName);
             requestHide();
         });
         // Bootstrap sets aria-hidden on the modal as it hides, which triggers a
@@ -3945,17 +3961,39 @@
                     target_position: gsYToUPosition(curGsY, gsH),
                     target_face: curFace,
                 } : null;
-                showMoveNameDialog(oldName, w.proposed_name || "", renamePreviewCtx, function (name) {
-                    w.proposed_name = name;
+                showMoveNameDialog(oldName, w.proposed_name || "", renamePreviewCtx, function (stored, display) {
+                    // `stored` is what proposed_name becomes -- empty for
+                    // keep-name, the typed value for a rename. `display` is
+                    // what the tile SHOWS -- the decorated "<design>-<old
+                    // name>" for keep-name, same as stored for a rename.
+                    // They diverge on keep-name: the decoration is a
+                    // render-time-only detail (projection.py), never stored.
+                    w.proposed_name = stored;
+                    // Marks this widget as having gone through the §4a
+                    // dialog THIS session, even when that resolved to an
+                    // empty (keep-name) value -- buildRackPayload below must
+                    // still send that empty string explicitly so it
+                    // authoritatively overwrites whatever the placement had
+                    // stored before, rather than omitting the field (which
+                    // means "leave it alone"). Reset to false on a full
+                    // revert (homecoming, cancelMove).
+                    w.nameUserSet = true;
                     st.needsRename = false;
                     var content = itemEl.querySelector(".grid-stack-item-content");
                     if (content) {
-                        content.setAttribute("data-name", name || oldName);
-                        content.setAttribute("title", oldName + " → " + name);
+                        content.setAttribute("data-name", display || oldName);
+                        // The REAL stored value, distinct from the tile's
+                        // display text above -- editor.js reads w.proposed_name
+                        // directly for the save payload, but the e2e harness
+                        // (private closure state) can only observe the DOM, so
+                        // this attribute is its one way to see the stored
+                        // value when it differs from what's shown.
+                        content.setAttribute("data-proposed-name", stored);
+                        content.setAttribute("title", oldName + " → " + display);
                         // The tile SHOWS the plan's new identity (user
                         // ruling 2026-07-10); the hover card tells the
                         // identity story (new name + the device's real one).
-                        setTileDisplayName(content, name);
+                        setTileDisplayName(content, display);
                         content.setAttribute("data-old-name", oldName);
                     }
                     markDirty();
@@ -4180,6 +4218,12 @@
                     u_height: w.u_height,
                     label: w.label,
                     proposed_name: w.proposed_name || "",
+                    // Whether this tile went through the §4a dialog THIS
+                    // session (even to an explicit empty/keep-name result) --
+                    // carried across a further cross-rack drag so a later
+                    // save still sends that empty string rather than omitting
+                    // it (see buildRackPayload's w.nameUserSet gate below).
+                    nameUserSet: !!w.nameUserSet,
                     // Planned re-attribution travels with the tile, so hopping
                     // racks does not silently drop an override the user set (or
                     // re-stamp it from a rail that has since changed).
@@ -4493,6 +4537,7 @@
                 u_height: d.u_height,
                 label: d.label,
                 proposed_name: d.proposed_name || "",
+                nameUserSet: !!d.nameUserSet,
                 face: face,
                 device_role_id: (d.device_role_id != null) ? d.device_role_id : null,
                 tenant_id: (d.tenant_id != null) ? d.tenant_id : null,
@@ -4671,6 +4716,7 @@
             if (hcContent) {
                 setTileDisplayName(hcContent, "");
                 hcContent.removeAttribute("data-old-name");
+                hcContent.removeAttribute("data-proposed-name");
                 if (ost.widget && ost.widget.label != null) {
                     hcContent.setAttribute("data-name", ost.widget.label);
                     hcContent.setAttribute("title", ost.widget.label);
@@ -4927,6 +4973,7 @@
                     placement_id: (info.placement_id != null) ? info.placement_id : null,
                     u_height: info.u_height, label: info.label,
                     proposed_name: info.proposed_name || "", face: face,
+                    nameUserSet: !!info.nameUserSet,
                     device_role_id: (info.device_role_id != null) ? info.device_role_id : null,
                     tenant_id: (info.tenant_id != null) ? info.tenant_id : null,
                     planning_data: info.planning_data || null,
@@ -4995,6 +5042,7 @@
                     device_id: w.device_id, device_type_id: w.device_type_id,
                     placement_id: w.placement_id, u_height: w.u_height,
                     label: w.label, proposed_name: w.proposed_name || "",
+                    nameUserSet: !!w.nameUserSet,
                     device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
                     tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
                     planning_data: w.planning_data || null,
@@ -5106,7 +5154,10 @@
             // Cleared here at the top so every branch below (incl. the cross-rack
             // early returns that hand the tile to another rack) reverts the name.
             var content0 = itemEl.querySelector(".grid-stack-item-content");
-            if (content0) { setTileDisplayName(content0, ""); }
+            if (content0) {
+                setTileDisplayName(content0, "");
+                content0.removeAttribute("data-proposed-name");
+            }
             w.proposed_name = "";
             w.nameUserSet = false;
             // A revert also drops the move's PROPOSED NAME: the device is back to
@@ -5474,10 +5525,21 @@
                         });
                     }
                 } else {
-                    if (w.proposed_name) {
-                        // A move that went through the §4a dialog carries its chosen
-                        // name. Omitted (no name) => the view leaves the placement's
-                        // existing proposed_name untouched, keeping the save idempotent.
+                    if (w.nameUserSet) {
+                        // Went through the §4a dialog THIS session -- send the
+                        // stored value verbatim, even when it is an explicit
+                        // empty string (keep-name), so it authoritatively
+                        // replaces whatever proposed_name the placement had
+                        // before. An empty string is meaningful now (contract:
+                        // empty = keep the device's current name), not a
+                        // missing value to fall back away from.
+                        item.proposed_name = w.proposed_name || "";
+                    } else if (w.proposed_name) {
+                        // Untouched this session but non-empty (e.g. carried
+                        // over from a server reload). Omitted entirely (no
+                        // name, untouched) => the view leaves the placement's
+                        // existing proposed_name untouched, keeping the save
+                        // idempotent.
                         item.proposed_name = w.proposed_name;
                     }
                     // Planned re-attribution on a move: role, tenant and the
