@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-08
+
+### Release Summary
+
+An approved design can now be **applied**: materialized in NetBox as planned
+devices. Until now a design was a drawing — the plan existed only inside the
+plugin, so nothing stopped a colleague from racking hardware into a unit your
+approved design had already claimed, and there was nowhere to hang planned
+cabling for a device that had not moved yet. Apply closes that: it creates a
+planned `dcim.Device` at each target slot, reserving the space and giving
+planned ports and cables something real to attach to, and flags the devices a
+design removes with a configured status. The device being moved is left
+untouched in its old slot — apply materializes the *plan*, not the move, so
+during the window before the hardware is touched the rack honestly shows both.
+The physical work, and the design's move to `implemented`, stay with whatever
+automation performs them.
+
+### **Breaking Changes**
+
+- The `planned_statuses` and `removal_statuses` settings are replaced by
+  `planned_status` and `removal_status`, each a **single string** rather than a
+  list:
+
+  ```python
+  "planned_status": "planned",
+  "removal_status": "to_decommission",   # default "decommissioning"
+  ```
+
+  Writing a status needs exactly one value and recognising it needs the same
+  one, so a list was never the right shape. Both keys were scaffolding present
+  since the first commit that **no code ever read**, so nothing behaved
+  differently because of them — but a `PLUGINS_CONFIG` still naming the plural
+  keys must be updated, or the plugin's startup check will reject the unknown
+  keys.
+
+### Added
+
+- **Apply.** `Apply` on an approved design's page, and
+  `POST /api/plugins/rack-design/designs/<pk>/apply/` for automation. `GET` on
+  the same URL is a **dry run** — it reports exactly what a real run would do,
+  writes nothing, and needs only `view_design`.
+  - **Every problem is reported at once**, in plain language: an occupied unit
+    names the device holding it, a name collision names the conflicting device,
+    an unapplied ancestor names which design to apply first, a missing
+    permission names the site. No fixing them one at a time.
+  - **All-or-nothing.** The run is a single transaction, so NetBox is never
+    left half-changed and the plugin's records can never disagree with what
+    exists. There is deliberately no partial "applied 7 of 12" state.
+  - **Safe to press twice.** Apply reconciles rather than duplicating: it
+    finds the device it created before, compares name, rack, position, face,
+    role, tenant and status, and writes back only what drifted. A planned
+    device someone deleted in DCIM is recreated.
+  - **Ordered along a chain.** Applying a design refuses while an ancestor
+    still has unapplied placements, so a slot is never reserved for a move
+    whose precondition does not exist yet. *Planning* stays unordered — the
+    whole point of chains is that the next team plans before the first team's
+    hardware work finishes.
+  - **Cleanup is reported, never silent.** A planned device whose placement was
+    deleted is removed, and a removal flag whose placement was deleted is
+    reverted to the device's *exact* prior status — recorded at flag time, not
+    guessed at `active`. Deleting a planned device is the only irreversible
+    step in the flow, so the confirmation page calls it out by name before you
+    press anything.
+  - Runs with **your own permissions**: `dcim.add_device` /
+    `change_device` / `delete_device` as the run actually requires them,
+    checked through NetBox's object permissions so per-site and per-tenant
+    constraints are honoured. There is no service account, so pressing the
+    button can never do something you could not do directly.
+- **`DesignApply`** records which device an apply created for which placement.
+  Every reference is `SET_NULL` with a name snapshot beside it, so the record
+  outlives whichever side is deleted — "never applied", "applied then the
+  device was deleted", and "applied then the placement was deleted" stay
+  distinguishable rather than collapsing into one indistinguishable state.
+- **Applied and reserved markers on the elevations.** In the design that
+  created it, an applied device draws as a single tile marked applied — the
+  live DCIM copy is suppressed, following the apply records exactly rather than
+  matching on names, so one device can never render as two overlapping tiles.
+  In any other design covering that rack it renders as **reserved by** the
+  design holding it, so a planner who did not create it can see whose plan owns
+  the slot. Both are filterable in the legend and shown in the hover card.
+
+### Changed
+
+- Blade placements (a device destined for a chassis bay) cannot be applied yet.
+  Apply reports them explicitly as unsupported rather than skipping them — a
+  silent skip would read as "applied everything".
+
 ## [0.28.0] - 2026-09-07
 
 ### Release Summary
