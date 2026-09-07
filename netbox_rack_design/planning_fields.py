@@ -99,9 +99,9 @@ def resolve_source(obj, source):
     A ``cf`` segment may appear ANYWHERE along the path, not only at the head:
     ``cf.project`` reads a custom field off ``obj`` itself, and
     ``design.cf.project`` walks to ``obj.design`` first. That is what lets a
-    caller declare a path rooted at a related object (the naming engine's
-    ``prefix_source``, which is declared relative to the design) through this
-    one resolver instead of a second, subtly different one.
+    caller declare a path rooted at a related object (a ``planning_fields``
+    descriptor's ``source``, declared relative to the placement/design) through
+    this one resolver instead of a second, subtly different one.
 
     Returns ``None`` for a missing value or an unresolvable path -- a planning
     field is always optional from the reader's point of view.

@@ -756,10 +756,9 @@ Two flags on a slot dict capture everything that changes:
   design's layer, not from reality untouched or from this design's own
   placements. `source_design_id` names which ancestor.
 - **`conflict`** — something outside this design's control disagrees with
-  this slot (an ancestor's settled name could not be resolved, an ancestor
-  now occupies a unit this design already claimed, or a downstream
-  placement's upstream reference is stale). `conflict_reason` is the
-  human-readable detail.
+  this slot (an ancestor now occupies a unit this design already claimed, or a
+  downstream placement's upstream reference is stale). `conflict_reason` is
+  the human-readable detail.
 
 ### 12.2 Flags, not states (§8.4 of the plan)
 

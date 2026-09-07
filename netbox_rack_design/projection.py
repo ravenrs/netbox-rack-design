@@ -29,6 +29,31 @@ the tray's "reality" layer (spec §9.1), rendered as ``existing`` slots exactly
 like a racked existing device, just without a U/face.
 
 ------------------------------------------------------------------------------
+NAME DECORATION  (render-time only; see naming.py's module docstring)
+------------------------------------------------------------------------------
+
+A device name is stored ONLY when a plan actually changes it:
+``DesignPlacement.proposed_name`` is non-empty for an ``add`` or a renaming
+``move``; a keep-name ``move`` stores an empty ``proposed_name``. The
+``"<design title>-<real name>"`` decoration a keep-name tile shows is produced
+HERE, at render time, and never stored. Every slot's ``label`` (the stable
+identity) and ``display_label`` (the visible name) follow this table:
+
+    Slot comes from ...      | Move kind  | label (identity) | display_label
+    the design being         | keep name  | real name         | "<design.title>-<real name>"
+      projected               | rename     | real name         | proposed_name
+    an ANCESTOR design       | kept name  | real name          | real name (plain, no prefix)
+      (baseline)              | renamed    | real name          | that ancestor's proposed_name
+    any                       | add        | proposed_name      | proposed_name
+
+The prefix marks the PROJECTED design's own pending move only: a child design
+already builds on an ancestor's plan as the world it starts from, so an
+ancestor-owned slot renders plain -- the device simply lives there now, under
+its own name. ``design.title`` is used verbatim (no token derivation, no
+regex, no config lookup): ``Design.display`` carries a ``(v1)`` suffix,
+``title`` does not.
+
+------------------------------------------------------------------------------
 RESULT CONTRACT  (this is the shape the template / API consumes)
 ------------------------------------------------------------------------------
 
@@ -85,7 +110,7 @@ Each *slot* is a plain ``dict`` with the following keys (stable contract):
                                    inherited slot's identity.
     conflict      bool             True when something outside this design's
                                    control is wrong about this slot (today:
-                                   its settled name could not be resolved).
+                                   two designs claim the same chassis bay).
     conflict_reason str | None     Human-readable reason when ``conflict``.
 
 ------------------------------------------------------------------------------
@@ -329,14 +354,13 @@ def _slot(
         "inherited": inherited,
         "source_design_id": source_design_id,
         # CONFLICT (§8.4), the same flag-not-state call: something outside this
-        # design's control is wrong about this slot. Today the only producer is a
-        # settled-name resolution failure (§3.3: an inherited slot must render
-        # under its settled name, and a failure must be SURFACED rather than
-        # quietly falling back to the ancestor's planning name). The slot still
-        # renders -- its U is not in doubt, only its name -- and the matching
-        # entry in ``ProjectedElevation.conflicts`` carries the detail for the
-        # panel. Never the hard-collision path: a conflict marker never blocks a
-        # save (§8.2).
+        # design's control is wrong about this slot. Today the only producer is
+        # a bay this design's own blade claims that an ancestor's blade already
+        # holds (§8.5.3). The slot still renders -- its U is not in doubt, only
+        # the bay claim -- and the matching entry in
+        # ``ProjectedElevation.conflicts`` carries the detail for the panel.
+        # Never the hard-collision path: a conflict marker never blocks a save
+        # (§8.2).
         "conflict": conflict,
         "conflict_reason": conflict_reason,
         # Device bays of a PARENT device (a blade chassis), filled by
@@ -387,11 +411,11 @@ def _conflict(kind, *, severity="error", slot=None, placement=None,
     """One entry for ``ProjectedElevation.conflicts`` (§8.3).
 
     * ``kind``          -- machine-readable category, so a renderer can pick an
-      icon/word without parsing ``detail``. Phase 3 produces five:
+      icon/word without parsing ``detail``. Phase 3 produces four:
       ``ancestor_implemented`` and ``ancestor_not_approved`` (the §9.2 refusal),
-      ``chain_broken`` (the lineage does not resolve), ``settled_name``, and
-      ``bay_occupied`` (this design claims a bay an ancestor's blade already
-      holds -- §8.5.3, marked and never blocking).
+      ``chain_broken`` (the lineage does not resolve), and ``bay_occupied``
+      (this design claims a bay an ancestor's blade already holds -- §8.5.3,
+      marked and never blocking).
     * ``severity``      -- ``"error"`` (this design cannot be trusted as drawn)
       or ``"warning"``. Never blocks a save either way (§8.2).
     * ``slot``          -- the slot dict this is about, or None for a
@@ -459,8 +483,6 @@ class _BaselineEntry:
     parent_key: tuple = None
     label: str = None
     display_label: str = None
-    conflict: bool = False
-    conflict_reason: str = None
     named: bool = False
 
 
@@ -596,10 +618,6 @@ class _Baseline:
         # iterates ``entries``, and a blade must be structurally incapable of
         # reaching a face or the tray -- not merely filtered out of them.
         self.bay_entries = {}
-        # Identities whose settled-name failure has already been reported, so a
-        # bay asked about by several consumers yields one panel row, not one per
-        # question.
-        self._reported_names = set()
         self._build()
 
     # -- construction -------------------------------------------------------
@@ -836,9 +854,12 @@ class _Baseline:
     def _resolve_names(self, entry):
         """Fill ``label``/``display_label`` on an entry, under §3.2 R1.
 
-        An inherited slot renders under its SETTLED name: the planning prefix is
-        the OWNING design's bookkeeping, so ``IDS-1234_srv-01`` in the ancestor
-        is ``srv-01`` in the child.
+        An ancestor's own pending move/rename is ITS bookkeeping, not part of
+        the device's identity in the child: a device an ancestor renamed to
+        ``srv-01`` renders as ``srv-01`` here, with no per-design decoration --
+        only the design CURRENTLY being projected decorates a keep-name move
+        (see ``project_rack`` / ``_slot``'s two callers and the module
+        docstring's rendering table).
 
         ``label`` vs ``display_label`` (the 2026-07-10 ruling documented in
         ``_slot``) resolves differently for the two kinds of identity, and both
@@ -847,17 +868,10 @@ class _Baseline:
         * a REAL device keeps its real name as ``label`` -- that is what anchors
           ghost pairing, harnesses and the read-model, and it is unchanged by an
           ancestor planning to rename it -- while ``display_label`` shows the
-          settled name the ancestor gives it;
-        * an ancestor-PLANNED identity has no real name to be stable about. The
-          settled name is the only handle the child's world has for it, so it is
-          both. Using the ancestor's planning name as ``label`` would leak
-          ``IDS-1234_`` into ghost pairing and the read model, which is exactly
-          the coupling R1 exists to break.
-
-        A resolution failure must not break the render, so
-        ``settled_name_status`` (the non-raising variant) is used -- but it must
-        not silently produce a planning name either, so the fallback is flagged
-        ``conflict`` on the slot and reported in ``conflicts``.
+          name the ancestor renamed it to;
+        * an ancestor-PLANNED identity (an ``add`` with no real device yet) has
+          no real name to be stable about, so its own ``proposed_name`` is
+          both ``label`` and ``display_label``.
         """
         if entry.named:
             return
@@ -867,52 +881,22 @@ class _Baseline:
         real_name = (device.name or str(device)) if device is not None else None
 
         if not placement.proposed_name:
-            # Nothing was ever named, so there is no prefix to strip and no
-            # settled name to fail at: the real device's name, or the catalog
-            # model for a planned add that was never named.
+            # A keep-name move: the real device's name, or the catalog model
+            # for a planned add that was never named.
             entry.label = real_name or _placement_label(placement, entry.device_type)
             entry.display_label = entry.label
             return
 
-        from .naming import settled_name_status
-
-        settled, status = settled_name_status(placement)
-        if settled is None:
-            entry.conflict = True
-            entry.conflict_reason = status["detail"]
-            entry.label = real_name or placement.proposed_name
-            entry.display_label = placement.proposed_name
-            return
-        entry.label = real_name or settled
-        entry.display_label = settled
+        entry.label = real_name or placement.proposed_name
+        entry.display_label = placement.proposed_name
 
     # -- consumption --------------------------------------------------------
-
-    def _report_settled_name(self, entry):
-        """Surface an inherited BAY entry's settled-name failure, once (§3.3).
-
-        The rack path reports it from ``emit`` while building the slot; a bay
-        entry has no slot of its own and may be asked for by several consumers,
-        so the report is deduped on the identity instead.
-        """
-        if not entry.conflict or entry.key in self._reported_names:
-            return
-        self._reported_names.add(entry.key)
-        self.conflicts.append(_conflict(
-            "settled_name",
-            placement=entry.placement,
-            source_design=entry.source_design,
-            detail=f"The settled name of {entry.placement.proposed_name!r} "
-                   f"(planned by {entry.source_design}) could not be resolved, so "
-                   f"this bay is showing that design's PLANNING name: "
-                   f"{entry.conflict_reason}",
-        ))
 
     def bay_entry(self, key):
         """The baseline BAY entry for one identity, or None -- names resolved.
 
         The bay twin of :meth:`entry`, for the caller that must read an inherited
-        blade's type and settled name off the baseline because its own row
+        blade's type and display name off the baseline because its own row
         (a ``base_placement`` move/remove) carries neither.
         """
         entry = self.bay_entries.get(key)
@@ -972,14 +956,13 @@ class _Baseline:
             if acting is not None and acting.kind != DesignPlacementKindChoices.KIND_REMOVE:
                 continue  # Freed by this design; its target draws the occupant.
             self._resolve_names(entry)
-            self._report_settled_name(entry)
             if acting is None:
                 out[entry.bay_name] = {
                     "device": entry.device,
                     "device_type": entry.device_type,
                     # A bay entry has ONE name field and it is the visible one
                     # (that is what ``_placement_label`` fills for this design's
-                    # own blades), so the settled name goes there -- §3.2 R1 by
+                    # own blades), so the display name goes there -- §3.2 R1 by
                     # the same ``_resolve_names`` the rack layer uses.
                     "label": entry.display_label,
                     "occupied": True,
@@ -987,8 +970,8 @@ class _Baseline:
                     "placement": entry.placement,
                     "inherited": True,
                     "source_design_id": entry.source_design.pk,
-                    "conflict": entry.conflict,
-                    "conflict_reason": entry.conflict_reason,
+                    "conflict": False,
+                    "conflict_reason": None,
                 }
             else:
                 out[entry.bay_name] = {
@@ -1111,20 +1094,7 @@ class _Baseline:
                 placement=entry.placement,
                 inherited=True,
                 source_design_id=entry.source_design.pk,
-                conflict=entry.conflict,
-                conflict_reason=entry.conflict_reason,
             )
-            if entry.conflict:
-                self.conflicts.append(_conflict(
-                    "settled_name",
-                    slot=slot,
-                    placement=entry.placement,
-                    source_design=entry.source_design,
-                    detail=f"The settled name of {entry.placement.proposed_name!r} "
-                           f"(planned by {entry.source_design}) could not be "
-                           f"resolved, so this tile is showing that design's "
-                           f"PLANNING name: {entry.conflict_reason}",
-                ))
             append(slot, full_depth=_is_full_depth(entry.device_type))
 
 
@@ -2379,9 +2349,8 @@ def project_chassis(design, entry, baseline=None):
             1 for s in slots
             if s["label"] and s["state"] != ProjectedSlotState.REMOVE
         ),
-        # Chain-level problems first (a refused ancestor, an unresolvable
-        # settled name -- design-wide, so every column reports them), then this
-        # chassis's own bay conflicts.
+        # Chain-level problems first (a refused ancestor -- design-wide, so
+        # every column reports them), then this chassis's own bay conflicts.
         "conflicts": list(baseline.conflicts) + bay_conflicts,
     }
 
@@ -2632,8 +2601,16 @@ def project_rack(design, rack):
                     # The plan's new identity for the device (user ruling
                     # 2026-07-10): the tile SHOWS the assigned name; the
                     # identity `label` above stays the device's real name (or,
-                    # for an ancestor-planned identity, its settled name).
-                    display_label=placement.proposed_name or None,
+                    # for an ancestor-planned identity, its own name). A
+                    # RENAME shows its proposed_name verbatim; a KEEP-NAME move
+                    # is decorated with THIS design's title at render time --
+                    # the prefix marks the projected design's own pending
+                    # move, never stored on the placement (see the module
+                    # docstring's rendering table).
+                    display_label=(
+                        placement.proposed_name
+                        or f"{design.title}-{identity_label}"
+                    ),
                     # PROVENANCE: this tile is THIS design's own act (it chose
                     # to move the identity here), so it must never claim
                     # `inherited` -- only `source_design_id` is set, so the

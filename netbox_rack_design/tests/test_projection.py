@@ -18,7 +18,7 @@ stripe treatment without re-deriving the knowledge client-side.
 from decimal import Decimal
 
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
-from django.test import TestCase, override_settings
+from django.test import TestCase
 from utilities.testing import create_test_device
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
@@ -154,11 +154,13 @@ class DisplacedProjectionTestCase(TestCase):
 
 class DisplayLabelProjectionTestCase(TestCase):
     """Tile label = ASSIGNED name (user ruling 2026-07-10): a slot's visible
-    ``display_label`` is the placement's proposed_name when one exists,
-    falling back to the identity label. The identity ``label`` itself is
-    UNCHANGED (it anchors ghost pairing, harnesses, and the read-model);
-    only the display layer shows the new name. Ghost (origin) slots keep the
-    device's real name as their display -- the origin marker names what is
+    ``display_label`` is the placement's ``proposed_name`` when one exists
+    (a rename), and a "<design title>-<real name>" decoration produced at
+    RENDER time when it does not (a keep-name move stores nothing). The
+    identity ``label`` itself is UNCHANGED either way (it anchors ghost
+    pairing, harnesses, and the read-model); only the display layer shows the
+    decorated/assigned name. Ghost (origin) slots keep the device's real name,
+    undecorated, as their display -- the origin marker names what is
     physically there today."""
 
     @classmethod
@@ -191,8 +193,11 @@ class DisplayLabelProjectionTestCase(TestCase):
         self.assertEqual(len(ghosts), 1)
         self.assertEqual(ghosts[0]["display_label"], self.devices[0].name)
 
-    def test_unnamed_move_display_label_falls_back_to_device_name(self):
-        DesignPlacement.objects.create(
+    def test_keep_name_move_stores_nothing_and_display_is_decorated(self):
+        # A move that does not rename stores an empty proposed_name -- there is
+        # nothing to write down -- and the "<design title>-<real name>"
+        # decoration is produced HERE, at render time, never stored.
+        placement = DesignPlacement.objects.create(
             design=self.design,
             kind=DesignPlacementKindChoices.KIND_MOVE,
             device=self.devices[0],
@@ -200,9 +205,13 @@ class DisplayLabelProjectionTestCase(TestCase):
             target_position=10,
             target_face="front",
         )
+        self.assertEqual(placement.proposed_name, "")
         result = project_rack(self.design, self.racks[0])
         move_ins = [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_IN]
-        self.assertEqual(move_ins[0]["display_label"], self.devices[0].name)
+        self.assertEqual(move_ins[0]["label"], self.devices[0].name)
+        self.assertEqual(
+            move_ins[0]["display_label"], f"{self.design.title}-{self.devices[0].name}"
+        )
 
 
 class TrayProjectionTestCase(TestCase):
@@ -657,19 +666,6 @@ class StalePlacementProjectionTestCase(TestCase):
 # ---------------------------------------------------------------------------
 
 
-def _chain_plugins_config(**naming_overrides):
-    """PLUGINS_CONFIG for the plugin with ``naming`` overrides, for the
-    settled-name cases below (mirrors ``test_naming._plugins_config``)."""
-    cfg = {
-        "naming_mode": "sequence",
-        "naming_template": "{design.name}-{n}",
-        "naming_script": "",
-    }
-    if naming_overrides:
-        cfg["naming"] = dict(naming_overrides)
-    return {"netbox_rack_design": cfg}
-
-
 class ChainProjectionTestCase(TestCase):
     """``project_rack`` replays an approved ancestor's placements as BASELINE.
 
@@ -895,24 +891,23 @@ class ChainProjectionTestCase(TestCase):
         self.assertEqual(self._at(result.front, 10), [])
         self.assertEqual([s for s in result.front if s["inherited"]], [])
 
-    # --- settled names on inherited slots (§3.2 R1) ------------------------
+    # --- names on inherited (ancestor-owned) slots (§3.2 R1) ----------------
 
-    @override_settings(PLUGINS_CONFIG=_chain_plugins_config())
-    def test_inherited_slot_renders_under_its_settled_name(self):
+    def test_inherited_add_renders_under_its_own_stored_name(self):
+        # An ancestor's own 'add' has no real device: its proposed_name IS the
+        # identity, plain, with no per-design decoration (only the design
+        # CURRENTLY being projected decorates a keep-name move).
         a = self._design("Network sweep IDS-1234")
-        self._add(a, 10, name="IDS-1234_srv-01")
+        self._add(a, 10, name="srv-01")
         self._approve(a)
         b = self._design("Server build IDS-2000", based_on=a)
 
         slot = self._at(project_rack(b, self.racks[0]).front, 10)[0]
-        self.assertEqual(slot["display_label"], "srv-01",
-                         "the ancestor's planning prefix is ITS bookkeeping, not part "
-                         "of the device's identity in the child")
+        self.assertEqual(slot["display_label"], "srv-01")
         self.assertEqual(slot["label"], "srv-01",
-                         "an ancestor-planned identity has no real device name, so the "
-                         "settled name IS the stable identity in the child's world")
+                         "an ancestor-planned identity has no real device name, so its "
+                         "own stored name IS the stable identity in the child's world")
 
-    @override_settings(PLUGINS_CONFIG=_chain_plugins_config())
     def test_inherited_moved_real_device_keeps_its_real_name_as_identity(self):
         a = self._design("Network sweep IDS-1234")
         DesignPlacement.objects.create(
@@ -922,7 +917,7 @@ class ChainProjectionTestCase(TestCase):
             target_rack=self.racks[0],
             target_position=10,
             target_face="front",
-            proposed_name="IDS-1234_renamed-01",
+            proposed_name="renamed-01",
         )
         self._approve(a)
         b = self._design("Server build IDS-2000", based_on=a)
@@ -931,30 +926,28 @@ class ChainProjectionTestCase(TestCase):
         self.assertEqual(slot["label"], self.devices[0].name,
                          "a REAL device's identity stays its real name (2026-07-10 ruling)")
         self.assertEqual(slot["display_label"], "renamed-01",
-                         "the visible name is the settled name the ancestor gives it")
+                         "the visible name is what the ancestor renamed it to, verbatim -- "
+                         "no per-design decoration on an ancestor's own move")
 
-    @override_settings(PLUGINS_CONFIG=_chain_plugins_config(prefix_source="cf.project"))
-    def test_settled_name_failure_is_surfaced_as_a_conflict(self):
-        # ``prefix_source`` is configured but resolves to nothing on the
-        # ancestor, so the settled name cannot be determined. It must NOT
-        # quietly fall through to the planning name with nothing on screen.
+    def test_inherited_kept_name_move_renders_plain_with_no_ancestor_decoration(self):
+        # The ancestor's move KEPT the device's name: from the child's point of
+        # view that move already happened, so the slot renders plain -- only
+        # the design CURRENTLY being projected decorates a keep-name move.
         a = self._design("Network sweep IDS-1234")
-        self._add(a, 10, name="IDS-1234_srv-01")
+        DesignPlacement.objects.create(
+            design=a,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+        )
         self._approve(a)
         b = self._design("Server build IDS-2000", based_on=a)
 
-        result = project_rack(b, self.racks[0])
-
-        slot = self._at(result.front, 10)[0]
-        self.assertTrue(slot["conflict"], slot)
-        self.assertTrue(slot["conflict_reason"])
-        kinds = [c["kind"] for c in result.conflicts]
-        self.assertIn("settled_name", kinds, result.conflicts)
-        entry = next(c for c in result.conflicts if c["kind"] == "settled_name")
-        self.assertEqual(entry["severity"], "error")
-        self.assertEqual(entry["source_design"], a)
-        self.assertEqual(entry["slot"], slot)
-        self.assertTrue(entry["detail"])
+        slot = self._at(project_rack(b, self.racks[0]).front, 10)[0]
+        self.assertEqual(slot["label"], self.devices[0].name)
+        self.assertEqual(slot["display_label"], self.devices[0].name)
 
     # --- a child acting on an ancestor-planned identity (base_placement) ---
 
@@ -1467,7 +1460,7 @@ class ChainBayProjectionTestCase(TestCase):
     face), so an ancestor's bay-targeted placements cannot ride the rack replay
     -- they need a parallel one keyed on the SAME identity
     (``_identity_key``) and named by the SAME ``_resolve_names``, or bay
-    identities and settled names drift from rack ones.
+    identities and names drift from rack ones.
 
     Consumed by three single-layer surfaces, all of which must see it:
     ``_overlay_planned_blades`` (the bay strips on a rack elevation),
@@ -1842,40 +1835,20 @@ class ChainBayProjectionTestCase(TestCase):
                          "the ancestor decommissioned it: offering its bays would be "
                          "a column nothing can ever be built into")
 
-    # --- settled names ------------------------------------------------------
+    # --- names on an inherited blade -----------------------------------------
 
-    @override_settings(PLUGINS_CONFIG=_chain_plugins_config())
-    def test_inherited_blade_renders_under_its_settled_name(self):
+    def test_inherited_blade_renders_under_its_own_stored_name(self):
         a = self._design("Network sweep IDS-1234")
-        self._blade_add(a, bay=self.bays["c1"], name="IDS-1234_blade-01")
+        self._blade_add(a, bay=self.bays["c1"], name="blade-01")
         self._approve(a)
         b = self._design("Server build IDS-2000", based_on=a)
 
         entry = self._strip(project_rack(b, self.racks[0]), "Chain-Chassis-1")["c1"]
         self.assertEqual(entry["label"], "blade-01",
-                         "an inherited bay renders under its SETTLED name, by the same "
+                         "an inherited bay renders under its own stored name, by the same "
                          "_resolve_names the rack layer uses (§3.2 R1)")
         column = self._column(b, f"dev-{self.chassis.pk}")
         self.assertEqual(self._bay(column, "c1")["label"], "blade-01")
-
-    @override_settings(PLUGINS_CONFIG=_chain_plugins_config(prefix_source="cf.project"))
-    def test_settled_name_failure_on_an_inherited_blade_is_a_conflict(self):
-        # Parity with the rack layer: the prefix source is configured but
-        # resolves to nothing, so the bay must SAY it is showing the ancestor's
-        # planning name rather than quietly showing it.
-        a = self._design("Network sweep IDS-1234")
-        self._blade_add(a, bay=self.bays["c1"], name="IDS-1234_blade-01")
-        self._approve(a)
-        b = self._design("Server build IDS-2000", based_on=a)
-
-        result = project_rack(b, self.racks[0])
-        entry = self._strip(result, "Chain-Chassis-1")["c1"]
-        self.assertTrue(entry["conflict"], entry)
-        self.assertTrue(entry["conflict_reason"])
-        self.assertEqual(entry["label"], "IDS-1234_blade-01")
-        rows = [c for c in result.conflicts if c["kind"] == "settled_name"]
-        self.assertEqual(len(rows), 1, result.conflicts)
-        self.assertEqual(rows[0]["source_design"], a)
 
     def test_a_columns_conflicts_are_its_own(self):
         # The chassis layer shares ONE replay across its columns, so a bay

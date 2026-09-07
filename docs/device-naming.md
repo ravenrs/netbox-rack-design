@@ -87,8 +87,10 @@ demonstrates the most valuable script-only trick: **continuing a numbered
 family** (`ams1-sw7050-3` → next device becomes `…-4`) by querying NetBox for
 the highest existing number — the lookup engineers otherwise do by hand — via
 `naming.chain_placement_names()`, which also counts every APPROVED ancestor
-design's placements under their settled names, so the family counter stays
-correct when this design is part of a [design chain](design-chains.md).
+design's placements — each under its effective name, which for a move that
+keeps the device's name is that device's real name — so the family counter
+stays correct when this design is part of a
+[design chain](design-chains.md).
 
 Save it anywhere importable by NetBox (e.g. next to `manage.py`) and set:
 

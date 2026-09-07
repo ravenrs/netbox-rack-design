@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-07
+
+### Release Summary
+
+The planning prefix stops being data and becomes decoration. Until now a move
+that kept a device's name still wrote `"<design title>-<device name>"` into
+`proposed_name`, and the real name was recovered later by *stripping* that
+prefix back off — using a token that came from configuration and, when it did
+not match what had been written, silently returned the string unchanged. The
+result was a planning string displayed as if it were a real device name, with
+no error raised. That whole mechanism is gone. `proposed_name` now means one
+thing — the new name the plan gives the device — and is written only when the
+plan actually renames something. The decoration is composed at render time from
+the design's title, so there is nothing to strip, nothing to configure, and
+nothing to get wrong.
+
+### **Breaking Changes**
+
+Removed from `netbox_rack_design.naming` (a deployment naming script importing
+any of these must be updated before upgrading):
+
+- `settled_name()`, `settled_name_status()`, `strip_planning_prefix()`,
+  `_builtin_settled_name()`, `prefix_token()`, `derive_prefix_token()` and the
+  `SettledNameError` exception. There is no replacement, because there is no
+  longer a planning name to settle: a placement's stored name IS its name.
+- `name_exists_in_site()` no longer accepts the `design=` keyword. It compared
+  candidates on a "settled plane" that no longer exists; the check is now a
+  direct comparison against real device names and other placements' stored
+  names. Drop the argument at the call site.
+- `chain_placement_names()` returns **one** name per placement row instead of a
+  planning/settled pair per ancestor row. Each name is the row's effective
+  name: its `proposed_name`, or — for a move that keeps the device's name — the
+  device's real name. Scripts that de-duplicated the old double entries can
+  drop that handling. This also fixes a real defect: a keep-name move used to
+  contribute an empty string, so a family counter never saw it.
+- The `naming.prefix_source` plugin setting is removed, along with the
+  `naming.settled_name` hook. The decoration uses `Design.title` verbatim. Any
+  `PLUGINS_CONFIG` entry for them should be deleted; the `naming` sub-dict
+  itself remains as an extension point and currently accepts no keys.
+
+No migration is required — no model or field changed. Existing rows that still
+hold a prefixed `proposed_name` are read as renames, because that is now what a
+non-empty value means; clear those values to restore keep-name behaviour.
+
+### Changed
+
+- A `move` that keeps the device's name stores `proposed_name = ''`. The editor
+  no longer writes the decorated string when you choose "keep the old name",
+  and an explicit keep-name choice is now sent to the server as an empty string
+  so it authoritatively replaces any name the placement carried before.
+- Rendering, in full: inside the design that owns the move, a keep-name move
+  shows `"<design title>-<device name>"` and a rename shows its stored name
+  verbatim; in a design based on it, an ancestor's keep-name move shows the
+  plain device name — in the child's world the device has already moved and
+  carries its own name.
+- The `settled_name` conflict kind is gone from the projection's report. It
+  described a failure that can no longer occur.
+- `docs/design-chains.md`, `docs/device-naming.md`,
+  `docs/editor-behavior-spec.md` and `README.md` updated to describe the new
+  scheme.
+
+### Fixed
+
+- Deleting a placement from an **approved** (frozen) design through the REST
+  API is now refused with `409`, single and bulk alike. The freeze lives in
+  `clean()`, which Django never calls on delete, so the API had no guard — the
+  HTML views already did, and `DesignPowerFeedViewSet` already had exactly this
+  `perform_destroy` override for the same reason.
+
 ## [0.27.1] - 2026-09-07
 
 ### Release Summary

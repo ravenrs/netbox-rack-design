@@ -196,17 +196,32 @@ window.__rdE2E = (function () {
             } else if (w.proposed_name) {
                 item.proposed_name = w.proposed_name;
             }
-            // The editor's REAL widget.proposed_name (set by the §4a rename
-            // dialog's onConfirm, or by an add's name input) is private
-            // in-memory state this harness can't reach into -- but both
-            // paths stamp the same value onto the tile's `data-name`
-            // attribute (editor.js setTileDisplayName/promptRename/
-            // finishAdd), so read it from there when present. This is the
-            // ONLY way a rename made THIS session (not merely the base
-            // widget JSON) surfaces in buildRackPayload.
             var contentEl = itemEl.querySelector(".grid-stack-item-content");
-            var liveName = contentEl ? contentEl.getAttribute("data-name") : null;
-            if (liveName) { item.proposed_name = liveName; }
+            if (isAdd) {
+                // The editor's REAL widget.proposed_name (set by an add's name
+                // input) is private in-memory state this harness can't reach
+                // into -- but the add path stamps that same value onto the
+                // tile's `data-name` attribute (editor.js finishAdd's input
+                // listener / preview-fill), so read it from there when
+                // present. This is the ONLY way a rename made THIS session
+                // (not merely the base widget JSON) surfaces in
+                // buildRackPayload. An add's display and stored name are
+                // always the same string, so data-name is a faithful proxy.
+                var liveName = contentEl ? contentEl.getAttribute("data-name") : null;
+                if (liveName) { item.proposed_name = liveName; }
+            } else if (contentEl && contentEl.hasAttribute("data-proposed-name")) {
+                // A move's display and stored name DIVERGE on keep-name: the
+                // tile SHOWS the render-time "<design>-<old name>" decoration
+                // (data-name) while proposed_name itself must stay/become an
+                // empty string. `data-proposed-name` is the raw stored value,
+                // stamped only once a move has gone through the §4a dialog
+                // THIS session (editor.js promptRename's onConfirm) --
+                // presence of the attribute is itself the "touched this
+                // session" signal, mirroring editor.js's own
+                // widget.nameUserSet gate in buildRackPayload, which sends
+                // this value verbatim (including "") rather than omitting it.
+                item.proposed_name = contentEl.getAttribute("data-proposed-name");
+            }
 
             var removed = isFlaggedRemoved(itemEl, w);
             if (removed && isAdd) {
@@ -341,6 +356,25 @@ window.__rdE2E = (function () {
         };
     }
 
+    // Display vs. storage (contract enforced by projection.py + editor.js's
+    // §4a move dialog): `dataName` is what the tile SHOWS (the decorated
+    // "<design>-<old name>" on a keep-name move); `dataProposedName` is the
+    // REAL stored value editor.js would send to Save (present only once a
+    // move has gone through the dialog this session -- see buildRackPayload
+    // above). Both live on the same content element setTileDisplayName and
+    // promptRename's onConfirm stamp.
+    function tileNameAttrs(idx) {
+        var el = root.querySelector('.grid-stack-item[data-widget-index="' + idx + '"]');
+        var content = el ? el.querySelector(".grid-stack-item-content") : null;
+        if (!content) { return null; }
+        return {
+            dataName: content.getAttribute("data-name"),
+            dataProposedName: content.hasAttribute("data-proposed-name")
+                ? content.getAttribute("data-proposed-name") : null,
+            title: content.getAttribute("title"),
+        };
+    }
+
     function ghostCount() {
         return root.querySelectorAll(
             '.grid-stack-item.nbx-rd-state-move_out_ghost[data-rd-temp-ghost]').length;
@@ -352,6 +386,7 @@ window.__rdE2E = (function () {
         dropPaletteItem: dropPaletteItem,
         moveTile: moveTile,
         tileInfo: tileInfo,
+        tileNameAttrs: tileNameAttrs,
         ghostCount: ghostCount,
         uPositionToGsY: uPositionToGsY,
         baseWidgets: baseWidgets,
@@ -469,6 +504,7 @@ class EditorE2ETestCase(unittest.TestCase):
             "racks": [int(RACK_PK)],
         })
         cls._design_id = design["id"]
+        cls._design_title = design["title"]
 
         mv = cls._api("POST", "/api/plugins/rack-design/placements/", {
             "design": cls._design_id,
@@ -496,6 +532,7 @@ class EditorE2ETestCase(unittest.TestCase):
         })
 
         cls._untouched_id = untouched["id"]
+        cls._untouched_name = untouched["name"]
         cls._moved_real_u = int(float(moved["position"]))
         cls._dt_id = untouched["device_type"]["id"]
         cls._dt_h = dt_info[cls._dt_id]["h"]
@@ -1240,6 +1277,104 @@ class EditorE2ETestCase(unittest.TestCase):
         self.assertEqual(len(calls), 1,
                          "reopening on an already-custom-named placement must "
                          "not call preview-name again")
+        self.assert_no_console_errors()
+
+    # =====================================================================
+    # 13-16. Display vs. storage (N3): the render-time "<design>-<old name>"
+    # decoration (projection.py) must never be stored -- only what the user
+    # actually typed, or nothing at all for keep-name. editor.js's §4a dialog
+    # separates the STORED value (proposed_name) from the DISPLAYED one
+    # (the tile's data-name / .nbx-rd-name-display text).
+    # =====================================================================
+    def test_13_move_keep_name_saves_empty_proposed_name(self):
+        self._stub_preview_name(name="engine-suggested-name")
+        idx = self._drag_existing_off_origin()
+
+        # Keep-name is preselected; confirm without ever touching the rename
+        # radio.
+        self.page.click("[data-rd-move-apply]")
+
+        w = self.base_widgets()[idx]
+        item = self.find_item(self.payload()["front"], device_id=w.get("device_id"))
+        self.assertIsNotNone(item, "moved device missing from the payload")
+        self.assertEqual(
+            item.get("proposed_name"), "",
+            "keep-name must store an EMPTY proposed_name -- never the "
+            "decorated '<design>-<old name>' string that used to leak in")
+        self.assert_no_console_errors()
+
+    def test_14_move_keep_name_tile_displays_decorated_name(self):
+        self._stub_preview_name(name="engine-suggested-name")
+        idx = self._drag_existing_off_origin()
+        self.page.click("[data-rd-move-apply]")
+
+        attrs = self.page.evaluate(f"() => window.__rdE2E.tileNameAttrs('{idx}')")
+        self.assertIsNotNone(attrs, "tile content element not found")
+        expected = f"{self._design_title}-{self._untouched_name}"
+        self.assertEqual(
+            attrs["dataName"], expected,
+            "the tile must still SHOW the render-time decorated name even "
+            "though nothing was stored for it")
+        self.assertEqual(
+            attrs["dataProposedName"], "",
+            "the real stored value behind that display must be empty")
+        self.assert_no_console_errors()
+
+    def test_15_move_rename_tile_displays_typed_name_verbatim(self):
+        self._stub_preview_name(name="engine-suggested-name")
+        idx = self._drag_existing_off_origin()
+
+        self.page.click("#nbx-rd-move-new")
+        self.page.wait_for_function(
+            "() => document.querySelector('.nbx-rd-move-new-input').value === "
+            "'engine-suggested-name'",
+            timeout=5000)
+        self.page.fill(".nbx-rd-move-new-input", "hand-typed-name")
+        self.page.click("[data-rd-move-apply]")
+
+        w = self.base_widgets()[idx]
+        item = self.find_item(self.payload()["front"], device_id=w.get("device_id"))
+        self.assertIsNotNone(item, "moved device missing from the payload")
+        self.assertEqual(item.get("proposed_name"), "hand-typed-name",
+                         "the typed value should be exactly what is saved")
+
+        attrs = self.page.evaluate(f"() => window.__rdE2E.tileNameAttrs('{idx}')")
+        self.assertEqual(
+            attrs["dataName"], "hand-typed-name",
+            "a rename must display the typed name verbatim -- no "
+            "'<design>-' decoration applied to an explicit new name")
+        self.assertEqual(attrs["dataProposedName"], "hand-typed-name")
+        self.assert_no_console_errors()
+
+    def test_16_move_keep_name_reopen_does_not_prefill_decorated_name(self):
+        idx = self.widx(kind="existing", face="front", device_id=self._untouched_id)
+        before = self.tile_info(idx)
+        orig_gsY = before["y"]
+        free_gsY = self.page.evaluate(
+            f"() => window.__rdE2E.uPositionToGsY({self._live_free_u}, {before['h']})")
+
+        self._stub_preview_name(name="engine-suggested-name")
+
+        # First drag off origin: confirm keep-name (stores "").
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+        self.page.click("[data-rd-move-apply]")
+
+        # Return to origin (moveDialogShown resets; proposed_name is left
+        # exactly as the dialog stored it -- still empty), then drag off
+        # again -- this reopens the dialog with that empty value as
+        # currentName.
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {orig_gsY})")
+        self.page.wait_for_timeout(100)
+        self.page.evaluate(f"() => window.__rdE2E.moveTile('{idx}', {free_gsY})")
+        self.page.wait_for_selector(".nbx-rd-move-modal", state="visible", timeout=5000)
+
+        prefilled = self.page.eval_on_selector(".nbx-rd-move-new-input", "el => el.value")
+        self.assertEqual(
+            prefilled, "",
+            "reopening the dialog on a keep-name move must NOT prefill the "
+            "rename field with the decorated '<design>-<old name>' string -- "
+            "nothing was actually stored, so there is nothing to prefill")
         self.assert_no_console_errors()
 
 

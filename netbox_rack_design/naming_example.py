@@ -30,7 +30,7 @@ Two patterns worth stealing:
 
 * **Chain-aware counting** (:func:`_family_names`) -- when this design is
   baselined on another, the family must continue past what its ANCESTORS
-  reserved, under the names those placements settle to (via
+  reserved, under those placements' EFFECTIVE names (via
   :func:`netbox_rack_design.naming.chain_placement_names`). Any script that
   counts a family should call that helper instead of querying one design's
   placements.
@@ -88,11 +88,12 @@ def _family_names(placement, prefix):
     The chain half is the third pattern worth stealing: ask
     ``naming.chain_placement_names`` rather than querying
     ``DesignPlacement.objects.filter(design=placement.design)`` yourself. It
-    spans ancestors + self, matches an ancestor's row by its SETTLED name (an
-    ancestor's stored name carries that design's own planning prefix, so a raw
-    comparison would silently miss it), and deliberately ignores SIBLING
-    designs -- a counter that scoped itself to one design hands a child a number
-    an ancestor already reserved.
+    spans ancestors + self, matches an ancestor's row by its EFFECTIVE name
+    (the ancestor's own ``proposed_name`` if it renamed the device, otherwise
+    the device's real name -- there is no planning prefix to strip, since a
+    name is stored only when a plan actually changes it), and deliberately
+    ignores SIBLING designs -- a counter that scoped itself to one design
+    hands a child a number an ancestor already reserved.
     """
     from dcim.models import Device
 
