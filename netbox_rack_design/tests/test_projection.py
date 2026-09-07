@@ -15,6 +15,9 @@ the read-only elevation (and the editor's on-load render) can apply the
 stripe treatment without re-deriving the knowledge client-side.
 """
 
+from decimal import Decimal
+
+from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
 from django.test import TestCase, override_settings
 from utilities.testing import create_test_device
 
@@ -977,17 +980,27 @@ class ChainProjectionTestCase(TestCase):
         self.assertEqual(len(at10), 1, at10)
         self.assertEqual(at10[0]["state"], ProjectedSlotState.MOVE_OUT_GHOST,
                          "THIS design proposes the move, so U10 is a ghost it vacates "
-                         "-- not an inherited occupied slot")
-        self.assertFalse(at10[0]["inherited"])
+                         "-- not a plain inherited EXISTING slot")
+        # The ghost still carries full provenance (defect fix, PLAN-design-
+        # chains.md §8.4): U10 is where the ANCESTOR's add put the identity,
+        # so the tile that depicts vacating it is ancestor-caused and gets the
+        # "from an ancestor design" frame, even though its `state` stays the
+        # proposal flavour MOVE_OUT_GHOST rather than EXISTING.
+        self.assertTrue(at10[0]["inherited"])
+        self.assertEqual(at10[0]["source_design_id"], a.pk)
         self.assertEqual(at10[0]["placement"], own)
         at20 = self._at(result.front, 20)
         self.assertEqual(len(at20), 1, at20)
         self.assertEqual(at20[0]["state"], ProjectedSlotState.MOVE_IN)
         self.assertEqual(at20[0]["label"], "srv-01")
         self.assertEqual(at20[0]["display_label"], "IDS-2000_srv-01")
+        # The move_in is THIS design's own act, so it must not itself claim
+        # `inherited` -- but it still names where the identity came from.
+        self.assertFalse(at20[0]["inherited"])
+        self.assertEqual(at20[0]["source_design_id"], a.pk)
         # The identity appears exactly twice (ghost + move_in) and nowhere else.
         self.assertEqual(len(self._at(result.front, 10) + self._at(result.front, 20)), 2)
-        self.assertEqual([s for s in result.front if s["inherited"]], [])
+        self.assertEqual([s for s in result.front if s["inherited"]], [at10[0]])
 
     def test_child_remove_of_base_placement_identity_flags_the_ancestor_slot(self):
         a = self._design("Network sweep IDS-1000")
@@ -1007,6 +1020,211 @@ class ChainProjectionTestCase(TestCase):
         self.assertEqual(at10[0]["state"], ProjectedSlotState.REMOVE)
         self.assertEqual(at10[0]["placement"], own)
         self.assertFalse(at10[0]["inherited"])
+
+    # --- move-slot provenance & the no-op-move ghost guard (defect fix) ----
+
+    def test_child_move_of_ancestor_moved_device_to_a_different_cell(self):
+        """A moved it U1->U10; B moves it further, U10->U20 (a DIFFERENT cell).
+
+        The ghost at U10 depicts where the ANCESTOR's layer left the device,
+        so it is flagged fully ``inherited`` with the ancestor's
+        ``source_design_id``. The move_in at U20 is THIS design's own act, so
+        it must NOT claim ``inherited`` -- but it still carries the ancestor's
+        ``source_design_id`` so the hover card can name where the identity
+        came from.
+        """
+        a = self._design("Network sweep IDS-1000")
+        DesignPlacement.objects.create(
+            design=a,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+        )
+        self._approve(a)
+
+        b = self._design("Server build IDS-2000", based_on=a)
+        own = DesignPlacement.objects.create(
+            design=b,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=20,
+            target_face="front",
+        )
+
+        result = project_rack(b, self.racks[0])
+
+        at10 = self._at(result.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.MOVE_OUT_GHOST)
+        self.assertTrue(at10[0]["inherited"],
+                         "the ghost depicts where the ANCESTOR left the device")
+        self.assertEqual(at10[0]["source_design_id"], a.pk)
+
+        at20 = self._at(result.front, 20)
+        self.assertEqual(len(at20), 1, at20)
+        self.assertEqual(at20[0]["state"], ProjectedSlotState.MOVE_IN)
+        self.assertEqual(at20[0]["placement"], own)
+        self.assertFalse(at20[0]["inherited"],
+                          "the move_in is THIS design's own act, not the ancestor's")
+        self.assertEqual(at20[0]["source_design_id"], a.pk,
+                          "provenance still names where the identity came from")
+
+    def test_child_move_onto_the_exact_cell_the_ancestor_left_it_in_suppresses_the_ghost(self):
+        """A moved it to U10; B's move ALSO targets U10 -- vacates nothing.
+
+        Same rack + position + face as the ancestor left it in: the move is a
+        no-op location-wise, so drawing a ghost there would stack it directly
+        under the move_in tile at the same rect. Only the move_in is emitted.
+        """
+        a = self._design("Network sweep IDS-1000")
+        DesignPlacement.objects.create(
+            design=a,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+        )
+        self._approve(a)
+
+        b = self._design("Server build IDS-2000", based_on=a)
+        own = DesignPlacement.objects.create(
+            design=b,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+            proposed_name="IDS-2000_renamed",
+        )
+
+        result = project_rack(b, self.racks[0])
+
+        at10 = self._at(result.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(
+            [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_OUT_GHOST],
+            [], "the move vacates nothing at U10, so no ghost belongs there")
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.MOVE_IN)
+        self.assertEqual(at10[0]["placement"], own)
+        # Positions must be compared numerically: Decimal("10") == 10 must not
+        # defeat the guard.
+        self.assertEqual(Decimal(str(own.target_position)), Decimal("10"))
+
+    def test_child_move_onto_the_exact_cell_suppresses_both_full_depth_mirror_faces(self):
+        """The same no-op-move guard, for a full-depth device: front AND rear.
+
+        The ``_append`` full-depth mirror copies a slot per face, so
+        suppressing the source ghost slot must remove BOTH its mirrored
+        copies -- asserted directly rather than assumed.
+        """
+        fd_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.create(name="FD MF", slug="fd-mf-provenance"),
+            model="FD Type Provenance", slug="fd-type-provenance",
+            u_height=2, is_full_depth=True,
+        )
+        fd_device = Device.objects.create(
+            name="fd-provenance", site=self.site, rack=self.racks[0],
+            position=5, face="front", device_type=fd_type,
+            role=DeviceRole.objects.create(name="FD Role", slug="fd-role-provenance"),
+        )
+        a = self._design("Network sweep IDS-1000")
+        DesignPlacement.objects.create(
+            design=a,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=fd_device,
+            target_rack=self.racks[0],
+            target_position=15,
+            target_face="front",
+        )
+        self._approve(a)
+
+        b = self._design("Server build IDS-2000", based_on=a)
+        DesignPlacement.objects.create(
+            design=b,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=fd_device,
+            target_rack=self.racks[0],
+            target_position=15,
+            target_face="front",
+        )
+
+        result = project_rack(b, self.racks[0])
+
+        ghosts_front = [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_OUT_GHOST]
+        ghosts_rear = [s for s in result.rear if s["state"] == ProjectedSlotState.MOVE_OUT_GHOST]
+        self.assertEqual(ghosts_front, [], "front mirror of the suppressed ghost must be absent")
+        self.assertEqual(ghosts_rear, [], "rear mirror of the suppressed ghost must be absent")
+        move_ins_front = [s for s in result.front if s["state"] == ProjectedSlotState.MOVE_IN]
+        move_ins_rear = [s for s in result.rear if s["state"] == ProjectedSlotState.MOVE_IN]
+        self.assertEqual(len(move_ins_front), 1, move_ins_front)
+        self.assertEqual(len(move_ins_rear), 1, move_ins_rear)
+
+    def test_plain_move_with_no_ancestor_is_unchanged(self):
+        """No ``based_on``: ghost and move_in both present, neither inherited."""
+        design = self._design("Standalone build")
+        own = DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+        )
+
+        result = project_rack(design, self.racks[0])
+
+        at1 = self._at(result.front, 1)
+        self.assertEqual(len(at1), 1, at1)
+        self.assertEqual(at1[0]["state"], ProjectedSlotState.MOVE_OUT_GHOST)
+        self.assertFalse(at1[0]["inherited"])
+        self.assertIsNone(at1[0]["source_design_id"])
+
+        at10 = self._at(result.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.MOVE_IN)
+        self.assertEqual(at10[0]["placement"], own)
+        self.assertFalse(at10[0]["inherited"])
+        self.assertIsNone(at10[0]["source_design_id"])
+
+    def test_ancestor_planned_identity_the_child_does_not_touch_is_still_inherited(self):
+        """Regression guard: an ancestor's own move, untouched by the child,
+        must still come through ``baseline.emit()`` as ``inherited=True`` --
+        this fix must not leak into the plain baseline (non-moves_removes)
+        path."""
+        a = self._design("Network sweep IDS-1000")
+        DesignPlacement.objects.create(
+            design=a,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=10,
+            target_face="front",
+        )
+        self._approve(a)
+
+        b = self._design("Server build IDS-2000", based_on=a)
+        # An unrelated action in b, touching a DIFFERENT identity, so the
+        # ancestor-moved device at U10 goes through emit() untouched.
+        DesignPlacement.objects.create(
+            design=b,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[1],
+            target_rack=self.racks[0],
+            target_position=30,
+            target_face="front",
+        )
+
+        result = project_rack(b, self.racks[0])
+
+        at10 = self._at(result.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertEqual(at10[0]["state"], ProjectedSlotState.EXISTING)
+        self.assertTrue(at10[0]["inherited"])
+        self.assertEqual(at10[0]["source_design_id"], a.pk)
 
     # --- §9.2 refusal ------------------------------------------------------
 
