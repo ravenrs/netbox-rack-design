@@ -81,6 +81,29 @@ def _design_children_message(design):
     )
 
 
+def _design_versions_message(design):
+    """
+    The message shown when a delete is rejected because other versions of
+    the same plan point their ``root`` at ``design`` (models.py: ``root`` is
+    ``on_delete=models.CASCADE``, with ``related_name="versions"``). A
+    rolled-back probe against a real database (2026-09-08) built root v1 ->
+    v2 (approved) -> v3, each with a ``DesignPlacement``, then deleted the
+    root: all three designs and all three placements were removed, approved
+    versions included, with no warning and nothing reported. Deleting the
+    first version of a plan must not silently destroy every later version
+    and its content, so this guard refuses the delete outright rather than
+    letting CASCADE run. Not conditioned on status, same as
+    ``_design_children_message`` above: a DRAFT root with another version is
+    refused too.
+    """
+    names = ", ".join(str(version) for version in design.versions.all())
+    return (
+        f"Cannot delete {design}: {names} are later versions of this plan "
+        "and would be destroyed along with it. Delete those versions "
+        "first."
+    )
+
+
 # ---------------------------------------------------------------------------
 # DesignGroup
 # ---------------------------------------------------------------------------
@@ -854,15 +877,22 @@ class DesignDeleteView(generic.ObjectDeleteView):
     Deleting a design never runs ``Design.clean()`` (Django's delete path
     calls no ``clean()`` at all), so the dependents guard that leaving
     'approved' status already gets from ``clean()`` (PLAN-design-chains.md
-    §2.2) needs its own check here.
+    §2.2) needs its own check here. Also guards ``root`` CASCADE (models.py):
+    deleting the first version of a plan would otherwise silently destroy
+    every later version and its content.
     """
 
     queryset = models.Design.objects.all()
 
     def post(self, request, *args, **kwargs):
         obj = self.get_object(**kwargs)
-        if obj.children.exists():
+        has_children = obj.children.exists()
+        has_versions = obj.versions.exists()
+        if has_children:
             messages.error(request, _design_children_message(obj))
+        if has_versions:
+            messages.error(request, _design_versions_message(obj))
+        if has_children or has_versions:
             return redirect(obj.get_absolute_url())
         return super().post(request, *args, **kwargs)
 
@@ -898,12 +928,17 @@ class DesignBulkDeleteView(generic.BulkDeleteView):
                 pk_list = list(qs.values_list("pk", flat=True))
             else:
                 pk_list = [int(pk) for pk in request.POST.getlist("pk")]
-            blocked = models.Design.objects.filter(
+            blocked_children = models.Design.objects.filter(
                 pk__in=pk_list, derived_designs__isnull=False,
             ).distinct()
-            if blocked.exists():
-                for design in blocked:
+            blocked_versions = models.Design.objects.filter(
+                pk__in=pk_list, versions__isnull=False,
+            ).distinct()
+            if blocked_children.exists() or blocked_versions.exists():
+                for design in blocked_children:
                     messages.error(request, _design_children_message(design))
+                for design in blocked_versions:
+                    messages.error(request, _design_versions_message(design))
                 return redirect(self.get_return_url(request))
         return super().post(request, **kwargs)
 
