@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-09-08
+
+### Release Summary
+
+A bug fix. An approved design's placements are frozen and it cannot be moved
+back to draft while other designs are based on it — but it could always be
+**deleted**, which silently orphaned every dependent design's baseline. Since
+0.29.0 that could also strand applied planned devices in NetBox with no record
+pointing at them. Deleting such a design is now refused, through every door.
+
+### Fixed
+
+- **Deleting a design that other designs are based on is now refused.**
+  `Design.clean()` blocks leaving `approved` status while dependents exist, but
+  Django never calls `clean()` on the delete path and `based_on` is
+  `SET_NULL` — so a delete quietly nulled every child's baseline and each
+  child re-rendered as though it had always been planned against bare reality,
+  with nothing reported. The refusal is enforced in all three write paths:
+  the single-object and bulk delete views, and
+  `DELETE /api/plugins/rack-design/designs/<pk>/` (409 Conflict), which also
+  covers the API's bulk delete. The message names the dependent designs and
+  points at re-basing them.
+  - Not conditioned on status: a *draft* design with dependents orphans them
+    exactly the same way, so the guard applies whatever the design's own status
+    is.
+  - Same class of gap as the frozen-placement delete hole fixed in 0.28.0, and
+    fixed with the same pattern.
+
 ## [0.30.0] - 2026-09-08
 
 ### Release Summary
