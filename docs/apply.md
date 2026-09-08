@@ -155,6 +155,33 @@ deletion before you confirm, and why the API reports them in the dry run. The
 plugin is not cable-aware in this version, so it cannot warn you that a
 particular planned device carries a day's cabling work.
 
+## Reading the records afterwards
+
+Apply records which device it created for which placement. Automation that
+performs the physical move reads them to find its exact target:
+
+```
+GET /api/plugins/rack-design/design-applies/?design_id=<pk>
+```
+
+Each record carries the design, placement, device, who applied it, when, and —
+for a removal — the status the device had before it was flagged. The
+`design_title` and `device_name` snapshots are always present, so a name is
+readable without a second request and stays readable after the object it names
+is gone.
+
+Three filters find the leftovers:
+
+| Filter | Finds |
+|---|---|
+| `no_device=true` | the planned device was deleted in DCIM |
+| `no_placement=true` | the placement was deleted; the planned device is unwanted |
+| `no_design=true` | the whole design was deleted |
+
+The endpoint is read-only. These records are written by apply and nothing else
+— a client able to edit one could make them disagree with DCIM, which is
+exactly what they exist to prevent.
+
 ## On the elevations
 
 Once applied, the design that created a device draws it as **one** tile, marked
