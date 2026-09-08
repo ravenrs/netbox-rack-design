@@ -59,6 +59,28 @@ def _frozen_design_message(design, what):
     )
 
 
+def _design_children_message(design):
+    """
+    The message shown when a delete is rejected because other designs are
+    based on ``design`` (PLAN-design-chains.md §2.2). Deleting a design never
+    runs ``Design.clean()`` (Django's delete path calls no ``clean()`` at
+    all), and ``based_on`` is ``SET_NULL``, so without this guard the delete
+    would silently orphan every child's baseline -- exactly the outcome the
+    "leave approved status" guard in ``clean()`` (models.py) exists to
+    prevent, reached through another door. Mirrors that guard's wording, so
+    a user sees one consistent explanation whichever door caught it. Unlike
+    that guard, this one is not conditioned on status: any design with
+    children orphans them the same way when deleted, regardless of its own
+    status.
+    """
+    names = ", ".join(str(child) for child in design.children)
+    return (
+        f"Cannot delete {design}: {names} are based on this design and "
+        "would silently lose their baseline. Re-base the dependent designs "
+        "onto another design first."
+    )
+
+
 # ---------------------------------------------------------------------------
 # DesignGroup
 # ---------------------------------------------------------------------------
@@ -828,7 +850,21 @@ class DesignEditView(generic.ObjectEditView):
 
 @register_model_view(models.Design, "delete")
 class DesignDeleteView(generic.ObjectDeleteView):
+    """
+    Deleting a design never runs ``Design.clean()`` (Django's delete path
+    calls no ``clean()`` at all), so the dependents guard that leaving
+    'approved' status already gets from ``clean()`` (PLAN-design-chains.md
+    §2.2) needs its own check here.
+    """
+
     queryset = models.Design.objects.all()
+
+    def post(self, request, *args, **kwargs):
+        obj = self.get_object(**kwargs)
+        if obj.children.exists():
+            messages.error(request, _design_children_message(obj))
+            return redirect(obj.get_absolute_url())
+        return super().post(request, *args, **kwargs)
 
 
 @register_model_view(models.Design, "bulk_import", detail=False)
@@ -847,9 +883,29 @@ class DesignBulkEditView(generic.BulkEditView):
 
 @register_model_view(models.Design, "bulk_delete", path="delete", detail=False)
 class DesignBulkDeleteView(generic.BulkDeleteView):
+    """See :class:`DesignDeleteView` -- bulk delete has the same gap."""
+
     queryset = models.Design.objects.all()
     filterset = filtersets.DesignFilterSet
     table = tables.DesignTable
+
+    def post(self, request, **kwargs):
+        if "_confirm" in request.POST:
+            if request.POST.get("_all"):
+                qs = self.queryset.all()
+                if self.filterset is not None:
+                    qs = self.filterset(request.GET, qs, request=request).qs
+                pk_list = list(qs.values_list("pk", flat=True))
+            else:
+                pk_list = [int(pk) for pk in request.POST.getlist("pk")]
+            blocked = models.Design.objects.filter(
+                pk__in=pk_list, derived_designs__isnull=False,
+            ).distinct()
+            if blocked.exists():
+                for design in blocked:
+                    messages.error(request, _design_children_message(design))
+                return redirect(self.get_return_url(request))
+        return super().post(request, **kwargs)
 
 
 # ---------------------------------------------------------------------------

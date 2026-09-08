@@ -173,6 +173,38 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         design.refresh_from_db()
         self.assertTrue(design.is_frozen)
 
+    # --- design delete children guard ---------------------------------------
+    # `DesignViewSet` had no `perform_destroy` guard, so REST DELETE of a
+    # design another design is based on succeeded, silently orphaning the
+    # child's baseline (`based_on` is SET_NULL and Django's delete path never
+    # runs `clean()`). Single and bulk delete both funnel through
+    # `perform_destroy`, so one override covers both.
+
+    def test_delete_rejected_when_has_children(self):
+        """DELETE a design another design is based on -> 409, body carries
+        the explanation, the design still exists."""
+        self.add_permissions("netbox_rack_design.delete_design")
+        parent = Design.objects.create(title="API parent", site=self.site)
+        child = Design.objects.create(
+            title="API child", site=self.site, based_on=parent,
+        )
+        url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[parent.pk])
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertTrue(Design.objects.filter(pk=parent.pk).exists())
+        self.assertIn("API child", str(response.data))
+        child.refresh_from_db()
+        self.assertEqual(child.based_on_id, parent.pk)
+
+    def test_delete_allowed_when_no_children(self):
+        """DELETE a design with no children -> 204, it is gone."""
+        self.add_permissions("netbox_rack_design.delete_design")
+        lonely = Design.objects.create(title="API lonely", site=self.site)
+        url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[lonely.pk])
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Design.objects.filter(pk=lonely.pk).exists())
+
 
 class DesignChainActionsTest(APITestCase):
     """
