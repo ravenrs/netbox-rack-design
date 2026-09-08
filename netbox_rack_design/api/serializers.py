@@ -11,11 +11,12 @@ from dcim.api.serializers import (
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import Rack
 from netbox.api.fields import SerializedPKRelatedField
-from netbox.api.serializers import NetBoxModelSerializer, WritableNestedSerializer
+from netbox.api.serializers import BaseModelSerializer, NetBoxModelSerializer, WritableNestedSerializer
 from rest_framework import serializers
 from tenancy.api.serializers import TenantSerializer
+from users.api.serializers import UserSerializer
 
-from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from ..models import Design, DesignApply, DesignGroup, DesignPlacement, DesignPowerFeed
 
 __all__ = (
     "NestedDesignGroupSerializer",
@@ -25,6 +26,7 @@ __all__ = (
     "DesignSerializer",
     "DesignPlacementSerializer",
     "DesignPowerFeedSerializer",
+    "DesignApplySerializer",
     "SaveLayoutSerializer",
     "PreviewNameSerializer",
     "FavoriteSetWriteSerializer",
@@ -198,6 +200,44 @@ class DesignPowerFeedSerializer(NetBoxModelSerializer):
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "name")
+
+
+class DesignApplySerializer(BaseModelSerializer):
+    """
+    One apply run's record of a placement materialized as a real device
+    (models.py ``DesignApply``, ``apply.py``) -- read-only, see
+    ``DesignApplyViewSet`` (api/views.py) for why.
+
+    ``DesignApply`` is a plain ``models.Model``, not a ``NetBoxModel``: it has
+    no tags/custom fields/changelog of its own (models.py docstring), so this
+    subclasses ``BaseModelSerializer`` directly rather than
+    ``NetBoxModelSerializer`` -- pulling in the tag/custom-field/changelog
+    mixins here would offer features the model cannot back.
+
+    ``design_title`` and ``device_name`` are included alongside the live
+    ``design``/``device`` FKs, not instead of them: they are the snapshot
+    ``DesignApply.snapshot_names()`` freezes on every save, and the only
+    readable identity once that FK goes null (all three FKs are SET_NULL).
+    A polling client should never have to fetch a related object just to
+    learn a name that might not exist by the time it asks.
+    """
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:designapply-detail"
+    )
+    design = NestedDesignSerializer(required=False, allow_null=True)
+    placement = NestedDesignPlacementSerializer(required=False, allow_null=True)
+    device = DeviceSerializer(nested=True, required=False, allow_null=True)
+    applied_by = UserSerializer(nested=True, required=False, allow_null=True)
+
+    class Meta:
+        model = DesignApply
+        fields = (
+            "id", "url", "display", "design", "design_title", "placement",
+            "device", "device_name", "prior_device_status", "applied_by",
+            "created", "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "design_title", "device_name")
 
 
 # ---------------------------------------------------------------------------

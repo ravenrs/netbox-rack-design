@@ -5,13 +5,14 @@ import logging
 from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, PowerFeed, Rack
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
 from netbox.plugins import get_plugin_config
 from rest_framework import status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, PermissionDenied
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
 
@@ -20,6 +21,7 @@ from .. import filtersets, naming, planning_fields, projection
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
+    DesignApply,
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
@@ -31,6 +33,7 @@ from ..models import (
 )
 from .serializers import (
     CopyFeedsSerializer,
+    DesignApplySerializer,
     DesignGroupSerializer,
     DesignPlacementSerializer,
     DesignPowerFeedSerializer,
@@ -59,6 +62,7 @@ __all__ = (
     "DesignViewSet",
     "DesignPlacementViewSet",
     "DesignPowerFeedViewSet",
+    "DesignApplyViewSet",
     "FavoriteDeviceTypeViewSet",
     "FavoriteSetViewSet",
     "HiddenDesignRackViewSet",
@@ -2421,6 +2425,79 @@ class DesignPowerFeedViewSet(NetBoxModelViewSet):
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
         super().perform_destroy(instance)
+
+
+class _HasViewDesignPermission(BasePermission):
+    """Gate ``DesignApplyViewSet`` on ``netbox_rack_design.view_design``.
+
+    ``DesignApply`` carries no permissions of its own (models.py docstring --
+    it is bookkeeping written only by the apply engine, never hand-edited),
+    so the permission that matters is the one on what these rows describe:
+    designs.
+    """
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.has_perm("netbox_rack_design.view_design")
+        )
+
+
+class DesignApplyViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only records of what an apply run materialized (models.py
+    ``DesignApply``, ``apply.py``): one row per placement an apply run
+    created, updated, flagged for removal, or reverted, naming exactly which
+    ``dcim.Device`` it produced. This is the only way to look this up once a
+    run has finished -- the design's own ``apply`` action (``DesignViewSet``,
+    above) returns only the rows *that run* touched.
+
+    Deliberately list/retrieve only: these rows are written exclusively by
+    the apply engine, and a client able to create or edit one could make the
+    plugin's bookkeeping disagree with DCIM -- precisely the failure
+    ``DesignApply`` exists to prevent. Cleanup once external automation has
+    finished with a row is documented as that automation's job (or the next
+    apply run's, for a re-applied placement), never a REST DELETE here.
+
+    ``DesignApply`` is a plain ``models.Model``, not a ``NetBoxModel``: it
+    has no ``RestrictedQuerySet``, so ``.restrict()`` is unavailable on it --
+    and ``NetBoxModelViewSet``/``NetBoxReadOnlyModelViewSet`` would call it
+    unconditionally in ``BaseViewSet.initial()``. This subclasses DRF's plain
+    ``ReadOnlyModelViewSet`` instead (the same base core's own
+    ``ObjectChangeViewSet`` uses, for the same reason -- ``ObjectChange`` is
+    not a ``NetBoxModel`` either) and does both gates by hand:
+
+    - permission: ``_HasViewDesignPermission`` requires
+      ``netbox_rack_design.view_design`` -- these rows describe designs.
+    - queryset: rows whose design the requesting user may view (scoped via
+      ``Design.objects.restrict(user, "view")``, since that IS a
+      ``NetBoxModel``), PLUS rows whose ``design`` is null. That second
+      clause is not an edge case to skip: every FK here is SET_NULL, so a
+      deleted design leaves exactly the orphan rows the external automation
+      needs to find in order to clean up planned devices still standing in
+      DCIM. Scoping naively to viewable designs would hide them.
+
+    URL name: plugins-api:netbox_rack_design-api:designapply-list / -detail
+    Path:     /api/plugins/rack-design/design-applies/
+    """
+
+    queryset = DesignApply.objects.select_related(
+        "design", "placement", "device", "applied_by"
+    )
+    serializer_class = DesignApplySerializer
+    filterset_class = filtersets.DesignApplyFilterSet
+    permission_classes = [_HasViewDesignPermission]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if not user.is_authenticated:
+            return qs.none()
+        viewable_designs = Design.objects.restrict(user, "view")
+        return qs.filter(
+            Q(design__in=viewable_designs) | Q(design__isnull=True)
+        )
 
 
 class FavoriteSetViewSet(viewsets.ViewSet):

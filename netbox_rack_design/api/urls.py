@@ -4,6 +4,7 @@ from django.urls import path
 from netbox.api.routers import NetBoxRouter
 
 from .views import (
+    DesignApplyViewSet,
     DesignGroupViewSet,
     DesignPlacementViewSet,
     DesignPowerFeedViewSet,
@@ -23,6 +24,7 @@ router.register("design-groups", DesignGroupViewSet)
 router.register("designs", DesignViewSet)
 router.register("placements", DesignPlacementViewSet)
 router.register("planned-power-feeds", DesignPowerFeedViewSet)
+router.register("design-applies", DesignApplyViewSet)
 router.register(
     "favorite-device-types",
     FavoriteDeviceTypeViewSet,

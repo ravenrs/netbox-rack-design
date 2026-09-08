@@ -3,18 +3,19 @@
 import django_filters
 from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, PowerFeed, Rack, Site
 from django.db.models import Q
-from netbox.filtersets import NetBoxModelFilterSet
+from netbox.filtersets import BaseFilterSet, NetBoxModelFilterSet
 from tenancy.models import Tenant
 from utilities.filters import TreeNodeMultipleChoiceFilter
 
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from .models import Design, DesignApply, DesignGroup, DesignPlacement, DesignPowerFeed
 
 __all__ = (
     "DesignGroupFilterSet",
     "DesignFilterSet",
     "DesignPlacementFilterSet",
     "DesignPowerFeedFilterSet",
+    "DesignApplyFilterSet",
 )
 
 
@@ -179,3 +180,55 @@ class DesignPowerFeedFilterSet(NetBoxModelFilterSet):
         if not value.strip():
             return queryset
         return queryset.filter(Q(name__icontains=value) | Q(rack__name__icontains=value))
+
+
+class DesignApplyFilterSet(BaseFilterSet):
+    """
+    ``DesignApply`` is a plain ``models.Model``, not a ``NetBoxModel`` -- it
+    has no tags/custom fields, so this subclasses ``BaseFilterSet`` (which
+    ``NetBoxModelFilterSet`` builds on) rather than ``NetBoxModelFilterSet``
+    itself: inheriting the tag/tag_id/custom-field machinery would advertise
+    filters the model cannot back (a ``tags`` lookup on this model raises a
+    ``FieldError`` the moment anyone actually uses ``?tag=``).
+
+    The three ``no_*`` filters exist for exactly one reason: finding the
+    orphans left behind when a design/placement/device this row pointed at
+    (all three FKs are SET_NULL) is deleted -- the whole reason automation
+    polls this endpoint (docs/apply.md, models.py ``DesignApply``).
+    """
+
+    q = django_filters.CharFilter(method="search", label="Search")
+    design_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Design.objects.all(), label="Design (ID)"
+    )
+    placement_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=DesignPlacement.objects.all(), label="Placement (ID)"
+    )
+    device_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Device.objects.all(), label="Device (ID)"
+    )
+    # Named after the pattern DesignFilterSet.no_parent already uses for "is
+    # this FK null" -- not "<fk>_id__isnull", which is not a legal query-param
+    # spelling. DesignApplyViewSet defines no custom @actions, so none of
+    # these names can shadow an action's own query parameter the way a
+    # `rack_id` filter once 404'd four Design power actions.
+    no_design = django_filters.BooleanFilter(
+        field_name="design", lookup_expr="isnull", label="Design deleted (orphan)",
+    )
+    no_placement = django_filters.BooleanFilter(
+        field_name="placement", lookup_expr="isnull", label="Placement deleted",
+    )
+    no_device = django_filters.BooleanFilter(
+        field_name="device", lookup_expr="isnull", label="Device deleted",
+    )
+
+    class Meta:
+        model = DesignApply
+        fields = ("id", "design_title", "device_name", "prior_device_status")
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(
+            Q(design_title__icontains=value) | Q(device_name__icontains=value)
+        )

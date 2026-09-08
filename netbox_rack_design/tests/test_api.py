@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 
+from core.models import ObjectType
 from dcim.choices import PowerFeedPhaseChoices
 from dcim.models import (
     Cable,
@@ -16,10 +17,12 @@ from dcim.models import (
     Rack,
     Site,
 )
+from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
-from users.models import Token, User
+from users.models import ObjectPermission, Token, User
 from utilities.testing import (
     APITestCase,
     APIViewTestCases,
@@ -30,6 +33,7 @@ from utilities.testing import (
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
+    DesignApply,
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
@@ -2810,6 +2814,309 @@ class DesignPowerFeedAPITest(APIViewTestCases.APIViewTestCase):
         response = self.client.delete(url, **self.header)
         self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
         self.assertFalse(DesignPowerFeed.objects.filter(pk=feed.pk).exists())
+
+
+class DesignApplyAPITest(APITestCase):
+    """
+    ``DesignApply``'s read-only REST surface (A6): the external automation's
+    only way to look up "which device did this design's apply produce" once
+    an apply run has finished (docs/apply.md, models.py ``DesignApply``).
+
+    Not an ``APIViewTestCases.APIViewTestCase``: that suite exercises full
+    CRUD, and this endpoint deliberately has none of it (list/retrieve
+    only) -- see ``DesignApplyViewSet``'s docstring for why.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        rack = env["racks"][0]
+
+        cls.design_visible = Design.objects.create(title="Apply Design Visible", site=cls.site)
+        cls.design_hidden = Design.objects.create(title="Apply Design Hidden", site=cls.site)
+
+        cls.device_visible = create_test_device(
+            "Apply Device Visible", site=cls.site, rack=rack, position=10, face="front",
+        )
+        cls.device_hidden = create_test_device(
+            "Apply Device Hidden", site=cls.site, rack=rack, position=11, face="front",
+        )
+        cls.device_orphan = create_test_device(
+            "Apply Device Orphan", site=cls.site, rack=rack, position=12, face="front",
+        )
+
+        cls.placement_visible = DesignPlacement.objects.create(
+            design=cls.design_visible, kind=DesignPlacementKindChoices.KIND_ADD,
+            device=cls.device_visible, proposed_name="apply-visible",
+            target_rack=rack, target_position=10, target_face="front",
+        )
+        cls.placement_hidden = DesignPlacement.objects.create(
+            design=cls.design_hidden, kind=DesignPlacementKindChoices.KIND_ADD,
+            device=cls.device_hidden, proposed_name="apply-hidden",
+            target_rack=rack, target_position=11, target_face="front",
+        )
+
+        cls.applier = User.objects.create_user(username="apply-applier")
+
+        cls.apply_visible = DesignApply.objects.create(
+            design=cls.design_visible, placement=cls.placement_visible,
+            device=cls.device_visible, prior_device_status="offline",
+            applied_by=cls.applier,
+        )
+        cls.apply_hidden = DesignApply.objects.create(
+            design=cls.design_hidden, placement=cls.placement_hidden,
+            device=cls.device_hidden, prior_device_status="offline",
+            applied_by=cls.applier,
+        )
+        # The orphan case (A6's whole reason for existing): design AND
+        # placement already gone. Built directly rather than by deleting a
+        # real Design, so setUpTestData stays a single, cheap pass -- the
+        # deletion-triggered path (SET_NULL on a live row) is covered
+        # separately below.
+        cls.apply_orphan = DesignApply.objects.create(
+            design=None, placement=None, device=cls.device_orphan,
+            design_title="Deleted design", device_name=cls.device_orphan.name,
+            prior_device_status="offline", applied_by=cls.applier,
+        )
+        # A row with no device either -- exercises the third null filter
+        # independently of the design/placement ones.
+        cls.apply_no_device = DesignApply.objects.create(
+            design=cls.design_visible, placement=None, device=None,
+            design_title=str(cls.design_visible), device_name="removed-device-x",
+            prior_device_status="active", applied_by=cls.applier,
+        )
+
+    def _list_url(self):
+        return reverse("plugins-api:netbox_rack_design-api:designapply-list")
+
+    def _detail_url(self, pk):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:designapply-detail", kwargs={"pk": pk}
+        )
+
+    def _ids(self, response):
+        return {row["id"] for row in response.data["results"]}
+
+    # --- permission gate --------------------------------------------------
+
+    def test_list_without_view_design_is_403(self):
+        response = self.client.get(self._list_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+    def test_retrieve_without_view_design_is_403(self):
+        response = self.client.get(self._detail_url(self.apply_visible.pk), **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+    def test_list_with_view_design_is_200(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._list_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+    def test_retrieve_with_view_design_is_200(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._detail_url(self.apply_visible.pk), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+    # --- read-only: every write verb rejected -----------------------------
+
+    def test_post_rejected(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.post(
+            self._list_url(), {"design": self.design_visible.pk}, format="json", **self.header,
+        )
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_405_METHOD_NOT_ALLOWED, status.HTTP_403_FORBIDDEN),
+        )
+
+    def test_put_rejected(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.put(
+            self._detail_url(self.apply_visible.pk), {}, format="json", **self.header,
+        )
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_405_METHOD_NOT_ALLOWED, status.HTTP_403_FORBIDDEN),
+        )
+
+    def test_patch_rejected(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.patch(
+            self._detail_url(self.apply_visible.pk), {}, format="json", **self.header,
+        )
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_405_METHOD_NOT_ALLOWED, status.HTTP_403_FORBIDDEN),
+        )
+
+    def test_delete_rejected(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.delete(self._detail_url(self.apply_visible.pk), **self.header)
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_405_METHOD_NOT_ALLOWED, status.HTTP_403_FORBIDDEN),
+        )
+
+    # --- scoping: viewable designs + the null-design orphans --------------
+
+    def test_orphan_row_visible_but_other_design_hidden(self):
+        """
+        A ``view_design`` permission CONSTRAINED to ``design_visible`` must
+        still show ``apply_orphan`` (its ``design`` is null) while hiding
+        ``apply_hidden`` (a design that exists but this user may not view).
+        Scoping naively to "designs the user can view" would hide the
+        orphan too -- exactly the trap the brief calls out.
+        """
+        permission = ObjectPermission(
+            name="apply-restricted", actions=["view"],
+            constraints={"pk": self.design_visible.pk},
+        )
+        permission.save()
+        permission.users.add(self.user)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
+
+        response = self.client.get(self._list_url(), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        ids = self._ids(response)
+        self.assertIn(self.apply_visible.pk, ids)
+        self.assertIn(self.apply_orphan.pk, ids)
+        self.assertIn(self.apply_no_device.pk, ids)
+        self.assertNotIn(self.apply_hidden.pk, ids)
+
+    def test_hidden_design_row_404s_on_retrieve(self):
+        permission = ObjectPermission(
+            name="apply-restricted-retrieve", actions=["view"],
+            constraints={"pk": self.design_visible.pk},
+        )
+        permission.save()
+        permission.users.add(self.user)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
+
+        response = self.client.get(self._detail_url(self.apply_hidden.pk), **self.header)
+        self.assertHttpStatus(response, status.HTTP_404_NOT_FOUND)
+
+    # --- snapshots ----------------------------------------------------------
+
+    def test_snapshots_present_while_fks_alive(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._detail_url(self.apply_visible.pk), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["design_title"], str(self.design_visible))
+        self.assertEqual(response.data["device_name"], self.device_visible.name)
+        self.assertIsNotNone(response.data["design"])
+        self.assertIsNotNone(response.data["device"])
+
+    def test_snapshots_survive_fk_deletion(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        device_name = self.device_hidden.name
+        design_title = str(self.design_hidden)
+
+        self.device_hidden.delete()
+        response = self.client.get(self._detail_url(self.apply_hidden.pk), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertIsNone(response.data["device"])
+        self.assertEqual(response.data["device_name"], device_name)
+
+        # Cascades: DesignPlacement.design is on_delete=CASCADE, so this also
+        # deletes placement_hidden -- DesignApply.placement/.design both fall
+        # to SET_NULL, exactly the real orphan path (as opposed to
+        # apply_orphan above, which is built pre-orphaned).
+        self.design_hidden.delete()
+        response = self.client.get(self._detail_url(self.apply_hidden.pk), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertIsNone(response.data["design"])
+        self.assertIsNone(response.data["placement"])
+        self.assertEqual(response.data["design_title"], design_title)
+
+    # --- filters --------------------------------------------------------
+
+    def test_filter_design_id(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(
+            self._list_url(), {"design_id": self.design_visible.pk}, **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            self._ids(response), {self.apply_visible.pk, self.apply_no_device.pk},
+        )
+
+    def test_filter_placement_id(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(
+            self._list_url(), {"placement_id": self.placement_visible.pk}, **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(self._ids(response), {self.apply_visible.pk})
+
+    def test_filter_device_id(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(
+            self._list_url(), {"device_id": self.device_hidden.pk}, **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(self._ids(response), {self.apply_hidden.pk})
+
+    def test_filter_no_design(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._list_url(), {"no_design": "true"}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(self._ids(response), {self.apply_orphan.pk})
+
+    def test_filter_no_placement(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._list_url(), {"no_placement": "true"}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            self._ids(response), {self.apply_orphan.pk, self.apply_no_device.pk},
+        )
+
+    def test_filter_no_device(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._list_url(), {"no_device": "true"}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(self._ids(response), {self.apply_no_device.pk})
+
+    def test_filter_q_searches_snapshots(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(
+            self._list_url(), {"q": "Deleted design"}, **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(self._ids(response), {self.apply_orphan.pk})
+
+    # --- no query-per-row on list -----------------------------------------
+
+    def test_list_query_count_does_not_scale_with_row_count(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        # Warm up first (permission/content-type caches on the user
+        # instance), so the comparison below isn't skewed by first-call
+        # setup work -- mirrors test_views.py's chain-health query test.
+        self.client.get(self._list_url(), **self.header)
+        with CaptureQueriesContext(connection) as before:
+            self.client.get(self._list_url(), **self.header)
+        baseline = len(before.captured_queries)
+
+        # 20 more rows, reusing the existing FKs: if the serializer were
+        # missing a select_related, this would show up as extra queries
+        # proportional to the row count, not a fixed offset.
+        DesignApply.objects.bulk_create([
+            DesignApply(
+                design=self.design_visible, device=self.device_visible,
+                design_title=str(self.design_visible), device_name=self.device_visible.name,
+                prior_device_status="active", applied_by=self.applier,
+            )
+            for _ in range(20)
+        ])
+
+        with CaptureQueriesContext(connection) as after:
+            self.client.get(self._list_url(), **self.header)
+        self.assertEqual(
+            len(after.captured_queries), baseline,
+            "list query count must not scale with the number of rows",
+        )
 
 
 class FavoriteDeviceTypeTest(APITestCase):
