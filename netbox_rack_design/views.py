@@ -99,7 +99,7 @@ def _design_versions_message(design):
     names = ", ".join(str(version) for version in design.versions.all())
     return (
         f"Cannot delete {design}: {names} are later versions of this plan "
-        "and would be destroyed along with them. Delete those versions "
+        "and would be destroyed along with it. Delete those versions "
         "first."
     )
 

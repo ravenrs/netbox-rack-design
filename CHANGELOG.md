@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.2] - 2026-09-08
+
+### Release Summary
+
+A bug fix, and a worse one than 0.30.1's. Designs are versioned, and every
+version of a plan points at the first one through `root`, which cascades on
+delete — so deleting a plan's **first version** silently destroyed every later
+version of it and all of their placements, approved versions included, with no
+warning. 0.30.1 closed the door where a delete orphaned a dependent design's
+baseline; this closes the one where a delete destroys data outright.
+
+### Fixed
+
+- **Deleting the first version of a plan no longer destroys its other
+  versions.** `Design.root` is `on_delete=CASCADE`, so a delete of the root
+  design took every design whose `root` pointed at it — and their placements —
+  with no confirmation naming them and nothing reported afterwards. Verified
+  against a real database before fixing: a root with an approved v2 and a v3,
+  one placement each, left nothing behind.
+  - The delete is now refused in all three write paths (single-object and bulk
+    delete views, and `DELETE /api/plugins/rack-design/designs/<pk>/` with 409
+    Conflict, which also covers the API's bulk delete), naming the versions
+    that would have been destroyed.
+  - The foreign key is unchanged, so there is no migration. Guarding the write
+    paths keeps the refusal explainable; `PROTECT` would surface as a raw
+    database error to every caller that does not expect one.
+  - Deleting a *later* version is unaffected — only a design that other
+    versions hang off is refused.
+  - When a design is blocked for both reasons — other designs are based on it
+    (0.30.1) **and** other versions hang off it — both are reported together,
+    so fixing one and retrying does not reveal the second only then.
+
 ## [0.30.1] - 2026-09-08
 
 ### Release Summary
