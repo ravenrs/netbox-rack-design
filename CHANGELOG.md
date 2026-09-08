@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-08
+
+### Release Summary
+
+Apply's records become readable. 0.29.0 recorded which planned device each
+placement produced, but only the run that created them ever returned those
+records — afterwards there was no way to look one up, which left the automation
+that performs the physical move with no way to find the device it was supposed
+to act on. This release exposes them as a read-only endpoint with the filters
+that job needs, including finding the orphans left behind when a design or
+placement is deleted.
+
+### Added
+
+- **`GET /api/plugins/rack-design/design-applies/`** and
+  `.../design-applies/<pk>/` — the apply records: which `dcim.Device` was
+  created for which `DesignPlacement`, by whom, when, and the status a removed
+  device had before it was flagged.
+  - Filters: `design_id`, `placement_id`, `device_id`, `q` (searches the name
+    snapshots), and `no_design` / `no_placement` / `no_device` for finding
+    orphaned records — the rows that matter when a planned device is left
+    standing in DCIM after its design or placement was deleted.
+  - The `design_title` and `device_name` snapshots are always in the payload,
+    even while their references are alive, so a client never has to fetch a
+    related object just to learn a name — and the snapshot is what survives a
+    deletion.
+  - Requires `view_design`. A record is visible when its design is one you may
+    view, **or** when it has no design at all: every reference is `SET_NULL`, so
+    a deleted design leaves exactly the orphans automation must find, and
+    scoping only to viewable designs would hide them.
+  - **Read-only by design.** These records are written by the apply engine and
+    nothing else; a client able to create or edit one could make the plugin's
+    bookkeeping disagree with DCIM, which is the failure the records exist to
+    prevent. Cleanup remains the apply run's job, or the automation's.
+
 ## [0.29.0] - 2026-09-08
 
 ### Release Summary
