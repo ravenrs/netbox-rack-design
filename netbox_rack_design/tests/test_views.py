@@ -5,6 +5,7 @@ from decimal import Decimal
 from core.models import ObjectType
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
 from dcim.models import Device, Rack, Site
+from django.contrib.messages import get_messages
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -1757,6 +1758,84 @@ class DesignPowerFeedFrozenWriteTest(TestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertTrue(DesignPowerFeed.objects.filter(pk=self.feed.pk).exists())
+
+
+class DesignDeleteChildrenGuardTest(TestCase):
+    """
+    Deleting a Design never runs ``Design.clean()`` (Django's delete path
+    calls no clean() at all), and ``based_on`` is ``SET_NULL`` -- so without
+    an explicit guard, deleting a design that another design is based on
+    silently orphans the child's baseline. The guard fires on ``children``,
+    not status: a DRAFT design with a child is refused too (the case most
+    likely to be missed by an ``is_frozen`` condition).
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.delete_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.parent = Design.objects.create(title="Parent design", site=cls.site)
+        cls.child = Design.objects.create(
+            title="Child design", site=cls.site, based_on=cls.parent,
+        )
+        cls.lonely = Design.objects.create(title="Lonely design", site=cls.site)
+
+    def test_delete_rejected_when_has_children(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_delete", kwargs={"pk": self.parent.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Design.objects.filter(pk=self.parent.pk).exists())
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, self.parent.pk)
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("Child design" in m for m in shown))
+
+    def test_delete_allowed_when_no_children(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_delete", kwargs={"pk": self.lonely.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Design.objects.filter(pk=self.lonely.pk).exists())
+
+
+class DesignBulkDeleteChildrenGuardTest(TestCase):
+    """See :class:`DesignDeleteChildrenGuardTest` -- bulk delete has the same gap."""
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.delete_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.parent = Design.objects.create(title="Bulk parent design", site=cls.site)
+        cls.child = Design.objects.create(
+            title="Bulk child design", site=cls.site, based_on=cls.parent,
+        )
+        cls.lonely = Design.objects.create(title="Bulk lonely design", site=cls.site)
+
+    def test_bulk_delete_rejected_when_selection_has_children(self):
+        url = reverse("plugins:netbox_rack_design:design_bulk_delete")
+        response = self.client.post(url, {
+            "pk": [self.parent.pk, self.lonely.pk], "_confirm": "1", "confirm": "true",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Design.objects.filter(pk=self.parent.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=self.lonely.pk).exists())
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, self.parent.pk)
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("Bulk parent design" in m for m in shown))
 
 
 class DesignDeriveViewTest(TestCase):

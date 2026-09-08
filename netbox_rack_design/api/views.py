@@ -214,6 +214,27 @@ def _frozen_design_rest_message(design):
     )
 
 
+def _design_children_rest_message(design):
+    """
+    The message body for a REST 409 rejecting the delete of ``design``
+    because other designs are based on it (PLAN-design-chains.md §2.2).
+    Deleting a design never runs ``Design.clean()`` (DRF's destroy/
+    bulk_destroy call no ``clean()`` either), and ``based_on`` is
+    ``SET_NULL``, so without this guard the delete would silently orphan
+    every child's baseline. Mirrors ``_design_children_message`` (views.py)
+    so a user sees one consistent explanation regardless of which door
+    caught it. Note this does NOT point at "create a new version" -- that
+    route does not exist yet (no view, no action, no button) -- it points
+    at ``rebase``, which does.
+    """
+    names = ", ".join(str(child) for child in design.children)
+    return (
+        f"Cannot delete {design}: {names} are based on this design and "
+        "would silently lose their baseline. Re-base the dependent designs "
+        "onto another design first."
+    )
+
+
 def _serialize_change_value(key, value):
     """One ``UpdatedDevice.changes`` value, JSON-safe.
 
@@ -373,6 +394,23 @@ class DesignViewSet(NetBoxModelViewSet):
                       "chain"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
+
+    def perform_destroy(self, instance):
+        """
+        Deleting a design never runs ``Design.clean()`` (DRF's destroy/
+        bulk_destroy call no ``clean()`` either), so the dependents guard
+        (PLAN-design-chains.md §2.2) needs its own check here, mirroring the
+        HTML delete/bulk-delete views (views.py) for the same reason.
+        ``perform_destroy`` is the one hook both DRF's single-object
+        ``destroy()`` AND ``BulkDestroyModelMixin``'s ``bulk_destroy()``
+        funnel every deletion through, so overriding it here covers both
+        with one check.
+        """
+        if instance.children.exists():
+            exc = APIException(_design_children_rest_message(instance))
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc
+        super().perform_destroy(instance)
 
     @action(detail=True, methods=["post"], url_path="preview-name")
     def preview_name(self, request, pk=None):
