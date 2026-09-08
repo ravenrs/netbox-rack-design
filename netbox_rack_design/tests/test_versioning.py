@@ -8,10 +8,12 @@ Model-layer only -- no view, no API action (that is phase 2). See
 
 from unittest import mock
 
+from core.models import ObjectType
 from dcim.choices import SubdeviceRoleChoices
 from dcim.models import DeviceBayTemplate, DeviceType
 from django.core.exceptions import ValidationError
 from django.test import TestCase
+from extras.models import CustomField, Tag
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignApply, DesignPlacement, DesignPowerFeed, DesignRackPower
@@ -32,8 +34,26 @@ class NewVersionBasicsTestCase(TestCase):
         cls.tenant = env["tenant"]
         cls.devices = env["devices"]
 
-        cls.design = Design.objects.create(title="Plan", site=cls.site, summary="s", link="http://example.com/", description="d", comments="c")
+        cls.tag = Tag.objects.create(name="Tag A", slug="tag-a")
+
+        # Registered CustomFields for "project" (Design/DesignPlacement) and
+        # "leg" (DesignPowerFeed): new_version() calls full_clean() on every
+        # cloned row, and full_clean() rejects an unregistered cf key.
+        project_cf = CustomField.objects.create(name="project", type="text", required=False)
+        project_cf.object_types.set([
+            ObjectType.objects.get_for_model(Design),
+            ObjectType.objects.get_for_model(DesignPlacement),
+        ])
+        leg_cf = CustomField.objects.create(name="leg", type="text", required=False)
+        leg_cf.object_types.set([ObjectType.objects.get_for_model(DesignPowerFeed)])
+
+        cls.design = Design.objects.create(
+            title="Plan", site=cls.site, summary="s", link="http://example.com/",
+            description="d", comments="c",
+            custom_field_data={"project": "IDS-1000"},
+        )
         cls.design.racks.add(*cls.racks)
+        cls.design.tags.set([cls.tag])
 
         cls.feed = DesignPowerFeed.objects.create(
             design=cls.design, rack=cls.racks[0], name="Feed A", voltage=400,
@@ -53,7 +73,9 @@ class NewVersionBasicsTestCase(TestCase):
             target_face="front",
             proposed_name="new-node",
             planned_power_feed=cls.feed,
+            custom_field_data={"project": "IDS-1000"},
         )
+        cls.add_placement.tags.set([cls.tag])
         cls.move_placement = DesignPlacement.objects.create(
             design=cls.design,
             kind=DesignPlacementKindChoices.KIND_MOVE,
@@ -96,6 +118,38 @@ class NewVersionBasicsTestCase(TestCase):
         cloned_rp = clone.rack_power.get()
         self.assertNotEqual(cloned_rp.pk, self.rack_power.pk)
         self.assertEqual(cloned_rp.power_config, self.rack_power.power_config)
+
+    def test_design_custom_field_data_and_tags_are_copied(self):
+        clone = new_version(self.design)
+        self.assertEqual(clone.custom_field_data, {"project": "IDS-1000"})
+        self.assertEqual(set(clone.tags.all()), {self.tag})
+
+    def test_placement_custom_field_data_and_tags_are_copied(self):
+        clone = new_version(self.design)
+        clone_add = clone.placements.get(kind=DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(clone_add.custom_field_data, {"project": "IDS-1000"})
+        self.assertEqual(set(clone_add.tags.all()), {self.tag})
+        # A row with nothing set copies an empty dict, not a KeyError/None.
+        clone_move = clone.placements.get(kind=DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(clone_move.custom_field_data, {})
+        self.assertEqual(set(clone_move.tags.all()), set())
+
+    def test_feed_custom_field_data_and_tags_are_copied(self):
+        self.feed.custom_field_data = {"leg": "A"}
+        self.feed.tags.set([self.tag])
+        self.feed.save()
+
+        clone = new_version(self.design)
+        cloned_feed = clone.planned_feeds.get()
+        self.assertEqual(cloned_feed.custom_field_data, {"leg": "A"})
+        self.assertEqual(set(cloned_feed.tags.all()), {self.tag})
+
+    def test_rack_power_has_no_custom_fields_or_tags_to_copy(self):
+        # DesignRackPower is a plain models.Model (not a NetBoxModel), so it
+        # carries neither custom_field_data nor tags -- confirmed here rather
+        # than assumed.
+        self.assertFalse(hasattr(DesignRackPower, "custom_field_data"))
+        self.assertFalse(hasattr(DesignRackPower, "tags"))
 
     def test_design_apply_rows_are_not_cloned(self):
         DesignApply.objects.create(

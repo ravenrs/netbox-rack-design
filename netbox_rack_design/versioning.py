@@ -28,8 +28,18 @@ def new_version(design, *, title=None):
     "<title> (v<version>)", so no suffix is invented here), ``site``,
     ``group``, ``description``, ``comments``, ``summary``, ``link``,
     ``based_on`` (the SAME ancestor as the source -- a version is not a new
-    plan), ``racks`` and ``depends_on`` (both M2M, set after ``save()``, since
-    an M2M needs a pk).
+    plan), ``custom_field_data``, ``racks``, ``depends_on`` and ``tags``
+    (``racks``/``depends_on``/``tags`` are M2M, set after ``save()``, since an
+    M2M needs a pk).
+
+    ``Design``, ``DesignPlacement`` and ``DesignPowerFeed`` are all
+    ``NetBoxModel`` -- each carries its own custom field values and tags, and
+    both are copied for all three, for the same reason a stale placement is
+    copied rather than dropped (models.py:269-279): silently losing them
+    would shrink the plan without saying so, and a placement's custom fields
+    specifically feed the naming/distribution scripts, so losing them would
+    also change what the clone projects to. ``DesignRackPower`` is a plain
+    ``models.Model`` (not a ``NetBoxModel``) and carries neither.
 
     Set explicitly: ``status`` is always ``draft`` (even when the source is
     approved -- the clone has not been reviewed), ``root`` is the source's
@@ -69,12 +79,14 @@ def new_version(design, *, title=None):
             status=DesignStatusChoices.STATUS_DRAFT,
             root=root,
             version=(max_version or 0) + 1,
+            custom_field_data=dict(design.custom_field_data),
         )
         clone.full_clean()
         clone.save()
         # M2M needs a pk -- same ordering `derive` uses (api/views.py:2289).
         clone.racks.set(design.racks.all())
         clone.depends_on.set(design.depends_on.all())
+        clone.tags.set(design.tags.all())
 
         # --- planned power feeds: cloned FIRST, placements remap onto these ---
         feed_map = {}  # old DesignPowerFeed pk -> new DesignPowerFeed
@@ -87,9 +99,11 @@ def new_version(design, *, title=None):
                 amperage=feed.amperage,
                 phase=feed.phase,
                 supply=feed.supply,
+                custom_field_data=dict(feed.custom_field_data),
             )
             new_feed.full_clean()
             new_feed.save()
+            new_feed.tags.set(feed.tags.all())
             feed_map[feed.pk] = new_feed
 
         # --- rack power overrides: nothing references these ---
@@ -135,6 +149,7 @@ def new_version(design, *, title=None):
         # so nothing invalid is ever what a caller of this function can see.
         old_to_new = {}       # old DesignPlacement pk -> new (unsaved-clean) instance
         old_parent_of = {}    # old pk -> old pk of its parent_placement (if any)
+        source_of = {}        # old pk -> source placement (for the tags copy in pass 2)
 
         for placement in design.placements.all():
             new_placement = DesignPlacement(
@@ -163,9 +178,11 @@ def new_version(design, *, title=None):
                 base_placement=placement.base_placement,
                 base_parent_placement=placement.base_parent_placement,
                 parent_placement=None,  # remapped in pass 2, see above
+                custom_field_data=dict(placement.custom_field_data),
             )
             new_placement.save()
             old_to_new[placement.pk] = new_placement
+            source_of[placement.pk] = placement
             if placement.parent_placement_id:
                 old_parent_of[placement.pk] = placement.parent_placement_id
 
@@ -175,5 +192,6 @@ def new_version(design, *, title=None):
                 new_placement.parent_placement = old_to_new[old_parent_pk]
             new_placement.full_clean()
             new_placement.save()
+            new_placement.tags.set(source_of[old_pk].tags.all())
 
         return clone
