@@ -1838,6 +1838,129 @@ class DesignBulkDeleteChildrenGuardTest(TestCase):
         self.assertTrue(any("Bulk parent design" in m for m in shown))
 
 
+class DesignDeleteVersionsGuardTest(TestCase):
+    """
+    ``Design.root`` is ``on_delete=models.CASCADE`` (models.py), grouping
+    every version of a plan under the reverse accessor ``versions``. A
+    rolled-back probe against a real database (2026-09-08) built root v1 ->
+    v2 (approved) -> v3, each with a placement, then deleted the root: all
+    three designs and all three placements were removed, approved versions
+    included, with no warning. The guard fires on ``versions``, not status:
+    a DRAFT root with another version is refused too.
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.delete_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.root = Design.objects.create(title="Root design", site=cls.site)
+        cls.v2 = Design.objects.create(
+            title="Root design", site=cls.site, root=cls.root, version=2,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.lonely = Design.objects.create(title="Lonely root", site=cls.site)
+
+    def test_delete_rejected_when_has_versions(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_delete", kwargs={"pk": self.root.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Design.objects.filter(pk=self.root.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=self.v2.pk).exists())
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any(str(self.v2) in m for m in shown))
+
+    def test_delete_allowed_for_non_root_version(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_delete", kwargs={"pk": self.v2.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Design.objects.filter(pk=self.v2.pk).exists())
+
+    def test_delete_allowed_when_no_versions(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_delete", kwargs={"pk": self.lonely.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Design.objects.filter(pk=self.lonely.pk).exists())
+
+
+class DesignBulkDeleteVersionsGuardTest(TestCase):
+    """See :class:`DesignDeleteVersionsGuardTest` -- bulk delete has the same gap."""
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.delete_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.root = Design.objects.create(title="Bulk root design", site=cls.site)
+        cls.v2 = Design.objects.create(
+            title="Bulk root design", site=cls.site, root=cls.root, version=2,
+        )
+        cls.lonely = Design.objects.create(title="Bulk lonely root", site=cls.site)
+
+    def test_bulk_delete_rejected_when_selection_has_versions(self):
+        url = reverse("plugins:netbox_rack_design:design_bulk_delete")
+        response = self.client.post(url, {
+            "pk": [self.root.pk, self.lonely.pk], "_confirm": "1", "confirm": "true",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Design.objects.filter(pk=self.root.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=self.lonely.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=self.v2.pk).exists())
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("Bulk root design" in m for m in shown))
+
+
+class DesignDeleteBothReasonsGuardTest(TestCase):
+    """
+    A design can simultaneously be a root with other versions AND have a
+    child based on it (``based_on``). Both guards apply, and a user who
+    fixes one reason and retries should not discover the second only then --
+    so both must be reported on the first refusal, not just one.
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.delete_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.root = Design.objects.create(title="Both-reasons root", site=cls.site)
+        cls.v2 = Design.objects.create(
+            title="Both-reasons root", site=cls.site, root=cls.root, version=2,
+        )
+        cls.child = Design.objects.create(
+            title="Both-reasons child", site=cls.site, based_on=cls.root,
+        )
+
+    def test_delete_rejected_reports_both_reasons(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_delete", kwargs={"pk": self.root.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Design.objects.filter(pk=self.root.pk).exists())
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("Both-reasons child" in m for m in shown))
+        self.assertTrue(any(str(self.v2) in m for m in shown))
+
+
 class DesignDeriveViewTest(TestCase):
     """"Derive design" action (PLAN-design-chains.md §5 phase 1)."""
 

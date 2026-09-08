@@ -205,6 +205,59 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
         self.assertFalse(Design.objects.filter(pk=lonely.pk).exists())
 
+    # --- design delete versions (root cascade) guard ------------------------
+    # `Design.root` is `on_delete=models.CASCADE` (models.py), grouping every
+    # version of a plan under the reverse accessor `versions`. A rolled-back
+    # probe against a real database (2026-09-08) built root v1 -> v2
+    # (approved) -> v3, each with a placement, then deleted the root: all
+    # three designs and all three placements were removed, approved versions
+    # included, with no warning. `perform_destroy` gets a second check for
+    # this alongside the children check above.
+
+    def test_delete_rejected_when_has_versions(self):
+        """DELETE a root that another version points its ``root`` at -> 409,
+        body carries the explanation, both designs still exist."""
+        self.add_permissions("netbox_rack_design.delete_design")
+        root = Design.objects.create(title="API root", site=self.site)
+        v2 = Design.objects.create(
+            title="API root", site=self.site, root=root, version=2,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[root.pk])
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertTrue(Design.objects.filter(pk=root.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=v2.pk).exists())
+        self.assertIn(str(v2), str(response.data))
+
+    def test_delete_allowed_for_non_root_version(self):
+        """DELETE a non-root version (its own ``versions`` is empty) -> 204."""
+        self.add_permissions("netbox_rack_design.delete_design")
+        root = Design.objects.create(title="API root2", site=self.site)
+        v2 = Design.objects.create(title="API root2", site=self.site, root=root, version=2)
+        url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[v2.pk])
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Design.objects.filter(pk=v2.pk).exists())
+
+    def test_delete_rejected_reports_both_reasons(self):
+        """A design that is both a root-with-versions AND has a child ->
+        409 whose body mentions both reasons, not just the first found."""
+        self.add_permissions("netbox_rack_design.delete_design")
+        root = Design.objects.create(title="API both", site=self.site)
+        v2 = Design.objects.create(title="API both", site=self.site, root=root, version=2)
+        child = Design.objects.create(
+            title="API both child", site=self.site, based_on=root,
+        )
+        url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[root.pk])
+        response = self.client.delete(url, **self.header)
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertIn("API both child", str(response.data))
+        self.assertIn(str(v2), str(response.data))
+        self.assertTrue(Design.objects.filter(pk=root.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=v2.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=child.pk).exists())
+
 
 class DesignChainActionsTest(APITestCase):
     """

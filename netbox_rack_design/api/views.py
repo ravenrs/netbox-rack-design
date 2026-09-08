@@ -235,6 +235,26 @@ def _design_children_rest_message(design):
     )
 
 
+def _design_versions_rest_message(design):
+    """
+    The message body for a REST 409 rejecting the delete of ``design``
+    because other versions of the same plan point their ``root`` at it
+    (models.py: ``root`` is ``on_delete=models.CASCADE``, with
+    ``related_name="versions"``). A rolled-back probe against a real
+    database (2026-09-08) built root v1 -> v2 (approved) -> v3, each with a
+    ``DesignPlacement``, then deleted the root: all three designs and all
+    three placements were removed, approved versions included, with no
+    warning. Mirrors ``_design_versions_message`` (views.py) so a user sees
+    one consistent explanation regardless of which door caught it.
+    """
+    names = ", ".join(str(version) for version in design.versions.all())
+    return (
+        f"Cannot delete {design}: {names} are later versions of this plan "
+        "and would be destroyed along with them. Delete those versions "
+        "first."
+    )
+
+
 def _serialize_change_value(key, value):
     """One ``UpdatedDevice.changes`` value, JSON-safe.
 
@@ -400,14 +420,22 @@ class DesignViewSet(NetBoxModelViewSet):
         Deleting a design never runs ``Design.clean()`` (DRF's destroy/
         bulk_destroy call no ``clean()`` either), so the dependents guard
         (PLAN-design-chains.md §2.2) needs its own check here, mirroring the
-        HTML delete/bulk-delete views (views.py) for the same reason.
-        ``perform_destroy`` is the one hook both DRF's single-object
-        ``destroy()`` AND ``BulkDestroyModelMixin``'s ``bulk_destroy()``
-        funnel every deletion through, so overriding it here covers both
-        with one check.
+        HTML delete/bulk-delete views (views.py) for the same reason. Also
+        guards ``root`` CASCADE (models.py): deleting the first version of a
+        plan would otherwise silently destroy every later version and its
+        content. ``perform_destroy`` is the one hook both DRF's
+        single-object ``destroy()`` AND ``BulkDestroyModelMixin``'s
+        ``bulk_destroy()`` funnel every deletion through, so overriding it
+        here covers both with one check. When both reasons apply, the 409
+        detail carries both sentences rather than only the first found.
         """
+        reasons = []
         if instance.children.exists():
-            exc = APIException(_design_children_rest_message(instance))
+            reasons.append(_design_children_rest_message(instance))
+        if instance.versions.exists():
+            reasons.append(_design_versions_rest_message(instance))
+        if reasons:
+            exc = APIException(" ".join(reasons))
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
         super().perform_destroy(instance)
