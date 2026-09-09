@@ -2606,22 +2606,28 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
             if peer_full_depth else (peer_face,)
         )
         peer_start = float(peer.target_position)
-        hit = False
+        # The FIRST of our slots this peer lands on, carried on the entry as
+        # `slot` -- the same dict object that is in a face list, which is how
+        # _conflict() documents a renderer finding the tile. Without it a
+        # slot claim is the one kind the panel could not point at.
+        hit = None
         for face in faces:
             for slot in occupying[face]:
                 if _u_interval_overlap(
                     peer_start, peer_height,
                     float(slot["u_position"]), float(slot["u_height"]),
                 ):
-                    hit = True
+                    if hit is None:
+                        hit = slot
                     slot["peer_conflict"] = True
                     if slot["peer_design_id"] is None:
                         slot["peer_design_id"] = peer.design_id
                         slot["peer_design_title"] = str(peer.design)
-        if hit:
+        if hit is not None:
             conflicts.append(_conflict(
                 "peer_slot_claim",
                 severity=_peer_severity(peer.design),
+                slot=hit,
                 source_design=peer.design,
                 detail=f"{peer.design} also plans a device at "
                        f"U{_fmt_u(peer.target_position)} in {rack}.",

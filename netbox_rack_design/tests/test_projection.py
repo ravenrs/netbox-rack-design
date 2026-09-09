@@ -2337,6 +2337,9 @@ class PeerConflictProjectionTestCase(TestCase):
         self.assertEqual(len(at10), 1, at10)
         self.assertTrue(at10[0]["peer_conflict"])
         self.assertEqual(at10[0]["peer_design_id"], b.pk)
+        # The entry points at the tile BY IDENTITY, the join _conflict()
+        # documents -- so the panel can highlight it (phase 2).
+        self.assertIs(claims[0]["slot"], at10[0])
         self.assertEqual(at10[0]["peer_design_title"], str(b))
 
         # Symmetric (P6): B's own projection reports A right back.
