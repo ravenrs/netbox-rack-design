@@ -261,8 +261,8 @@ class DesignForm(NetBoxModelForm):
                     "racks",
                     _("This design is approved, and approved designs are "
                       "frozen: its rack scope cannot be changed. Set the "
-                      "design back to draft, or create a new version of it, "
-                      "to make this change."),
+                      "design back to draft, or use the New version button "
+                      "on it, to make this change."),
                 )
 
         return self.cleaned_data

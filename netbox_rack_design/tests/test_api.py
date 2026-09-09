@@ -195,6 +195,12 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         self.assertIn("API child", str(response.data))
         child.refresh_from_db()
         self.assertEqual(child.based_on_id, parent.pk)
+        # Creating a new version does not detach the child from `parent` --
+        # only re-basing it does -- so the message must not suggest a
+        # version as the fix (Group B distinction: a careless edit here
+        # would send an API caller chasing a dead end).
+        self.assertNotIn("new version", str(response.data))
+        self.assertIn("Re-base", str(response.data))
 
     def test_delete_allowed_when_no_children(self):
         """DELETE a design with no children -> 204, it is gone."""
@@ -273,6 +279,7 @@ class DesignChainActionsTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
 
     def _chain_url(self, design):
         return reverse(
@@ -287,6 +294,11 @@ class DesignChainActionsTest(APITestCase):
     def _rebase_url(self, design):
         return reverse(
             "plugins-api:netbox_rack_design-api:design-rebase", kwargs={"pk": design.pk}
+        )
+
+    def _new_version_url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-new-version", kwargs={"pk": design.pk}
         )
 
     # --- chain (read) --------------------------------------------------------
@@ -466,6 +478,84 @@ class DesignChainActionsTest(APITestCase):
         )
         self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(Design.objects.filter(based_on=parent).exists())
+
+    # --- new_version ------------------------------------------------------
+
+    def test_new_version_with_add_permission_succeeds(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        root = Design.objects.create(
+            title="Root", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(self._new_version_url(root), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        clone = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(clone.version, 2)
+        self.assertEqual(clone.root_id, root.pk)
+        self.assertEqual(clone.status, DesignStatusChoices.STATUS_DRAFT)
+
+    def test_new_version_with_only_view_permission_denied(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        root = Design.objects.create(
+            title="Root2", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(self._new_version_url(root), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+    def test_new_version_with_no_body_keeps_source_title(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        root = Design.objects.create(
+            title="Keep my title", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(self._new_version_url(root), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        clone = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(clone.title, "Keep my title")
+
+    def test_new_version_with_blank_title_rejected(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        root = Design.objects.create(
+            title="Root3", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        response = self.client.post(
+            self._new_version_url(root), {"title": "   "}, **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Design.objects.filter(root=root).exists())
+
+    def test_new_version_of_a_draft_design_succeeds(self):
+        # No status requirement, unlike `derive`: a version may be created
+        # from a design in ANY status, since approval makes a version
+        # necessary, not valid.
+        self.add_permissions("netbox_rack_design.add_design")
+        draft = Design.objects.create(title="Draft root", site=self.site)
+        response = self.client.post(self._new_version_url(draft), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        clone = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(clone.root_id, draft.pk)
+        self.assertEqual(clone.version, 2)
+
+    def test_new_version_clones_placements_and_feeds(self):
+        self.add_permissions("netbox_rack_design.add_design")
+        source = Design.objects.create(
+            title="With content", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        DesignPlacement.objects.create(
+            design=source, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=self.racks[0], target_position=10,
+        )
+        DesignPowerFeed.objects.create(
+            design=source, rack=self.racks[0], name="Feed A",
+        )
+        DesignRackPower.objects.create(design=source, rack=self.racks[0])
+
+        response = self.client.post(self._new_version_url(source), {}, **self.header)
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        clone = Design.objects.get(pk=response.data["id"])
+        self.assertEqual(clone.placements.count(), 1)
+        self.assertEqual(clone.planned_feeds.count(), 1)
+        self.assertEqual(clone.rack_power.count(), 1)
 
     # --- rebase ---------------------------------------------------------------
 

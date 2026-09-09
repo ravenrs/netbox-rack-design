@@ -42,6 +42,28 @@ __all__ = (
 DOCS_BASE_URL = "https://ravenrs.github.io/netbox-rack-design/"
 
 
+def _frozen_design_clean_message(what):
+    """
+    The message ``clean()`` raises when a write is rejected because the
+    owning design is frozen (approved, PLAN-design-chains.md §2.2/G4).
+    Shared by ``DesignPlacement.clean()`` and ``DesignPowerFeed.clean()`` so
+    both raise identical wording rather than duplicating the sentence by
+    hand. Cannot carry a link to the New version page the way the view-layer
+    equivalent (``_frozen_design_message``, views.py) does: a model has no
+    request context, and there is no reason to tie models.py to a specific
+    URL name for it -- the caller (a form, view or API layer) is in a much
+    better position to turn "the New version button" into an actual link if
+    it wants one. ``what`` names the resource in the caller's own words,
+    e.g. "its placements" or "its planned power feeds" -- mirrors the
+    parameter of the same name on ``_frozen_design_message``.
+    """
+    return (
+        f"This design is approved, and approved designs are frozen: {what} "
+        "cannot be created or edited. Set the design back to draft, or use "
+        "the New version button on it, to make this change."
+    )
+
+
 class DesignGroup(NetBoxModel):
     """
     An optional, hierarchical container that links designs into a larger effort
@@ -375,8 +397,8 @@ class Design(NetBoxModel):
                     raise ValidationError(
                         {"status": f"Cannot leave 'approved' status: {names} "
                                    "are based on this design and would silently lose their "
-                                   "baseline. Create a new version of this design and "
-                                   "re-base them onto it instead."}
+                                   "baseline. Use the New version button on this design to "
+                                   "create one and re-base them onto it instead."}
                     )
 
         # Every scoped rack must belong to this design's site (consistent with the
@@ -829,11 +851,7 @@ class DesignPlacement(NetBoxModel):
         # a frozen design's placements reject a create/edit uniformly,
         # regardless of what else about the placement would otherwise be valid.
         if self.design_id and self.design.is_frozen:
-            raise ValidationError(
-                "This design is approved, and approved designs are frozen: "
-                "its placements cannot be created or edited. Set the design "
-                "back to draft, or create a new version of it, to make this change."
-            )
+            raise ValidationError(_frozen_design_clean_message("its placements"))
 
         # Config-declared planning fields: validated against the deployment's
         # ``placement_fields`` schema and normalised in place, so what reaches
@@ -1667,12 +1685,7 @@ class DesignPowerFeed(NetBoxModel):
         # reaches clean() at all -- that half is guarded explicitly on the
         # viewset / HTML delete views instead, same as for placements.)
         if self.design_id and self.design.is_frozen:
-            raise ValidationError(
-                "This design is approved, and approved designs are frozen: "
-                "its planned power feeds cannot be created or edited. Set "
-                "the design back to draft, or create a new version of it, "
-                "to make this change."
-            )
+            raise ValidationError(_frozen_design_clean_message("its planned power feeds"))
 
     @property
     def derated_watts(self):

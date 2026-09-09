@@ -48,16 +48,63 @@ that would lose their baseline. Two ways forward:
 
 - if the design genuinely has no children yet, set its status back to
   **draft** to edit it directly;
-- if it does have children, create a **new version** of the design (the
-  existing versioning feature), make your changes there, approve the new
-  version, and use **Re-base** on each child to point it at the new version
-  instead of the old one.
+- if it does have children, create a **new version** of the design, make your
+  changes there, approve the new version, and use **Re-base** on each child
+  to point it at the new version instead of the old one.
 
-**Re-base** (on the design page, or the design's `Based on` field) is also
-the escape hatch for two other situations: a parent that has since moved to
-**implemented** (see below), and two designs that both baselined on the same
-parent — whichever is approved first keeps that baseline; the other re-bases
-onto it (see [Siblings are blind to each other](#Siblings-are-blind-to-each-other)).
+### Versioning: cloning a design for revision
+
+A **new version** creates a fresh draft copy of an approved (or unapproved)
+design, with the same plan ancestry and all of its content — placements,
+planned power feeds, rack power overrides, rack scope, custom fields, and tags
+— carried into the clone. The key distinction: a version is the **same plan,
+revised**; if you need a different plan standing on top of this one, use
+**Derive design** instead (see [Deriving a design](#Deriving-a-design)), which
+creates a child that only copies rack scope and inherits everything else live
+through the baseline chain.
+
+**Where to find it.** The design page's **Design chain** card shows a **New
+version** button next to Derive and Re-base. It works from any design status
+— you do not have to wait for approval, though approval is typically what
+makes versioning necessary (it is the only door out of a frozen design with
+dependents).
+
+**The order of operations** when a frozen design has children:
+
+1. Click **New version** on the design page and optionally give it a title
+   (omitting one keeps the source's own title). The new version is a draft.
+2. Open the new version's editor and make your changes freely — nothing
+   depends on it yet.
+3. For each design based on the old version, edit its `Based on` field or
+   click **Re-base** to point it at the new version instead.
+4. Set the old version back to **draft** — this is now allowed, since it has
+   no dependents.
+5. Approve the new version. Only one version of a plan may be approved at a
+   time, so this must follow step 4.
+
+**The consequence between steps 3 and 5:** while dependents are being re-based
+against a draft new version, they cannot project and will show **"ancestor not
+approved"** in their conflicts panel. This is correct — a dependent cannot be
+trusted while its baseline is being rewritten — and not an error. It resolves
+the moment step 5 completes.
+
+**What happens to the old version afterwards:** nothing automatic. It stays at
+**draft** — editable again, and no longer usable as a parent, since deriving
+requires an approved design. You tell which version is current by which one is
+**approved**; there is no "superseded" or "archived" status. To go back to the
+old plan, approve it again and re-base the dependents back — nothing was
+undone, you are only moving references.
+
+**What is not copied:** apply records. A new version has applied nothing, so it
+starts unapplied and applying it reconciles against reality like any other
+apply. The design's **execution order** within its site is also not copied —
+a new version is assigned the next free slot, so if you sequence your designs
+deliberately, check the new version's position.
+
+**Re-base** is also the escape hatch for two other situations: a parent that
+has since moved to **implemented** (see below), and two designs that both
+baselined on the same parent — whichever is approved first keeps that baseline;
+the other re-bases onto it (see [Siblings are blind to each other](#Siblings-are-blind-to-each-other)).
 
 ## Inherited tiles
 

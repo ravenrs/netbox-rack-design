@@ -1697,6 +1697,22 @@ class DesignPlacementFrozenWriteTest(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(DesignPlacement.objects.filter(pk=self.placement.pk).exists())
 
+    def test_delete_rejected_when_frozen_message_links_to_new_version(self):
+        # `_frozen_design_message` (views.py) now renders a real <a> to this
+        # design's New version page rather than just naming the action --
+        # confirmed NetBox's messages framework renders it, not escapes it
+        # (see that function's docstring for how). One design in scope here,
+        # so a concrete link is possible (unlike the plural bulk messages).
+        url = reverse(
+            "plugins:netbox_rack_design:designplacement_delete", kwargs={"pk": self.placement.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"}, follow=True)
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        expected_url = reverse(
+            "plugins:netbox_rack_design:design_new_version", kwargs={"pk": self.design.pk}
+        )
+        self.assertTrue(any(f'<a href="{expected_url}">' in m for m in shown))
+
     def test_bulk_delete_rejected_when_frozen(self):
         url = reverse("plugins:netbox_rack_design:designplacement_bulk_delete")
         response = self.client.post(url, {
@@ -1796,6 +1812,12 @@ class DesignDeleteChildrenGuardTest(TestCase):
         self.assertEqual(self.child.based_on_id, self.parent.pk)
         shown = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("Child design" in m for m in shown))
+        # Creating a new version does not detach the child from this
+        # design -- only re-basing it does -- so the message must not
+        # suggest a version as the fix (this is the Group B distinction:
+        # a careless edit here would send a user chasing a dead end).
+        self.assertFalse(any("new version" in m for m in shown))
+        self.assertTrue(any("Re-base" in m for m in shown))
 
     def test_delete_allowed_when_no_children(self):
         url = reverse(
@@ -2063,6 +2085,128 @@ class DesignDeriveViewTest(TestCase):
         response = self.client.post(self._url(self.approved), {"title": "Derived child"})
         self.assertIn(response.status_code, (403, 404))
         self.assertEqual(Design.objects.count(), 2)
+
+
+class DesignNewVersionViewTest(TestCase):
+    """"New version" action (PLAN-design-versions.md §1/§3)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.approved = Design.objects.create(
+            title="Approved root", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft = Design.objects.create(title="Draft root", site=cls.site)
+        cls.parent_with_child = Design.objects.create(
+            title="Parent with child", site=cls.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.child = Design.objects.create(
+            title="Child", site=cls.site, based_on=cls.parent_with_child,
+        )
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design_new_version", kwargs={"pk": design.pk})
+
+    def test_get_renders_form_prefilled_with_source_title(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.context["form"].initial["title"], "Approved root"
+        )
+
+    def test_get_on_design_without_dependents_omits_ordering_block(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertNotIn("Re-base each dependent design", content)
+
+    def test_get_on_design_with_dependents_includes_ordering_block(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.parent_with_child))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn("Re-base each dependent design", content)
+        self.assertIn("ancestor not approved", content.lower())
+
+    def test_post_creates_version_and_redirects(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.approved), {"title": "Approved root"})
+        self.assertEqual(response.status_code, 302)
+        clone = Design.objects.exclude(
+            pk__in=[self.approved.pk, self.draft.pk, self.parent_with_child.pk, self.child.pk]
+        ).get()
+        self.assertEqual(clone.root_id, self.approved.pk)
+        self.assertEqual(clone.version, 2)
+        self.assertEqual(response.url, clone.get_absolute_url())
+
+    def test_post_on_draft_design_succeeds(self):
+        # No status requirement, unlike Derive: a version may be created
+        # from a design in ANY status.
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.draft), {"title": "Draft root"})
+        self.assertEqual(response.status_code, 302)
+        clone = Design.objects.exclude(
+            pk__in=[self.approved.pk, self.draft.pk, self.parent_with_child.pk, self.child.pk]
+        ).get()
+        self.assertEqual(clone.root_id, self.draft.pk)
+
+    def test_post_with_blank_title_shows_error(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        count_before = Design.objects.count()
+        response = self.client.post(self._url(self.approved), {"title": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Design.objects.count(), count_before)
+        self.assertTrue(response.context["form"].errors.get("title"))
+
+    def test_without_permission_denied(self):
+        response = self.client.get(self._url(self.approved))
+        self.assertIn(response.status_code, (403, 404))
+        response = self.client.post(self._url(self.approved), {"title": "Nope"})
+        self.assertIn(response.status_code, (403, 404))
+
+
+class DesignNewVersionButtonTest(TestCase):
+    """The "New version" button on the design detail page (PLAN-design-versions.md §1/§3)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.approved = Design.objects.create(
+            title="Approved for button", site=cls.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft = Design.objects.create(title="Draft for button", site=cls.site)
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design", kwargs={"pk": design.pk})
+
+    def _link(self, design):
+        return reverse("plugins:netbox_rack_design:design_new_version", kwargs={"pk": design.pk})
+
+    def test_button_appears_for_approved_design_with_add_permission(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self._link(self.approved), response.content.decode())
+
+    def test_button_appears_for_draft_design_with_add_permission(self):
+        # No status condition, unlike Derive: offered regardless of status.
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.draft))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self._link(self.draft), response.content.decode())
+
+    def test_button_absent_without_add_permission(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self._link(self.approved), response.content.decode())
 
 
 class DesignApplyViewTest(TestCase):

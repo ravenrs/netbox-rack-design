@@ -17,7 +17,7 @@ from rest_framework.response import Response
 from tenancy.models import Tenant
 
 from .. import apply as apply_engine
-from .. import filtersets, naming, planning_fields, projection
+from .. import filtersets, naming, planning_fields, projection, versioning
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
@@ -223,9 +223,16 @@ def _design_children_rest_message(design):
     ``SET_NULL``, so without this guard the delete would silently orphan
     every child's baseline. Mirrors ``_design_children_message`` (views.py)
     so a user sees one consistent explanation regardless of which door
-    caught it. Note this does NOT point at "create a new version" -- that
-    route does not exist yet (no view, no action, no button) -- it points
-    at ``rebase``, which does.
+    caught it.
+
+    Note this does NOT point at "create a new version" -- not because the
+    route doesn't exist (it does: ``new_version``/``DesignNewVersionView``),
+    but because creating a version would not help here: a new version is a
+    fresh draft that sits beside ``design``, it does not detach
+    ``design.children`` from it, so the orphaning this guard exists to
+    prevent would still happen. Only re-basing the dependents onto a
+    different design actually severs the link, hence pointing at
+    ``rebase``, which does.
     """
     names = ", ".join(str(child) for child in design.children)
     return (
@@ -2358,6 +2365,59 @@ class DesignViewSet(NetBoxModelViewSet):
         logger.debug("api.derive: design=%s -> child=%s", design.pk, child.pk)
         return Response(
             DesignSerializer(child, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"], url_path="new-version")
+    def new_version(self, request, pk=None):
+        """
+        Clone this design into a new, draft version of the same plan --
+        the REST equivalent of ``DesignNewVersionView`` (views.py); the
+        clone itself is ``versioning.new_version()``
+        (PLAN-design-versions.md §1/§4), which this action only exposes.
+        Requires ``add_design`` (this CREATES a Design) -- the default
+        TokenPermissions mapping for POST already gives exactly that, so
+        ``get_permissions`` does not override it for this action, same as
+        ``derive`` above.
+
+        Unlike ``derive``, there is NO status requirement: a version may be
+        created from a design in any status. Approval is what makes a
+        version *necessary* (it is the only door out of a frozen design with
+        dependents), not what makes it *valid*.
+
+        POST .../designs/<pk>/new-version/  {"title": "..."}  (title optional)
+          -> 201 {<full Design representation of the new version>}
+          -> 400 when "title" is present but blank/whitespace-only
+
+        An omitted "title" keeps the source's own title (versions are
+        distinguished by ``__str__``, "<title> (v<version>)", so no suffix
+        is invented here) -- ``versioning.new_version()`` already implements
+        that, so it is simply passed through.
+
+        URL name: plugins-api:netbox_rack_design-api:design-new-version
+        Path:     /api/plugins/rack-design/designs/<pk>/new-version/
+        """
+        # Restrict by "add" (not "view"): the required permission for this
+        # action IS add_design (it creates a Design), matching `derive`.
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "add")
+        design = self.get_object()
+
+        title = request.data.get("title")
+        if title is not None and not title.strip():
+            return Response(
+                {"title": ["This field may not be blank."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            clone = versioning.new_version(design, title=title)
+        except ValidationError as exc:
+            errors = exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages}
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+        logger.debug("api.new_version: design=%s -> clone=%s", design.pk, clone.pk)
+        return Response(
+            DesignSerializer(clone, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
         )
 

@@ -18,7 +18,7 @@ The plugin is fully generic and public — nothing organization-specific is hard
 
 ## Features
 
-Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. The apply/conflict features are planned (see [Roadmap](#roadmap)).
+Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. Applying a design into NetBox, and conflict detection within a design chain, are delivered; detecting collisions between two unrelated designs is planned (see [Roadmap](#roadmap)).
 
 - **Three models** for capturing rack plans:
   - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, may optionally belong to a group, and may be **`based_on`** exactly one other approved design — forming a design chain (see [docs/design-chains.md](docs/design-chains.md)). Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
@@ -204,7 +204,7 @@ The `power_*` keys are not listed in the plugin's `default_settings` (they have 
 - **Naming convention engine** — auto-names planned devices via `naming_mode` = `"sequence"` / `"template"` / `"script"`, with graceful fallback when a template or script fails.
 - **Power projection** — config-driven capacity vs. projected consumption per rack, rendered as a capacity bar plus a per-device power heatmap.
 - **PDU power distribution** — per-PDU/per-bank load distribution (`distribution_mode` = `"none"` / `"builtin"` / `"script"`), planned-PDU feed binding for greenfield racks, and a per-bank heatmap.
-- **Design chains** — baseline a design on another approved design (`based_on`), inheriting its placements, names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. See [docs/design-chains.md](docs/design-chains.md).
+- **Design chains and versioning** — baseline a design on another approved design (`based_on`), inheriting its placements, names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. Clone-and-revise an approved design into a new draft version to escape the freeze when you have dependents, then re-base the children onto the new version. See [docs/design-chains.md](docs/design-chains.md).
 - **Apply** — materialize an approved design in NetBox as planned devices, reserving each target slot and flagging removals with a configured status. Reports every problem up front, runs all-or-nothing in one transaction, is safe to re-run (reconciles rather than duplicating), is ordered along a chain, and uses the acting user's own DCIM permissions. Button plus API action with a read-only dry run. See [docs/apply.md](docs/apply.md).
 
 **Planned for upcoming stages**

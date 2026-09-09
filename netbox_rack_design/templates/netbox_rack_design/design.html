@@ -138,6 +138,16 @@
                 <i class="mdi mdi-source-branch-plus" aria-hidden="true"></i> {% trans "Derive design" %}
               </a>
             {% endif %}
+            {# New version: the SAME plan, revised (PLAN-design-versions.md   #}
+            {# §1/§3) -- unlike Derive, available from ANY status, since      #}
+            {# approval makes a version necessary, not valid. Placed next to  #}
+            {# Derive since both create a Design and share add_design.        #}
+            {% if perms.netbox_rack_design.add_design %}
+              <a href="{% url 'plugins:netbox_rack_design:design_new_version' pk=object.pk %}"
+                 class="btn btn-ghost-primary btn-sm">
+                <i class="mdi mdi-content-duplicate" aria-hidden="true"></i> {% trans "New version" %}
+              </a>
+            {% endif %}
             {# Re-base: edits THIS design's own based_on, so it only needs #}
             {# change_design -- shown regardless of frozen state, since a  #}
             {# draft design re-bases just as often as an approved one.     #}
@@ -213,7 +223,7 @@
       {% endif %}
       <div class="card-footer text-muted small">
         {% if object.is_frozen %}
-          <p class="mb-1">{% trans "This design is approved: its placements are read-only. Set the status back to draft, or create a new version, to change them." %}</p>
+          <p class="mb-1">{% trans "This design is approved: its placements are read-only. Set the status back to draft, or use the New version button above, to change them." %}</p>
           {% if children %}
             <p class="mb-0">{% trans "It cannot be un-approved while designs are based on it — re-base or remove them first." %}</p>
           {% endif %}

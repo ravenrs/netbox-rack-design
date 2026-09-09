@@ -13,6 +13,7 @@ from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 from django.views.generic import View
 from django_tables2 import RequestConfig
@@ -23,7 +24,7 @@ from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
 from . import apply as apply_engine
-from . import filtersets, forms, models, planning_fields, projection, tables
+from . import filtersets, forms, models, planning_fields, projection, tables, versioning
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
 
@@ -45,17 +46,41 @@ __all__ = (
 def _frozen_design_message(design, what):
     """
     The message shown when a write path is rejected because ``design`` is
-    frozen (PLAN-design-chains.md §2.2/G4). Mirrors the wording
-    ``DesignPlacement.clean()`` raises for the same reason (models.py), so a
-    user sees one consistent explanation no matter which write path caught it.
+    frozen (PLAN-design-chains.md §2.2/G4). Same reason models.py's
+    ``_frozen_design_clean_message`` exists, and close to the same wording,
+    but this helper runs in the view layer where a concrete design and a
+    URL name are both available, so -- unlike the model-layer helper -- it
+    renders a real link to that design's New version page rather than just
+    naming the button. Built with ``format_html`` (not manual string
+    concatenation) so the ``design``/``what`` interpolations are escaped
+    while the anchor markup is not; confirmed this actually renders as a
+    clickable link rather than literal text (2026-09-09): NetBox's
+    ``inc/toast.html`` prints the message via bare ``{{ message }}`` with
+    the ``message`` object coming straight from the ``messages`` loop
+    variable (no ``|safe`` needed, none applied) and Django's messages
+    framework preserves ``SafeString`` end to end -- ``Message.__str__``
+    returns ``str(self.message)``, which keeps the safe flag because
+    ``str()`` on an exact ``SafeString`` argument is a no-op, and even
+    cookie-backed storage round-trips it explicitly (``MessageEncoder``/
+    ``MessageDecoder`` carry an ``is_safedata`` flag and re-apply
+    ``mark_safe`` on decode). The one non-toast caller
+    (``DesignPowerFeedBulkImportView.save_object``, below) raises this as a
+    ``ValidationError`` that ends up in ``form.add_error(None, ...)``;
+    ``ValidationError.messages``/``Form`` error rendering go through
+    ``conditional_escape``, which likewise leaves ``SafeString`` alone --
+    verified by constructing a ``ValidationError`` from a ``mark_safe``
+    string and checking ``e.messages[0]`` stayed a ``SafeString``. So this
+    single helper is safe to use, as-is, from every call site below.
 
     ``what`` names the resource in the caller's own words, e.g. "its
     placements" or "its planned power feeds".
     """
-    return (
-        f"{design} is approved, and approved designs are frozen: {what} "
-        "cannot be created, edited or deleted. Set the design back to draft, "
-        "or create a new version of it, to make this change."
+    url = reverse("plugins:netbox_rack_design:design_new_version", kwargs={"pk": design.pk})
+    return format_html(
+        '{} is approved, and approved designs are frozen: {} '
+        'cannot be created, edited or deleted. Set the design back to draft, '
+        'or <a href="{}">create a new version</a> of it, to make this change.',
+        design, what, url,
     )
 
 
@@ -67,11 +92,17 @@ def _design_children_message(design):
     all), and ``based_on`` is ``SET_NULL``, so without this guard the delete
     would silently orphan every child's baseline -- exactly the outcome the
     "leave approved status" guard in ``clean()`` (models.py) exists to
-    prevent, reached through another door. Mirrors that guard's wording, so
-    a user sees one consistent explanation whichever door caught it. Unlike
-    that guard, this one is not conditioned on status: any design with
-    children orphans them the same way when deleted, regardless of its own
-    status.
+    prevent, reached through another door. Unlike that guard, this one is
+    not conditioned on status: any design with children orphans them the
+    same way when deleted, regardless of its own status.
+
+    Note this does NOT point at "create a new version" the way that guard
+    now does -- not because the route doesn't exist (it does), but because
+    creating a version would not help here: a new version is a fresh draft
+    that sits beside ``design``, it does not detach ``design.children`` from
+    it, so the orphaning this guard exists to prevent would still happen.
+    Only re-basing the dependents onto a different design actually severs
+    the link, hence pointing at ``rebase``.
     """
     names = ", ".join(str(child) for child in design.children)
     return (
@@ -1176,8 +1207,8 @@ class DesignPlacementBulkDeleteView(generic.BulkDeleteView):
                     request,
                     "Cannot delete placements belonging to frozen (approved) "
                     "designs: " + ", ".join(frozen_designs) + ". Set those "
-                    "designs back to draft, or create a new version of them, "
-                    "to make this change.",
+                    "designs back to draft, or use the New version button on "
+                    "each of them, to make this change.",
                 )
                 return redirect(self.get_return_url(request))
         return super().post(request, **kwargs)
@@ -1277,8 +1308,8 @@ class DesignPowerFeedBulkEditView(generic.BulkEditView):
             raise ValidationError(
                 "Cannot bulk-edit planned power feeds belonging to frozen "
                 "(approved) designs: " + ", ".join(frozen_designs) + ". Set "
-                "those designs back to draft, or create a new version of "
-                "them, to make this change."
+                "those designs back to draft, or use the New version button "
+                "on each of them, to make this change."
             )
         return super()._update_objects(form, request)
 
@@ -1308,8 +1339,8 @@ class DesignPowerFeedBulkDeleteView(generic.BulkDeleteView):
                     request,
                     "Cannot delete planned power feeds belonging to frozen "
                     "(approved) designs: " + ", ".join(frozen_designs) + ". Set "
-                    "those designs back to draft, or create a new version of "
-                    "them, to make this change.",
+                    "those designs back to draft, or use the New version "
+                    "button on each of them, to make this change.",
                 )
                 return redirect(self.get_return_url(request))
         return super().post(request, **kwargs)
@@ -1435,6 +1466,82 @@ class DesignDeriveView(generic.ObjectView):
             })
         messages.success(request, f"Created {child} based on {design}.")
         return redirect(child.get_absolute_url())
+
+
+class DesignNewVersionForm(django_forms.Form):
+    """
+    Standalone (not in forms.py -- owned by this view) form for
+    :class:`DesignNewVersionView`: the user types the new version's title
+    themselves. ``initial`` is set by the view to the SOURCE design's own
+    title -- not a "(derived)"-style suffix, since a version is the SAME
+    plan, revised, and is distinguished by ``__str__``, "<title> (v<version>)",
+    not by a generated suffix -- but the field is a plain required
+    CharField -- nothing falls back to a generated name if it's left blank.
+    """
+
+    title = django_forms.CharField(
+        max_length=200,
+        label=_("Title"),
+        help_text=_("Title for the new version."),
+    )
+
+
+@register_model_view(models.Design, "new_version", path="new-version")
+class DesignNewVersionView(generic.ObjectView):
+    """
+    Clone this design into a new, draft version of the same plan
+    (PLAN-design-versions.md §1/§3). The clone itself is
+    ``versioning.new_version()`` (its docstring implements §4 exactly);
+    this view only exposes it -- it does not reimplement or duplicate any
+    of its copying logic.
+
+    Unlike Derive, available from a design in ANY status: a version may be
+    created whether the source is draft or approved. Approval is what makes
+    a version *necessary* (it is the only way to change an approved design
+    that has dependents), not what makes it *valid*.
+
+    URL: /plugins/rack-design/designs/<pk>/new-version/
+    Name: plugins:netbox_rack_design:design_new_version  (kwargs: pk)
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_new_version.html"
+
+    def get_required_permission(self):
+        # Creating a version CREATES a new Design.
+        return "netbox_rack_design.add_design"
+
+    def _context(self, design, form):
+        return {
+            "object": design,
+            "form": form,
+            "return_url": design.get_absolute_url(),
+            # Counts for the copy summary -- read from the source design so
+            # the template never hardcodes a list of model names.
+            "placement_count": design.placements.count(),
+            "planned_feed_count": design.planned_feeds.count(),
+            "rack_power_count": design.rack_power.count(),
+            "rack_count": design.racks.count(),
+        }
+
+    def get(self, request, pk):
+        design = self.get_object(pk=pk)
+        form = DesignNewVersionForm(initial={"title": design.title})
+        return render(request, self.template_name, self._context(design, form))
+
+    def post(self, request, pk):
+        design = self.get_object(pk=pk)
+        form = DesignNewVersionForm(data=request.POST)
+        if not form.is_valid():
+            return render(request, self.template_name, self._context(design, form))
+
+        try:
+            clone = versioning.new_version(design, title=form.cleaned_data["title"])
+        except ValidationError as e:
+            form.add_error(None, e)
+            return render(request, self.template_name, self._context(design, form))
+        messages.success(request, f"Created {clone} as a new version of {design}.")
+        return redirect(clone.get_absolute_url())
 
 
 @register_model_view(models.Design, "rebase", path="rebase")
