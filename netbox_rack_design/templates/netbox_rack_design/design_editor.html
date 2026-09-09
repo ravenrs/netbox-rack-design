@@ -87,6 +87,8 @@
            data-design-id="{{ object.pk }}"
            data-design-title="{{ object.title }}"
            data-preview-name-url="{{ preview_name_url }}"
+           data-rerun-naming-preview-url="{{ rerun_naming_preview_url }}"
+           data-rerun-naming-url="{{ rerun_naming_url }}"
            data-save-url="{{ save_url }}"
            data-favorites-url="{{ favorites_url }}"
            data-favorite-sets-url="{{ favorite_sets_url }}"
@@ -112,7 +114,15 @@
         {#    defensively -- `chain_conflicts` may not exist yet on a         #}
         {#    concurrently-landing server build; an absent/undefined value    #}
         {#    is simply falsy here, same as `stale_placements` always was.    #}
-        {% if stale_placements or chain_conflicts %}
+        {# 3. Peer conflicts (PLAN-peer-conflicts.md P7/P12, `peer_conflict_  #}
+        {#    rows` -- the same flat entry shape as `chain_conflicts`, PLUS   #}
+        {#    name-claim rows pre-grouped per peer design): a design NOT in   #}
+        {#    this design's lineage also claims a unit, a name, or a real     #}
+        {#    device this design plans to move. Save is not blocked EITHER   #}
+        {#    (P5), but re-basing does nothing about a peer -- a peer is not  #}
+        {#    upstream -- so this gets its OWN sentence, never the chain      #}
+        {#    row's "re-base to resolve" wording.                            #}
+        {% if stale_placements or chain_conflicts or peer_conflict_rows %}
         <div class="nbx-rd-conflicts-panel alert alert-warning" role="alert" data-rd-conflicts-panel>
           <div class="nbx-rd-conflicts-header">
             <i class="mdi mdi-alert-outline" aria-hidden="true"></i>
@@ -149,6 +159,69 @@
             </ul>
           </div>
           {% endif %}
+          {% if peer_conflict_rows %}
+          <div class="nbx-rd-conflicts-row nbx-rd-peer-conflicts">
+            {# P7: its own sentence, not the chain row's "re-base to resolve" --  #}
+            {# re-basing does nothing about a peer (it is not upstream). What a   #}
+            {# peer conflict asks of the reader, true today with no forward       #}
+            {# reference to the rename dialog (phase 3): talk to the other        #}
+            {# planner, or change this design's own plan.                        #}
+            <div class="small text-muted mb-1">
+              {% trans "Peer conflicts -- save is not blocked; another design outside this design's chain plans the same unit, name, or device. Resolve by talking to that design's planner, or by changing this design's own plan:" %}
+            </div>
+            <ul class="mb-0 ps-3">
+              {% for row in peer_conflict_rows %}
+              {# Severity is visible per row (P1): an APPROVED peer's claim is  #}
+              {# `text-danger`, a draft peer's `text-warning-emphasis` -- the   #}
+              {# SAME two classes the chain row above already uses for its own  #}
+              {# severity. Never a red tile/panel fill: the 0.19.0 comment in   #}
+              {# inc/rack_block.html reserves red backgrounds for displacement. #}
+              <li class="{% if row.severity == 'error' %}text-danger{% else %}text-warning-emphasis{% endif %}">
+                {% if row.grouped %}
+                  {# P12: one row per peer design for name claims, not one per   #}
+                  {# colliding name (P11 means a whole family collides at once).  #}
+                  {# Only ever reached with TWO or more -- a group of one is      #}
+                  {# unwrapped back into a plain row in `_design_editor_context`. #}
+                  {# The design is named INSIDE this sentence, so this branch     #}
+                  {# does not also append the "(from X)" span below: printing the #}
+                  {# same title twice in one visible line reads as a rendering    #}
+                  {# fault.                                                      #}
+                  {% if row.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=row.source_design_id %}">{{ row.source_design_name }}</a>{% else %}{{ row.source_design_name }}{% endif %}
+                  {% blocktrans count counter=row.entries|length %}also claims {{ counter }} of this design's planned names.{% plural %}also claims {{ counter }} of this design's planned names.{% endblocktrans %}
+                  <details class="d-inline">
+                    <summary class="d-inline text-muted small" style="cursor: pointer;">{% trans "Show" %}</summary>
+                    <ul class="mb-0 ps-3">
+                      {% for e in row.entries %}<li>{{ e.detail }}</li>{% endfor %}
+                    </ul>
+                  </details>
+                  {# P10: one "Re-run naming" button acts on the WHOLE batch  #}
+                  {# (P12) -- `data-rd-placement-ids` carries every colliding  #}
+                  {# placement pk this row groups, comma-joined.              #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary ms-1 nbx-rd-rerun-naming"
+                          data-rd-rerun-naming data-rd-placement-ids="{{ row.placement_ids_csv }}">
+                    {% trans "Re-run naming" %}
+                  </button>
+                {% else %}
+                  {{ row.detail }}
+                  {% if row.source_design_name %}
+                  <span class="text-muted small">
+                    ({% trans "from" %}
+                    {% if row.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=row.source_design_id %}">{{ row.source_design_name }}</a>{% else %}{{ row.source_design_name }}{% endif %})
+                  </span>
+                  {% endif %}
+                  {% if row.kind == "peer_name_claim" %}
+                  {# P10: the single-collision case -- same button, one pk.   #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary ms-1 nbx-rd-rerun-naming"
+                          data-rd-rerun-naming data-rd-placement-ids="{{ row.placement_ids_csv }}">
+                    {% trans "Re-run naming" %}
+                  </button>
+                  {% endif %}
+                {% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
         </div>
         {% endif %}
 
@@ -167,6 +240,14 @@
         {# rail inputs and the per-tile dialog from this -- no cf name is ever #}
         {# named in HTML or JS. `[]` (default) -> no extra inputs at all.       #}
         {{ placement_fields|json_script:"rd-placement-fields" }}
+
+        {# Peer conflicts (PLAN-peer-conflicts.md P5), flat/ungrouped -- the   #}
+        {# SAME entries the panel row above renders, mounted here too so      #}
+        {# editor.js can read them without a network round trip. Consumed     #}
+        {# exactly once, right after a save-triggered reload, to fire the     #}
+        {# save-time toast (see editor.js's post-save-toast gate); the panel  #}
+        {# row above is what persists across every OTHER page view.          #}
+        {{ peer_conflicts|json_script:"rd-peer-conflicts" }}
 
         {# ---- ONE always-visible toolbar line: the state-LEGEND filter and the #}
         {# Role/Tenant selects share a single horizontal row above the drawer +  #}
@@ -196,6 +277,10 @@
             {# combine by OR with, the five state checkboxes above.           #}
             <label class="nbx-rd-filter" title="{% trans 'A tile carried over from an approved ancestor design' %}"><input type="checkbox" checked data-rd-flag="inherited"><span class="nbx-rd-swatch nbx-rd-flag-inherited"></span>{% trans "Inherited" %}</label>
             <label class="nbx-rd-filter" title="{% trans 'An upstream design now disagrees with this placement -- does not block save' %}"><input type="checkbox" checked data-rd-flag="conflict"><span class="nbx-rd-swatch nbx-rd-flag-conflict"></span>{% trans "Conflict" %}</label>
+            {# Peer conflict (PLAN-peer-conflicts.md P7), the same flag-not-state #}
+            {# pattern: a design OUTSIDE this design's chain claims this unit,    #}
+            {# name, or device. Never blocks save either. #}
+            <label class="nbx-rd-filter" title="{% trans 'A design outside this design\'s chain also claims this unit, name, or device -- does not block save' %}"><input type="checkbox" checked data-rd-flag="peer_conflict"><span class="nbx-rd-swatch nbx-rd-flag-peer_conflict"></span>{% trans "Peer conflict" %}</label>
             {# Apply markers (apply-projection phase): same flag-not-state pattern. #}
             <label class="nbx-rd-filter" title="{% trans 'This design already applied it -- pressing apply again is a no-op' %}"><input type="checkbox" checked data-rd-flag="applied"><span class="nbx-rd-swatch nbx-rd-flag-applied"></span>{% trans "Applied" %}</label>
             <label class="nbx-rd-filter" title="{% trans 'Another design already applied this device' %}"><input type="checkbox" checked data-rd-flag="reserved"><span class="nbx-rd-swatch nbx-rd-flag-reserved"></span>{% trans "Reserved" %}</label>

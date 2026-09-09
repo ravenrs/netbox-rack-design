@@ -115,7 +115,7 @@
             {# tile composited under the occupant. Editable mode keeps the     #}
             {# tile: editor.js collapses it and owns the bar (displaceOne).    #}
             {% if editable or not slot.displaced %}
-            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}"
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}{% if slot.peer_conflict %} nbx-rd-flag-peer_conflict{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
                  gs-x="0"
@@ -148,6 +148,10 @@
                    {% if slot.applied %}data-applied="1"{% endif %}
                    {% if slot.reserved_by_design_id %}data-reserved-by-design-id="{{ slot.reserved_by_design_id }}"{% endif %}
                    {% if slot.reserved_by_design_title %}data-reserved-by-design-title="{{ slot.reserved_by_design_title }}"{% endif %}
+                   {# Peer conflict (PLAN-peer-conflicts.md P1-P3/P16): a design outside this design's chain also claims this unit, this name, or this real device. Title unconditional (P16) -- a contested slot is operational information even when the peer design is hidden from this viewer. #}
+                   {% if slot.peer_conflict %}data-peer-conflict="1"{% endif %}
+                   {% if slot.peer_design_id %}data-peer-design-id="{{ slot.peer_design_id }}"{% endif %}
+                   {% if slot.peer_design_title %}data-peer-design-title="{{ slot.peer_design_title }}"{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
@@ -211,7 +215,7 @@
              gs-min-row="{{ rack.u_height|mul2 }}">
           {% for slot in rear %}
             {% if editable or not slot.displaced %}
-            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}"
+            <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.opposite_face %} nbx-rd-opposite{% endif %}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}{% if slot.peer_conflict %} nbx-rd-flag-peer_conflict{% endif %}"
                  gs-w="1"
                  gs-h="{{ slot.u_height|mul2 }}"
                  gs-x="0"
@@ -243,6 +247,10 @@
                    {% if slot.applied %}data-applied="1"{% endif %}
                    {% if slot.reserved_by_design_id %}data-reserved-by-design-id="{{ slot.reserved_by_design_id }}"{% endif %}
                    {% if slot.reserved_by_design_title %}data-reserved-by-design-title="{{ slot.reserved_by_design_title }}"{% endif %}
+                   {# Peer conflict (PLAN-peer-conflicts.md P1-P3/P16): a design outside this design's chain also claims this unit, this name, or this real device. Title unconditional (P16) -- a contested slot is operational information even when the peer design is hidden from this viewer. #}
+                   {% if slot.peer_conflict %}data-peer-conflict="1"{% endif %}
+                   {% if slot.peer_design_id %}data-peer-design-id="{{ slot.peer_design_id }}"{% endif %}
+                   {% if slot.peer_design_title %}data-peer-design-title="{{ slot.peer_design_title }}"{% endif %}
                    title="{{ slot.display_label }} (U{{ slot.u_position|floatformat:"0" }}, {{ slot.state }})">
                 {% if editable and not slot.opposite_face %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                         aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}
@@ -297,7 +305,7 @@
         {# every tray tile is a fixed gs-h="2") so items never overlap and  #}
         {# the container grows to fit -- server-render order first, session #}
         {# drops append after (see editor.js's tray "dropped" handler).     #}
-        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}"
+        <div class="grid-stack-item nbx-rd-state-{{ slot.state }}{% if slot.inherited %} nbx-rd-flag-inherited{% endif %}{% if slot.conflict %} nbx-rd-flag-conflict{% endif %}{% if slot.applied %} nbx-rd-flag-applied{% endif %}{% if slot.reserved_by_design_title %} nbx-rd-flag-reserved{% endif %}{% if slot.peer_conflict %} nbx-rd-flag-peer_conflict{% endif %}"
              gs-w="1"
              gs-h="2"
              gs-x="0"
@@ -325,6 +333,10 @@
                {% if slot.applied %}data-applied="1"{% endif %}
                {% if slot.reserved_by_design_id %}data-reserved-by-design-id="{{ slot.reserved_by_design_id }}"{% endif %}
                {% if slot.reserved_by_design_title %}data-reserved-by-design-title="{{ slot.reserved_by_design_title }}"{% endif %}
+                   {# Peer conflict (PLAN-peer-conflicts.md P1-P3/P16): a design outside this design's chain also claims this unit, this name, or this real device. Title unconditional (P16) -- a contested slot is operational information even when the peer design is hidden from this viewer. #}
+                   {% if slot.peer_conflict %}data-peer-conflict="1"{% endif %}
+                   {% if slot.peer_design_id %}data-peer-design-id="{{ slot.peer_design_id }}"{% endif %}
+                   {% if slot.peer_design_title %}data-peer-design-title="{{ slot.peer_design_title }}"{% endif %}
                title="{{ slot.display_label }} ({{ slot.state }})">
             {% if editable %}<button type="button" class="nbx-rd-remove-btn" title="{% trans 'Flag for removal' %}"
                     aria-label="{% trans 'Flag for removal' %}">&times;</button>{% endif %}

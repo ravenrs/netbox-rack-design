@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 
 
 from netbox.plugins import PluginConfig
@@ -95,6 +95,18 @@ class RackdesignConfig(PluginConfig):
         #      "target": "cf.burn_in_hours"},
         #   ]
         "placement_fields": [],
+        # --- Peer-conflict detection (see projection.py's peer producers) ------
+        # Whether a design's projection reports OTHER designs (not its own
+        # lineage, not another version of the same plan, not implemented) that
+        # also claim one of its units, planned names, or a real device it
+        # plans to move. Default ON, so existing deployments start reporting
+        # overlaps that were silently there. Disclosure note: even when the
+        # requesting user cannot view the peer design, its TITLE (and the fact
+        # it exists) is still named -- an unnamed "something else claims this"
+        # is not actionable (docs/, PLAN-peer-conflicts.md P16). Turn this off
+        # for a deployment that cannot accept that disclosure, or where
+        # planners never share racks.
+        "peer_conflicts_enabled": True,
     }
 
     @classmethod

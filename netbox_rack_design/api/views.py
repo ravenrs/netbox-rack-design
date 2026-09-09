@@ -356,6 +356,102 @@ def _reject_frozen_design(design):
     )
 
 
+def _rerun_naming_plan(design, placement_ids):
+    """
+    Build the ``old -> new`` diff for the "Re-run naming" dialog (PLAN-
+    peer-conflicts.md P9/P10, phase 3), for both the preview and the commit
+    action -- the SAME computation, so a stale/tampered ``placement_ids``
+    payload cannot make the commit write something the preview never showed.
+
+    Returns either a 400 ``Response`` (an id that does not belong to
+    ``design``, or that is not CURRENTLY claimed by a peer name -- both
+    recomputed fresh here, never trusted from the caller, which is exactly
+    the guard a stale dialog needs, P9) or ``(placements, lines)``:
+
+    * ``placements`` -- the ``DesignPlacement`` rows, in ``placement_ids``
+      order, each with ``proposed_name`` already set IN MEMORY to the fresh
+      name. The preview action must not save them; the commit action does.
+    * ``lines`` -- ``[{"placement_id", "old_name", "new_name",
+      "still_colliding"}]``, the read-only diff the dialog renders.
+
+    Reuses :func:`naming.generate_name` for the fresh name -- the exact
+    function that names a brand-new placement on the add path -- so this is
+    not a second name-derivation path.
+
+    P11: the family counter ``generate_name`` (via a naming script's own use
+    of ``chain_placement_names``) consults never reserves against a peer
+    draft, so a fresh name CAN still collide with the same peer (both sides
+    re-running independently land on the same next number again). This is
+    reported per-line as ``still_colliding`` rather than silently returned
+    as if it were a fix -- the caller (both actions below) hands the flag
+    straight back in the response, and the commit action still writes the
+    name regardless (P10: "Confirm writes every line shown").
+    """
+    if not isinstance(placement_ids, list) or not placement_ids:
+        return Response(
+            {"placement_ids": ["This field is required and must be a non-empty list of placement ids."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    placements_by_id = {
+        placement.pk: placement
+        for placement in DesignPlacement.objects.filter(
+            design=design, pk__in=placement_ids
+        ).select_related("device_type", "device", "device_role", "tenant", "target_rack")
+    }
+    missing = [pid for pid in placement_ids if pid not in placements_by_id]
+    if missing:
+        return Response(
+            {"placement_ids": [f"Placement(s) {missing} do not belong to this design."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    peers = projection.peer_placements_for_design(design)
+
+    ordered = [placements_by_id[pid] for pid in placement_ids]
+    lines = []
+    # The names handed out EARLIER IN THIS BATCH, fed forward as pending names
+    # exactly the way the add path does it (``preview_name`` injects the
+    # editor session's unsaved sibling names the same way). A naming script's
+    # family counter reads persisted siblings plus ``pending_names``, and has
+    # no other way to know about a name this loop generated a moment ago and
+    # has not saved -- so without this, a batch of collisions all come back
+    # with the SAME next number, replacing a cross-design collision with a
+    # duplicate inside one design, which is strictly worse.
+    granted = []
+    for placement in ordered:
+        if not naming.peer_name_claims(placement, peers):
+            # P9's guard: the world may have moved on since the dialog
+            # opened (the peer applied, renamed, or was deleted) -- refuse
+            # the WHOLE request rather than rename a name that is clean now.
+            return Response(
+                {"placement_ids": [
+                    f"Placement {placement.pk} does not currently claim a name any "
+                    f"peer design also claims; refusing to rename it."
+                ]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        old_name = naming.effective_name(placement)
+        placement._rd_pending_names = list(granted)
+        new_name = naming.generate_name(placement)
+        granted.append(new_name)
+        placement.proposed_name = new_name
+        still_colliding = bool(naming.peer_name_claims(placement, peers))
+        lines.append({
+            "placement_id": placement.pk,
+            "old_name": old_name,
+            "new_name": new_name,
+            "still_colliding": still_colliding,
+            # The engine can hand back the very name it is being asked to
+            # replace -- in the P11 case both designs' counters legitimately
+            # land on the same number, and re-running changes nothing. Saying
+            # so is the difference between a button that reports what it did
+            # and one that claims a fix it did not make.
+            "unchanged": new_name == old_name,
+        })
+    return ordered, lines
+
+
 class ChangeDesignPermissions(TokenPermissions):
     """
     These detail @actions (save-layout, add-rack, remove-rack) are writes that
@@ -402,7 +498,7 @@ class DesignViewSet(NetBoxModelViewSet):
     def get_permissions(self):
         action = getattr(self, "action", None)
         if action in ("save_layout", "add_rack", "remove_rack", "rack_power",
-                      "planned_feed", "copy_feeds", "rebase", "apply"):
+                      "planned_feed", "copy_feeds", "rebase", "apply", "rerun_naming"):
             # ``rebase`` re-points THIS design's own ``based_on`` -- an edit
             # to an existing Design, not a create -- so it needs
             # ``change_design`` rather than the ``add_design`` TokenPermissions
@@ -418,7 +514,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # ``rack_power``'s split below.
             return [ChangeDesignPermissions()]
         if action in ("preview_name", "power_source", "feeds", "recompute_distribution",
-                      "chain"):
+                      "chain", "rerun_naming_preview", "conflicts"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -522,6 +618,84 @@ class DesignViewSet(NetBoxModelViewSet):
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
         )
+
+    @action(detail=True, methods=["post"], url_path="rerun-naming-preview")
+    def rerun_naming_preview(self, request, pk=None):
+        """
+        Preview (PLAN-peer-conflicts.md P10, phase 3): for the given
+        ``placement_ids`` (a peer name-claim row's colliding placement(s) --
+        one for an ungrouped row, several for a collapsed batch, P12),
+        recompute a fresh name for each via the naming engine's add path
+        (:func:`naming.generate_name`, the same function ``preview_name``
+        above already uses) and return the ``old -> new`` diff. Writes
+        NOTHING -- no placement is saved.
+
+        Requires only ``view_design`` (``ViewDesignPermissions``, registered
+        in ``get_permissions``), like ``preview_name``: a computing POST
+        needs no more than that.
+
+        Body: ``{"placement_ids": [<int>, ...]}``.
+        Returns: ``{"lines": [{"placement_id", "old_name", "new_name",
+        "still_colliding"}, ...]}`` -- see ``_rerun_naming_plan`` for what
+        ``still_colliding`` means (P11).
+
+        URL name: plugins-api:netbox_rack_design-api:design-rerun-naming-preview
+        Path:     /api/plugins/rack-design/designs/<pk>/rerun-naming-preview/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        result = _rerun_naming_plan(design, request.data.get("placement_ids"))
+        if isinstance(result, Response):
+            return result
+        _placements, lines = result
+        return Response({"lines": lines}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="rerun-naming")
+    def rerun_naming(self, request, pk=None):
+        """
+        Commit (PLAN-peer-conflicts.md P10, phase 3): writes the SAME diff
+        ``rerun_naming_preview`` would show -- recomputed fresh here from
+        ``placement_ids`` rather than trusted from the request body, so a
+        stale/tampered payload cannot force a write the P9 guard would have
+        refused. "Confirm writes every line shown" (P10): every placement
+        the guard accepts gets its fresh ``proposed_name`` saved, including
+        one whose fresh name ``still_colliding`` reports as still true (P11)
+        -- that is reported back, not treated as a reason to withhold it.
+
+        Requires ``change_design`` (``ChangeDesignPermissions``, registered
+        in ``get_permissions``, like ``save_layout``/``add_rack``/etc). A
+        FROZEN design refuses with 409, like every other write action.
+
+        Body: ``{"placement_ids": [<int>, ...]}``.
+        Returns: the same ``{"lines": [...]}`` shape as the preview.
+
+        URL name: plugins-api:netbox_rack_design-api:design-rerun-naming
+        Path:     /api/plugins/rack-design/designs/<pk>/rerun-naming/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+
+        if design.is_frozen:
+            return _reject_frozen_design(design)
+
+        result = _rerun_naming_plan(design, request.data.get("placement_ids"))
+        if isinstance(result, Response):
+            return result
+        placements, lines = result
+        try:
+            with transaction.atomic():
+                for placement in placements:
+                    placement.full_clean()
+                    placement.save(update_fields=["proposed_name"])
+        except ValidationError as exc:
+            return Response(
+                {"detail": exc.message_dict if hasattr(exc, "message_dict") else exc.messages},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response({"lines": lines}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="recompute-distribution")
     def recompute_distribution(self, request, pk=None):
@@ -2285,6 +2459,66 @@ class DesignViewSet(NetBoxModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["get"], url_path="conflicts")
+    def conflicts(self, request, pk=None):
+        """
+        Read-only chain + peer conflicts for this design, across every rack it
+        scopes -- the SAME flat vocabulary the editor's tool-drawer panel
+        renders (views.py's ``_design_editor_context``), factored into
+        ``projection.flatten_conflicts()`` so this action and the editor
+        context cannot drift into two vocabularies (PLAN-peer-conflicts.md
+        P14, phase 4). Automation currently learns about a conflict only from
+        ``apply``'s refusal, which is too late to use as a gate -- this lets
+        a pipeline check first.
+
+        Each entry: {"kind", "severity", "detail", "rack_id",
+        "source_design_id", "source_design_name", "slot_key"} -- see
+        ``projection.flatten_conflicts()`` for exactly how each key,
+        especially ``slot_key``, is derived for every conflict kind.
+
+        Flattened across every rack the design scopes, not grouped per rack:
+        a design scopes many racks and the projection runs per rack, but
+        `rack_id` on every entry is already enough for a client to tell
+        entries in different racks apart, and a flat list is the simplest
+        shape for a pipeline that only wants to know "is this empty".
+
+        The list is returned under a ``conflicts`` key rather than as a bare
+        top-level array, matching every other action on this ViewSet
+        (``chain``, ``apply``, ``preview_name``, ``rerun-naming``). A bare
+        array is the one shape that cannot be extended later -- there is
+        nowhere to add a field beside it without breaking every client -- and
+        the shape of a published endpoint is the hardest thing to change.
+
+        PLAN-peer-conflicts.md P16: a peer design's TITLE is returned even
+        when this user's NetBox object permissions would hide that design --
+        a contested slot is operational information, and "another design
+        claims U36" without a name is not actionable.
+        ``source_design_name`` is a plain ``str()``, never a nested Design
+        serializer, so no OTHER field of the hidden peer design is exposed.
+        The ``peer_conflicts_enabled`` PLUGINS_CONFIG flag is the way out for
+        a deployment that cannot accept that disclosure -- it already gates
+        peer detection at the projection layer (phase 1), so turning it off
+        means this action returns no peer entries, at no extra cost here.
+
+        GET .../designs/<pk>/conflicts/
+          -> {"conflicts": [
+                 {"kind", "severity", "detail", "rack_id", "source_design_id",
+                  "source_design_name", "slot_key"}, ...]}
+
+        URL name: plugins-api:netbox_rack_design-api:design-conflicts
+        Path:     /api/plugins/rack-design/designs/<pk>/conflicts/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        entries = []
+        for rack in design.racks.all():
+            result = projection.project_rack(design, rack)
+            entries.extend(projection.flatten_conflicts(rack, result.conflicts))
+
+        return Response({"conflicts": entries}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="derive")
     def derive(self, request, pk=None):

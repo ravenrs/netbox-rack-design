@@ -10,6 +10,7 @@ nav:
       - Power distribution: power-distribution.md
       - Planning fields: planning-fields.md
       - Design chains: design-chains.md
+      - Peer conflicts: peer-conflicts.md
       - Applying a design: apply.md
   - Reference:
       - Power projection spec: power-projection-spec.md

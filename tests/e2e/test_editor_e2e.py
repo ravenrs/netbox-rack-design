@@ -652,6 +652,28 @@ class EditorE2ETestCase(unittest.TestCase):
                 return idx
         self.fail(f"no widget matching {match} in baseWidgets: {widgets}")
 
+    def _dismiss_debug_toolbar(self):
+        """Remove the Django Debug Toolbar from the page, if it is there.
+
+        A dev server runs with DEBUG on, so the toolbar's collapsed handle
+        floats over the editor's top-right corner -- where the Save button is.
+        Playwright refuses a click it can see is intercepted, so the toolbar
+        makes a real Save click impossible. No other test in this suite clicks
+        Save, which is why only the peer-conflict test needs this. Strictly a
+        dev-environment accommodation: nothing about the toolbar is under test,
+        and a production NetBox does not serve it.
+
+        BOTH ids are removed because the bundled toolbar renamed its root
+        between the NetBox minors this suite runs against: 4.4/4.5 mount
+        ``#djDebug``, 4.6 wraps it in ``#djDebugRoot`` and that wrapper is what
+        intercepts the click there. Removing whichever is present keeps one
+        helper honest across the range.
+        """
+        self.page.evaluate(
+            "() => { for (const id of ['djDebug', 'djDebugRoot']) {"
+            " const d = document.getElementById(id); if (d) d.remove(); } }"
+        )
+
     def tile_info(self, idx):
         return self.page.evaluate(f"() => window.__rdE2E.tileInfo('{idx}')")
 
@@ -1376,6 +1398,208 @@ class EditorE2ETestCase(unittest.TestCase):
             "rename field with the decorated '<design>-<old name>' string -- "
             "nothing was actually stored, so there is nothing to prefill")
         self.assert_no_console_errors()
+
+
+    # =====================================================================
+    # 17. PLAN-peer-conflicts.md phase 2: saving a placement onto a unit a
+    #     PEER design (outside this design's chain) already claims must
+    #     succeed (P5's save-not-blocked rule -- pinned end-to-end here, not
+    #     just in test_views.py), toast the conflict at save time, and still
+    #     show it in the panel after the reload the save triggers (P6).
+    #
+    #     THIS IS THE ONE TEST IN THE SUITE THAT ACTUALLY CLICKS SAVE and
+    #     writes to the DB -- every other test here only asserts on the
+    #     would-be payload (see the module docstring). To keep that
+    #     invariant true for every other test, this one provisions and
+    #     tears down its OWN two throwaway designs (never touching the
+    #     class's shared fixture design or its shared editor page) and
+    #     navigates its own page there instead of using `self.editor_url`.
+    # =====================================================================
+    def test_17_peer_conflict_toast_and_panel_survive_reload(self):
+        site_id = self._api("GET", f"/api/dcim/racks/{RACK_PK}/")["site"]["id"]
+
+        # The PEER: an unrelated design (no based_on relationship, no shared
+        # version_root with anything below) that plans a device at the SAME
+        # free unit this test's own design will then also target.
+        peer = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        # THIS test's own design: starts with NO placements, so its rack
+        # renders no peer conflict until the drop+save below creates one.
+        mine = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        try:
+            peer_u = self._live_free_u  # a real-device-free U (see _provision_fixture)
+            self._api("POST", "/api/plugins/rack-design/placements/", {
+                "design": peer["id"], "kind": "add", "device_type": self._dt_id,
+                "proposed_name": "e2e-peer-device", "target_rack": int(RACK_PK),
+                "target_position": peer_u, "target_face": "front",
+            })
+
+            mine_url = (
+                f"{BASE}/plugins/rack-design/designs/{mine['id']}/editor/{RACK_PK}/")
+            self.page.goto(mine_url, wait_until="networkidle")
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self.page.wait_for_timeout(1200)
+            self.page.add_script_tag(content=TEST_HARNESS_JS)
+            self._dismiss_debug_toolbar()
+
+            # Drop a device type (lands at the grid's top row), then drag it
+            # down onto the peer's claimed unit -- an unsaved add, exactly
+            # like test_03, just relocated onto the contested U before Save.
+            new_idx = self.page.evaluate(
+                f"() => window.__rdE2E.dropPaletteItem({self._dt_id}, "
+                f"{self._dt_h}, 'e2e-peer-clash')")
+            self.assertIsNotNone(new_idx, "dropPaletteItem did not stamp a widget index")
+            gs_h = self.tile_info(new_idx)["h"]
+            peer_gs_y = self.page.evaluate(
+                f"() => window.__rdE2E.uPositionToGsY({peer_u}, {gs_h})")
+            moved = self.page.evaluate(
+                f"() => window.__rdE2E.moveTile('{new_idx}', {peer_gs_y})")
+            self.assertTrue(moved, "could not drag the new add onto the peer's unit")
+
+            # The real Save click -- this is a genuine write + reload.
+            with self.page.expect_navigation(wait_until="networkidle", timeout=15000):
+                self.page.click("#rd-editor-save")
+
+            # P5: the save succeeded (we are back on the editor, not an error
+            # page) and toasted the peer conflict by name/unit.
+            self.page.wait_for_selector(
+                ".toast-header:has-text('Peer conflict')", timeout=5000)
+            toast_body = self.page.eval_on_selector(
+                ".toast:has(.toast-header:has-text('Peer conflict')) .toast-body",
+                "el => el.textContent")
+            self.assertIn(peer["title"], toast_body,
+                          f"toast should name the peer design: {toast_body!r}")
+            self.assertIn(f"U{peer_u}", toast_body,
+                          f"toast should name the contested unit: {toast_body!r}")
+
+            # Reload again: the panel row (not the one-shot toast) is what
+            # must persist for every OTHER page view (P6) -- e.g. the peer's
+            # own planner opening THEIR design and seeing it right back
+            # (pinned in test_views.py; here we only need our own survives).
+            self.page.reload(wait_until="networkidle")
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self._dismiss_debug_toolbar()
+            self.assertIsNotNone(
+                self.page.query_selector(".nbx-rd-peer-conflicts"),
+                "the peer-conflicts panel row must survive a plain reload")
+            # And the ONE-SHOT toast must NOT re-fire on this ordinary reload
+            # -- only the save-triggered one above should have shown it.
+            self.assertIsNone(
+                self.page.query_selector(".toast-header:has-text('Peer conflict')"),
+                "the save-time toast must not re-fire on an unrelated reload")
+        finally:
+            for design_id in (peer["id"], mine["id"]):
+                try:
+                    self._api(
+                        "DELETE",
+                        f"/api/plugins/rack-design/designs/{design_id}/")
+                except Exception:
+                    pass
+
+    def test_18_rerun_naming_dialog_cancel_and_confirm(self):
+        """PLAN-peer-conflicts.md P10, phase 3: the panel's "Re-run naming"
+        button on a peer_name_claim row opens a read-only old->new diff;
+        Cancel writes nothing, Confirm renames and the row is gone after
+        reload. Mirrors test_17's own-throwaway-design pattern exactly."""
+        site_id = self._api("GET", f"/api/dcim/racks/{RACK_PK}/")["site"]["id"]
+        # The colliding name carries MARKUP on purpose: a proposed_name is
+        # text a planner typed, so the dialog must render it as text. If the
+        # diff were built by string-concatenating names into innerHTML, this
+        # would become a real element in the page instead of characters.
+        dup_name = f"e2e-dup-<i>rename</i>-{uuid.uuid4()}"
+
+        peer = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        mine = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        try:
+            u = self._live_free_u
+            self._api("POST", "/api/plugins/rack-design/placements/", {
+                "design": peer["id"], "kind": "add", "device_type": self._dt_id,
+                "proposed_name": dup_name, "target_rack": int(RACK_PK),
+                "target_position": u, "target_face": "front",
+            })
+            mine_placement = self._api(
+                "POST", "/api/plugins/rack-design/placements/", {
+                    "design": mine["id"], "kind": "add",
+                    "device_type": self._dt_id,
+                    "proposed_name": dup_name, "target_rack": int(RACK_PK),
+                    "target_position": u, "target_face": "front",
+                })
+            mine_pid = mine_placement["id"]
+
+            def _current_proposed_name():
+                return self._api(
+                    "GET",
+                    f"/api/plugins/rack-design/placements/{mine_pid}/",
+                )["proposed_name"]
+
+            self.assertEqual(_current_proposed_name(), dup_name)
+
+            mine_url = (
+                f"{BASE}/plugins/rack-design/designs/{mine['id']}/editor/{RACK_PK}/")
+            self.page.goto(mine_url, wait_until="networkidle")
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self._dismiss_debug_toolbar()
+
+            button_selector = (
+                f"[data-rd-rerun-naming][data-rd-placement-ids='{mine_pid}']")
+            self.page.wait_for_selector(button_selector, timeout=5000)
+
+            # ---- Cancel: dialog opens with the diff, Cancel writes nothing.
+            self.page.click(button_selector)
+            self.page.wait_for_selector(".nbx-rd-rerun-naming-modal", timeout=5000)
+            diff_text = self.page.eval_on_selector(
+                ".nbx-rd-rerun-naming-lines", "el => el.textContent")
+            self.assertIn(dup_name, diff_text,
+                          f"diff line should show the OLD (colliding) name: {diff_text!r}")
+            self.assertIsNone(
+                self.page.query_selector(".nbx-rd-rerun-naming-lines i"),
+                "a name's markup must render as text, never as an element",
+            )
+            self.page.click(
+                ".nbx-rd-rerun-naming-modal button.btn-link:has-text('Cancel')")
+            self.page.wait_for_selector(
+                ".nbx-rd-rerun-naming-modal", state="detached", timeout=5000)
+            self.assertEqual(
+                _current_proposed_name(), dup_name,
+                "Cancel must write nothing")
+            # The row survives Cancel -- the button is still there to retry.
+            self.page.wait_for_selector(button_selector, timeout=5000)
+
+            # ---- Confirm: writes the rename and reloads; the row is gone.
+            self.page.click(button_selector)
+            self.page.wait_for_selector(".nbx-rd-rerun-naming-modal", timeout=5000)
+            with self.page.expect_navigation(wait_until="networkidle", timeout=15000):
+                self.page.click("[data-rd-rerun-naming-confirm]")
+
+            new_name = _current_proposed_name()
+            self.assertNotEqual(
+                new_name, dup_name,
+                "Confirm must rename the colliding placement")
+
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self._dismiss_debug_toolbar()
+            self.assertIsNone(
+                self.page.query_selector(button_selector),
+                "the renamed placement's row must be gone after reload")
+        finally:
+            for design_id in (peer["id"], mine["id"]):
+                try:
+                    self._api(
+                        "DELETE",
+                        f"/api/plugins/rack-design/designs/{design_id}/")
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

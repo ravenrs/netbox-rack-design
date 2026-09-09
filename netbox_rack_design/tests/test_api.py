@@ -18,7 +18,7 @@ from dcim.models import (
     Site,
 )
 from django.db import connection
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
@@ -30,6 +30,7 @@ from utilities.testing import (
     create_test_device,
 )
 
+from .. import views as html_views
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
@@ -670,6 +671,181 @@ class DesignChainActionsTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_200_OK)
 
 
+def _peer_plugins_config(**overrides):
+    cfg = {"peer_conflicts_enabled": True}
+    cfg.update(overrides)
+    return {"netbox_rack_design": cfg}
+
+
+class DesignConflictsActionTest(APITestCase):
+    """
+    PLAN-peer-conflicts.md P14/phase 4: ``GET .../designs/<pk>/conflicts/``
+    serves chain + peer conflicts together, read-only, so a pipeline can gate
+    on it BEFORE calling ``apply``. Modelled on ``DesignChainActionsTest``
+    above for conventions.
+
+    The entries are the SAME flat vocabulary ``projection.flatten_conflicts()``
+    produces for the editor's tool-drawer panel (``_design_editor_context``,
+    ``DesignEditorPeerConflictContextTest`` in test_views.py) -- this class
+    pins that the two surfaces agree, not just that this action works in
+    isolation.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+
+        # Parent: approved, then IMPLEMENTED -- an implemented ancestor is
+        # exactly what makes the child's chain "ancestor_implemented"
+        # (test_views.py's DesignEditorPeerConflictContextTest precedent).
+        cls.parent = Design.objects.create(title="Parent IDS-1000", site=cls.site)
+        cls.parent.racks.add(cls.rack)
+        DesignPlacement.objects.create(
+            design=cls.parent, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, target_rack=cls.rack,
+            target_position=10, target_face="front", proposed_name="srv-a",
+        )
+        cls.parent.status = DesignStatusChoices.STATUS_APPROVED
+        cls.parent.save()
+        cls.parent.status = DesignStatusChoices.STATUS_IMPLEMENTED
+        cls.parent.save()
+
+        cls.child = Design.objects.create(
+            title="Child IDS-2000", site=cls.site, based_on=cls.parent,
+        )
+        cls.child.racks.add(cls.rack)
+        cls.own_add = DesignPlacement.objects.create(
+            design=cls.child, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, target_rack=cls.rack,
+            target_position=20, target_face="front", proposed_name="own-device",
+        )
+
+        # A PEER (not in the child's lineage) claiming the SAME unit as the
+        # child's own add -- a peer_slot_claim, symmetric to and reported
+        # completely apart from the parent/child chain above.
+        cls.peer = Design.objects.create(title="Peer IDS-9000", site=cls.site)
+        cls.peer.racks.add(cls.rack)
+        cls.peer_add = DesignPlacement.objects.create(
+            design=cls.peer, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, target_rack=cls.rack,
+            target_position=20, target_face="front", proposed_name="peer-device",
+        )
+
+    def _conflicts_url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-conflicts", kwargs={"pk": design.pk},
+        )
+
+    def _seven_keys(self, entry):
+        return set(entry.keys())
+
+    def test_without_view_design_denied(self):
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+    def test_peer_and_chain_conflicts_together(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        kinds = [e["kind"] for e in response.data["conflicts"]]
+        self.assertIn("ancestor_implemented", kinds, response.data["conflicts"])
+        self.assertIn("peer_slot_claim", kinds, response.data["conflicts"])
+
+        expected_keys = {
+            "kind", "severity", "detail", "rack_id",
+            "source_design_id", "source_design_name", "slot_key",
+        }
+        for entry in response.data["conflicts"]:
+            self.assertEqual(self._seven_keys(entry), expected_keys, entry)
+
+    def test_clean_design_returns_empty_list(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        clean = Design.objects.create(title="Clean design", site=self.site)
+        clean.racks.add(self.rack)
+        response = self.client.get(self._conflicts_url(clean), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["conflicts"], [])
+
+    def test_peer_slot_claim_slot_key_matches_childs_own_placement(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        claims = [e for e in response.data["conflicts"] if e["kind"] == "peer_slot_claim"]
+        self.assertEqual(len(claims), 1, response.data["conflicts"])
+        self.assertEqual(claims[0]["slot_key"], self.own_add.pk)
+        self.assertEqual(claims[0]["source_design_id"], self.peer.pk)
+        self.assertEqual(claims[0]["source_design_name"], str(self.peer))
+
+    def test_peer_title_disclosed_despite_hidden_object_permission(self):
+        """
+        PLAN-peer-conflicts.md P16: this user may view ONLY ``self.child``
+        (an ``ObjectPermission`` constrained to its pk, precedent in
+        ``DesignApplyTest.test_orphan_row_visible_but_other_design_hidden``
+        above) -- ``self.peer`` is NOT visible to them. The peer's title must
+        still come back on the ``peer_slot_claim`` entry: a contested slot is
+        operational information, and "another design claims U20" without a
+        name is not actionable. No other field of the hidden peer design is
+        in the payload -- there is no nested object to check, only the two
+        flat id/name fields.
+        """
+        permission = ObjectPermission(
+            name="conflicts-restricted", actions=["view"],
+            constraints={"pk": self.child.pk},
+        )
+        permission.save()
+        permission.users.add(self.user)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
+
+        # Confirm the peer really is hidden from this user before relying on it.
+        self.assertFalse(
+            Design.objects.restrict(self.user, "view").filter(pk=self.peer.pk).exists()
+        )
+
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        claims = [e for e in response.data["conflicts"] if e["kind"] == "peer_slot_claim"]
+        self.assertEqual(len(claims), 1, response.data["conflicts"])
+        self.assertEqual(claims[0]["source_design_id"], self.peer.pk)
+        self.assertEqual(claims[0]["source_design_name"], str(self.peer))
+
+    def test_flag_off_drops_peer_entries_chain_entries_unaffected(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        with override_settings(PLUGINS_CONFIG=_peer_plugins_config(peer_conflicts_enabled=False)):
+            response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        kinds = [e["kind"] for e in response.data["conflicts"]]
+        self.assertNotIn("peer_slot_claim", kinds, response.data["conflicts"])
+        self.assertIn("ancestor_implemented", kinds, response.data["conflicts"])
+
+    def test_agrees_with_editor_context(self):
+        """
+        The whole point of factoring the flatten out (PLAN-peer-conflicts.md
+        phase 4): the API entries and the editor context's flat
+        ``chain_conflicts`` + ``peer_conflicts`` for the SAME design must be
+        the same set of entries.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        api_entries = [dict(e) for e in response.data["conflicts"]]
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        ctx = html_views._design_editor_context(request, self.child)
+        editor_entries = ctx["chain_conflicts"] + ctx["peer_conflicts"]
+
+        key = lambda e: (e["kind"], e["rack_id"], e["slot_key"], e["source_design_id"])  # noqa: E731
+        self.assertEqual(
+            sorted(api_entries, key=key), sorted(editor_entries, key=key),
+        )
+
+
 class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
     model = DesignPlacement
     view_namespace = "plugins-api:netbox_rack_design"
@@ -1110,6 +1286,48 @@ class SaveLayoutTest(APITestCase):
         response = self.client.post(self._url(self.design), payload, format="json", **self.header)
         self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
         self.assertIn("errors", response.data)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_applied_peer_device_refuses_the_save(self):
+        """PLAN-peer-conflicts.md P4: an APPLIED peer's device is a real
+        dcim.Device, so save-layout's ordinary collision check already
+        refuses a save onto its unit -- this is CURRENT behaviour (0.29.0),
+        pinned here with no new code."""
+        from .. import apply
+
+        self._grant_all()
+        superuser = User.objects.create_superuser(username="peer-apply-super")
+        rack = self.racks[1]  # empty rack
+
+        creator = Design.objects.create(title="Peer creator IDS-9000", site=self.site)
+        DesignPlacement.objects.create(
+            design=creator,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            device_role=self.device_role,
+            target_rack=rack,
+            target_position=10,
+            target_face="front",
+            proposed_name="applied-peer-srv",
+        )
+        creator.status = DesignStatusChoices.STATUS_APPROVED
+        creator.save()
+        result = apply.run(creator, superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        # self.design is an UNRELATED draft design (no lineage, no shared
+        # version) planning onto the same, now-real, unit.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
 
     def test_swap_two_devices_succeeds(self):
@@ -2460,6 +2678,270 @@ class PreviewNameTest(APITestCase):
         body = {"kind": "add", "device_type": self.device_type.pk}
         response = self.client.post(self._url(), body, format="json", **self.header)
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+
+@override_settings(PLUGINS_CONFIG=_plugins_config())
+class RerunNamingActionTest(APITestCase):
+    """
+    Tests for the DesignViewSet rerun-naming-preview / rerun-naming actions
+    (PLAN-peer-conflicts.md P9/P10/P11, phase 3): re-running the naming engine
+    over ONLY a design's colliding placements, with a read-only preview and a
+    confirmed write.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+
+        # Design A: the design whose placements we rename. Two placements --
+        # one colliding with peer B's claimed name, one clean (P9: only the
+        # colliding one may ever change).
+        cls.design = Design.objects.create(title="IDS-1", site=cls.site)
+        cls.design.racks.add(cls.racks[1])
+        cls.colliding = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.racks[1],
+            target_position=10,
+            proposed_name="dup-name",
+        )
+        cls.clean = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.racks[1],
+            target_position=11,
+            proposed_name="A-clean",
+        )
+
+        # Peer B: a DRAFT design (default status) that also scopes rack[1]
+        # and claims the SAME name as `colliding` -- this is what the panel's
+        # "Re-run naming" button would have been rendered from.
+        cls.peer = Design.objects.create(title="IDS-2", site=cls.site)
+        cls.peer.racks.add(cls.racks[1])
+        DesignPlacement.objects.create(
+            design=cls.peer,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.racks[1],
+            target_position=20,
+            proposed_name="dup-name",
+        )
+
+    def _preview_url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-rerun-naming-preview",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def _commit_url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-rerun-naming",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    @override_settings(
+        PLUGINS_CONFIG={"netbox_rack_design": {
+            "naming_mode": "script",
+            "naming_script": (
+                "netbox_rack_design.tests.test_naming.family_counter_naming_fn"
+            ),
+        }}
+    )
+    def test_a_batch_gives_every_placement_a_DISTINCT_new_name(self):
+        """A naming script's family counter can only avoid handing the same
+        number to two placements if the caller feeds each generated name back
+        in as a pending name -- which is exactly what the add path does
+        (``preview_name`` injects ``pending_names``).
+
+        Without that, re-running naming over a batch of collisions renames
+        them all to the SAME name, replacing a cross-design collision with a
+        duplicate inside one design, which is worse.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        # A second and third colliding placement, so the batch is >1.
+        extra = []
+        for i, position in enumerate((12, 13)):
+            mine = DesignPlacement.objects.create(
+                design=self.design,
+                kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type,
+                target_rack=self.racks[1],
+                target_position=position,
+                proposed_name=f"batch-dup-{i}",
+            )
+            DesignPlacement.objects.create(
+                design=self.peer,
+                kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type,
+                target_rack=self.racks[1],
+                target_position=30 + i,
+                proposed_name=f"batch-dup-{i}",
+            )
+            extra.append(mine)
+
+        response = self.client.post(
+            self._preview_url(),
+            {"placement_ids": [self.colliding.pk] + [p.pk for p in extra]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        new_names = [line["new_name"] for line in response.data["lines"]]
+        self.assertEqual(len(new_names), 3, response.data)
+        self.assertEqual(
+            len(set(new_names)), 3,
+            f"every placement in one batch must get its own name: {new_names}",
+        )
+
+    def test_preview_returns_diff_and_writes_nothing(self):
+        """Preview reports old -> new for the colliding placement only, and
+        persists nothing (the placements are byte-identical afterwards)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        before_colliding = self.colliding.proposed_name
+        before_clean = self.clean.proposed_name
+        response = self.client.post(
+            self._preview_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        lines = response.data["lines"]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["placement_id"], self.colliding.pk)
+        self.assertEqual(lines[0]["old_name"], "dup-name")
+        # Sequence mode: "<title>-<ordinal>" -- `colliding` is ordinal 1
+        # (target_position 10 sorts first), so the fresh name differs from
+        # both the old name and the peer's claim.
+        self.assertEqual(lines[0]["new_name"], "IDS-1-1")
+        self.assertFalse(lines[0]["still_colliding"])
+
+        self.colliding.refresh_from_db()
+        self.clean.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, before_colliding)
+        self.assertEqual(self.clean.proposed_name, before_clean)
+
+    def test_commit_writes_exactly_the_shown_set(self):
+        """Confirm writes every line the preview showed -- the colliding
+        placement is renamed, the clean sibling is untouched byte-for-byte
+        (P9: renaming a clean name is churn, not a fix)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        preview = self.client.post(
+            self._preview_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(preview, status.HTTP_200_OK)
+        expected_new_name = preview.data["lines"][0]["new_name"]
+
+        response = self.client.post(
+            self._commit_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["lines"][0]["new_name"], expected_new_name)
+
+        self.colliding.refresh_from_db()
+        self.clean.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, expected_new_name)
+        self.assertEqual(self.clean.proposed_name, "A-clean")
+
+    def test_commit_rejects_a_non_colliding_placement(self):
+        """A stale dialog naming a placement that is not CURRENTLY colliding
+        is rejected whole -- nothing is written, including the placement
+        that IS colliding in the same payload (P9's guard)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        before_colliding = self.colliding.proposed_name
+        before_clean = self.clean.proposed_name
+        response = self.client.post(
+            self._commit_url(),
+            {"placement_ids": [self.colliding.pk, self.clean.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.colliding.refresh_from_db()
+        self.clean.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, before_colliding)
+        self.assertEqual(self.clean.proposed_name, before_clean)
+
+    def test_commit_rejected_when_design_approved(self):
+        """A FROZEN design refuses the commit with 409, like every other
+        write action; nothing is renamed."""
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        self.design.status = DesignStatusChoices.STATUS_APPROVED
+        self.design.save()
+        before = self.colliding.proposed_name
+        response = self.client.post(
+            self._commit_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.colliding.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, before)
+
+    def test_view_design_is_enough_for_preview_but_not_for_commit(self):
+        """`view_design` alone lets the preview through (P10's precedent:
+        a computing POST needs no more) but a commit with only that
+        permission is refused -- writing requires `change_design`."""
+        self.add_permissions("netbox_rack_design.view_design")
+        preview = self.client.post(
+            self._preview_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(preview, status.HTTP_200_OK)
+
+        commit = self.client.post(
+            self._commit_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(commit, status.HTTP_403_FORBIDDEN)
+        self.colliding.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, "dup-name")
+
+    def test_still_colliding_after_rerun_is_reported_not_hidden(self):
+        """P11: the family counter never reserves against a peer draft, so a
+        fresh name CAN land on the exact same name the peer already claims.
+        The response must say so (`still_colliding`), never silently claim a
+        fix -- and the commit still writes it (P10: confirm writes every
+        line shown)."""
+        # Both designs share a title AND an ordinal-1 placement, so sequence
+        # mode's "<title>-<n>" independently computes the SAME fresh name for
+        # both sides, no matter how many times either re-runs (P11's
+        # accepted consequence).
+        shared_a = Design.objects.create(title="Shared", site=self.site)
+        shared_a.racks.add(self.racks[1])
+        placement_a = DesignPlacement.objects.create(
+            design=shared_a, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=self.racks[1],
+            target_position=30, proposed_name="Shared-1",
+        )
+        shared_b = Design.objects.create(title="Shared", site=self.site)
+        shared_b.racks.add(self.racks[1])
+        DesignPlacement.objects.create(
+            design=shared_b, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=self.racks[1],
+            target_position=31, proposed_name="Shared-1",
+        )
+
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        response = self.client.post(
+            self._commit_url(shared_a), {"placement_ids": [placement_a.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        line = response.data["lines"][0]
+        self.assertEqual(line["new_name"], "Shared-1")
+        self.assertTrue(line["still_colliding"])
+        placement_a.refresh_from_db()
+        # Written anyway (P10) -- still_colliding is reported, not withheld.
+        self.assertEqual(placement_a.proposed_name, "Shared-1")
 
 
 class DesignRackScopeTest(APITestCase):

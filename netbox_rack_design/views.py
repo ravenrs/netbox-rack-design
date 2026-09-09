@@ -550,11 +550,14 @@ def _design_editor_context(request, design):
         {"rack": scoped_rack, "hidden": scoped_rack.pk in hidden_rack_ids}
         for scoped_rack in scoped_racks
     ]
-    # Chain conflicts (PLAN-design-chains.md §8.2/§8.3/G3): every rack's
-    # ``ProjectedElevation.conflicts``, flattened into ONE list for the
-    # persistent panel a chain conflict must render in (never a toast --
-    # §8.2, it is not this design's fault and persists until someone
-    # re-bases). ``slot_key`` is deliberately the SAME identifier the widget
+    # Chain + peer conflicts (PLAN-design-chains.md §8.2/§8.3/G3,
+    # PLAN-peer-conflicts.md P7): every rack's ``ProjectedElevation.conflicts``,
+    # flattened into TWO lists (chain_conflicts / peer_conflicts, split below
+    # by ``kind``) for the two persistent panel rows a conflict must render in
+    # (never a toast for a chain conflict -- §8.2, it is not this design's
+    # fault and persists until someone re-bases; a peer conflict DOES also get
+    # a toast, at save time, but that is P5's job, not this flatten's).
+    # ``slot_key`` is deliberately the SAME identifier the widget
     # dicts already carry -- a conflict's ``placement`` (when set) is the
     # exact placement a slot's ``placement_id`` came from (see
     # projection.py's ``_conflict()``/``emit()``), so the frontend joins a
@@ -563,27 +566,103 @@ def _design_editor_context(request, design):
     # ancestor_not_approved) carries no placement at all -- ``slot_key`` is
     # None, meaning the entry is about the rack/chain as a whole, not any one
     # tile, and the panel renders it without trying to highlight a tile.
+    # PLAN-peer-conflicts.md phase 2: the flat entry shape above is ONE
+    # vocabulary shared by two rows in this panel (kind decides which), not
+    # two vocabularies -- phase 4 (projection.flatten_conflicts(), which does
+    # the actual flattening + slot_key derivation + kind validation, shared
+    # verbatim with the REST ``conflicts`` action) serves the same keys over
+    # REST. `kind` decides which row an entry belongs in here: the chain
+    # kinds (``projection.CHAIN_CONFLICT_KINDS``) go to `chain_conflicts`
+    # (rendered under "re-base to resolve"), everything else (`peer_*`,
+    # already validated by ``flatten_conflicts()``) goes to `peer_conflicts`
+    # (rendered under its own sentence -- re-basing does not touch a peer,
+    # see design_editor.html).
     chain_conflicts = []
+    peer_conflicts = []
     for block in all_rack_blocks:
-        rack_pk = block["rack"].pk
-        for entry in block["conflicts"]:
-            placement = entry.get("placement")
-            source_design = entry.get("source_design")
-            chain_conflicts.append({
-                "kind": entry["kind"],
+        for flat in projection.flatten_conflicts(block["rack"], block["conflicts"]):
+            if flat["kind"] in projection.CHAIN_CONFLICT_KINDS:
+                chain_conflicts.append(flat)
+            else:
+                peer_conflicts.append(flat)
+    # P12: name-claim rows collapse per peer design behind a `Show` toggle --
+    # one row per peer design ("Design C (draft) claims 5 of this design's
+    # planned names"), not one row per colliding name (P11 means two drafts
+    # commonly collide on a whole family at once). Slot and device rows stay
+    # one row each: an overlap is a specific unit a human must look at, and
+    # collapsing it would hide which. This is a PRESENTATION-only regrouping
+    # for the panel template -- `peer_conflicts` above stays the flat,
+    # ungrouped, per-entry vocabulary phase 4 will serve verbatim; grouping it
+    # here would mean maintaining a second shape.
+    peer_name_groups = {}
+    peer_conflict_rows = []
+    for entry in peer_conflicts:
+        if entry["kind"] != "peer_name_claim":
+            peer_conflict_rows.append({"grouped": False, **entry})
+            continue
+        key = entry["source_design_id"]
+        group = peer_name_groups.get(key)
+        if group is None:
+            group = {
+                "grouped": True,
+                "kind": "peer_name_claim",
+                "source_design_id": entry["source_design_id"],
+                "source_design_name": entry["source_design_name"],
                 "severity": entry["severity"],
-                "detail": entry["detail"],
-                "rack_id": rack_pk,
-                "source_design_id": source_design.pk if source_design is not None else None,
-                "source_design_name": str(source_design) if source_design is not None else None,
-                "slot_key": placement.pk if placement is not None else None,
-            })
+                "entries": [],
+            }
+            peer_name_groups[key] = group
+            peer_conflict_rows.append(group)
+        group["entries"].append(entry)
+        # An approved peer's claim on even one name in the batch makes the
+        # whole collapsed row an error (P1) -- worse severity wins, never the
+        # first-seen one.
+        if entry["severity"] == "error":
+            group["severity"] = "error"
+    # A group of ONE is not a group: collapsing it would put a "Show" toggle
+    # in front of a single hidden line and replace the detail sentence with a
+    # count of one. Such a row reads better as the plain entry it came from,
+    # so unwrap it -- in place, keeping the panel's order stable.
+    peer_conflict_rows = [
+        {"grouped": False, **row["entries"][0]}
+        if row.get("grouped") and len(row["entries"]) == 1
+        else row
+        for row in peer_conflict_rows
+    ]
+    # PLAN-peer-conflicts.md phase 3: the "Re-run naming" button's payload --
+    # a comma-joined string of the colliding placement pk(s) this row's
+    # button acts on (the WHOLE batch for a grouped row, P12; the one
+    # placement for an ungrouped row). `slot_key` IS the placement pk for a
+    # `peer_name_claim` entry (set above -- the entry carries `placement`,
+    # never `slot`), so no new identifier is introduced. A plain string
+    # (not a JSON list) because it only ever needs to sit in one HTML
+    # attribute -- editor.js splits it back into ints.
+    for row in peer_conflict_rows:
+        if row["kind"] != "peer_name_claim":
+            continue
+        if row.get("grouped"):
+            row["placement_ids_csv"] = ",".join(
+                str(e["slot_key"]) for e in row["entries"]
+            )
+        else:
+            row["placement_ids_csv"] = str(row["slot_key"])
+
     return {
         "scoped_racks": scoped_racks,
         "hidden_rack_ids": hidden_rack_ids,
         "all_rack_blocks": all_rack_blocks,
         "scoped_rack_rows": scoped_rack_rows,
         "chain_conflicts": chain_conflicts,
+        # Peer conflicts (PLAN-peer-conflicts.md P7/P12): a peer is not
+        # upstream, so this is a separate context key from chain_conflicts
+        # rather than folded into it -- see design_editor.html's third panel
+        # row for the reasoning on why the wording must differ too. Flat,
+        # ungrouped -- also what the save-time toast (editor.js) reads via
+        # its json_script mount, and the same shape phase 4 will serve.
+        "peer_conflicts": peer_conflicts,
+        # The panel's own grouped/collapsed view of the same data (P12) --
+        # see the comment above.
+        "peer_conflict_rows": peer_conflict_rows,
         # Drives the empty-state markup + the drawer's default-open override.
         "has_racks": bool(all_rack_blocks),
         # Gates the chassis-layer switch (spec §10.3/§10.4): offered only when the
@@ -594,6 +673,10 @@ def _design_editor_context(request, design):
         "save_url": f"/api/plugins/rack-design/designs/{design.pk}/save-layout/",
         # Read-only naming preview for the editor's add auto-fill (Phase 3).
         "preview_name_url": f"/api/plugins/rack-design/designs/{design.pk}/preview-name/",
+        # PLAN-peer-conflicts.md phase 3: the "Re-run naming" dialog's two
+        # calls -- the read-only diff and the write that commits it.
+        "rerun_naming_preview_url": f"/api/plugins/rack-design/designs/{design.pk}/rerun-naming-preview/",
+        "rerun_naming_url": f"/api/plugins/rack-design/designs/{design.pk}/rerun-naming/",
         # User-scoped favorite device types (the catalog palette's stars).
         "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
         # The user's NAMED favorite sets ("Default", "for server", ...), which

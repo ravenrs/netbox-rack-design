@@ -195,6 +195,7 @@ __all__ = (
     "project_rack",
     "baseline_occupancy",
     "device_type_power_summary",
+    "peer_placements_for_design",
 )
 
 PLUGIN_NAME = "netbox_rack_design"
@@ -251,6 +252,91 @@ class ProjectedElevation:
     conflicts: list = field(default_factory=list)
 
 
+# Conflict ``kind``s this projection layer can emit. The chain kinds are the
+# four already wired through ``_conflict()`` for §8.3's upstream reporting;
+# everything else is required to carry the ``peer_`` prefix (PLAN-peer-
+# conflicts.md P3). This is the ONE place that vocabulary is enumerated --
+# ``flatten_conflicts()`` validates every entry against it, and
+# views.py's ``_design_editor_context`` reuses it to route a flattened entry
+# to the "re-base to resolve" panel row (chain) versus the peer row, so the
+# two call sites cannot silently disagree on what a chain kind is.
+CHAIN_CONFLICT_KINDS = {
+    "ancestor_implemented", "ancestor_not_approved", "chain_broken", "bay_occupied",
+}
+
+
+def flatten_conflicts(rack, conflicts):
+    """
+    Flatten ONE rack's ``ProjectedElevation.conflicts`` into the flat,
+    template/API-agnostic entry shape shared by the editor's tool-drawer
+    panel (views.py's ``_design_editor_context``) and the read-only REST
+    ``conflicts`` action (api/views.py, PLAN-peer-conflicts.md P14/phase 4).
+    Both call sites call this helper rather than each flattening the same
+    ``ProjectedElevation.conflicts`` structure themselves, so the two
+    surfaces cannot drift into two vocabularies.
+
+    Each returned entry carries exactly:
+      kind, severity, detail, rack_id, source_design_id, source_design_name,
+      slot_key
+
+    ``slot_key`` is deliberately the SAME identifier a widget dict already
+    carries as ``placement_id`` (views._slot_to_widget's key of that name),
+    mirroring ``_conflict()``/``emit()``'s two ways of naming the contested
+    tile:
+      - Most kinds (every chain kind, ``peer_name_claim``,
+        ``peer_device_claim``) carry ``placement``: the entry is about THIS
+        design's own placement, so ``slot_key`` is that placement's pk.
+      - ``peer_slot_claim`` carries no ``placement`` of ours -- the
+        contested unit is not one of our own placements. It instead carries
+        ``slot``, the SAME slot dict object already in the rack's
+        front/rear list; that slot dict's OWN ``placement`` key is the
+        ``DesignPlacement`` that named the tile (this design's own add/move,
+        or -- for an inherited tile -- the ancestor placement, see
+        ``_BaselineEntry``). ``_slot_to_widget`` reads that exact same key
+        into a widget's ``placement_id``, so ``slot["placement"].pk`` IS the
+        tile's identifier -- no new scheme, just reached through the slot.
+      - Neither ``placement`` nor ``slot`` set: a design-level refusal
+        (``ancestor_not_approved`` / ``ancestor_implemented`` /
+        ``chain_broken``) is about the rack/chain as a whole, not any one
+        tile -- ``slot_key`` is ``None``.
+
+    Raises ``ValueError`` for a ``kind`` that is neither in
+    ``CHAIN_CONFLICT_KINDS`` nor prefixed ``peer_`` -- deliberately not
+    softened for either caller: ``kind`` is our own controlled vocabulary
+    from ``_conflict()`` call sites, never user input, so a mismatch is a
+    programming error to surface, not data to tolerate.
+    """
+    rack_pk = rack.pk
+    flat = []
+    for entry in conflicts:
+        kind = entry["kind"]
+        if kind not in CHAIN_CONFLICT_KINDS and not kind.startswith("peer_"):
+            raise ValueError(
+                f"Unrecognized conflict kind {kind!r}: add it to "
+                f"CHAIN_CONFLICT_KINDS (projection.py) or give it a 'peer_' "
+                f"prefix so flatten_conflicts() knows it is a valid producer."
+            )
+        placement = entry.get("placement")
+        source_design = entry.get("source_design")
+        slot = entry.get("slot")
+        if placement is not None:
+            slot_key = placement.pk
+        elif slot is not None:
+            slot_key = slot["placement"].pk if slot.get("placement") is not None else None
+        else:
+            slot_key = None
+        flat.append({
+            "kind": kind,
+            "severity": entry["severity"],
+            "detail": entry["detail"],
+            "rack_id": rack_pk,
+            "source_design_id": source_design.pk if source_design is not None else None,
+            "source_design_name": str(source_design) if source_design is not None else None,
+            "slot_key": slot_key,
+        })
+    return flat
+
+
 # The two things EVERY container's projection derives the same way, whatever its
 # slots are (spec §2). They were copied verbatim into the rack overlay and the
 # chassis one; a state or label rule fixed in one silently left the other wrong.
@@ -303,6 +389,9 @@ def _slot(
     applied=False,
     reserved_by_design_id=None,
     reserved_by_design_title="",
+    peer_conflict=False,
+    peer_design_id=None,
+    peer_design_title="",
 ):
     """Build a single projected-slot dict following the documented contract."""
     return {
@@ -383,6 +472,19 @@ def _slot(
         "applied": applied,
         "reserved_by_design_id": reserved_by_design_id,
         "reserved_by_design_title": reserved_by_design_title,
+        # PEER CONFLICT (PLAN-peer-conflicts.md P1-P3), the same §8.4
+        # flag-not-state call: a design NOT in this design's lineage (not an
+        # ancestor, not a descendant, not another version of the same plan)
+        # also claims this slot's unit, this slot's name, or the real device
+        # this slot represents. Set by ``_peer_conflicts()``, which runs once
+        # per rack after this design's own layer is fully assembled.
+        # ``peer_design_id``/``peer_design_title`` name the FIRST peer found
+        # (a slot flags a single offender; every offender still gets its own
+        # entry in ``ProjectedElevation.conflicts``, which a renderer can
+        # list in full). Never blocks a save (P5).
+        "peer_conflict": peer_conflict,
+        "peer_design_id": peer_design_id,
+        "peer_design_title": peer_design_title,
         # Device bays of a PARENT device (a blade chassis), filled by
         # _attach_bays() in one pass over the finished elevation. Always a list:
         # empty for an ordinary device, so consumers never guard on the key.
@@ -1548,6 +1650,36 @@ def _overlay_planned_blades(design, slots_lists, baseline=None):
                         _apply(entry, by_base_parent[key])
 
 
+def _fmt_u(position):
+    """A U position for a human: ``U1``, not ``U1.0`` -- and ``U1.5`` intact.
+
+    Lives here rather than in :mod:`apply` (which imported nothing from a
+    lower layer for it, and which this module must not import back) so the
+    projection's peer messages and apply's collision messages read the same.
+    """
+    if position == position.to_integral_value():
+        return str(int(position))
+    return str(position.normalize())
+
+
+def _u_interval_overlap(start_a, height_a, start_b, height_b):
+    """Whether two U-intervals (already floats) overlap.
+
+    The exact test :func:`_mark_displaced` uses for vacating-vs-live
+    collision (spec §3/§4.3) and, unchanged, the one :func:`_peer_conflicts`
+    reuses for a peer's slot claim (PLAN-peer-conflicts.md P8): "whatever
+    rule already decides a unit is occupied" is this interval test, applied
+    per face -- a full-depth device's occupancy already falls out of it
+    without a separate branch, because ``_append`` emits a full-depth slot
+    once per face (front and rear each get their own copy), so scanning one
+    face list at a time is enough; there is no second definition to drift
+    from this one.
+    """
+    end_a = start_a + height_a
+    end_b = start_b + height_b
+    return start_a < end_b and start_b < end_a
+
+
 def _mark_displaced(slots):
     """
     Mark every vacating slot (move_out_ghost/remove) whose rows are occupied
@@ -1583,8 +1715,7 @@ def _mark_displaced(slots):
             if old["device"] is not None and new["device"] is old["device"]:
                 continue
             new_start = float(new["u_position"])
-            new_end = new_start + float(new["u_height"])
-            if old_start < new_end and new_start < old_end:
+            if _u_interval_overlap(old_start, old_end - old_start, new_start, float(new["u_height"])):
                 old["displaced"] = True
                 old["displaced_by"] = new["label"]
                 break
@@ -2412,6 +2543,255 @@ def project_chassis(design, entry, baseline=None):
     }
 
 
+# ---------------------------------------------------------------------------
+# Peer conflicts (PLAN-peer-conflicts.md) -- two designs NOT in the same chain
+# claiming the same unit, name, or real device while both are still planning.
+# ---------------------------------------------------------------------------
+
+
+def _peer_conflicts_enabled():
+    """P13: default ON. When off, ``_peer_conflicts`` must not run its query
+    at all -- checked by the caller before ``_peer_placements`` is ever
+    built, not by filtering an empty result after the fact."""
+    return bool(get_plugin_config(PLUGIN_NAME, "peer_conflicts_enabled", True))
+
+
+def _lineage_exclusion_ids(design):
+    """Design pks that ``design`` may never call a peer (P2): itself, every
+    ``based_on`` ancestor, every transitive descendant, and every OTHER
+    version sharing its ``version_root`` (v1/v2 of one plan claim the same
+    units by construction, and at most one version may ever be approved).
+
+    ``design.baseline_chain()`` is called directly rather than reusing the
+    caller's already-resolved ``_Baseline.chain`` -- that list is emptied by
+    §9.2 when an ancestor is refused (not approved / implemented), but a
+    refused ancestor is still an ancestor for LINEAGE purposes (its claim is
+    inheritance, not a peer conflict, whether or not its layer is currently
+    replayed). This costs no extra query: ``based_on`` is a plain FK, and
+    ``_Baseline`` already walked and cached the very same chain of instances
+    on ``design`` earlier in this same ``project_rack`` call.
+    """
+    excluded = {design.pk}
+    try:
+        excluded.update(ancestor.pk for ancestor in design.baseline_chain())
+    except ValueError:
+        pass  # A cycle: already reported as `chain_broken` elsewhere.
+
+    # Descendants: BFS over `children` (direct `based_on` pointers back at
+    # this design). One query per depth level of design's OWN lineage tree --
+    # bounded by that tree's size, not by how many peer designs exist.
+    frontier = [design]
+    while frontier:
+        next_frontier = []
+        for node in frontier:
+            for child in node.children:
+                if child.pk not in excluded:
+                    excluded.add(child.pk)
+                    next_frontier.append(child)
+        frontier = next_frontier
+
+    from django.db.models import Q
+
+    from .models import Design
+
+    root = design.version_root
+    if root.pk is not None:
+        excluded.update(
+            Design.objects.filter(Q(root=root) | Q(pk=root.pk))
+            .values_list("pk", flat=True)
+        )
+    return excluded
+
+
+def _peer_placements(rack, excluded_design_ids):
+    """Every OTHER design's placement that could conflict with a design
+    projecting ``rack`` -- ONE query (P1/P2/perf): designs that scope this
+    rack (``design__racks``), are not in ``excluded_design_ids`` (this
+    design's own lineage + version siblings), and are not ``implemented``
+    (an implemented peer's device is real; the existing real-device
+    collision rules already own that case, and it is not a "peer conflict").
+    """
+    from .models import DesignPlacement
+
+    return list(
+        DesignPlacement.objects.filter(design__racks=rack)
+        .exclude(design_id__in=excluded_design_ids)
+        .exclude(design__status=DesignStatusChoices.STATUS_IMPLEMENTED)
+        .select_related("design", "device", "device_type", "target_rack")
+    )
+
+
+def _peer_severity(peer_design):
+    """P1: an approved peer is an error, a draft peer a warning. Neither
+    blocks a save (P5)."""
+    if peer_design.status == DesignStatusChoices.STATUS_APPROVED:
+        return "error"
+    return "warning"
+
+
+def peer_placements_for_design(design):
+    """Every OTHER design's placement that could conflict with ANY of
+    ``design``'s own placements, across EVERY rack ``design`` scopes --
+    the union ``_peer_conflicts`` computes one rack at a time inside
+    ``project_rack``, gathered once here for the rename action
+    (PLAN-peer-conflicts.md phase 3, P9/P10). Deduplicated by placement pk
+    (a peer design scoping several of ``design``'s racks would otherwise be
+    fetched once per rack). ``[]`` when P13's flag is off or ``design``
+    scopes no racks -- no query either way.
+
+    Public (unlike ``_peer_placements``/``_lineage_exclusion_ids``) because
+    the rename action lives in ``api/views.py``, outside this module.
+    """
+    if not _peer_conflicts_enabled():
+        return []
+    exclusion_ids = _lineage_exclusion_ids(design)
+    peers = {}
+    for rack in design.racks.all():
+        for placement in _peer_placements(rack, exclusion_ids):
+            peers[placement.pk] = placement
+    return list(peers.values())
+
+
+def _peer_conflicts(design, rack, own_placements, front, rear):
+    """Every peer-conflict entry for THIS rack (P3), and the matching
+    slot-level flags. Returns the list to append to
+    ``ProjectedElevation.conflicts``; mutates ``front``/``rear`` slots
+    in place (the same flag-not-state convention every other producer here
+    follows).
+
+    ``own_placements`` is THIS design's own adds/moves/removes (the same
+    lists ``project_rack`` already built for its own layer) -- the peer
+    query never needs to know what THIS design proposes; only the comparison
+    does.
+    """
+    if not _peer_conflicts_enabled():
+        return []
+    peers = _peer_placements(rack, _lineage_exclusion_ids(design))
+    if not peers:
+        return []
+
+    conflicts = []
+
+    # --- peer_slot_claim: a peer targets a unit THIS design's plan claims
+    # (its own add/move, or a slot it inherits from an ancestor) --
+    # P8: reusing `_u_interval_overlap`, the SAME rule `_mark_displaced`
+    # already uses to decide two slots occupy the same rows, per face (a
+    # full-depth slot's mirror copy on the opposite face is scanned exactly
+    # like any other slot in that face's list, so full-depth needs no
+    # separate branch here either).
+    def _claimed(slots):
+        # Only what THIS design's plan asserts: its own adds/move-ins, plus an
+        # ancestor's slot it inherits (an inherited claim IS this design's
+        # claim -- it renders as `existing` flagged `inherited`, §"inherited").
+        # Untouched REALITY is deliberately excluded: a peer dropping a device
+        # onto a real device that this design never touches is the PEER's
+        # collision, caught by its own occupancy rule, and nothing the reader
+        # of this design can act on -- including it would put a conflict in
+        # every design that merely shares a busy rack. Vacating slots claim
+        # nothing going forward, the mirror of the removals carve-out (P3).
+        return [
+            s for s in slots
+            if s["u_position"] is not None
+            and (s["inherited"] or s["state"] in (ProjectedSlotState.ADD, ProjectedSlotState.MOVE_IN))
+        ]
+
+    occupying = {
+        DeviceFaceChoices.FACE_FRONT: _claimed(front),
+        DeviceFaceChoices.FACE_REAR: _claimed(rear),
+    }
+    for peer in peers:
+        if peer.kind == DesignPlacementKindChoices.KIND_REMOVE:
+            continue  # Removals are not a case (P3): the real device still stands.
+        if peer.target_rack_id != rack.pk or peer.target_position is None:
+            continue
+        if peer.target_bay_id or peer.parent_placement_id or peer.base_parent_placement_id:
+            continue  # A blade in a bay is not a rack slot; out of scope here.
+        peer_type = _device_type_of(peer)
+        peer_height = float(_u_height(peer_type))
+        peer_full_depth = _is_full_depth(peer_type)
+        peer_face = _normalize_face(peer.target_face)
+        faces = (
+            (DeviceFaceChoices.FACE_FRONT, DeviceFaceChoices.FACE_REAR)
+            if peer_full_depth else (peer_face,)
+        )
+        peer_start = float(peer.target_position)
+        # The FIRST of our slots this peer lands on, carried on the entry as
+        # `slot` -- the same dict object that is in a face list, which is how
+        # _conflict() documents a renderer finding the tile. Without it a
+        # slot claim is the one kind the panel could not point at.
+        hit = None
+        for face in faces:
+            for slot in occupying[face]:
+                if _u_interval_overlap(
+                    peer_start, peer_height,
+                    float(slot["u_position"]), float(slot["u_height"]),
+                ):
+                    if hit is None:
+                        hit = slot
+                    slot["peer_conflict"] = True
+                    if slot["peer_design_id"] is None:
+                        slot["peer_design_id"] = peer.design_id
+                        slot["peer_design_title"] = str(peer.design)
+        if hit is not None:
+            conflicts.append(_conflict(
+                "peer_slot_claim",
+                severity=_peer_severity(peer.design),
+                slot=hit,
+                source_design=peer.design,
+                detail=f"{peer.design} also plans a device at "
+                       f"U{_fmt_u(peer.target_position)} in {rack}.",
+            ))
+
+    # --- peer_name_claim: a peer placement's effective name equals one of
+    # ours (naming.py's peer-aware sibling of name_exists_in_site).
+    from .naming import effective_name, peer_name_claims
+
+    for placement in own_placements:
+        if placement.kind == DesignPlacementKindChoices.KIND_REMOVE:
+            continue  # A removal claims no name going forward.
+        name = effective_name(placement)
+        for match in peer_name_claims(placement, peers):
+            conflicts.append(_conflict(
+                "peer_name_claim",
+                severity=_peer_severity(match.design),
+                placement=placement,
+                source_design=match.design,
+                detail=f'{match.design} also plans the name "{name}".',
+            ))
+
+    # --- peer_device_claim: a peer MOVE targets the same real device as one
+    # of this design's own MOVEs. (An ADD has no device_id; a REMOVE's
+    # device is not being contested for a *different* location -- P3.)
+    peer_moves_by_device = {
+        peer.device_id: peer
+        for peer in peers
+        if peer.kind == DesignPlacementKindChoices.KIND_MOVE and peer.device_id
+    }
+    for placement in own_placements:
+        if placement.kind != DesignPlacementKindChoices.KIND_MOVE or not placement.device_id:
+            continue
+        peer = peer_moves_by_device.get(placement.device_id)
+        if peer is None:
+            continue
+        # Where the peer sends it, rather than asserting it differs: the two
+        # designs may well target the SAME unit, in which case this is a
+        # second, independent reason the plans cannot both come true.
+        if peer.target_rack_id and peer.target_position is not None:
+            where = f"{peer.target_rack} U{_fmt_u(peer.target_position)}"
+        else:
+            where = "another location"
+        conflicts.append(_conflict(
+            "peer_device_claim",
+            severity=_peer_severity(peer.design),
+            placement=placement,
+            source_design=peer.design,
+            detail=f"{peer.design} also plans to move {placement.device} "
+                   f"(to {where}).",
+        ))
+
+    return conflicts
+
+
 def project_rack(design, rack):
     """
     Compute the projected elevation of ``rack`` under ``design``.
@@ -2731,6 +3111,12 @@ def project_rack(design, rack):
     # apply the SAME displaced treatment as the editor's live gesture flow.
     _mark_displaced(front)
     _mark_displaced(rear)
+    # Peer conflicts (PLAN-peer-conflicts.md): after this design's own layer is
+    # fully assembled (adds/moves/removes above), against every OTHER design
+    # not in this design's lineage that also scopes this rack. Runs before the
+    # bay layer -- peer detection today covers rack U slots only (§ P8 note in
+    # `_peer_conflicts`), not chassis bays.
+    peer_conflicts = _peer_conflicts(design, rack, adds + moves_removes, front, rear)
     # The BAY layer, in the order the layers compose (G1): reality, minus the
     # parts an ancestor already invalidated; bay templates for a planned chassis;
     # the inherited blades; then this design's own.
@@ -2752,8 +3138,9 @@ def project_rack(design, rack):
         rear=rear,
         non_racked=non_racked,
         # Whatever the replay could not do, in the order it hit it: the §9.2
-        # chain refusal first, then per-slot problems from ``emit``.
-        conflicts=baseline.conflicts,
+        # chain refusal first, per-slot problems from ``emit``, then peer
+        # conflicts (a design outside this one's lineage/version group).
+        conflicts=baseline.conflicts + peer_conflicts,
     )
     # Power projection (docs/power-projection-spec.md): fills per-slot draw and
     # the rack-level summary over the planned world just built above.

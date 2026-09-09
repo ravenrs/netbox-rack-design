@@ -741,9 +741,9 @@ not pick up.
 
 ## 12. Design chains: inherited & conflict flags (shipped)
 
-Status: **shipped**. See `docs/design-chains.md` for the user-facing workflow
-and `PLAN-design-chains.md` for the design record; this section covers only
-what changes in the rendering/legend contract of §3 and §4.
+Status: **shipped**. See [Design chains](design-chains.md) for the
+user-facing workflow; this section covers only what changes in the
+rendering/legend contract of §3 and §4.
 
 ### 12.1 What the two flags mean
 

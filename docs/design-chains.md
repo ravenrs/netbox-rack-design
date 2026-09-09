@@ -104,7 +104,7 @@ deliberately, check the new version's position.
 **Re-base** is also the escape hatch for two other situations: a parent that
 has since moved to **implemented** (see below), and two designs that both
 baselined on the same parent — whichever is approved first keeps that baseline;
-the other re-bases onto it (see [Siblings are blind to each other](#Siblings-are-blind-to-each-other)).
+the other re-bases onto it (see [Siblings do not inherit from each other](#Siblings-do-not-inherit-from-each-other)).
 
 ## Inherited tiles
 
@@ -172,18 +172,25 @@ never a toast, because an upstream conflict outlives the session it was
 noticed in. The legend's **Conflict** checkbox filters these tiles the same
 way **Inherited** does.
 
-## Siblings are blind to each other
+## Siblings do not inherit from each other
 
-Two designs based on the **same** approved parent do not see each other's
-placements. If both plan into the same unit, or both generate the same name,
-nothing detects the clash while both are in progress — it surfaces the
-ordinary way, as the ordinary name-collision warning, once someone actually
-tries to save into an occupied unit.
+Two designs based on the **same** approved parent do not inherit each other's
+placements: neither is an ancestor of the other, so nothing one sibling plans
+appears as an inherited tile in the other. Each stands on the shared parent
+and nothing else.
+
+They are **not** blind to each other, though. If both plan into the same
+unit, or both generate the same name, each one's projection reports the other
+as a [peer conflict](peer-conflicts.md) while both are still in progress —
+sibling designs are peers like any other pair not related by lineage. The
+clash is visible immediately; it does not wait for someone to try to save
+onto an occupied unit.
 
 **First approved wins.** The other design re-bases: once one sibling is
 approved, use **Re-base** on the other to point it at the newly-approved
 design instead of the old shared parent, and its own placements are then
-checked against that result.
+checked against that result — which is what turns the peer conflict into
+ordinary inheritance.
 
 ## Naming across a chain
 

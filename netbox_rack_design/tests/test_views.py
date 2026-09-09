@@ -2501,6 +2501,196 @@ class DesignEditorChainWidgetTest(TestCase):
         placement_ids = [w["placement_id"] for w in block["widgets"]]
         self.assertNotIn(self.upstream_add.pk, placement_ids)
 
+class DesignEditorPeerConflictContextTest(TestCase):
+    """
+    PLAN-peer-conflicts.md phase 2: the editor context must split
+    ``ProjectedElevation.conflicts`` by ``kind`` into ``chain_conflicts``
+    (unchanged) and a NEW ``peer_conflicts`` key -- a peer is not upstream, so
+    it must never land in the row whose sentence says "re-base to resolve".
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.change_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+
+        cls.parent = Design.objects.create(title="Network sweep IDS-1000", site=cls.site)
+        cls.parent.racks.add(cls.rack)
+        cls.upstream_add = DesignPlacement.objects.create(
+            design=cls.parent,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=10,
+            target_face="front",
+            proposed_name="srv-a",
+        )
+        cls.parent.status = DesignStatusChoices.STATUS_APPROVED
+        cls.parent.save()
+
+        cls.child = Design.objects.create(
+            title="Server build IDS-2000", site=cls.site, based_on=cls.parent,
+        )
+        cls.child.racks.add(cls.rack)
+        cls.own_add = DesignPlacement.objects.create(
+            design=cls.child,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=20,
+            target_face="front",
+            proposed_name="own-device",
+        )
+
+        # A PEER (not in the child's lineage) claiming the SAME unit as the
+        # child's own add -- a peer_slot_claim, symmetric to (and rendered
+        # completely apart from) the parent/child chain above.
+        cls.peer = Design.objects.create(title="Peer design IDS-9000", site=cls.site)
+        cls.peer.racks.add(cls.rack)
+        cls.peer_add = DesignPlacement.objects.create(
+            design=cls.peer,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.rack,
+            target_position=20,
+            target_face="front",
+            proposed_name="peer-device",
+        )
+
+    def _editor_url(self, design):
+        return reverse(
+            "plugins:netbox_rack_design:design_editor_default",
+            kwargs={"pk": design.pk},
+        )
+
+    def test_peer_conflict_lands_in_peer_conflicts_not_chain_conflicts(self):
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        peer_conflicts = response.context["peer_conflicts"]
+        self.assertEqual(len(peer_conflicts), 1, peer_conflicts)
+        entry = peer_conflicts[0]
+        self.assertEqual(entry["kind"], "peer_slot_claim")
+        self.assertEqual(entry["source_design_id"], self.peer.pk)
+        self.assertEqual(entry["source_design_name"], str(self.peer))
+        # The contested tile IS the child's own add at U20 -- slot_key must
+        # resolve to that placement's pk, the same identifier its widget
+        # dict carries as placement_id (views._slot_to_widget).
+        self.assertEqual(entry["slot_key"], self.own_add.pk)
+
+        # NEVER in chain_conflicts: re-basing past the parent does nothing
+        # about a peer, so a peer kind must not be mistaken for one.
+        chain_kinds = [c["kind"] for c in response.context["chain_conflicts"]]
+        self.assertNotIn("peer_slot_claim", chain_kinds)
+
+    def test_chain_conflict_still_lands_in_chain_conflicts(self):
+        self.parent.status = DesignStatusChoices.STATUS_IMPLEMENTED
+        self.parent.save()
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        chain_kinds = [c["kind"] for c in response.context["chain_conflicts"]]
+        self.assertIn("ancestor_implemented", chain_kinds)
+        peer_kinds = [c["kind"] for c in response.context["peer_conflicts"]]
+        self.assertNotIn("ancestor_implemented", peer_kinds)
+
+    def test_no_peer_conflicts_key_stays_empty_for_a_clean_design(self):
+        response = self.client.get(self._editor_url(self.plain_design()))
+        self.assertHttpStatus(response, 200)
+        self.assertEqual(response.context["peer_conflicts"], [])
+        self.assertEqual(response.context["peer_conflict_rows"], [])
+
+    def plain_design(self):
+        design = Design.objects.create(title="Unrelated design", site=self.site)
+        design.racks.add(self.rack)
+        return design
+
+    def test_peer_conflicts_panel_row_renders_when_present(self):
+        response = self.client.get(self._editor_url(self.child))
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, "nbx-rd-peer-conflicts")
+        self.assertContains(response, str(self.peer))
+
+    def test_peer_conflicts_panel_row_absent_when_none(self):
+        response = self.client.get(self._editor_url(self.plain_design()))
+        self.assertHttpStatus(response, 200)
+        self.assertNotContains(response, "nbx-rd-peer-conflicts")
+
+    # --- P12 grouping: only worth collapsing when there is a batch ---------
+
+    def _peer_name_collision(self, count):
+        """Make ``count`` of the child's planned names collide with the peer's,
+        and return the child's editor response."""
+        for i in range(count):
+            name = f"dup-{i}"
+            DesignPlacement.objects.create(
+                design=self.child, kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type, target_rack=self.rack,
+                target_position=30 + i, target_face="front", proposed_name=name,
+            )
+            DesignPlacement.objects.create(
+                design=self.peer, kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type, target_rack=self.rack,
+                target_position=40 + i, target_face="front", proposed_name=name,
+            )
+        return self.client.get(self._editor_url(self.child))
+
+    def test_a_single_colliding_name_is_not_collapsed(self):
+        """A group of one would put a "Show" toggle in front of one hidden
+        line and replace the sentence with a count of one -- so it stays a
+        plain row carrying its own detail."""
+        response = self._peer_name_collision(1)
+        self.assertHttpStatus(response, 200)
+        name_rows = [
+            r for r in response.context["peer_conflict_rows"]
+            if r["kind"] == "peer_name_claim"
+        ]
+        self.assertEqual(len(name_rows), 1, name_rows)
+        self.assertFalse(name_rows[0]["grouped"], name_rows[0])
+        self.assertIn("dup-0", name_rows[0]["detail"])
+
+    def test_several_colliding_names_collapse_into_one_row(self):
+        response = self._peer_name_collision(3)
+        self.assertHttpStatus(response, 200)
+        name_rows = [
+            r for r in response.context["peer_conflict_rows"]
+            if r["kind"] == "peer_name_claim"
+        ]
+        self.assertEqual(len(name_rows), 1, name_rows)
+        self.assertTrue(name_rows[0]["grouped"])
+        self.assertEqual(len(name_rows[0]["entries"]), 3)
+        # The flat vocabulary phase 4 serves stays per-entry and ungrouped.
+        flat = [
+            e for e in response.context["peer_conflicts"]
+            if e["kind"] == "peer_name_claim"
+        ]
+        self.assertEqual(len(flat), 3, flat)
+
+    def test_a_collapsed_row_names_the_peer_design_once(self):
+        """The grouped sentence already names the design, so the row must not
+        also append the "(from X)" span -- the same title printed twice in one
+        visible line reads as a rendering fault.
+
+        Scoped to the row's own visible header, up to the ``<details>``: the
+        collapsed lines inside it each carry the full ``detail`` sentence,
+        which is the one flat vocabulary phase 4 serves and is not the
+        template's to rewrite.
+        """
+        response = self._peer_name_collision(3)
+        body = response.content.decode()
+        panel = body.index("nbx-rd-peer-conflicts")
+        details = body.index("<details", panel)
+        # The grouped row's own <li>, not the whole panel: a slot-claim row
+        # above it legitimately names the same peer.
+        header = body[body.rindex("<li ", panel, details):details]
+        self.assertEqual(header.count(str(self.peer)), 1, header)
+
+
 class DesignChainHealthViewTest(TestCase):
     """
     The cross-design staleness / re-base REPORT (PLAN-design-chains.md G4's

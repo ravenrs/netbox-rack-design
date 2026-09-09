@@ -711,6 +711,193 @@
         }
     }
 
+    // PLAN-peer-conflicts.md P10, phase 3: the "Re-run naming" dialog. A
+    // READ-ONLY diff -- one line per colliding placement, "old -> new" --
+    // with Cancel/Confirm, modelled on showDisplaceConfirmDialog's shape
+    // above (fresh overlay per open, `decided` guard, transition-safe hide,
+    // blur-before-hide, every `data-bs-dismiss` control wired explicitly).
+    // Not editable: per-name editing already exists elsewhere (P12 note),
+    // so this dialog's only job is "here is what I am about to do".
+    // `lines` is the preview response's `{placement_id, old_name, new_name,
+    // still_colliding, unchanged}` array. Confirm calls `onConfirm()` with no args --
+    // the caller already knows which placement_ids it asked to preview, and
+    // POSTs that SAME list to the commit endpoint, which recomputes the
+    // diff itself rather than trusting anything from this dialog (P9).
+    function showRerunNamingDialog(lines, onConfirm, onCancel) {
+        var overlay = document.createElement("div");
+        overlay.className = "modal fade nbx-rd-rerun-naming-modal";
+        overlay.setAttribute("tabindex", "-1");
+        // Each line is built as DOM with the two names set via textContent,
+        // NEVER interpolated into innerHTML: a `proposed_name` is text a
+        // planner typed, so concatenating it into markup would execute it.
+        // This is the same build-the-skeleton-then-textContent shape the
+        // displace dialog above uses for its own two labels.
+        var rowNodes = (lines || []).map(function (line) {
+            var li = document.createElement("li");
+            li.className = "nbx-rd-rerun-naming-line";
+            li.setAttribute("data-rd-placement-id", line.placement_id);
+            var oldCode = document.createElement("code");
+            oldCode.textContent = line.old_name || "(unnamed)";
+            var newCode = document.createElement("code");
+            newCode.textContent = line.new_name || "(unnamed)";
+            li.appendChild(oldCode);
+            li.appendChild(document.createTextNode(" \u2192 "));
+            li.appendChild(newCode);
+            // The engine can hand back the very name it was asked to replace
+            // (P11: both designs' counters legitimately land on the same
+            // number), so the row says which lines actually change.
+            if (line.unchanged) {
+                var same = document.createElement("span");
+                same.className = "text-muted small";
+                same.title = "Re-running produced the same name; this line changes nothing.";
+                same.textContent = " (unchanged)";
+                li.appendChild(same);
+            }
+            if (line.still_colliding) {
+                var warn = document.createElement("span");
+                warn.className = "text-warning-emphasis small";
+                warn.title = "This name is still claimed by a peer design after re-running.";
+                warn.textContent = " (still collides)";
+                li.appendChild(warn);
+            }
+            return li;
+        });
+        overlay.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered modal-sm">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h5 class="modal-title">' + "Re-run naming" + "</h5>"
+            + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+            + "</div>"
+            + '<div class="modal-body">'
+            + '<p class="small text-muted">These planned names collide with a peer '
+            + "design; confirming renames every line below.</p>"
+            + '<ul class="mb-0 ps-3 nbx-rd-rerun-naming-lines"></ul>'
+            + "</div>"
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
+            + '<button type="button" class="btn btn-sm btn-primary" data-rd-rerun-naming-confirm>Confirm</button>'
+            + "</div>"
+            + "</div></div>";
+        var listEl = overlay.querySelector(".nbx-rd-rerun-naming-lines");
+        rowNodes.forEach(function (li) { listEl.appendChild(li); });
+        document.body.appendChild(overlay);
+
+        var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
+        var modal = ctor ? new ctor(overlay) : null;
+        var decided = false;
+
+        var shownDone = false, hidePending = false;
+        overlay.addEventListener("shown.bs.modal", function () {
+            shownDone = true;
+            if (hidePending && modal) { modal.hide(); }
+        });
+        function requestHide() {
+            if (!modal) { overlay.remove(); return; }
+            if (shownDone) { modal.hide(); } else { hidePending = true; }
+        }
+
+        function finishConfirm() {
+            if (decided) { return; }
+            decided = true;
+            if (typeof onConfirm === "function") { onConfirm(); }
+        }
+        function finishCancel() {
+            if (decided) { return; }
+            decided = true;
+            if (typeof onCancel === "function") { onCancel(); }
+        }
+
+        overlay.querySelector("[data-rd-rerun-naming-confirm]").addEventListener("click", function () {
+            finishConfirm();
+            requestHide();
+        });
+        overlay.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                finishCancel();
+                requestHide();
+            });
+        });
+        overlay.addEventListener("hide.bs.modal", function () {
+            if (overlay.contains(document.activeElement)) {
+                document.activeElement.blur();
+            }
+        });
+        overlay.addEventListener("hidden.bs.modal", function () {
+            finishCancel();
+            overlay.remove();
+        });
+
+        if (modal) {
+            modal.show();
+        } else {
+            finishConfirm();
+            overlay.remove();
+        }
+    }
+
+    // Wiring for every "Re-run naming" button the panel rendered (P10):
+    // both the grouped-row batch button and an ungrouped row's single-name
+    // button carry the SAME `data-rd-rerun-naming` marker and a comma-
+    // joined `data-rd-placement-ids`. Preview is a read-only POST; Confirm
+    // POSTs the SAME id list to the commit endpoint (recomputed server-side,
+    // never trusting this dialog's own copy, P9) and reloads on success so
+    // the panel/tiles re-render from the design's new state.
+    (function wireRerunNamingButtons() {
+        var previewUrl = root.getAttribute("data-rerun-naming-preview-url") || "";
+        var commitUrl = root.getAttribute("data-rerun-naming-url") || "";
+        if (!previewUrl || !commitUrl) { return; }
+        root.querySelectorAll("[data-rd-rerun-naming]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var idsAttr = btn.getAttribute("data-rd-placement-ids") || "";
+                var placementIds = idsAttr.split(",").map(function (s) {
+                    return parseInt(s, 10);
+                }).filter(function (n) { return !isNaN(n); });
+                if (!placementIds.length) { return; }
+                btn.disabled = true;
+                fetch(previewUrl, {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": getCsrfToken(),
+                    },
+                    body: JSON.stringify({ placement_ids: placementIds }),
+                }).then(function (resp) {
+                    return resp.ok ? resp.json() : null;
+                }).then(function (data) {
+                    btn.disabled = false;
+                    if (!data || !data.lines) {
+                        createToast("danger", "Re-run naming", "Could not compute a preview.");
+                        return;
+                    }
+                    showRerunNamingDialog(data.lines, function onConfirm() {
+                        fetch(commitUrl, {
+                            method: "POST",
+                            credentials: "same-origin",
+                            headers: {
+                                "Content-Type": "application/json",
+                                "X-CSRFToken": getCsrfToken(),
+                            },
+                            body: JSON.stringify({ placement_ids: placementIds }),
+                        }).then(function (resp) {
+                            if (!resp.ok) {
+                                createToast("danger", "Re-run naming", "The rename could not be saved.");
+                                return;
+                            }
+                            window.location.reload();
+                        }).catch(function () {
+                            createToast("danger", "Re-run naming", "The rename could not be saved.");
+                        });
+                    });
+                }).catch(function () {
+                    btn.disabled = false;
+                    createToast("danger", "Re-run naming", "Could not compute a preview.");
+                });
+            });
+        });
+    })();
+
     // ---- Planned-PDU / rack power dialogs (docs/pdu-distribution-spec.md) --
     // A planned PDU add has no real device/PowerFeed yet -- the distribution
     // script needs a stored power_config (custom-fields snapshot + feed
@@ -757,6 +944,46 @@
         var el = document.getElementById("rd-placement-fields");
         if (!el) { return []; }
         try { return JSON.parse(el.textContent || "[]") || []; } catch (e) { return []; }
+    })();
+
+    // Peer conflicts (PLAN-peer-conflicts.md P5/P7), read once from the SAME
+    // json_script convention as the three globals above: the flat, ungrouped
+    // entries the panel's collapsed rows are also built from server-side
+    // (views._design_editor_context's `peer_conflicts` key). Used ONLY for
+    // the post-save toast below -- the panel itself is rendered directly by
+    // the template, never by this JS.
+    var PEER_CONFLICTS = (function () {
+        var el = document.getElementById("rd-peer-conflicts");
+        if (!el) { return []; }
+        try { return JSON.parse(el.textContent || "[]") || []; } catch (e) { return []; }
+    })();
+
+    // One sessionStorage key per design (sessionStorage is per-tab already,
+    // but a design pk in the key keeps two designs opened in the same tab's
+    // history from ever reading each other's flag).
+    function postSaveToastKey() {
+        return "nbx-rd-post-save-toast-" + (root.getAttribute("data-design-id") || "");
+    }
+
+    // P5: the toast is feedback for the action JUST TAKEN ("I just did
+    // that"), so it fires exactly once, on the very next load after a save
+    // that actually changed something -- doSave's 200 branch (below) stashes
+    // this key right before its `window.location.reload()`. An ordinary page
+    // view (opening the design tomorrow, or a peer's planner opening THEIR
+    // design and seeing the same conflict, P6) never sets the key, so it
+    // never re-fires here -- that case is what the panel row above is for
+    // instead, since it reads from the page's own render every time, not
+    // from this one-shot flag.
+    (function fireSaveTimeConflictToasts() {
+        var key = postSaveToastKey();
+        var flagged;
+        try { flagged = sessionStorage.getItem(key); } catch (e) { flagged = null; }
+        if (!flagged) { return; }
+        try { sessionStorage.removeItem(key); } catch (e) { /* ignore */ }
+        PEER_CONFLICTS.forEach(function (c) {
+            var level = c.severity === "error" ? "danger" : "warning";
+            createToast(level, "Peer conflict", c.detail);
+        });
     })();
 
     // Which of them a given placement kind may carry. The default is add-only,
@@ -6517,6 +6744,12 @@
                     if (redirectTo) {
                         window.location.href = redirectTo;
                     } else {
+                        // P5: arm the ONE-SHOT post-save toast for the reload
+                        // this triggers -- see fireSaveTimeConflictToasts above.
+                        // Not armed on the redirectTo branch: that leaves for a
+                        // different page entirely (the layer switch), which has
+                        // no peer-conflicts payload of its own to read.
+                        try { sessionStorage.setItem(postSaveToastKey(), "1"); } catch (e) { /* ignore */ }
                         window.location.reload();
                     }
                 });
