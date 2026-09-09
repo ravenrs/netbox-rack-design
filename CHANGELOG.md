@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-09
+
+### Release Summary
+
+Two people planning the same rack could not see each other. Design chains
+relate a design to its ancestors, and that lineage is what the projection
+reads — so two designs with no lineage between them, siblings of one parent
+included, were blind to each other while both were still drafts. Both could
+claim the same unit, both could generate the same name, both could plan to
+move the same device, and nothing said so until one of them reached `apply`
+and was refused. This release reports those overlaps while there is still
+time to do something about them, and gives a name collision a one-click way
+out.
+
+Nothing new blocks a save: a peer conflict is not this design's fault and
+cannot be fixed by editing the tile. Detection is on by default, because the
+overlaps it finds are already there — including ones that have been
+overlapping for months.
+
 ### Added
 
 - **Peer conflicts.** A design's projection now reports overlaps with designs
