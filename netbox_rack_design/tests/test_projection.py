@@ -19,7 +19,7 @@ from decimal import Decimal
 
 from dcim.models import Device, DeviceRole, DeviceType, Manufacturer
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from users.models import User
 from utilities.testing import create_test_device
@@ -2237,4 +2237,346 @@ class ApplyMarkerProjectionTestCase(TestCase):
         self.assertEqual(
             len(after.captured_queries), baseline_queries,
             "query count must not scale with the number of applied devices",
+        )
+
+
+def _peer_plugins_config(**overrides):
+    cfg = {"peer_conflicts_enabled": True}
+    cfg.update(overrides)
+    return {"netbox_rack_design": cfg}
+
+
+class PeerConflictProjectionTestCase(TestCase):
+    """PLAN-peer-conflicts.md phase 1: detection only, in the projection.
+
+    Two designs that are not in the same chain are blind to each other while
+    planning (PLAN-design-chains.md §2.1). ``_peer_conflicts`` reports the
+    three P3 kinds through the same ``ProjectedElevation.conflicts`` channel
+    the chain producers already use, and flags the colliding slots
+    ``peer_conflict``/``peer_design_id``/``peer_design_title``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]  # Rack 1: Device1@U1, Device2@U2. Rack 2: empty.
+        cls.devices = env["devices"]
+        cls.device_type = env["device_type"]
+
+    # --- helpers -------------------------------------------------------
+
+    def _design(self, title, *, based_on=None, root=None, version=1):
+        return Design.objects.create(
+            title=title, site=self.site, based_on=based_on, root=root, version=version,
+        )
+
+    def _approve(self, design):
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+        return design
+
+    def _implement(self, design):
+        design.status = DesignStatusChoices.STATUS_IMPLEMENTED
+        design.save()
+        return design
+
+    def _scope(self, design, rack):
+        design.racks.add(rack)
+        return design
+
+    def _add(self, design, position, *, name, rack=None, face="front", device_type=None):
+        return DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=device_type or self.device_type,
+            target_rack=rack or self.racks[1],
+            target_position=position,
+            target_face=face,
+            proposed_name=name,
+        )
+
+    def _move(self, design, device, position, *, rack=None, face="front", name=""):
+        return DesignPlacement.objects.create(
+            design=design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=device,
+            target_rack=rack or self.racks[1],
+            target_position=position,
+            target_face=face,
+            proposed_name=name,
+        )
+
+    def _kinds(self, conflicts):
+        return sorted(c["kind"] for c in conflicts)
+
+    def _by_kind(self, conflicts, kind):
+        return [c for c in conflicts if c["kind"] == kind]
+
+    def _at(self, slots, position):
+        return [s for s in slots if s["u_position"] is not None and int(s["u_position"]) == position]
+
+    # --- P3: the three kinds ---------------------------------------------
+
+    def test_two_peer_designs_overlapping_a_unit_reports_one_slot_claim(self):
+        a = self._design("Peer A IDS-1000")
+        self._scope(a, self.racks[1])
+        self._add(a, 10, name="a-srv")
+
+        b = self._design("Peer B IDS-2000")
+        self._scope(b, self.racks[1])
+        self._add(b, 10, name="b-srv")
+
+        result = project_rack(a, self.racks[1])
+        claims = self._by_kind(result.conflicts, "peer_slot_claim")
+        self.assertEqual(len(claims), 1, result.conflicts)
+        self.assertEqual(claims[0]["source_design"], b)
+        self.assertIn("U10", claims[0]["detail"])
+
+        at10 = self._at(result.front, 10)
+        self.assertEqual(len(at10), 1, at10)
+        self.assertTrue(at10[0]["peer_conflict"])
+        self.assertEqual(at10[0]["peer_design_id"], b.pk)
+        self.assertEqual(at10[0]["peer_design_title"], str(b))
+
+        # Symmetric (P6): B's own projection reports A right back.
+        result_b = project_rack(b, self.racks[1])
+        claims_b = self._by_kind(result_b.conflicts, "peer_slot_claim")
+        self.assertEqual(len(claims_b), 1, result_b.conflicts)
+        self.assertEqual(claims_b[0]["source_design"], a)
+
+    def test_two_peer_designs_with_the_same_planned_name_reports_one_name_claim(self):
+        a = self._design("Peer A IDS-3000")
+        self._scope(a, self.racks[1])
+        self._add(a, 10, name="dup-name")
+
+        b = self._design("Peer B IDS-4000")
+        self._scope(b, self.racks[1])
+        self._add(b, 11, name="dup-name")
+
+        result = project_rack(a, self.racks[1])
+        claims = self._by_kind(result.conflicts, "peer_name_claim")
+        self.assertEqual(len(claims), 1, result.conflicts)
+        self.assertEqual(claims[0]["source_design"], b)
+        self.assertIn("dup-name", claims[0]["detail"])
+        # Not also reported as a slot claim -- different units.
+        self.assertEqual(self._by_kind(result.conflicts, "peer_slot_claim"), [])
+
+    def test_two_peer_designs_moving_the_same_device_reports_one_device_claim(self):
+        a = self._design("Peer A IDS-5000")
+        self._scope(a, self.racks[1])
+        self._move(a, self.devices[0], 10)
+
+        b = self._design("Peer B IDS-6000")
+        self._scope(b, self.racks[1])
+        self._move(b, self.devices[0], 11)
+
+        result = project_rack(a, self.racks[1])
+        claims = self._by_kind(result.conflicts, "peer_device_claim")
+        self.assertEqual(len(claims), 1, result.conflicts)
+        self.assertEqual(claims[0]["source_design"], b)
+        self.assertIn(str(self.devices[0]), claims[0]["detail"])
+        # Not also reported as a slot claim -- different target units.
+        self.assertEqual(self._by_kind(result.conflicts, "peer_slot_claim"), [])
+
+    def test_peer_removal_is_not_a_case(self):
+        """A peer planning to REMOVE the device at a unit is not a peer
+        conflict (P3): the real device still stands there, and the ordinary
+        occupancy rule already stops this design from adding onto it."""
+        a = self._design("Peer A IDS-6500")
+        self._scope(a, self.racks[0])
+        DesignPlacement.objects.create(
+            design=a, kind=DesignPlacementKindChoices.KIND_REMOVE, device=self.devices[1],  # U2
+        )
+        b = self._design("Peer B IDS-6600")
+        self._scope(b, self.racks[0])
+        # Same unit the peer is removing -- must NOT be flagged as a
+        # peer_slot_claim (the real device at U2 is what stops this add, via
+        # the ordinary occupancy rule, not a peer conflict).
+        self._add(b, 2, name="unrelated", rack=self.racks[0])
+
+        result = project_rack(b, self.racks[0])
+        self.assertEqual(self._by_kind(result.conflicts, "peer_slot_claim"), [])
+
+    # --- lineage / version exclusions (P2) --------------------------------
+
+    def test_ancestor_claim_is_not_reported(self):
+        ancestor = self._design("Ancestor IDS-7000")
+        self._scope(ancestor, self.racks[1])
+        self._add(ancestor, 10, name="anc-srv")
+        self._approve(ancestor)
+
+        # Same unit as the ancestor's -- absent the lineage exclusion this
+        # would be flagged a peer_slot_claim; instead it is inheritance.
+        child = self._design("Child IDS-7100", based_on=ancestor)
+        self._scope(child, self.racks[1])
+        self._add(child, 10, name="child-srv")
+
+        result = project_rack(child, self.racks[1])
+        self.assertEqual(result.conflicts, [])
+
+    def test_descendant_claim_is_not_reported(self):
+        parent = self._design("Parent IDS-7200")
+        self._scope(parent, self.racks[1])
+        self._add(parent, 10, name="parent-srv")
+        self._approve(parent)
+
+        # based_on does not itself require the parent to stay approved; the
+        # child claims the SAME unit, which -- absent the descendant
+        # exclusion -- would be a peer_slot_claim.
+        child = self._design("Child IDS-7300", based_on=parent)
+        self._scope(child, self.racks[1])
+        self._add(child, 10, name="child-srv")
+
+        # Projecting the PARENT: the child is a descendant, not a peer, even
+        # though it also scopes and claims the same unit in the same rack.
+        result = project_rack(parent, self.racks[1])
+        self.assertEqual(result.conflicts, [])
+
+    def test_another_version_of_the_same_plan_is_not_reported(self):
+        root = self._design("Plan root IDS-7400")
+        self._scope(root, self.racks[1])
+        self._add(root, 10, name="v1-srv")
+
+        v2 = self._design("Plan root IDS-7400", root=root, version=2)
+        self._scope(v2, self.racks[1])
+        self._add(v2, 10, name="v2-srv")
+
+        result = project_rack(root, self.racks[1])
+        self.assertEqual(result.conflicts, [])
+
+    def test_implemented_peer_is_not_reported(self):
+        peer = self._design("Implemented peer IDS-7500")
+        self._scope(peer, self.racks[1])
+        self._add(peer, 10, name="impl-srv")
+        self._approve(peer)
+        self._implement(peer)
+
+        other = self._design("Other IDS-7600")
+        self._scope(other, self.racks[1])
+        self._add(other, 10, name="other-srv")
+
+        result = project_rack(other, self.racks[1])
+        self.assertEqual(result.conflicts, [])
+
+    # --- P1: severity -----------------------------------------------------
+
+    def test_approved_peer_is_error_and_draft_peer_is_warning(self):
+        approved_peer = self._design("Approved peer IDS-7700")
+        self._scope(approved_peer, self.racks[1])
+        self._add(approved_peer, 10, name="appr-srv")
+        self._approve(approved_peer)
+
+        draft_peer = self._design("Draft peer IDS-7800")
+        self._scope(draft_peer, self.racks[1])
+        self._add(draft_peer, 11, name="draft-srv")
+
+        mine = self._design("Mine IDS-7900")
+        self._scope(mine, self.racks[1])
+        self._add(mine, 10, name="mine-a")
+        self._add(mine, 11, name="mine-b")
+
+        result = project_rack(mine, self.racks[1])
+        claims = self._by_kind(result.conflicts, "peer_slot_claim")
+        by_design = {c["source_design"].pk: c["severity"] for c in claims}
+        self.assertEqual(by_design[approved_peer.pk], "error")
+        self.assertEqual(by_design[draft_peer.pk], "warning")
+
+    # --- P16: named even when the peer is not viewable --------------------
+
+    def test_peer_is_named_even_though_nothing_here_checks_visibility(self):
+        """Detection never scopes the peer query by NetBox object permissions
+        (P16): the projection is a plain read, so the peer's title is always
+        in the conflict/slot, regardless of who is looking. Enforcing "the
+        user cannot view design C" is a view-layer concern (later phases);
+        this pins that detection itself does not filter it out."""
+        hidden = self._design("Hidden design IDS-8000")
+        self._scope(hidden, self.racks[1])
+        self._add(hidden, 10, name="hidden-srv")
+
+        mine = self._design("Mine IDS-8100")
+        self._scope(mine, self.racks[1])
+        self._add(mine, 10, name="mine-srv")
+
+        result = project_rack(mine, self.racks[1])
+        claims = self._by_kind(result.conflicts, "peer_slot_claim")
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["source_design"].title, "Hidden design IDS-8000")
+        self.assertIn("Hidden design IDS-8000", claims[0]["detail"])
+        at10 = self._at(result.front, 10)
+        self.assertEqual(at10[0]["peer_design_title"], str(hidden))
+
+    # --- full-depth mirror -------------------------------------------------
+
+    def test_full_depth_mirror_carries_peer_conflict_flags(self):
+        fd_type = DeviceType.objects.create(
+            manufacturer=self.device_type.manufacturer, model="FD Type Peer",
+            slug="fd-type-peer", u_height=2, is_full_depth=True,
+        )
+        a = self._design("Peer A IDS-8200")
+        self._scope(a, self.racks[1])
+        self._add(a, 15, name="a-fd", device_type=fd_type)
+
+        b = self._design("Peer B IDS-8300")
+        self._scope(b, self.racks[1])
+        self._add(b, 15, name="b-fd", device_type=fd_type)
+
+        result = project_rack(a, self.racks[1])
+        front15 = self._at(result.front, 15)
+        rear15 = self._at(result.rear, 15)
+        self.assertEqual(len(front15), 1, front15)
+        self.assertEqual(len(rear15), 1, rear15)
+        self.assertTrue(front15[0]["peer_conflict"])
+        self.assertTrue(rear15[0]["peer_conflict"], "the _append mirror must carry the flag too")
+        self.assertEqual(front15[0]["peer_design_id"], b.pk)
+        self.assertEqual(rear15[0]["peer_design_id"], b.pk)
+
+    # --- P13: the config flag ------------------------------------------
+
+    @override_settings(PLUGINS_CONFIG=_peer_plugins_config(peer_conflicts_enabled=False))
+    def test_flag_off_produces_no_conflicts_and_no_extra_query(self):
+        a = self._design("Peer A IDS-8400")
+        self._scope(a, self.racks[1])
+        self._add(a, 10, name="a-srv")
+
+        b = self._design("Peer B IDS-8500")
+        self._scope(b, self.racks[1])
+        self._add(b, 10, name="b-srv")
+
+        with CaptureQueriesContext(connection) as off:
+            result = project_rack(a, self.racks[1])
+        self.assertEqual(result.conflicts, [])
+
+        with override_settings(PLUGINS_CONFIG=_peer_plugins_config(peer_conflicts_enabled=True)):
+            with CaptureQueriesContext(connection) as on:
+                project_rack(a, self.racks[1])
+        self.assertLess(
+            len(off.captured_queries), len(on.captured_queries),
+            "turning the flag off must skip the peer query entirely, not just "
+            "discard its result",
+        )
+
+    # --- performance --------------------------------------------------------
+
+    def test_query_count_does_not_grow_with_the_number_of_peers(self):
+        mine = self._design("Mine IDS-8600")
+        self._scope(mine, self.racks[1])
+        self._add(mine, 10, name="mine-srv")
+
+        # Warm up caches unrelated to the count being proven.
+        project_rack(mine, self.racks[1])
+        with CaptureQueriesContext(connection) as before:
+            project_rack(mine, self.racks[1])
+        baseline_queries = len(before.captured_queries)
+
+        for i in range(15):
+            peer = self._design(f"Bulk peer IDS-{8700 + i}")
+            self._scope(peer, self.racks[1])
+            self._add(peer, 10, name=f"bulk-{i}", rack=self.racks[1])
+
+        with CaptureQueriesContext(connection) as after:
+            project_rack(mine, self.racks[1])
+        self.assertEqual(
+            len(after.captured_queries), baseline_queries,
+            "query count must not scale with the number of peer designs",
         )

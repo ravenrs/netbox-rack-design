@@ -1112,6 +1112,48 @@ class SaveLayoutTest(APITestCase):
         self.assertIn("errors", response.data)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
 
+    def test_applied_peer_device_refuses_the_save(self):
+        """PLAN-peer-conflicts.md P4: an APPLIED peer's device is a real
+        dcim.Device, so save-layout's ordinary collision check already
+        refuses a save onto its unit -- this is CURRENT behaviour (0.29.0),
+        pinned here with no new code."""
+        from .. import apply
+
+        self._grant_all()
+        superuser = User.objects.create_superuser(username="peer-apply-super")
+        rack = self.racks[1]  # empty rack
+
+        creator = Design.objects.create(title="Peer creator IDS-9000", site=self.site)
+        DesignPlacement.objects.create(
+            design=creator,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            device_role=self.device_role,
+            target_rack=rack,
+            target_position=10,
+            target_face="front",
+            proposed_name="applied-peer-srv",
+        )
+        creator.status = DesignStatusChoices.STATUS_APPROVED
+        creator.save()
+        result = apply.run(creator, superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        # self.design is an UNRELATED draft design (no lineage, no shared
+        # version) planning onto the same, now-real, unit.
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
     def test_swap_two_devices_succeeds(self):
         """Two devices swapping slots in one submit is valid: each vacates the
         slot the other moves into, so the projected layout has no collision.

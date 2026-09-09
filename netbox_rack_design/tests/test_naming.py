@@ -19,8 +19,10 @@ from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignPlacement
 from ..naming import (
     chain_placement_names,
+    effective_name,
     generate_name,
     name_exists_in_site,
+    peer_name_claims,
     pending_names,
     placement_ordinal,
     validate_naming_config,
@@ -330,6 +332,80 @@ class NamingEngineTestCase(TestCase):
         # placement.
         with self.assertNumQueries(1):
             list(chain_placement_names(self.p_add))
+
+
+class PeerNameClaimsTestCase(TestCase):
+    """PLAN-peer-conflicts.md phase 1: :func:`peer_name_claims`, the
+    peer-aware sibling of :func:`name_exists_in_site`. Unlike that function
+    (which only answers True/False and deliberately does not exclude
+    lineage/version siblings -- ``preview_name`` depends on exactly that),
+    this one names WHICH of an already-filtered peer list claims the same
+    effective name, and does no query of its own -- the caller
+    (``projection.py``) has already fetched the peer placements once per
+    rack."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.devices = env["devices"]  # Device 1 @ U1, Device 2 @ U2
+        cls.design = Design.objects.create(title="Mine", site=cls.site)
+        cls.peer_a = Design.objects.create(title="Peer A", site=cls.site)
+        cls.peer_b = Design.objects.create(title="Peer B", site=cls.site)
+
+    def _add(self, design, name):
+        return DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, proposed_name=name,
+        )
+
+    def _move(self, design, device, *, name=""):
+        return DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=device, proposed_name=name,
+        )
+
+    def test_effective_name_is_proposed_name_or_the_real_device_s_name(self):
+        add = self._add(self.design, "planned-1")
+        keep_move = self._move(self.design, self.devices[0])
+        rename_move = self._move(self.design, self.devices[1], name="renamed-2")
+        self.assertEqual(effective_name(add), "planned-1")
+        self.assertEqual(effective_name(keep_move), self.devices[0].name)
+        self.assertEqual(effective_name(rename_move), "renamed-2")
+
+    def test_effective_name_is_none_for_an_unnamed_add_or_a_remove(self):
+        unnamed_add = self._add(self.design, "")
+        remove = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_REMOVE,
+            device=self.devices[0],
+        )
+        self.assertIsNone(effective_name(unnamed_add))
+        self.assertIsNone(effective_name(remove))
+
+    def test_peer_name_claims_matches_the_effective_name(self):
+        mine = self._add(self.design, "dup-name")
+        peer_hit = self._add(self.peer_a, "dup-name")
+        peer_miss = self._add(self.peer_b, "no-collision")
+
+        matches = peer_name_claims(mine, [peer_hit, peer_miss])
+        self.assertEqual(matches, [peer_hit])
+
+    def test_peer_name_claims_matches_a_keep_name_move_by_the_real_device_name(self):
+        mine = self._move(self.design, self.devices[0])  # keep-name: real name
+        peer_hit = self._add(self.peer_a, self.devices[0].name)
+        self.assertEqual(peer_name_claims(mine, [peer_hit]), [peer_hit])
+
+    def test_peer_name_claims_empty_when_this_placement_names_nothing(self):
+        unnamed_add = self._add(self.design, "")
+        peer = self._add(self.peer_a, "whatever")
+        self.assertEqual(peer_name_claims(unnamed_add, [peer]), [])
+
+    def test_peer_name_claims_does_no_query(self):
+        mine = self._add(self.design, "dup-name")
+        peer_hit = self._add(self.peer_a, "dup-name")
+        with self.assertNumQueries(0):
+            peer_name_claims(mine, [peer_hit])
 
 
 def resolved_attrs_naming_fn(placement):

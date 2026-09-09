@@ -98,8 +98,10 @@ __all__ = (
     "AVAILABLE_CONTEXT",
     "IDS_TOKEN_RE",
     "chain_placement_names",
+    "effective_name",
     "generate_name",
     "naming_config",
+    "peer_name_claims",
     "pending_names",
     "placement_ordinal",
     "name_exists_in_site",
@@ -593,3 +595,44 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
     if exclude_placement is not None and exclude_placement.pk:
         qs = qs.exclude(pk=exclude_placement.pk)
     return qs.exists()
+
+
+def effective_name(placement):
+    """The name ``placement`` claims, if any: its ``proposed_name``, or (a
+    keep-name move) its real device's own name. ``None`` for a not-yet-named
+    add and for a remove (a removal claims no name going forward).
+
+    The same effective-name rule :func:`chain_placement_names` inlines for its
+    own rows, factored out so :func:`peer_name_claims` compares by the exact
+    same definition rather than a second one that could drift.
+    """
+    if placement.proposed_name:
+        return placement.proposed_name
+    if placement.kind == DesignPlacementKindChoices.KIND_MOVE and placement.device_id:
+        return placement.device.name or None
+    return None
+
+
+def peer_name_claims(placement, peer_placements):
+    """Which of ``peer_placements`` claim the SAME effective name as
+    ``placement`` -- the peer-aware sibling of :func:`name_exists_in_site`
+    (PLAN-peer-conflicts.md P3).
+
+    ``name_exists_in_site`` answers only True/False and, by design, does not
+    exclude a design's own lineage or other versions of the same plan --
+    its only consumer (``preview_name``) depends on exactly that
+    design-blind semantics, so it is not touched here. This function instead
+    takes an ALREADY-FILTERED peer list (the caller -- ``projection.py``'s
+    peer query -- has already dropped ancestors, descendants, version
+    siblings and implemented designs, P2) and reports WHICH of them claim the
+    name, so the message can say "design C claims this name" instead of
+    merely "taken".
+
+    Performs no query of its own: ``peer_placements`` is the caller's single
+    per-rack fetch, and comparison is plain Python string equality over each
+    row's :func:`effective_name`.
+    """
+    name = effective_name(placement)
+    if not name:
+        return []
+    return [peer for peer in peer_placements if effective_name(peer) == name]
