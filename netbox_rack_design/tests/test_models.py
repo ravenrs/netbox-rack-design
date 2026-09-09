@@ -229,6 +229,22 @@ class DesignTestCase(TestCase):
         with self.assertRaises(ValidationError):
             a.full_clean()
 
+    def test_unapproving_blocked_with_children_names_new_version_action(self):
+        # The New version route now exists (PLAN-design-versions.md), so this
+        # guard's advice must name the real escape hatch rather than the
+        # generic "create a new version" phrase it used before the route
+        # existed. Named as the UI action ("New version button"), not a URL --
+        # a model has no request context to reverse one.
+        a = Design.objects.create(
+            title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
+        )
+        Design.objects.create(title="B", site=self.site, based_on=a)
+        a.status = DesignStatusChoices.STATUS_DRAFT
+        with self.assertRaises(ValidationError) as ctx:
+            a.full_clean()
+        message = str(ctx.exception.message_dict["status"][0])
+        self.assertIn("New version button", message)
+
     def test_unapproving_allowed_without_children(self):
         a = Design.objects.create(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
@@ -618,6 +634,26 @@ class DesignPlacementTestCase(TestCase):
         )
         with self.assertRaises(ValidationError):
             placement.full_clean()
+
+    def test_create_placement_rejected_message_names_new_version_action(self):
+        # The New version route now exists, so the frozen-write message must
+        # name it as the escape hatch instead of the pre-route wording. Named
+        # as the UI action, not a URL -- a model has no request context.
+        approved = Design.objects.create(
+            title="Approved, message check", site=self.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        placement = DesignPlacement(
+            design=approved,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=self.racks[1],
+            target_position=10,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            placement.full_clean()
+        message = str(ctx.exception.message_dict["__all__"][0])
+        self.assertIn("New version button", message)
 
     def test_edit_placement_rejected_once_design_is_approved(self):
         # A dedicated design, not the shared `self.design` fixture: mutating a

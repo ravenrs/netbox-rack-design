@@ -1697,6 +1697,22 @@ class DesignPlacementFrozenWriteTest(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(DesignPlacement.objects.filter(pk=self.placement.pk).exists())
 
+    def test_delete_rejected_when_frozen_message_links_to_new_version(self):
+        # `_frozen_design_message` (views.py) now renders a real <a> to this
+        # design's New version page rather than just naming the action --
+        # confirmed NetBox's messages framework renders it, not escapes it
+        # (see that function's docstring for how). One design in scope here,
+        # so a concrete link is possible (unlike the plural bulk messages).
+        url = reverse(
+            "plugins:netbox_rack_design:designplacement_delete", kwargs={"pk": self.placement.pk}
+        )
+        response = self.client.post(url, {"confirm": "true"}, follow=True)
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        expected_url = reverse(
+            "plugins:netbox_rack_design:design_new_version", kwargs={"pk": self.design.pk}
+        )
+        self.assertTrue(any(f'<a href="{expected_url}">' in m for m in shown))
+
     def test_bulk_delete_rejected_when_frozen(self):
         url = reverse("plugins:netbox_rack_design:designplacement_bulk_delete")
         response = self.client.post(url, {
@@ -1796,6 +1812,12 @@ class DesignDeleteChildrenGuardTest(TestCase):
         self.assertEqual(self.child.based_on_id, self.parent.pk)
         shown = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("Child design" in m for m in shown))
+        # Creating a new version does not detach the child from this
+        # design -- only re-basing it does -- so the message must not
+        # suggest a version as the fix (this is the Group B distinction:
+        # a careless edit here would send a user chasing a dead end).
+        self.assertFalse(any("new version" in m for m in shown))
+        self.assertTrue(any("Re-base" in m for m in shown))
 
     def test_delete_allowed_when_no_children(self):
         url = reverse(

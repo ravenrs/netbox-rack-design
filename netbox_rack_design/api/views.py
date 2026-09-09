@@ -223,9 +223,16 @@ def _design_children_rest_message(design):
     ``SET_NULL``, so without this guard the delete would silently orphan
     every child's baseline. Mirrors ``_design_children_message`` (views.py)
     so a user sees one consistent explanation regardless of which door
-    caught it. Note this does NOT point at "create a new version" -- that
-    route does not exist yet (no view, no action, no button) -- it points
-    at ``rebase``, which does.
+    caught it.
+
+    Note this does NOT point at "create a new version" -- not because the
+    route doesn't exist (it does: ``new_version``/``DesignNewVersionView``),
+    but because creating a version would not help here: a new version is a
+    fresh draft that sits beside ``design``, it does not detach
+    ``design.children`` from it, so the orphaning this guard exists to
+    prevent would still happen. Only re-basing the dependents onto a
+    different design actually severs the link, hence pointing at
+    ``rebase``, which does.
     """
     names = ", ".join(str(child) for child in design.children)
     return (

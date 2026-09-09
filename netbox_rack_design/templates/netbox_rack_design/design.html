@@ -223,7 +223,7 @@
       {% endif %}
       <div class="card-footer text-muted small">
         {% if object.is_frozen %}
-          <p class="mb-1">{% trans "This design is approved: its placements are read-only. Set the status back to draft, or create a new version, to change them." %}</p>
+          <p class="mb-1">{% trans "This design is approved: its placements are read-only. Set the status back to draft, or use the New version button above, to change them." %}</p>
           {% if children %}
             <p class="mb-0">{% trans "It cannot be un-approved while designs are based on it — re-base or remove them first." %}</p>
           {% endif %}

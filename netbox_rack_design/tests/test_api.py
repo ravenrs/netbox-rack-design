@@ -195,6 +195,12 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         self.assertIn("API child", str(response.data))
         child.refresh_from_db()
         self.assertEqual(child.based_on_id, parent.pk)
+        # Creating a new version does not detach the child from `parent` --
+        # only re-basing it does -- so the message must not suggest a
+        # version as the fix (Group B distinction: a careless edit here
+        # would send an API caller chasing a dead end).
+        self.assertNotIn("new version", str(response.data))
+        self.assertIn("Re-base", str(response.data))
 
     def test_delete_allowed_when_no_children(self):
         """DELETE a design with no children -> 204, it is gone."""
