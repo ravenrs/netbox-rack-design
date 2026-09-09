@@ -1,0 +1,102 @@
+{% extends 'generic/_base.html' %}
+{% load i18n %}
+
+{% comment %}
+Confirmation page for the "New version" action (PLAN-design-versions.md
+§1/§3). Available from a design in ANY status -- see
+views.DesignNewVersionView. GET renders this page; POST clones the design.
+
+Context:
+  - object:              the source Design being versioned
+  - form:                DesignNewVersionForm (a required "title" CharField,
+                          prefilled with the source design's own title)
+  - return_url:           where Cancel goes
+  - placement_count:      object.placements.count()
+  - planned_feed_count:   object.planned_feeds.count()
+  - rack_power_count:     object.rack_power.count()
+  - rack_count:           object.racks.count()
+{% endcomment %}
+
+{% block title %}{% trans "New version of" %} {{ object }}{% endblock %}
+
+{% block content %}
+  <div class="card">
+    <h5 class="card-header">{% trans "New version" %}</h5>
+    <div class="card-body">
+      <p>
+        {% blocktrans trimmed with title=object %}
+          Create a new draft version of <strong>{{ title }}</strong>? A
+          version is the SAME plan, revised: it copies this design's whole
+          content into a new draft row, unlike Derive, which creates a new
+          plan standing on top of this one and copies nothing but rack scope.
+        {% endblocktrans %}
+      </p>
+      <p>{% trans "What will be copied:" %}</p>
+      <ul>
+        <li>
+          {% blocktrans trimmed count counter=placement_count %}
+            {{ counter }} placement
+          {% plural %}
+            {{ counter }} placements
+          {% endblocktrans %}
+        </li>
+        <li>
+          {% blocktrans trimmed count counter=planned_feed_count %}
+            {{ counter }} planned power feed
+          {% plural %}
+            {{ counter }} planned power feeds
+          {% endblocktrans %}
+        </li>
+        <li>
+          {% blocktrans trimmed count counter=rack_power_count %}
+            {{ counter }} rack power override
+          {% plural %}
+            {{ counter }} rack power overrides
+          {% endblocktrans %}
+        </li>
+        <li>
+          {% blocktrans trimmed count counter=rack_count %}
+            {{ counter }} rack in scope
+          {% plural %}
+            {{ counter }} racks in scope
+          {% endblocktrans %}
+        </li>
+      </ul>
+
+      {% with children=object.children %}
+        {% if children %}
+          <div class="alert alert-warning">
+            <p>
+              {% blocktrans trimmed with title=object %}
+                {{ title }} has designs based on it. Changing it safely takes
+                a specific order:
+              {% endblocktrans %}
+            </p>
+            <ol class="mb-2">
+              <li>{% trans "Create this new version (draft) — this button." %}</li>
+              <li>{% trans "Edit the new version freely — nothing depends on it yet." %}</li>
+              <li>{% trans "Re-base each dependent design onto the new version (its own Re-base button)." %}</li>
+              <li>
+                {% blocktrans trimmed with title=object %}
+                  Set {{ title }} back to draft — allowed once it has no
+                  dependents left.
+                {% endblocktrans %}
+              </li>
+              <li>{% trans "Approve the new version — only one version per plan may be approved, so this must follow the previous step." %}</li>
+            </ol>
+            <p class="mb-0">
+              {% trans "Between steps 3 and 5, the dependent design(s) cannot be projected and will show \"ancestor not approved\" in their conflicts panel. That is correct behaviour — a dependent genuinely cannot be trusted while its baseline is being rewritten — not damage this flow caused." %}
+            </p>
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      <form method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit" class="btn btn-primary">{% trans "Create version" %}</button>
+        <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Cancel" %}</a>
+      </form>
+    </div>
+  </div>
+{% endblock %}

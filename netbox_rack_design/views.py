@@ -23,7 +23,7 @@ from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
 from . import apply as apply_engine
-from . import filtersets, forms, models, planning_fields, projection, tables
+from . import filtersets, forms, models, planning_fields, projection, tables, versioning
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
 
@@ -1435,6 +1435,82 @@ class DesignDeriveView(generic.ObjectView):
             })
         messages.success(request, f"Created {child} based on {design}.")
         return redirect(child.get_absolute_url())
+
+
+class DesignNewVersionForm(django_forms.Form):
+    """
+    Standalone (not in forms.py -- owned by this view) form for
+    :class:`DesignNewVersionView`: the user types the new version's title
+    themselves. ``initial`` is set by the view to the SOURCE design's own
+    title -- not a "(derived)"-style suffix, since a version is the SAME
+    plan, revised, and is distinguished by ``__str__``, "<title> (v<version>)",
+    not by a generated suffix -- but the field is a plain required
+    CharField -- nothing falls back to a generated name if it's left blank.
+    """
+
+    title = django_forms.CharField(
+        max_length=200,
+        label=_("Title"),
+        help_text=_("Title for the new version."),
+    )
+
+
+@register_model_view(models.Design, "new_version", path="new-version")
+class DesignNewVersionView(generic.ObjectView):
+    """
+    Clone this design into a new, draft version of the same plan
+    (PLAN-design-versions.md §1/§3). The clone itself is
+    ``versioning.new_version()`` (its docstring implements §4 exactly);
+    this view only exposes it -- it does not reimplement or duplicate any
+    of its copying logic.
+
+    Unlike Derive, available from a design in ANY status: a version may be
+    created whether the source is draft or approved. Approval is what makes
+    a version *necessary* (it is the only way to change an approved design
+    that has dependents), not what makes it *valid*.
+
+    URL: /plugins/rack-design/designs/<pk>/new-version/
+    Name: plugins:netbox_rack_design:design_new_version  (kwargs: pk)
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_new_version.html"
+
+    def get_required_permission(self):
+        # Creating a version CREATES a new Design.
+        return "netbox_rack_design.add_design"
+
+    def _context(self, design, form):
+        return {
+            "object": design,
+            "form": form,
+            "return_url": design.get_absolute_url(),
+            # Counts for the copy summary -- read from the source design so
+            # the template never hardcodes a list of model names.
+            "placement_count": design.placements.count(),
+            "planned_feed_count": design.planned_feeds.count(),
+            "rack_power_count": design.rack_power.count(),
+            "rack_count": design.racks.count(),
+        }
+
+    def get(self, request, pk):
+        design = self.get_object(pk=pk)
+        form = DesignNewVersionForm(initial={"title": design.title})
+        return render(request, self.template_name, self._context(design, form))
+
+    def post(self, request, pk):
+        design = self.get_object(pk=pk)
+        form = DesignNewVersionForm(data=request.POST)
+        if not form.is_valid():
+            return render(request, self.template_name, self._context(design, form))
+
+        try:
+            clone = versioning.new_version(design, title=form.cleaned_data["title"])
+        except ValidationError as e:
+            form.add_error(None, e)
+            return render(request, self.template_name, self._context(design, form))
+        messages.success(request, f"Created {clone} as a new version of {design}.")
+        return redirect(clone.get_absolute_url())
 
 
 @register_model_view(models.Design, "rebase", path="rebase")

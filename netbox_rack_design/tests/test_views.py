@@ -2065,6 +2065,128 @@ class DesignDeriveViewTest(TestCase):
         self.assertEqual(Design.objects.count(), 2)
 
 
+class DesignNewVersionViewTest(TestCase):
+    """"New version" action (PLAN-design-versions.md §1/§3)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.approved = Design.objects.create(
+            title="Approved root", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft = Design.objects.create(title="Draft root", site=cls.site)
+        cls.parent_with_child = Design.objects.create(
+            title="Parent with child", site=cls.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.child = Design.objects.create(
+            title="Child", site=cls.site, based_on=cls.parent_with_child,
+        )
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design_new_version", kwargs={"pk": design.pk})
+
+    def test_get_renders_form_prefilled_with_source_title(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.context["form"].initial["title"], "Approved root"
+        )
+
+    def test_get_on_design_without_dependents_omits_ordering_block(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertNotIn("Re-base each dependent design", content)
+
+    def test_get_on_design_with_dependents_includes_ordering_block(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.parent_with_child))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertIn("Re-base each dependent design", content)
+        self.assertIn("ancestor not approved", content.lower())
+
+    def test_post_creates_version_and_redirects(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.approved), {"title": "Approved root"})
+        self.assertEqual(response.status_code, 302)
+        clone = Design.objects.exclude(
+            pk__in=[self.approved.pk, self.draft.pk, self.parent_with_child.pk, self.child.pk]
+        ).get()
+        self.assertEqual(clone.root_id, self.approved.pk)
+        self.assertEqual(clone.version, 2)
+        self.assertEqual(response.url, clone.get_absolute_url())
+
+    def test_post_on_draft_design_succeeds(self):
+        # No status requirement, unlike Derive: a version may be created
+        # from a design in ANY status.
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.post(self._url(self.draft), {"title": "Draft root"})
+        self.assertEqual(response.status_code, 302)
+        clone = Design.objects.exclude(
+            pk__in=[self.approved.pk, self.draft.pk, self.parent_with_child.pk, self.child.pk]
+        ).get()
+        self.assertEqual(clone.root_id, self.draft.pk)
+
+    def test_post_with_blank_title_shows_error(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        count_before = Design.objects.count()
+        response = self.client.post(self._url(self.approved), {"title": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Design.objects.count(), count_before)
+        self.assertTrue(response.context["form"].errors.get("title"))
+
+    def test_without_permission_denied(self):
+        response = self.client.get(self._url(self.approved))
+        self.assertIn(response.status_code, (403, 404))
+        response = self.client.post(self._url(self.approved), {"title": "Nope"})
+        self.assertIn(response.status_code, (403, 404))
+
+
+class DesignNewVersionButtonTest(TestCase):
+    """The "New version" button on the design detail page (PLAN-design-versions.md §1/§3)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.approved = Design.objects.create(
+            title="Approved for button", site=cls.site,
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
+        cls.draft = Design.objects.create(title="Draft for button", site=cls.site)
+
+    def _url(self, design):
+        return reverse("plugins:netbox_rack_design:design", kwargs={"pk": design.pk})
+
+    def _link(self, design):
+        return reverse("plugins:netbox_rack_design:design_new_version", kwargs={"pk": design.pk})
+
+    def test_button_appears_for_approved_design_with_add_permission(self):
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self._link(self.approved), response.content.decode())
+
+    def test_button_appears_for_draft_design_with_add_permission(self):
+        # No status condition, unlike Derive: offered regardless of status.
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.add_design")
+        response = self.client.get(self._url(self.draft))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self._link(self.draft), response.content.decode())
+
+    def test_button_absent_without_add_permission(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._url(self.approved))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(self._link(self.approved), response.content.decode())
+
+
 class DesignApplyViewTest(TestCase):
     """"Apply design" confirm-page flow (apply.py's plan()/run() pair)."""
 
