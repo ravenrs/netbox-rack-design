@@ -652,6 +652,28 @@ class EditorE2ETestCase(unittest.TestCase):
                 return idx
         self.fail(f"no widget matching {match} in baseWidgets: {widgets}")
 
+    def _dismiss_debug_toolbar(self):
+        """Remove the Django Debug Toolbar from the page, if it is there.
+
+        A dev server runs with DEBUG on, so the toolbar's collapsed handle
+        floats over the editor's top-right corner -- where the Save button is.
+        Playwright refuses a click it can see is intercepted, so the toolbar
+        makes a real Save click impossible. No other test in this suite clicks
+        Save, which is why only the peer-conflict test needs this. Strictly a
+        dev-environment accommodation: nothing about the toolbar is under test,
+        and a production NetBox does not serve it.
+
+        BOTH ids are removed because the bundled toolbar renamed its root
+        between the NetBox minors this suite runs against: 4.4/4.5 mount
+        ``#djDebug``, 4.6 wraps it in ``#djDebugRoot`` and that wrapper is what
+        intercepts the click there. Removing whichever is present keeps one
+        helper honest across the range.
+        """
+        self.page.evaluate(
+            "() => { for (const id of ['djDebug', 'djDebugRoot']) {"
+            " const d = document.getElementById(id); if (d) d.remove(); } }"
+        )
+
     def tile_info(self, idx):
         return self.page.evaluate(f"() => window.__rdE2E.tileInfo('{idx}')")
 
@@ -1423,6 +1445,7 @@ class EditorE2ETestCase(unittest.TestCase):
             self.page.wait_for_selector("#rd-editor", timeout=10000)
             self.page.wait_for_timeout(1200)
             self.page.add_script_tag(content=TEST_HARNESS_JS)
+            self._dismiss_debug_toolbar()
 
             # Drop a device type (lands at the grid's top row), then drag it
             # down onto the peer's claimed unit -- an unsaved add, exactly
@@ -1460,6 +1483,7 @@ class EditorE2ETestCase(unittest.TestCase):
             # (pinned in test_views.py; here we only need our own survives).
             self.page.reload(wait_until="networkidle")
             self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self._dismiss_debug_toolbar()
             self.assertIsNotNone(
                 self.page.query_selector(".nbx-rd-peer-conflicts"),
                 "the peer-conflicts panel row must survive a plain reload")

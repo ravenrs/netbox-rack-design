@@ -2621,6 +2621,75 @@ class DesignEditorPeerConflictContextTest(TestCase):
         self.assertHttpStatus(response, 200)
         self.assertNotContains(response, "nbx-rd-peer-conflicts")
 
+    # --- P12 grouping: only worth collapsing when there is a batch ---------
+
+    def _peer_name_collision(self, count):
+        """Make ``count`` of the child's planned names collide with the peer's,
+        and return the child's editor response."""
+        for i in range(count):
+            name = f"dup-{i}"
+            DesignPlacement.objects.create(
+                design=self.child, kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type, target_rack=self.rack,
+                target_position=30 + i, target_face="front", proposed_name=name,
+            )
+            DesignPlacement.objects.create(
+                design=self.peer, kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type, target_rack=self.rack,
+                target_position=40 + i, target_face="front", proposed_name=name,
+            )
+        return self.client.get(self._editor_url(self.child))
+
+    def test_a_single_colliding_name_is_not_collapsed(self):
+        """A group of one would put a "Show" toggle in front of one hidden
+        line and replace the sentence with a count of one -- so it stays a
+        plain row carrying its own detail."""
+        response = self._peer_name_collision(1)
+        self.assertHttpStatus(response, 200)
+        name_rows = [
+            r for r in response.context["peer_conflict_rows"]
+            if r["kind"] == "peer_name_claim"
+        ]
+        self.assertEqual(len(name_rows), 1, name_rows)
+        self.assertFalse(name_rows[0]["grouped"], name_rows[0])
+        self.assertIn("dup-0", name_rows[0]["detail"])
+
+    def test_several_colliding_names_collapse_into_one_row(self):
+        response = self._peer_name_collision(3)
+        self.assertHttpStatus(response, 200)
+        name_rows = [
+            r for r in response.context["peer_conflict_rows"]
+            if r["kind"] == "peer_name_claim"
+        ]
+        self.assertEqual(len(name_rows), 1, name_rows)
+        self.assertTrue(name_rows[0]["grouped"])
+        self.assertEqual(len(name_rows[0]["entries"]), 3)
+        # The flat vocabulary phase 4 serves stays per-entry and ungrouped.
+        flat = [
+            e for e in response.context["peer_conflicts"]
+            if e["kind"] == "peer_name_claim"
+        ]
+        self.assertEqual(len(flat), 3, flat)
+
+    def test_a_collapsed_row_names_the_peer_design_once(self):
+        """The grouped sentence already names the design, so the row must not
+        also append the "(from X)" span -- the same title printed twice in one
+        visible line reads as a rendering fault.
+
+        Scoped to the row's own visible header, up to the ``<details>``: the
+        collapsed lines inside it each carry the full ``detail`` sentence,
+        which is the one flat vocabulary phase 4 serves and is not the
+        template's to rewrite.
+        """
+        response = self._peer_name_collision(3)
+        body = response.content.decode()
+        panel = body.index("nbx-rd-peer-conflicts")
+        details = body.index("<details", panel)
+        # The grouped row's own <li>, not the whole panel: a slot-claim row
+        # above it legitimately names the same peer.
+        header = body[body.rindex("<li ", panel, details):details]
+        self.assertEqual(header.count(str(self.peer)), 1, header)
+
 
 class DesignChainHealthViewTest(TestCase):
     """

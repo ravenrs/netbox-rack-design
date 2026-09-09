@@ -665,6 +665,16 @@ def _design_editor_context(request, design):
         # first-seen one.
         if entry["severity"] == "error":
             group["severity"] = "error"
+    # A group of ONE is not a group: collapsing it would put a "Show" toggle
+    # in front of a single hidden line and replace the detail sentence with a
+    # count of one. Such a row reads better as the plain entry it came from,
+    # so unwrap it -- in place, keeping the panel's order stable.
+    peer_conflict_rows = [
+        {"grouped": False, **row["entries"][0]}
+        if row.get("grouped") and len(row["entries"]) == 1
+        else row
+        for row in peer_conflict_rows
+    ]
 
     return {
         "scoped_racks": scoped_racks,

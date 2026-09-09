@@ -176,13 +176,16 @@
               {# inc/rack_block.html reserves red backgrounds for displacement. #}
               <li class="{% if row.severity == 'error' %}text-danger{% else %}text-warning-emphasis{% endif %}">
                 {% if row.grouped %}
-                  {# P12: one row per peer design for name claims, not one per  #}
-                  {# colliding name (P11 means a whole family collides at once). #}
-                  {% blocktrans count counter=row.entries|length with design=row.source_design_name %}
-                    {{ design }} also claims {{ counter }} of this design's planned names.
-                  {% plural %}
-                    {{ design }} also claims {{ counter }} of this design's planned names.
-                  {% endblocktrans %}
+                  {# P12: one row per peer design for name claims, not one per   #}
+                  {# colliding name (P11 means a whole family collides at once).  #}
+                  {# Only ever reached with TWO or more -- a group of one is      #}
+                  {# unwrapped back into a plain row in `_design_editor_context`. #}
+                  {# The design is named INSIDE this sentence, so this branch     #}
+                  {# does not also append the "(from X)" span below: printing the #}
+                  {# same title twice in one visible line reads as a rendering    #}
+                  {# fault.                                                      #}
+                  {% if row.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=row.source_design_id %}">{{ row.source_design_name }}</a>{% else %}{{ row.source_design_name }}{% endif %}
+                  {% blocktrans count counter=row.entries|length %}also claims {{ counter }} of this design's planned names.{% plural %}also claims {{ counter }} of this design's planned names.{% endblocktrans %}
                   <details class="d-inline">
                     <summary class="d-inline text-muted small" style="cursor: pointer;">{% trans "Show" %}</summary>
                     <ul class="mb-0 ps-3">
@@ -191,12 +194,12 @@
                   </details>
                 {% else %}
                   {{ row.detail }}
-                {% endif %}
-                {% if row.source_design_name %}
-                <span class="text-muted small">
-                  ({% trans "from" %}
-                  {% if row.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=row.source_design_id %}">{{ row.source_design_name }}</a>{% else %}{{ row.source_design_name }}{% endif %})
-                </span>
+                  {% if row.source_design_name %}
+                  <span class="text-muted small">
+                    ({% trans "from" %}
+                    {% if row.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=row.source_design_id %}">{{ row.source_design_name }}</a>{% else %}{{ row.source_design_name }}{% endif %})
+                  </span>
+                  {% endif %}
                 {% endif %}
               </li>
               {% endfor %}
