@@ -79,8 +79,11 @@ applied.
 
 **Device bays.** Peer detection reads rack U slots only. A peer claiming a
 device bay — a blade inside a chassis this design also plans into — is not
-detected. The ordinary occupancy rule still catches it once someone actually
-tries to save into that bay.
+detected, and nothing else catches it either: the uniqueness rule on a
+planned bay is scoped to one design, so two designs can both plan a blade
+into the same bay of the same chassis and both saves succeed. Until this is
+covered, two teams planning blades into a shared chassis need to coordinate
+outside the plugin.
 
 ## Where it shows
 
@@ -161,7 +164,7 @@ promised to write.
 
 `peer_conflicts_enabled` in `PLUGINS_CONFIG` (default `True`) controls
 whether peer detection runs at all. See the [configuration
-table](index.md#configuration) for where it sits alongside the plugin's
+table](index.md#Configuration) for where it sits alongside the plugin's
 other keys.
 
 **Why a flag exists at all.** A peer design's **title** is shown in a

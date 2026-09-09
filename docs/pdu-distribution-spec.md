@@ -307,7 +307,7 @@ have the same view set as `DesignPlacement`:
 what a feed is worth. Deleting a feed unbinds the planned PDUs that pointed at
 it (`SET_NULL`), which the detail page names before you delete.
 
-**Design chains widen what counts (`PLAN-design-chains.md` G5).** A rack's
+**Design chains widen what counts** (see [Design chains](design-chains.md)). A rack's
 capacity figure (`projection._rack_capacity_w`) sums not only this design's
 own `DesignPowerFeed` rows but every APPROVED ancestor's, resolved through the
 same all-or-nothing `resolve_baseline_chain()` the placement replay uses — a
@@ -417,7 +417,7 @@ merge only matters for `distribution_mode = "script"` — a `distribution_script
 reads it through the `planning_fields` config bridge; the builtin tier ignores
 `rack.cf` entirely. Now populated via the `planning_fields`-driven rack dialog.
 
-**Design chains merge oldest-first (`PLAN-design-chains.md` G5).**
+**Design chains merge oldest-first** (see [Design chains](design-chains.md)).
 `DesignRackPower.effective_custom_fields(design, rack)` resolves the merge a
 `distribution_script` actually reads: every APPROVED ancestor's override for
 this rack, oldest first, then this design's own row last — so a nearer

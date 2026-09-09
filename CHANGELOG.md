@@ -43,6 +43,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     confirmed set; refuses on a frozen design).
   - See [docs/peer-conflicts.md](docs/peer-conflicts.md).
 
+### Fixed
+
+- Three documentation claims that are no longer true. The chains guide said
+  sibling designs are blind to each other and that a clash between them
+  surfaces only when someone tries to save onto an occupied unit — peer
+  conflicts report it while both are still in progress. The README's own
+  introduction still said an explicit Apply step was "arriving in a later
+  stage" (Apply shipped in 0.29.0), and its feature summary listed
+  cross-design conflict detection as planned.
+- Three references in the reference specs pointed at an internal design
+  document that is not part of the published site, so a reader was given a
+  filename they could not find; they now link the Design chains guide.
+
 ## [0.31.0] - 2026-09-09
 
 ### Release Summary
