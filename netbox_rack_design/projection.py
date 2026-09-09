@@ -1564,6 +1564,18 @@ def _overlay_planned_blades(design, slots_lists, baseline=None):
                         _apply(entry, by_base_parent[key])
 
 
+def _fmt_u(position):
+    """A U position for a human: ``U1``, not ``U1.0`` -- and ``U1.5`` intact.
+
+    Lives here rather than in :mod:`apply` (which imported nothing from a
+    lower layer for it, and which this module must not import back) so the
+    projection's peer messages and apply's collision messages read the same.
+    """
+    if position == position.to_integral_value():
+        return str(int(position))
+    return str(position.normalize())
+
+
 def _u_interval_overlap(start_a, height_a, start_b, height_b):
     """Whether two U-intervals (already floats) overlap.
 
@@ -2551,24 +2563,32 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
 
     conflicts = []
 
-    # --- peer_slot_claim: a peer targets a unit this design's world already
-    # occupies (reality, an inherited slot, or this design's own add/move) --
+    # --- peer_slot_claim: a peer targets a unit THIS design's plan claims
+    # (its own add/move, or a slot it inherits from an ancestor) --
     # P8: reusing `_u_interval_overlap`, the SAME rule `_mark_displaced`
     # already uses to decide two slots occupy the same rows, per face (a
     # full-depth slot's mirror copy on the opposite face is scanned exactly
     # like any other slot in that face's list, so full-depth needs no
     # separate branch here either).
+    def _claimed(slots):
+        # Only what THIS design's plan asserts: its own adds/move-ins, plus an
+        # ancestor's slot it inherits (an inherited claim IS this design's
+        # claim -- it renders as `existing` flagged `inherited`, §"inherited").
+        # Untouched REALITY is deliberately excluded: a peer dropping a device
+        # onto a real device that this design never touches is the PEER's
+        # collision, caught by its own occupancy rule, and nothing the reader
+        # of this design can act on -- including it would put a conflict in
+        # every design that merely shares a busy rack. Vacating slots claim
+        # nothing going forward, the mirror of the removals carve-out (P3).
+        return [
+            s for s in slots
+            if s["u_position"] is not None
+            and (s["inherited"] or s["state"] in (ProjectedSlotState.ADD, ProjectedSlotState.MOVE_IN))
+        ]
+
     occupying = {
-        DeviceFaceChoices.FACE_FRONT: [
-            s for s in front
-            if s["u_position"] is not None
-            and s["state"] not in (ProjectedSlotState.MOVE_OUT_GHOST, ProjectedSlotState.REMOVE)
-        ],
-        DeviceFaceChoices.FACE_REAR: [
-            s for s in rear
-            if s["u_position"] is not None
-            and s["state"] not in (ProjectedSlotState.MOVE_OUT_GHOST, ProjectedSlotState.REMOVE)
-        ],
+        DeviceFaceChoices.FACE_FRONT: _claimed(front),
+        DeviceFaceChoices.FACE_REAR: _claimed(rear),
     }
     for peer in peers:
         if peer.kind == DesignPlacementKindChoices.KIND_REMOVE:
@@ -2603,21 +2623,19 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
                 "peer_slot_claim",
                 severity=_peer_severity(peer.design),
                 source_design=peer.design,
-                detail=f"{peer.design} also plans a device at U{peer.target_position} "
-                       f"in {rack}.",
+                detail=f"{peer.design} also plans a device at "
+                       f"U{_fmt_u(peer.target_position)} in {rack}.",
             ))
 
     # --- peer_name_claim: a peer placement's effective name equals one of
     # ours (naming.py's peer-aware sibling of name_exists_in_site).
-    from .naming import peer_name_claims
+    from .naming import effective_name, peer_name_claims
 
     for placement in own_placements:
         if placement.kind == DesignPlacementKindChoices.KIND_REMOVE:
             continue  # A removal claims no name going forward.
+        name = effective_name(placement)
         for match in peer_name_claims(placement, peers):
-            name = placement.proposed_name or (
-                placement.device.name if placement.device_id else ""
-            )
             conflicts.append(_conflict(
                 "peer_name_claim",
                 severity=_peer_severity(match.design),
@@ -2640,13 +2658,20 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
         peer = peer_moves_by_device.get(placement.device_id)
         if peer is None:
             continue
+        # Where the peer sends it, rather than asserting it differs: the two
+        # designs may well target the SAME unit, in which case this is a
+        # second, independent reason the plans cannot both come true.
+        if peer.target_rack_id and peer.target_position is not None:
+            where = f"{peer.target_rack} U{_fmt_u(peer.target_position)}"
+        else:
+            where = "another location"
         conflicts.append(_conflict(
             "peer_device_claim",
             severity=_peer_severity(peer.design),
             placement=placement,
             source_design=peer.design,
-            detail=f"{peer.design} also plans to move {placement.device} to a "
-                   f"different location.",
+            detail=f"{peer.design} also plans to move {placement.device} "
+                   f"(to {where}).",
         ))
 
     return conflicts

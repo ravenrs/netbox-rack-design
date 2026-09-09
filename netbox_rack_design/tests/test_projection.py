@@ -2398,6 +2398,65 @@ class PeerConflictProjectionTestCase(TestCase):
         result = project_rack(b, self.racks[0])
         self.assertEqual(self._by_kind(result.conflicts, "peer_slot_claim"), [])
 
+    def test_a_peer_landing_on_untouched_reality_is_not_this_designs_conflict(self):
+        """A peer dropping a device onto a REAL device this design never
+        touches is the peer's own collision, not this design's.
+
+        Without this the panel would fill with entries the reader cannot act
+        on: every design that merely scopes a busy rack would inherit every
+        other design's collisions with reality.
+        """
+        a = self._design("Peer A IDS-6700")
+        self._scope(a, self.racks[0])
+        self._add(a, 20, name="a-srv", rack=self.racks[0])  # nowhere near U1
+
+        b = self._design("Peer B IDS-6800")
+        self._scope(b, self.racks[0])
+        self._add(b, 1, name="b-srv", rack=self.racks[0])  # onto real Device 1
+
+        result = project_rack(a, self.racks[0])
+        self.assertEqual(self._by_kind(result.conflicts, "peer_slot_claim"), [])
+        self.assertEqual(
+            [s["u_position"] for s in result.front if s["peer_conflict"]], [],
+        )
+
+    def test_a_peer_over_an_inherited_slot_is_reported(self):
+        """An INHERITED claim is this design's claim, so a peer over it is a
+        real conflict -- the other side of the reality carve-out above."""
+        ancestor = self._design("Ancestor IDS-6900")
+        self._scope(ancestor, self.racks[1])
+        self._add(ancestor, 10, name="anc-srv")
+        self._approve(ancestor)
+
+        child = self._design("Child IDS-6910", based_on=ancestor)
+        self._scope(child, self.racks[1])  # plans nothing of its own
+
+        peer = self._design("Peer IDS-6920")
+        self._scope(peer, self.racks[1])
+        self._add(peer, 10, name="peer-srv")
+
+        result = project_rack(child, self.racks[1])
+        claims = self._by_kind(result.conflicts, "peer_slot_claim")
+        self.assertEqual(len(claims), 1, result.conflicts)
+        self.assertEqual(claims[0]["source_design"], peer)
+        at10 = self._at(result.front, 10)
+        self.assertTrue(at10[0]["inherited"])
+        self.assertTrue(at10[0]["peer_conflict"])
+
+    def test_a_whole_unit_reads_as_U10_not_U10_0(self):
+        """The detail line is read by a human; ``target_position`` is a
+        Decimal, so it stringifies as ``10.0`` unless formatted."""
+        a = self._design("Peer A IDS-6930")
+        self._scope(a, self.racks[1])
+        self._add(a, 10, name="a-srv")
+        b = self._design("Peer B IDS-6940")
+        self._scope(b, self.racks[1])
+        self._add(b, 10, name="b-srv")
+
+        detail = self._by_kind(project_rack(a, self.racks[1]).conflicts, "peer_slot_claim")[0]["detail"]
+        self.assertIn("U10 ", detail)
+        self.assertNotIn("U10.0", detail)
+
     # --- lineage / version exclusions (P2) --------------------------------
 
     def test_ancestor_claim_is_not_reported(self):

@@ -250,12 +250,6 @@ def _footprint(rack_id, position, u_height, face, full_depth):
     return {(rack_id, u, f) for f in faces for u in range(start, end)}
 
 
-def _fmt_u(position):
-    if position == position.to_integral_value():
-        return str(int(position))
-    return str(position.normalize())
-
-
 def _is_bay_placement(pl):
     """A blade placement -- out of scope for this version of apply (see module docstring)."""
     return bool(
@@ -457,7 +451,7 @@ def plan(design, user):
                 if conflict is not None:
                     face_label = pl.target_face or DeviceFaceChoices.FACE_FRONT
                     result.problems.append(
-                        f"U{_fmt_u(pl.target_position)} {face_label} in rack "
+                        f"U{projection._fmt_u(pl.target_position)} {face_label} in rack "
                         f"{pl.target_rack} is occupied by {conflict.name}."
                     )
                     blocked = True
