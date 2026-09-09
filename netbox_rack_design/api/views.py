@@ -2483,6 +2483,13 @@ class DesignViewSet(NetBoxModelViewSet):
         entries in different racks apart, and a flat list is the simplest
         shape for a pipeline that only wants to know "is this empty".
 
+        The list is returned under a ``conflicts`` key rather than as a bare
+        top-level array, matching every other action on this ViewSet
+        (``chain``, ``apply``, ``preview_name``, ``rerun-naming``). A bare
+        array is the one shape that cannot be extended later -- there is
+        nowhere to add a field beside it without breaking every client -- and
+        the shape of a published endpoint is the hardest thing to change.
+
         PLAN-peer-conflicts.md P16: a peer design's TITLE is returned even
         when this user's NetBox object permissions would hide that design --
         a contested slot is operational information, and "another design
@@ -2495,8 +2502,9 @@ class DesignViewSet(NetBoxModelViewSet):
         means this action returns no peer entries, at no extra cost here.
 
         GET .../designs/<pk>/conflicts/
-          -> [{"kind", "severity", "detail", "rack_id", "source_design_id",
-               "source_design_name", "slot_key"}, ...]
+          -> {"conflicts": [
+                 {"kind", "severity", "detail", "rack_id", "source_design_id",
+                  "source_design_name", "slot_key"}, ...]}
 
         URL name: plugins-api:netbox_rack_design-api:design-conflicts
         Path:     /api/plugins/rack-design/designs/<pk>/conflicts/
@@ -2510,7 +2518,7 @@ class DesignViewSet(NetBoxModelViewSet):
             result = projection.project_rack(design, rack)
             entries.extend(projection.flatten_conflicts(rack, result.conflicts))
 
-        return Response(entries, status=status.HTTP_200_OK)
+        return Response({"conflicts": entries}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="derive")
     def derive(self, request, pk=None):

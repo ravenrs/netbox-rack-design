@@ -753,15 +753,15 @@ class DesignConflictsActionTest(APITestCase):
         response = self.client.get(self._conflicts_url(self.child), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
 
-        kinds = [e["kind"] for e in response.data]
-        self.assertIn("ancestor_implemented", kinds, response.data)
-        self.assertIn("peer_slot_claim", kinds, response.data)
+        kinds = [e["kind"] for e in response.data["conflicts"]]
+        self.assertIn("ancestor_implemented", kinds, response.data["conflicts"])
+        self.assertIn("peer_slot_claim", kinds, response.data["conflicts"])
 
         expected_keys = {
             "kind", "severity", "detail", "rack_id",
             "source_design_id", "source_design_name", "slot_key",
         }
-        for entry in response.data:
+        for entry in response.data["conflicts"]:
             self.assertEqual(self._seven_keys(entry), expected_keys, entry)
 
     def test_clean_design_returns_empty_list(self):
@@ -770,14 +770,14 @@ class DesignConflictsActionTest(APITestCase):
         clean.racks.add(self.rack)
         response = self.client.get(self._conflicts_url(clean), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        self.assertEqual(response.data, [])
+        self.assertEqual(response.data["conflicts"], [])
 
     def test_peer_slot_claim_slot_key_matches_childs_own_placement(self):
         self.add_permissions("netbox_rack_design.view_design")
         response = self.client.get(self._conflicts_url(self.child), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        claims = [e for e in response.data if e["kind"] == "peer_slot_claim"]
-        self.assertEqual(len(claims), 1, response.data)
+        claims = [e for e in response.data["conflicts"] if e["kind"] == "peer_slot_claim"]
+        self.assertEqual(len(claims), 1, response.data["conflicts"])
         self.assertEqual(claims[0]["slot_key"], self.own_add.pk)
         self.assertEqual(claims[0]["source_design_id"], self.peer.pk)
         self.assertEqual(claims[0]["source_design_name"], str(self.peer))
@@ -809,8 +809,8 @@ class DesignConflictsActionTest(APITestCase):
 
         response = self.client.get(self._conflicts_url(self.child), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        claims = [e for e in response.data if e["kind"] == "peer_slot_claim"]
-        self.assertEqual(len(claims), 1, response.data)
+        claims = [e for e in response.data["conflicts"] if e["kind"] == "peer_slot_claim"]
+        self.assertEqual(len(claims), 1, response.data["conflicts"])
         self.assertEqual(claims[0]["source_design_id"], self.peer.pk)
         self.assertEqual(claims[0]["source_design_name"], str(self.peer))
 
@@ -819,9 +819,9 @@ class DesignConflictsActionTest(APITestCase):
         with override_settings(PLUGINS_CONFIG=_peer_plugins_config(peer_conflicts_enabled=False)):
             response = self.client.get(self._conflicts_url(self.child), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        kinds = [e["kind"] for e in response.data]
-        self.assertNotIn("peer_slot_claim", kinds, response.data)
-        self.assertIn("ancestor_implemented", kinds, response.data)
+        kinds = [e["kind"] for e in response.data["conflicts"]]
+        self.assertNotIn("peer_slot_claim", kinds, response.data["conflicts"])
+        self.assertIn("ancestor_implemented", kinds, response.data["conflicts"])
 
     def test_agrees_with_editor_context(self):
         """
@@ -833,7 +833,7 @@ class DesignConflictsActionTest(APITestCase):
         self.add_permissions("netbox_rack_design.view_design")
         response = self.client.get(self._conflicts_url(self.child), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
-        api_entries = [dict(e) for e in response.data]
+        api_entries = [dict(e) for e in response.data["conflicts"]]
 
         request = RequestFactory().get("/")
         request.user = self.user
