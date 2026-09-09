@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-09
+
+### Release Summary
+
+An approved design with dependents could not be changed by any route. The
+freeze is deliberate — a child baselined on it has to trust that the ground
+will not shift — and the way out was always supposed to be "create a new
+version, then re-base the children onto it". The model had the fields for
+that (`version`, `root`, at most one approved version per plan) and seven
+error messages advised it, but nothing ever created a version: no button, no
+view, no API action. This release builds that route, so the advice those
+messages give is now something a user can actually do.
+
+### Added
+
+- **New version.** Clone a design into a fresh draft version of the same
+  plan, from the design page's Design chain card or
+  `POST /api/plugins/rack-design/designs/<pk>/new-version/`.
+  - A *version* is the same plan revised: it copies the source's `based_on`
+    and deep-copies its content — placements, planned power feeds, rack power
+    overrides, rack scope, `depends_on`, custom field values and tags. This is
+    the opposite of *Derive*, which creates a new plan standing on top of this
+    one and copies nothing but rack scope, inheriting the rest live through
+    the chain.
+  - Available whatever the source's status. Approval is what makes a version
+    *necessary*, not what makes it *valid*.
+  - An omitted title keeps the source's own — versions are distinguished by
+    their `(vN)` suffix, so nothing is invented.
+  - Apply records are deliberately not copied: a new version has applied
+    nothing, so it starts unapplied and applying it reconciles against
+    reality like any other apply.
+  - The confirm page states the order of operations when the design has
+    dependents, and warns that they cannot be projected between the re-base
+    and the approval — correct behaviour that would otherwise look like
+    damage.
+
+### Fixed
+
+- **The messages that advised a route which did not exist** now name the New
+  version action, and the view-layer ones link straight to it. The delete
+  guards deliberately still point at re-basing instead: a new version does
+  not detach a design's dependents, so it cannot unblock that delete.
+- Two documentation claims that were never true: `docs/design-chains.md`
+  described versioning as an existing feature, and the README's own
+  introduction said apply was planned — it shipped in 0.29.0 and is listed as
+  delivered on the same page.
+
 ## [0.30.2] - 2026-09-08
 
 ### Release Summary
