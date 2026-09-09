@@ -18,7 +18,7 @@ from dcim.models import (
     Site,
 )
 from django.db import connection
-from django.test import override_settings
+from django.test import RequestFactory, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from rest_framework import status
@@ -30,6 +30,7 @@ from utilities.testing import (
     create_test_device,
 )
 
+from .. import views as html_views
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
@@ -668,6 +669,181 @@ class DesignChainActionsTest(APITestCase):
         )
         response = self.client.get(planned_feed_url + f"?rack_id={rack.pk}", **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
+
+
+def _peer_plugins_config(**overrides):
+    cfg = {"peer_conflicts_enabled": True}
+    cfg.update(overrides)
+    return {"netbox_rack_design": cfg}
+
+
+class DesignConflictsActionTest(APITestCase):
+    """
+    PLAN-peer-conflicts.md P14/phase 4: ``GET .../designs/<pk>/conflicts/``
+    serves chain + peer conflicts together, read-only, so a pipeline can gate
+    on it BEFORE calling ``apply``. Modelled on ``DesignChainActionsTest``
+    above for conventions.
+
+    The entries are the SAME flat vocabulary ``projection.flatten_conflicts()``
+    produces for the editor's tool-drawer panel (``_design_editor_context``,
+    ``DesignEditorPeerConflictContextTest`` in test_views.py) -- this class
+    pins that the two surfaces agree, not just that this action works in
+    isolation.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.device_type = env["device_type"]
+        cls.rack = env["racks"][0]
+
+        # Parent: approved, then IMPLEMENTED -- an implemented ancestor is
+        # exactly what makes the child's chain "ancestor_implemented"
+        # (test_views.py's DesignEditorPeerConflictContextTest precedent).
+        cls.parent = Design.objects.create(title="Parent IDS-1000", site=cls.site)
+        cls.parent.racks.add(cls.rack)
+        DesignPlacement.objects.create(
+            design=cls.parent, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, target_rack=cls.rack,
+            target_position=10, target_face="front", proposed_name="srv-a",
+        )
+        cls.parent.status = DesignStatusChoices.STATUS_APPROVED
+        cls.parent.save()
+        cls.parent.status = DesignStatusChoices.STATUS_IMPLEMENTED
+        cls.parent.save()
+
+        cls.child = Design.objects.create(
+            title="Child IDS-2000", site=cls.site, based_on=cls.parent,
+        )
+        cls.child.racks.add(cls.rack)
+        cls.own_add = DesignPlacement.objects.create(
+            design=cls.child, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, target_rack=cls.rack,
+            target_position=20, target_face="front", proposed_name="own-device",
+        )
+
+        # A PEER (not in the child's lineage) claiming the SAME unit as the
+        # child's own add -- a peer_slot_claim, symmetric to and reported
+        # completely apart from the parent/child chain above.
+        cls.peer = Design.objects.create(title="Peer IDS-9000", site=cls.site)
+        cls.peer.racks.add(cls.rack)
+        cls.peer_add = DesignPlacement.objects.create(
+            design=cls.peer, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type, target_rack=cls.rack,
+            target_position=20, target_face="front", proposed_name="peer-device",
+        )
+
+    def _conflicts_url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-conflicts", kwargs={"pk": design.pk},
+        )
+
+    def _seven_keys(self, entry):
+        return set(entry.keys())
+
+    def test_without_view_design_denied(self):
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
+
+    def test_peer_and_chain_conflicts_together(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        kinds = [e["kind"] for e in response.data]
+        self.assertIn("ancestor_implemented", kinds, response.data)
+        self.assertIn("peer_slot_claim", kinds, response.data)
+
+        expected_keys = {
+            "kind", "severity", "detail", "rack_id",
+            "source_design_id", "source_design_name", "slot_key",
+        }
+        for entry in response.data:
+            self.assertEqual(self._seven_keys(entry), expected_keys, entry)
+
+    def test_clean_design_returns_empty_list(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        clean = Design.objects.create(title="Clean design", site=self.site)
+        clean.racks.add(self.rack)
+        response = self.client.get(self._conflicts_url(clean), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_peer_slot_claim_slot_key_matches_childs_own_placement(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        claims = [e for e in response.data if e["kind"] == "peer_slot_claim"]
+        self.assertEqual(len(claims), 1, response.data)
+        self.assertEqual(claims[0]["slot_key"], self.own_add.pk)
+        self.assertEqual(claims[0]["source_design_id"], self.peer.pk)
+        self.assertEqual(claims[0]["source_design_name"], str(self.peer))
+
+    def test_peer_title_disclosed_despite_hidden_object_permission(self):
+        """
+        PLAN-peer-conflicts.md P16: this user may view ONLY ``self.child``
+        (an ``ObjectPermission`` constrained to its pk, precedent in
+        ``DesignApplyTest.test_orphan_row_visible_but_other_design_hidden``
+        above) -- ``self.peer`` is NOT visible to them. The peer's title must
+        still come back on the ``peer_slot_claim`` entry: a contested slot is
+        operational information, and "another design claims U20" without a
+        name is not actionable. No other field of the hidden peer design is
+        in the payload -- there is no nested object to check, only the two
+        flat id/name fields.
+        """
+        permission = ObjectPermission(
+            name="conflicts-restricted", actions=["view"],
+            constraints={"pk": self.child.pk},
+        )
+        permission.save()
+        permission.users.add(self.user)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
+
+        # Confirm the peer really is hidden from this user before relying on it.
+        self.assertFalse(
+            Design.objects.restrict(self.user, "view").filter(pk=self.peer.pk).exists()
+        )
+
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        claims = [e for e in response.data if e["kind"] == "peer_slot_claim"]
+        self.assertEqual(len(claims), 1, response.data)
+        self.assertEqual(claims[0]["source_design_id"], self.peer.pk)
+        self.assertEqual(claims[0]["source_design_name"], str(self.peer))
+
+    def test_flag_off_drops_peer_entries_chain_entries_unaffected(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        with override_settings(PLUGINS_CONFIG=_peer_plugins_config(peer_conflicts_enabled=False)):
+            response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        kinds = [e["kind"] for e in response.data]
+        self.assertNotIn("peer_slot_claim", kinds, response.data)
+        self.assertIn("ancestor_implemented", kinds, response.data)
+
+    def test_agrees_with_editor_context(self):
+        """
+        The whole point of factoring the flatten out (PLAN-peer-conflicts.md
+        phase 4): the API entries and the editor context's flat
+        ``chain_conflicts`` + ``peer_conflicts`` for the SAME design must be
+        the same set of entries.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(self._conflicts_url(self.child), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        api_entries = [dict(e) for e in response.data]
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        ctx = html_views._design_editor_context(request, self.child)
+        editor_entries = ctx["chain_conflicts"] + ctx["peer_conflicts"]
+
+        key = lambda e: (e["kind"], e["rack_id"], e["slot_key"], e["source_design_id"])  # noqa: E731
+        self.assertEqual(
+            sorted(api_entries, key=key), sorted(editor_entries, key=key),
+        )
 
 
 class DesignPlacementTest(APIViewTestCases.APIViewTestCase):

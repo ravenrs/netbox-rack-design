@@ -252,6 +252,91 @@ class ProjectedElevation:
     conflicts: list = field(default_factory=list)
 
 
+# Conflict ``kind``s this projection layer can emit. The chain kinds are the
+# four already wired through ``_conflict()`` for §8.3's upstream reporting;
+# everything else is required to carry the ``peer_`` prefix (PLAN-peer-
+# conflicts.md P3). This is the ONE place that vocabulary is enumerated --
+# ``flatten_conflicts()`` validates every entry against it, and
+# views.py's ``_design_editor_context`` reuses it to route a flattened entry
+# to the "re-base to resolve" panel row (chain) versus the peer row, so the
+# two call sites cannot silently disagree on what a chain kind is.
+CHAIN_CONFLICT_KINDS = {
+    "ancestor_implemented", "ancestor_not_approved", "chain_broken", "bay_occupied",
+}
+
+
+def flatten_conflicts(rack, conflicts):
+    """
+    Flatten ONE rack's ``ProjectedElevation.conflicts`` into the flat,
+    template/API-agnostic entry shape shared by the editor's tool-drawer
+    panel (views.py's ``_design_editor_context``) and the read-only REST
+    ``conflicts`` action (api/views.py, PLAN-peer-conflicts.md P14/phase 4).
+    Both call sites call this helper rather than each flattening the same
+    ``ProjectedElevation.conflicts`` structure themselves, so the two
+    surfaces cannot drift into two vocabularies.
+
+    Each returned entry carries exactly:
+      kind, severity, detail, rack_id, source_design_id, source_design_name,
+      slot_key
+
+    ``slot_key`` is deliberately the SAME identifier a widget dict already
+    carries as ``placement_id`` (views._slot_to_widget's key of that name),
+    mirroring ``_conflict()``/``emit()``'s two ways of naming the contested
+    tile:
+      - Most kinds (every chain kind, ``peer_name_claim``,
+        ``peer_device_claim``) carry ``placement``: the entry is about THIS
+        design's own placement, so ``slot_key`` is that placement's pk.
+      - ``peer_slot_claim`` carries no ``placement`` of ours -- the
+        contested unit is not one of our own placements. It instead carries
+        ``slot``, the SAME slot dict object already in the rack's
+        front/rear list; that slot dict's OWN ``placement`` key is the
+        ``DesignPlacement`` that named the tile (this design's own add/move,
+        or -- for an inherited tile -- the ancestor placement, see
+        ``_BaselineEntry``). ``_slot_to_widget`` reads that exact same key
+        into a widget's ``placement_id``, so ``slot["placement"].pk`` IS the
+        tile's identifier -- no new scheme, just reached through the slot.
+      - Neither ``placement`` nor ``slot`` set: a design-level refusal
+        (``ancestor_not_approved`` / ``ancestor_implemented`` /
+        ``chain_broken``) is about the rack/chain as a whole, not any one
+        tile -- ``slot_key`` is ``None``.
+
+    Raises ``ValueError`` for a ``kind`` that is neither in
+    ``CHAIN_CONFLICT_KINDS`` nor prefixed ``peer_`` -- deliberately not
+    softened for either caller: ``kind`` is our own controlled vocabulary
+    from ``_conflict()`` call sites, never user input, so a mismatch is a
+    programming error to surface, not data to tolerate.
+    """
+    rack_pk = rack.pk
+    flat = []
+    for entry in conflicts:
+        kind = entry["kind"]
+        if kind not in CHAIN_CONFLICT_KINDS and not kind.startswith("peer_"):
+            raise ValueError(
+                f"Unrecognized conflict kind {kind!r}: add it to "
+                f"CHAIN_CONFLICT_KINDS (projection.py) or give it a 'peer_' "
+                f"prefix so flatten_conflicts() knows it is a valid producer."
+            )
+        placement = entry.get("placement")
+        source_design = entry.get("source_design")
+        slot = entry.get("slot")
+        if placement is not None:
+            slot_key = placement.pk
+        elif slot is not None:
+            slot_key = slot["placement"].pk if slot.get("placement") is not None else None
+        else:
+            slot_key = None
+        flat.append({
+            "kind": kind,
+            "severity": entry["severity"],
+            "detail": entry["detail"],
+            "rack_id": rack_pk,
+            "source_design_id": source_design.pk if source_design is not None else None,
+            "source_design_name": str(source_design) if source_design is not None else None,
+            "slot_key": slot_key,
+        })
+    return flat
+
+
 # The two things EVERY container's projection derives the same way, whatever its
 # slots are (spec §2). They were copied verbatim into the rack overlay and the
 # chassis one; a state or label rule fixed in one silently left the other wrong.

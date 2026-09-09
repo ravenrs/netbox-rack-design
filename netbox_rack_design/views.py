@@ -568,69 +568,23 @@ def _design_editor_context(request, design):
     # tile, and the panel renders it without trying to highlight a tile.
     # PLAN-peer-conflicts.md phase 2: the flat entry shape above is ONE
     # vocabulary shared by two rows in this panel (kind decides which), not
-    # two vocabularies -- phase 4 serves the same keys over REST. `kind`
-    # decides which row an entry belongs in: the four chain kinds go to
-    # `chain_conflicts` (rendered under "re-base to resolve"), everything
-    # `peer_*` goes to `peer_conflicts` (rendered under its own sentence --
-    # re-basing does not touch a peer, see design_editor.html). A kind that
-    # matches NEITHER bucket is a future producer this flatten does not yet
-    # know about; raising here (rather than silently dropping it into either
-    # row, or worse, discarding it) is deliberate -- ``kind`` is our own
-    # controlled vocabulary from ``_conflict()`` call sites, never user input,
-    # so a mismatch is a programming error to fix, not data to tolerate.
-    _CHAIN_CONFLICT_KINDS = {
-        "ancestor_implemented", "ancestor_not_approved", "chain_broken", "bay_occupied",
-    }
+    # two vocabularies -- phase 4 (projection.flatten_conflicts(), which does
+    # the actual flattening + slot_key derivation + kind validation, shared
+    # verbatim with the REST ``conflicts`` action) serves the same keys over
+    # REST. `kind` decides which row an entry belongs in here: the chain
+    # kinds (``projection.CHAIN_CONFLICT_KINDS``) go to `chain_conflicts`
+    # (rendered under "re-base to resolve"), everything else (`peer_*`,
+    # already validated by ``flatten_conflicts()``) goes to `peer_conflicts`
+    # (rendered under its own sentence -- re-basing does not touch a peer,
+    # see design_editor.html).
     chain_conflicts = []
     peer_conflicts = []
     for block in all_rack_blocks:
-        rack_pk = block["rack"].pk
-        for entry in block["conflicts"]:
-            kind = entry["kind"]
-            placement = entry.get("placement")
-            source_design = entry.get("source_design")
-            slot = entry.get("slot")
-            if placement is not None:
-                # peer_name_claim / peer_device_claim and every chain kind:
-                # the entry is ABOUT this design's own placement, exactly as
-                # today -- slot_key joins it to the SAME placement_id a
-                # widget dict carries (_slot_to_widget's "placement_id").
-                slot_key = placement.pk
-            elif slot is not None:
-                # peer_slot_claim: `placement` is None (P3 -- the contested
-                # unit, not a placement of ours, is the subject) and the
-                # entry instead carries `slot`, the SAME slot dict object
-                # that is in the rack's front/rear list (_conflict()'s
-                # docstring). That slot dict was built by _slot() with its
-                # OWN `placement` key set to the DesignPlacement it renders
-                # (this design's own add/move, or -- for an inherited tile --
-                # the ancestor placement that named it; see `_BaselineEntry`
-                # in projection.py). `_slot_to_widget` reads that exact same
-                # key to fill a widget's `placement_id`, so `slot["placement"]`
-                # IS the identifier a widget carries for this tile -- no new
-                # scheme, just reached through the slot instead of directly.
-                slot_key = slot["placement"].pk if slot.get("placement") is not None else None
-            else:
-                slot_key = None
-            flat = {
-                "kind": kind,
-                "severity": entry["severity"],
-                "detail": entry["detail"],
-                "rack_id": rack_pk,
-                "source_design_id": source_design.pk if source_design is not None else None,
-                "source_design_name": str(source_design) if source_design is not None else None,
-                "slot_key": slot_key,
-            }
-            if kind in _CHAIN_CONFLICT_KINDS:
+        for flat in projection.flatten_conflicts(block["rack"], block["conflicts"]):
+            if flat["kind"] in projection.CHAIN_CONFLICT_KINDS:
                 chain_conflicts.append(flat)
-            elif kind.startswith("peer_"):
-                peer_conflicts.append(flat)
             else:
-                raise ValueError(
-                    f"Unrecognized conflict kind {kind!r}: add it to "
-                    f"_CHAIN_CONFLICT_KINDS or give it a 'peer_' prefix so "
-                    f"_design_editor_context knows which panel row it belongs in."
-                )
+                peer_conflicts.append(flat)
     # P12: name-claim rows collapse per peer design behind a `Show` toggle --
     # one row per peer design ("Design C (draft) claims 5 of this design's
     # planned names"), not one row per colliding name (P11 means two drafts

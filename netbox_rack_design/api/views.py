@@ -514,7 +514,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # ``rack_power``'s split below.
             return [ChangeDesignPermissions()]
         if action in ("preview_name", "power_source", "feeds", "recompute_distribution",
-                      "chain", "rerun_naming_preview"):
+                      "chain", "rerun_naming_preview", "conflicts"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -2459,6 +2459,58 @@ class DesignViewSet(NetBoxModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["get"], url_path="conflicts")
+    def conflicts(self, request, pk=None):
+        """
+        Read-only chain + peer conflicts for this design, across every rack it
+        scopes -- the SAME flat vocabulary the editor's tool-drawer panel
+        renders (views.py's ``_design_editor_context``), factored into
+        ``projection.flatten_conflicts()`` so this action and the editor
+        context cannot drift into two vocabularies (PLAN-peer-conflicts.md
+        P14, phase 4). Automation currently learns about a conflict only from
+        ``apply``'s refusal, which is too late to use as a gate -- this lets
+        a pipeline check first.
+
+        Each entry: {"kind", "severity", "detail", "rack_id",
+        "source_design_id", "source_design_name", "slot_key"} -- see
+        ``projection.flatten_conflicts()`` for exactly how each key,
+        especially ``slot_key``, is derived for every conflict kind.
+
+        Flattened across every rack the design scopes, not grouped per rack:
+        a design scopes many racks and the projection runs per rack, but
+        `rack_id` on every entry is already enough for a client to tell
+        entries in different racks apart, and a flat list is the simplest
+        shape for a pipeline that only wants to know "is this empty".
+
+        PLAN-peer-conflicts.md P16: a peer design's TITLE is returned even
+        when this user's NetBox object permissions would hide that design --
+        a contested slot is operational information, and "another design
+        claims U36" without a name is not actionable.
+        ``source_design_name`` is a plain ``str()``, never a nested Design
+        serializer, so no OTHER field of the hidden peer design is exposed.
+        The ``peer_conflicts_enabled`` PLUGINS_CONFIG flag is the way out for
+        a deployment that cannot accept that disclosure -- it already gates
+        peer detection at the projection layer (phase 1), so turning it off
+        means this action returns no peer entries, at no extra cost here.
+
+        GET .../designs/<pk>/conflicts/
+          -> [{"kind", "severity", "detail", "rack_id", "source_design_id",
+               "source_design_name", "slot_key"}, ...]
+
+        URL name: plugins-api:netbox_rack_design-api:design-conflicts
+        Path:     /api/plugins/rack-design/designs/<pk>/conflicts/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        entries = []
+        for rack in design.racks.all():
+            result = projection.project_rack(design, rack)
+            entries.extend(projection.flatten_conflicts(rack, result.conflicts))
+
+        return Response(entries, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="derive")
     def derive(self, request, pk=None):
