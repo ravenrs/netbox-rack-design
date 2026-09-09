@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Peer conflicts.** A design's projection now reports overlaps with designs
+  outside its own chain (siblings, or designs sharing no lineage at all) that
+  were previously invisible to each other while both were still planning:
+  - `peer_slot_claim` — a peer plans a device on a unit this design claims
+    (its own adds/move-ins, plus anything it inherits from an ancestor).
+  - `peer_name_claim` — a peer plans the same name.
+  - `peer_device_claim` — a peer plans to move the same real device.
+  - An approved peer's claim is an error, a draft peer's a warning; neither
+    blocks a save — a peer conflict is not this design's fault, and there is
+    nothing to fix by editing the tile. A peer that has already applied owns
+    a real device, so saving onto that unit is refused the ordinary way, as
+    before.
+  - Shown as a third row in the editor's Design conflicts panel, with
+    contested tiles flagged and filterable via a "Peer conflict" legend chip
+    on both the editor and the read-only elevation view. Several name-claim
+    rows against the same peer design collapse into one row with a "Show"
+    toggle.
+  - A "Re-run naming" button on a name-claim row opens a read-only
+    `old -> new` diff; Confirm writes every line shown, Cancel writes
+    nothing. Only the colliding names are recomputed — a clean sibling name
+    is left alone even at the cost of tidy numbering, since it may already be
+    referenced elsewhere.
+  - Gated by the `peer_conflicts_enabled` `PLUGINS_CONFIG` key (default
+    `True`); disabling it turns off peer detection entirely, including the
+    disclosure of a peer design's title past NetBox object permissions that
+    peer detection otherwise relies on to make a conflict actionable.
+  - Not covered: a peer's claim on a device bay (peer detection reads rack U
+    slots only).
+  - New REST endpoints: `GET .../designs/<pk>/conflicts/` (chain and peer
+    conflicts together, read-only), `POST .../designs/<pk>/rerun-naming-preview/`
+    (read-only diff), and `POST .../designs/<pk>/rerun-naming/` (writes the
+    confirmed set; refuses on a frozen design).
+  - See [docs/peer-conflicts.md](docs/peer-conflicts.md).
+
 ## [0.31.0] - 2026-09-09
 
 ### Release Summary

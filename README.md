@@ -12,13 +12,13 @@
   <a href="https://www.youtube.com/playlist?list=PLQrzYAZqdcXg"><b>▶ Full 10-part tutorial</b></a>
 </p>
 
-NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection, an auto-naming engine, and design chains (baselining one design on another approved one) already built in — an explicit Apply step is still arriving in a later stage.
+NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection, an auto-naming engine, design chains (baselining one design on another approved one), and an explicit Apply step already built in.
 
 The plugin is fully generic and public — nothing organization-specific is hardcoded. Status names and behavior are driven entirely by `PLUGINS_CONFIG`, and only native NetBox mechanisms are used (change logging, tags, custom fields, permissions, REST + GraphQL APIs, global search).
 
 ## Features
 
-Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. Applying a design into NetBox, and conflict detection within a design chain, are delivered; detecting collisions between two unrelated designs is planned (see [Roadmap](#roadmap)).
+Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. Applying a design into NetBox, conflict detection within a design chain, and conflict detection between two unrelated designs planning the same rack are all delivered (see [Roadmap](#roadmap)).
 
 - **Three models** for capturing rack plans:
   - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, may optionally belong to a group, and may be **`based_on`** exactly one other approved design — forming a design chain (see [docs/design-chains.md](docs/design-chains.md)). Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
@@ -191,6 +191,7 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 | `power_warn_pct`    | `80`                 | Utilization percentage at/above which a rack's power state is "warn". Not present in `default_settings`; read via `get_plugin_config` with this default. |
 | `power_critical_pct`| `100`                | Utilization percentage at/above which a rack's power state is "critical". Not present in `default_settings`; read via `get_plugin_config` with this default. |
 | `power_exclude_roles` | `("pdu", "unmanageable-pdu")` | Device role slugs (case-insensitive) excluded from the power-consumption sum — power infrastructure, not consumers. Not present in `default_settings`; read via `get_plugin_config` with this default. |
+| `peer_conflicts_enabled` | `True` | Whether a design's projection reports conflicts with designs outside its own chain (peer designs planning the same unit, name, or device). A peer design's title is disclosed in these reports even past NetBox object permissions, since a conflict without a name to act on is not actionable; set to `False` to disable peer detection entirely if that disclosure is unacceptable. See [docs/peer-conflicts.md](docs/peer-conflicts.md). |
 
 The `power_*` keys are not listed in the plugin's `default_settings` (they have no admin-facing default in `__init__.py`); they are still fully overridable via `PLUGINS_CONFIG`, resolved at read time by `netbox_rack_design/projection.py` with the defaults shown above.
 
@@ -206,6 +207,7 @@ The `power_*` keys are not listed in the plugin's `default_settings` (they have 
 - **PDU power distribution** — per-PDU/per-bank load distribution (`distribution_mode` = `"none"` / `"builtin"` / `"script"`), planned-PDU feed binding for greenfield racks, and a per-bank heatmap.
 - **Design chains and versioning** — baseline a design on another approved design (`based_on`), inheriting its placements, names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. Clone-and-revise an approved design into a new draft version to escape the freeze when you have dependents, then re-base the children onto the new version. See [docs/design-chains.md](docs/design-chains.md).
 - **Apply** — materialize an approved design in NetBox as planned devices, reserving each target slot and flagging removals with a configured status. Reports every problem up front, runs all-or-nothing in one transaction, is safe to re-run (reconciles rather than duplicating), is ordered along a chain, and uses the acting user's own DCIM permissions. Button plus API action with a read-only dry run. See [docs/apply.md](docs/apply.md).
+- **Peer conflicts** — a design's projection reports overlaps with designs outside its own chain: a peer planning a device on the same unit, the same name, or a move of the same real device, surfaced as its own row in the editor's conflicts panel and as flagged tiles on both the editor and the elevation view, with a "Re-run naming" dialog to resolve a name claim. See [docs/peer-conflicts.md](docs/peer-conflicts.md).
 
 **Planned for upcoming stages**
 
