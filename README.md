@@ -18,7 +18,7 @@ The plugin is fully generic and public — nothing organization-specific is hard
 
 ## Features
 
-Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. Cross-design conflict detection (collisions between sibling designs in early stages) is planned; apply, conflict detection within a chain, and refusal-on-apply are delivered.
+Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. Applying a design into NetBox, and conflict detection within a design chain, are delivered; detecting collisions between two unrelated designs is planned (see [Roadmap](#roadmap)).
 
 - **Three models** for capturing rack plans:
   - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, may optionally belong to a group, and may be **`based_on`** exactly one other approved design — forming a design chain (see [docs/design-chains.md](docs/design-chains.md)). Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.

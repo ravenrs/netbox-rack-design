@@ -85,22 +85,21 @@ dependents).
 **The consequence between steps 3 and 5:** while dependents are being re-based
 against a draft new version, they cannot project and will show **"ancestor not
 approved"** in their conflicts panel. This is correct — a dependent cannot be
-trusted while its baseline is being rewritten — and not an error. A reader who
-does not expect this will think the feature broke their design. It resolves the
-moment step 5 completes.
+trusted while its baseline is being rewritten — and not an error. It resolves
+the moment step 5 completes.
 
 **What happens to the old version afterwards:** nothing automatic. It stays at
-**draft**, where it is read-only and will not serve as a parent. You tell which
-version is current by which one is **approved**; there is no "superseded" or
-"archived" status. If you ever need to revert to the old plan, re-approve it
-and re-base the dependents back (but note that intermediate changes to a design
-are still retained — you are moving around references, not undoing edits).
+**draft** — editable again, and no longer usable as a parent, since deriving
+requires an approved design. You tell which version is current by which one is
+**approved**; there is no "superseded" or "archived" status. To go back to the
+old plan, approve it again and re-base the dependents back — nothing was
+undone, you are only moving references.
 
 **What is not copied:** apply records. A new version has applied nothing, so it
 starts unapplied and applying it reconciles against reality like any other
-apply. Sequence numbers are also not copied — they are re-assigned per site on
-first save (an implementation detail, but worth knowing if you export a design
-and expect its devices to retain their planned order).
+apply. The design's **execution order** within its site is also not copied —
+a new version is assigned the next free slot, so if you sequence your designs
+deliberately, check the new version's position.
 
 **Re-base** is also the escape hatch for two other situations: a parent that
 has since moved to **implemented** (see below), and two designs that both
