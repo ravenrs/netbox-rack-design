@@ -410,6 +410,15 @@ def _rerun_naming_plan(design, placement_ids):
 
     ordered = [placements_by_id[pid] for pid in placement_ids]
     lines = []
+    # The names handed out EARLIER IN THIS BATCH, fed forward as pending names
+    # exactly the way the add path does it (``preview_name`` injects the
+    # editor session's unsaved sibling names the same way). A naming script's
+    # family counter reads persisted siblings plus ``pending_names``, and has
+    # no other way to know about a name this loop generated a moment ago and
+    # has not saved -- so without this, a batch of collisions all come back
+    # with the SAME next number, replacing a cross-design collision with a
+    # duplicate inside one design, which is strictly worse.
+    granted = []
     for placement in ordered:
         if not naming.peer_name_claims(placement, peers):
             # P9's guard: the world may have moved on since the dialog
@@ -423,7 +432,9 @@ def _rerun_naming_plan(design, placement_ids):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         old_name = naming.effective_name(placement)
+        placement._rd_pending_names = list(granted)
         new_name = naming.generate_name(placement)
+        granted.append(new_name)
         placement.proposed_name = new_name
         still_colliding = bool(naming.peer_name_claims(placement, peers))
         lines.append({
@@ -431,6 +442,12 @@ def _rerun_naming_plan(design, placement_ids):
             "old_name": old_name,
             "new_name": new_name,
             "still_colliding": still_colliding,
+            # The engine can hand back the very name it is being asked to
+            # replace -- in the P11 case both designs' counters legitimately
+            # land on the same number, and re-running changes nothing. Saying
+            # so is the difference between a button that reports what it did
+            # and one that claims a fix it did not make.
+            "unchanged": new_name == old_name,
         })
     return ordered, lines
 

@@ -719,7 +719,7 @@
     // Not editable: per-name editing already exists elsewhere (P12 note),
     // so this dialog's only job is "here is what I am about to do".
     // `lines` is the preview response's `{placement_id, old_name, new_name,
-    // still_colliding}` array. Confirm calls `onConfirm()` with no args --
+    // still_colliding, unchanged}` array. Confirm calls `onConfirm()` with no args --
     // the caller already knows which placement_ids it asked to preview, and
     // POSTs that SAME list to the commit endpoint, which recomputes the
     // diff itself rather than trusting anything from this dialog (P9).
@@ -727,18 +727,41 @@
         var overlay = document.createElement("div");
         overlay.className = "modal fade nbx-rd-rerun-naming-modal";
         overlay.setAttribute("tabindex", "-1");
-        var rows = (lines || []).map(function (line) {
-            var oldName = line.old_name || "(unnamed)";
-            var newName = line.new_name || "(unnamed)";
-            var warn = line.still_colliding
-                ? ' <span class="text-warning-emphasis small" title="'
-                    + "This name is still claimed by a peer design after re-running."
-                    + '">(still collides)</span>'
-                : "";
-            return '<li class="nbx-rd-rerun-naming-line" data-rd-placement-id="' + line.placement_id + '">'
-                + '<code>' + oldName + '</code> &rarr; <code>' + newName + '</code>' + warn
-                + '</li>';
-        }).join("");
+        // Each line is built as DOM with the two names set via textContent,
+        // NEVER interpolated into innerHTML: a `proposed_name` is text a
+        // planner typed, so concatenating it into markup would execute it.
+        // This is the same build-the-skeleton-then-textContent shape the
+        // displace dialog above uses for its own two labels.
+        var rowNodes = (lines || []).map(function (line) {
+            var li = document.createElement("li");
+            li.className = "nbx-rd-rerun-naming-line";
+            li.setAttribute("data-rd-placement-id", line.placement_id);
+            var oldCode = document.createElement("code");
+            oldCode.textContent = line.old_name || "(unnamed)";
+            var newCode = document.createElement("code");
+            newCode.textContent = line.new_name || "(unnamed)";
+            li.appendChild(oldCode);
+            li.appendChild(document.createTextNode(" \u2192 "));
+            li.appendChild(newCode);
+            // The engine can hand back the very name it was asked to replace
+            // (P11: both designs' counters legitimately land on the same
+            // number), so the row says which lines actually change.
+            if (line.unchanged) {
+                var same = document.createElement("span");
+                same.className = "text-muted small";
+                same.title = "Re-running produced the same name; this line changes nothing.";
+                same.textContent = " (unchanged)";
+                li.appendChild(same);
+            }
+            if (line.still_colliding) {
+                var warn = document.createElement("span");
+                warn.className = "text-warning-emphasis small";
+                warn.title = "This name is still claimed by a peer design after re-running.";
+                warn.textContent = " (still collides)";
+                li.appendChild(warn);
+            }
+            return li;
+        });
         overlay.innerHTML =
             '<div class="modal-dialog modal-dialog-centered modal-sm">'
             + '<div class="modal-content">'
@@ -749,13 +772,15 @@
             + '<div class="modal-body">'
             + '<p class="small text-muted">These planned names collide with a peer '
             + "design; confirming renames every line below.</p>"
-            + '<ul class="mb-0 ps-3 nbx-rd-rerun-naming-lines">' + rows + "</ul>"
+            + '<ul class="mb-0 ps-3 nbx-rd-rerun-naming-lines"></ul>'
             + "</div>"
             + '<div class="modal-footer">'
             + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
             + '<button type="button" class="btn btn-sm btn-primary" data-rd-rerun-naming-confirm>Confirm</button>'
             + "</div>"
             + "</div></div>";
+        var listEl = overlay.querySelector(".nbx-rd-rerun-naming-lines");
+        rowNodes.forEach(function (li) { listEl.appendChild(li); });
         document.body.appendChild(overlay);
 
         var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;

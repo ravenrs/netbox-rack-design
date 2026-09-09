@@ -1507,7 +1507,11 @@ class EditorE2ETestCase(unittest.TestCase):
         Cancel writes nothing, Confirm renames and the row is gone after
         reload. Mirrors test_17's own-throwaway-design pattern exactly."""
         site_id = self._api("GET", f"/api/dcim/racks/{RACK_PK}/")["site"]["id"]
-        dup_name = f"e2e-dup-rename-{uuid.uuid4()}"
+        # The colliding name carries MARKUP on purpose: a proposed_name is
+        # text a planner typed, so the dialog must render it as text. If the
+        # diff were built by string-concatenating names into innerHTML, this
+        # would become a real element in the page instead of characters.
+        dup_name = f"e2e-dup-<i>rename</i>-{uuid.uuid4()}"
 
         peer = self._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
@@ -1558,6 +1562,10 @@ class EditorE2ETestCase(unittest.TestCase):
                 ".nbx-rd-rerun-naming-lines", "el => el.textContent")
             self.assertIn(dup_name, diff_text,
                           f"diff line should show the OLD (colliding) name: {diff_text!r}")
+            self.assertIsNone(
+                self.page.query_selector(".nbx-rd-rerun-naming-lines i"),
+                "a name's markup must render as text, never as an element",
+            )
             self.page.click(
                 ".nbx-rd-rerun-naming-modal button.btn-link:has-text('Cancel')")
             self.page.wait_for_selector(

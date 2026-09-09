@@ -2570,6 +2570,59 @@ class RerunNamingActionTest(APITestCase):
             kwargs={"pk": (design or self.design).pk},
         )
 
+    @override_settings(
+        PLUGINS_CONFIG={"netbox_rack_design": {
+            "naming_mode": "script",
+            "naming_script": (
+                "netbox_rack_design.tests.test_naming.family_counter_naming_fn"
+            ),
+        }}
+    )
+    def test_a_batch_gives_every_placement_a_DISTINCT_new_name(self):
+        """A naming script's family counter can only avoid handing the same
+        number to two placements if the caller feeds each generated name back
+        in as a pending name -- which is exactly what the add path does
+        (``preview_name`` injects ``pending_names``).
+
+        Without that, re-running naming over a batch of collisions renames
+        them all to the SAME name, replacing a cross-design collision with a
+        duplicate inside one design, which is worse.
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        # A second and third colliding placement, so the batch is >1.
+        extra = []
+        for i, position in enumerate((12, 13)):
+            mine = DesignPlacement.objects.create(
+                design=self.design,
+                kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type,
+                target_rack=self.racks[1],
+                target_position=position,
+                proposed_name=f"batch-dup-{i}",
+            )
+            DesignPlacement.objects.create(
+                design=self.peer,
+                kind=DesignPlacementKindChoices.KIND_ADD,
+                device_type=self.device_type,
+                target_rack=self.racks[1],
+                target_position=30 + i,
+                proposed_name=f"batch-dup-{i}",
+            )
+            extra.append(mine)
+
+        response = self.client.post(
+            self._preview_url(),
+            {"placement_ids": [self.colliding.pk] + [p.pk for p in extra]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        new_names = [line["new_name"] for line in response.data["lines"]]
+        self.assertEqual(len(new_names), 3, response.data)
+        self.assertEqual(
+            len(set(new_names)), 3,
+            f"every placement in one batch must get its own name: {new_names}",
+        )
+
     def test_preview_returns_diff_and_writes_nothing(self):
         """Preview reports old -> new for the colliding placement only, and
         persists nothing (the placements are byte-identical afterwards)."""

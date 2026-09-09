@@ -38,6 +38,22 @@ def sample_naming_fn(placement):
 not_callable_value = "I am a string, not a function"
 
 
+def family_counter_naming_fn(placement):
+    """A naming script of the shape a real deployment uses: the next free
+    number in a family, counting persisted siblings AND the names already
+    handed out in this session (``pending_names``).
+
+    Exists to pin that a BATCH caller feeds each generated name back in as
+    pending -- a script like this has no other way to avoid handing the same
+    number to two placements it is asked about in one go.
+    """
+    taken = set(chain_placement_names(placement)) | set(pending_names(placement))
+    n = 1
+    while f"fam-{n}" in taken:
+        n += 1
+    return f"fam-{n}"
+
+
 def raising_naming_fn(placement):
     """Module-level callable that always raises, to exercise the runtime-error
     fallback in ``script`` mode."""
