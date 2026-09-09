@@ -1378,5 +1378,105 @@ class EditorE2ETestCase(unittest.TestCase):
         self.assert_no_console_errors()
 
 
+    # =====================================================================
+    # 17. PLAN-peer-conflicts.md phase 2: saving a placement onto a unit a
+    #     PEER design (outside this design's chain) already claims must
+    #     succeed (P5's save-not-blocked rule -- pinned end-to-end here, not
+    #     just in test_views.py), toast the conflict at save time, and still
+    #     show it in the panel after the reload the save triggers (P6).
+    #
+    #     THIS IS THE ONE TEST IN THE SUITE THAT ACTUALLY CLICKS SAVE and
+    #     writes to the DB -- every other test here only asserts on the
+    #     would-be payload (see the module docstring). To keep that
+    #     invariant true for every other test, this one provisions and
+    #     tears down its OWN two throwaway designs (never touching the
+    #     class's shared fixture design or its shared editor page) and
+    #     navigates its own page there instead of using `self.editor_url`.
+    # =====================================================================
+    def test_17_peer_conflict_toast_and_panel_survive_reload(self):
+        site_id = self._api("GET", f"/api/dcim/racks/{RACK_PK}/")["site"]["id"]
+
+        # The PEER: an unrelated design (no based_on relationship, no shared
+        # version_root with anything below) that plans a device at the SAME
+        # free unit this test's own design will then also target.
+        peer = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        # THIS test's own design: starts with NO placements, so its rack
+        # renders no peer conflict until the drop+save below creates one.
+        mine = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        try:
+            peer_u = self._live_free_u  # a real-device-free U (see _provision_fixture)
+            self._api("POST", "/api/plugins/rack-design/placements/", {
+                "design": peer["id"], "kind": "add", "device_type": self._dt_id,
+                "proposed_name": "e2e-peer-device", "target_rack": int(RACK_PK),
+                "target_position": peer_u, "target_face": "front",
+            })
+
+            mine_url = (
+                f"{BASE}/plugins/rack-design/designs/{mine['id']}/editor/{RACK_PK}/")
+            self.page.goto(mine_url, wait_until="networkidle")
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self.page.wait_for_timeout(1200)
+            self.page.add_script_tag(content=TEST_HARNESS_JS)
+
+            # Drop a device type (lands at the grid's top row), then drag it
+            # down onto the peer's claimed unit -- an unsaved add, exactly
+            # like test_03, just relocated onto the contested U before Save.
+            new_idx = self.page.evaluate(
+                f"() => window.__rdE2E.dropPaletteItem({self._dt_id}, "
+                f"{self._dt_h}, 'e2e-peer-clash')")
+            self.assertIsNotNone(new_idx, "dropPaletteItem did not stamp a widget index")
+            gs_h = self.tile_info(new_idx)["h"]
+            peer_gs_y = self.page.evaluate(
+                f"() => window.__rdE2E.uPositionToGsY({peer_u}, {gs_h})")
+            moved = self.page.evaluate(
+                f"() => window.__rdE2E.moveTile('{new_idx}', {peer_gs_y})")
+            self.assertTrue(moved, "could not drag the new add onto the peer's unit")
+
+            # The real Save click -- this is a genuine write + reload.
+            with self.page.expect_navigation(wait_until="networkidle", timeout=15000):
+                self.page.click("#rd-editor-save")
+
+            # P5: the save succeeded (we are back on the editor, not an error
+            # page) and toasted the peer conflict by name/unit.
+            self.page.wait_for_selector(
+                ".toast-header:has-text('Peer conflict')", timeout=5000)
+            toast_body = self.page.eval_on_selector(
+                ".toast:has(.toast-header:has-text('Peer conflict')) .toast-body",
+                "el => el.textContent")
+            self.assertIn(peer["title"], toast_body,
+                          f"toast should name the peer design: {toast_body!r}")
+            self.assertIn(f"U{peer_u}", toast_body,
+                          f"toast should name the contested unit: {toast_body!r}")
+
+            # Reload again: the panel row (not the one-shot toast) is what
+            # must persist for every OTHER page view (P6) -- e.g. the peer's
+            # own planner opening THEIR design and seeing it right back
+            # (pinned in test_views.py; here we only need our own survives).
+            self.page.reload(wait_until="networkidle")
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self.assertIsNotNone(
+                self.page.query_selector(".nbx-rd-peer-conflicts"),
+                "the peer-conflicts panel row must survive a plain reload")
+            # And the ONE-SHOT toast must NOT re-fire on this ordinary reload
+            # -- only the save-triggered one above should have shown it.
+            self.assertIsNone(
+                self.page.query_selector(".toast-header:has-text('Peer conflict')"),
+                "the save-time toast must not re-fire on an unrelated reload")
+        finally:
+            for design_id in (peer["id"], mine["id"]):
+                try:
+                    self._api(
+                        "DELETE",
+                        f"/api/plugins/rack-design/designs/{design_id}/")
+                except Exception:
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

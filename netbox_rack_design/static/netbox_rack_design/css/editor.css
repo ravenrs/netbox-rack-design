@@ -1199,6 +1199,34 @@
     z-index: 2;
 }
 
+/* `peer_conflict` (PLAN-peer-conflicts.md P1-P3/P7): a design OUTSIDE this
+   design's chain also claims this unit, name, or device. Dotted (distinct
+   from inherited/reserved's dashed and applied's solid) so all four
+   provenance/conflict outlines read apart at a glance; bottom-right corner
+   flag, the one corner the three above leave free. Pink, not amber/red: the
+   amber diagonal stripe already means "chain conflict" (nbx-rd-flag-conflict
+   below) and red is reserved for displacement (see rack_block.html's own
+   0.19.0 comment) -- a peer conflict is a third, distinct condition and
+   needs a color that is neither. */
+.grid-stack-item.nbx-rd-flag-peer_conflict > .grid-stack-item-content {
+    outline: 2px dotted var(--tblr-pink, #d6336c);
+    outline-offset: -2px;
+}
+
+.grid-stack-item.nbx-rd-flag-peer_conflict > .grid-stack-item-content::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 0 7px 7px 0;
+    border-color: transparent transparent var(--tblr-pink, #d6336c) transparent;
+    pointer-events: none;
+    z-index: 2;
+}
+
 /* ---- Device hover card (name / role / tenant) -------------------------- */
 /* A floating card appended to <body> and absolutely positioned by editor.js on
    hover. pointer-events:none guarantees it never blocks dragging a tile or the
@@ -1767,6 +1795,13 @@
 .nbx-rd-swatch.nbx-rd-flag-reserved {
     background-color: transparent;
     border: 2px dashed var(--tblr-purple, #7048e8);
+}
+/* `peer_conflict` (PLAN-peer-conflicts.md P7): dotted, matching the tile
+   outline above -- also a REAL filter swatch (data-rd-flag="peer_conflict",
+   wired by legend_filter.js exactly like the others on this page). */
+.nbx-rd-swatch.nbx-rd-flag-peer_conflict {
+    background-color: transparent;
+    border: 2px dotted var(--tblr-pink, #d6336c);
 }
 .nbx-rd-swatch.nbx-rd-info-displaced {
     background-color: transparent;

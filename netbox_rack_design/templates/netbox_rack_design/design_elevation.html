@@ -71,6 +71,13 @@
             {# combine by OR with, the five state checkboxes above.           #}
             <label class="nbx-rd-filter" title="{% trans 'A tile carried over from an approved ancestor design' %}"><input type="checkbox" checked data-rd-flag="inherited"><span class="nbx-rd-swatch nbx-rd-flag-inherited"></span>{% trans "Inherited" %}</label>
             <label class="nbx-rd-filter" title="{% trans 'An upstream design now disagrees with this placement -- does not block save' %}"><input type="checkbox" checked data-rd-flag="conflict"><span class="nbx-rd-swatch nbx-rd-flag-conflict"></span>{% trans "Conflict" %}</label>
+            {# Peer conflict (PLAN-peer-conflicts.md P7/P15), the same flag-not-  #}
+            {# state pattern: a design outside this design's chain also claims   #}
+            {# this unit, name, or device. This page has no conflicts PANEL (it   #}
+            {# never had one for chain conflicts either -- tile flags + this      #}
+            {# legend chip are the read-only view's whole treatment), so parity   #}
+            {# with chain conflicts here means this chip, nothing more. #}
+            <label class="nbx-rd-filter" title="{% trans 'A design outside this design\'s chain also claims this unit, name, or device -- does not block save' %}"><input type="checkbox" checked data-rd-flag="peer_conflict"><span class="nbx-rd-swatch nbx-rd-flag-peer_conflict"></span>{% trans "Peer conflict" %}</label>
             {# Apply markers (apply-projection phase): same flag-not-state pattern. #}
             <label class="nbx-rd-filter" title="{% trans 'This design already applied it -- pressing apply again is a no-op' %}"><input type="checkbox" checked data-rd-flag="applied"><span class="nbx-rd-swatch nbx-rd-flag-applied"></span>{% trans "Applied" %}</label>
             <label class="nbx-rd-filter" title="{% trans 'Another design already applied this device' %}"><input type="checkbox" checked data-rd-flag="reserved"><span class="nbx-rd-swatch nbx-rd-flag-reserved"></span>{% trans "Reserved" %}</label>

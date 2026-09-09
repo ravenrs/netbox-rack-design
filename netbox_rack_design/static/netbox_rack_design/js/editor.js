@@ -759,6 +759,46 @@
         try { return JSON.parse(el.textContent || "[]") || []; } catch (e) { return []; }
     })();
 
+    // Peer conflicts (PLAN-peer-conflicts.md P5/P7), read once from the SAME
+    // json_script convention as the three globals above: the flat, ungrouped
+    // entries the panel's collapsed rows are also built from server-side
+    // (views._design_editor_context's `peer_conflicts` key). Used ONLY for
+    // the post-save toast below -- the panel itself is rendered directly by
+    // the template, never by this JS.
+    var PEER_CONFLICTS = (function () {
+        var el = document.getElementById("rd-peer-conflicts");
+        if (!el) { return []; }
+        try { return JSON.parse(el.textContent || "[]") || []; } catch (e) { return []; }
+    })();
+
+    // One sessionStorage key per design (sessionStorage is per-tab already,
+    // but a design pk in the key keeps two designs opened in the same tab's
+    // history from ever reading each other's flag).
+    function postSaveToastKey() {
+        return "nbx-rd-post-save-toast-" + (root.getAttribute("data-design-id") || "");
+    }
+
+    // P5: the toast is feedback for the action JUST TAKEN ("I just did
+    // that"), so it fires exactly once, on the very next load after a save
+    // that actually changed something -- doSave's 200 branch (below) stashes
+    // this key right before its `window.location.reload()`. An ordinary page
+    // view (opening the design tomorrow, or a peer's planner opening THEIR
+    // design and seeing the same conflict, P6) never sets the key, so it
+    // never re-fires here -- that case is what the panel row above is for
+    // instead, since it reads from the page's own render every time, not
+    // from this one-shot flag.
+    (function fireSaveTimeConflictToasts() {
+        var key = postSaveToastKey();
+        var flagged;
+        try { flagged = sessionStorage.getItem(key); } catch (e) { flagged = null; }
+        if (!flagged) { return; }
+        try { sessionStorage.removeItem(key); } catch (e) { /* ignore */ }
+        PEER_CONFLICTS.forEach(function (c) {
+            var level = c.severity === "error" ? "danger" : "warning";
+            createToast(level, "Peer conflict", c.detail);
+        });
+    })();
+
     // Which of them a given placement kind may carry. The default is add-only,
     // matching the role/tenant rule the model enforces.
     function placementFieldsFor(kind) {
@@ -6517,6 +6557,12 @@
                     if (redirectTo) {
                         window.location.href = redirectTo;
                     } else {
+                        // P5: arm the ONE-SHOT post-save toast for the reload
+                        // this triggers -- see fireSaveTimeConflictToasts above.
+                        // Not armed on the redirectTo branch: that leaves for a
+                        // different page entirely (the layer switch), which has
+                        // no peer-conflicts payload of its own to read.
+                        try { sessionStorage.setItem(postSaveToastKey(), "1"); } catch (e) { /* ignore */ }
                         window.location.reload();
                     }
                 });

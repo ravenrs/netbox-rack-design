@@ -550,11 +550,14 @@ def _design_editor_context(request, design):
         {"rack": scoped_rack, "hidden": scoped_rack.pk in hidden_rack_ids}
         for scoped_rack in scoped_racks
     ]
-    # Chain conflicts (PLAN-design-chains.md §8.2/§8.3/G3): every rack's
-    # ``ProjectedElevation.conflicts``, flattened into ONE list for the
-    # persistent panel a chain conflict must render in (never a toast --
-    # §8.2, it is not this design's fault and persists until someone
-    # re-bases). ``slot_key`` is deliberately the SAME identifier the widget
+    # Chain + peer conflicts (PLAN-design-chains.md §8.2/§8.3/G3,
+    # PLAN-peer-conflicts.md P7): every rack's ``ProjectedElevation.conflicts``,
+    # flattened into TWO lists (chain_conflicts / peer_conflicts, split below
+    # by ``kind``) for the two persistent panel rows a conflict must render in
+    # (never a toast for a chain conflict -- §8.2, it is not this design's
+    # fault and persists until someone re-bases; a peer conflict DOES also get
+    # a toast, at save time, but that is P5's job, not this flatten's).
+    # ``slot_key`` is deliberately the SAME identifier the widget
     # dicts already carry -- a conflict's ``placement`` (when set) is the
     # exact placement a slot's ``placement_id`` came from (see
     # projection.py's ``_conflict()``/``emit()``), so the frontend joins a
@@ -563,27 +566,122 @@ def _design_editor_context(request, design):
     # ancestor_not_approved) carries no placement at all -- ``slot_key`` is
     # None, meaning the entry is about the rack/chain as a whole, not any one
     # tile, and the panel renders it without trying to highlight a tile.
+    # PLAN-peer-conflicts.md phase 2: the flat entry shape above is ONE
+    # vocabulary shared by two rows in this panel (kind decides which), not
+    # two vocabularies -- phase 4 serves the same keys over REST. `kind`
+    # decides which row an entry belongs in: the four chain kinds go to
+    # `chain_conflicts` (rendered under "re-base to resolve"), everything
+    # `peer_*` goes to `peer_conflicts` (rendered under its own sentence --
+    # re-basing does not touch a peer, see design_editor.html). A kind that
+    # matches NEITHER bucket is a future producer this flatten does not yet
+    # know about; raising here (rather than silently dropping it into either
+    # row, or worse, discarding it) is deliberate -- ``kind`` is our own
+    # controlled vocabulary from ``_conflict()`` call sites, never user input,
+    # so a mismatch is a programming error to fix, not data to tolerate.
+    _CHAIN_CONFLICT_KINDS = {
+        "ancestor_implemented", "ancestor_not_approved", "chain_broken", "bay_occupied",
+    }
     chain_conflicts = []
+    peer_conflicts = []
     for block in all_rack_blocks:
         rack_pk = block["rack"].pk
         for entry in block["conflicts"]:
+            kind = entry["kind"]
             placement = entry.get("placement")
             source_design = entry.get("source_design")
-            chain_conflicts.append({
-                "kind": entry["kind"],
+            slot = entry.get("slot")
+            if placement is not None:
+                # peer_name_claim / peer_device_claim and every chain kind:
+                # the entry is ABOUT this design's own placement, exactly as
+                # today -- slot_key joins it to the SAME placement_id a
+                # widget dict carries (_slot_to_widget's "placement_id").
+                slot_key = placement.pk
+            elif slot is not None:
+                # peer_slot_claim: `placement` is None (P3 -- the contested
+                # unit, not a placement of ours, is the subject) and the
+                # entry instead carries `slot`, the SAME slot dict object
+                # that is in the rack's front/rear list (_conflict()'s
+                # docstring). That slot dict was built by _slot() with its
+                # OWN `placement` key set to the DesignPlacement it renders
+                # (this design's own add/move, or -- for an inherited tile --
+                # the ancestor placement that named it; see `_BaselineEntry`
+                # in projection.py). `_slot_to_widget` reads that exact same
+                # key to fill a widget's `placement_id`, so `slot["placement"]`
+                # IS the identifier a widget carries for this tile -- no new
+                # scheme, just reached through the slot instead of directly.
+                slot_key = slot["placement"].pk if slot.get("placement") is not None else None
+            else:
+                slot_key = None
+            flat = {
+                "kind": kind,
                 "severity": entry["severity"],
                 "detail": entry["detail"],
                 "rack_id": rack_pk,
                 "source_design_id": source_design.pk if source_design is not None else None,
                 "source_design_name": str(source_design) if source_design is not None else None,
-                "slot_key": placement.pk if placement is not None else None,
-            })
+                "slot_key": slot_key,
+            }
+            if kind in _CHAIN_CONFLICT_KINDS:
+                chain_conflicts.append(flat)
+            elif kind.startswith("peer_"):
+                peer_conflicts.append(flat)
+            else:
+                raise ValueError(
+                    f"Unrecognized conflict kind {kind!r}: add it to "
+                    f"_CHAIN_CONFLICT_KINDS or give it a 'peer_' prefix so "
+                    f"_design_editor_context knows which panel row it belongs in."
+                )
+    # P12: name-claim rows collapse per peer design behind a `Show` toggle --
+    # one row per peer design ("Design C (draft) claims 5 of this design's
+    # planned names"), not one row per colliding name (P11 means two drafts
+    # commonly collide on a whole family at once). Slot and device rows stay
+    # one row each: an overlap is a specific unit a human must look at, and
+    # collapsing it would hide which. This is a PRESENTATION-only regrouping
+    # for the panel template -- `peer_conflicts` above stays the flat,
+    # ungrouped, per-entry vocabulary phase 4 will serve verbatim; grouping it
+    # here would mean maintaining a second shape.
+    peer_name_groups = {}
+    peer_conflict_rows = []
+    for entry in peer_conflicts:
+        if entry["kind"] != "peer_name_claim":
+            peer_conflict_rows.append({"grouped": False, **entry})
+            continue
+        key = entry["source_design_id"]
+        group = peer_name_groups.get(key)
+        if group is None:
+            group = {
+                "grouped": True,
+                "kind": "peer_name_claim",
+                "source_design_id": entry["source_design_id"],
+                "source_design_name": entry["source_design_name"],
+                "severity": entry["severity"],
+                "entries": [],
+            }
+            peer_name_groups[key] = group
+            peer_conflict_rows.append(group)
+        group["entries"].append(entry)
+        # An approved peer's claim on even one name in the batch makes the
+        # whole collapsed row an error (P1) -- worse severity wins, never the
+        # first-seen one.
+        if entry["severity"] == "error":
+            group["severity"] = "error"
+
     return {
         "scoped_racks": scoped_racks,
         "hidden_rack_ids": hidden_rack_ids,
         "all_rack_blocks": all_rack_blocks,
         "scoped_rack_rows": scoped_rack_rows,
         "chain_conflicts": chain_conflicts,
+        # Peer conflicts (PLAN-peer-conflicts.md P7/P12): a peer is not
+        # upstream, so this is a separate context key from chain_conflicts
+        # rather than folded into it -- see design_editor.html's third panel
+        # row for the reasoning on why the wording must differ too. Flat,
+        # ungrouped -- also what the save-time toast (editor.js) reads via
+        # its json_script mount, and the same shape phase 4 will serve.
+        "peer_conflicts": peer_conflicts,
+        # The panel's own grouped/collapsed view of the same data (P12) --
+        # see the comment above.
+        "peer_conflict_rows": peer_conflict_rows,
         # Drives the empty-state markup + the drawer's default-open override.
         "has_racks": bool(all_rack_blocks),
         # Gates the chassis-layer switch (spec §10.3/§10.4): offered only when the
