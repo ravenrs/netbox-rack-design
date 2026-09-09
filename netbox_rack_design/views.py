@@ -675,6 +675,23 @@ def _design_editor_context(request, design):
         else row
         for row in peer_conflict_rows
     ]
+    # PLAN-peer-conflicts.md phase 3: the "Re-run naming" button's payload --
+    # a comma-joined string of the colliding placement pk(s) this row's
+    # button acts on (the WHOLE batch for a grouped row, P12; the one
+    # placement for an ungrouped row). `slot_key` IS the placement pk for a
+    # `peer_name_claim` entry (set above -- the entry carries `placement`,
+    # never `slot`), so no new identifier is introduced. A plain string
+    # (not a JSON list) because it only ever needs to sit in one HTML
+    # attribute -- editor.js splits it back into ints.
+    for row in peer_conflict_rows:
+        if row["kind"] != "peer_name_claim":
+            continue
+        if row.get("grouped"):
+            row["placement_ids_csv"] = ",".join(
+                str(e["slot_key"]) for e in row["entries"]
+            )
+        else:
+            row["placement_ids_csv"] = str(row["slot_key"])
 
     return {
         "scoped_racks": scoped_racks,
@@ -702,6 +719,10 @@ def _design_editor_context(request, design):
         "save_url": f"/api/plugins/rack-design/designs/{design.pk}/save-layout/",
         # Read-only naming preview for the editor's add auto-fill (Phase 3).
         "preview_name_url": f"/api/plugins/rack-design/designs/{design.pk}/preview-name/",
+        # PLAN-peer-conflicts.md phase 3: the "Re-run naming" dialog's two
+        # calls -- the read-only diff and the write that commits it.
+        "rerun_naming_preview_url": f"/api/plugins/rack-design/designs/{design.pk}/rerun-naming-preview/",
+        "rerun_naming_url": f"/api/plugins/rack-design/designs/{design.pk}/rerun-naming/",
         # User-scoped favorite device types (the catalog palette's stars).
         "favorites_url": "/api/plugins/rack-design/favorite-device-types/",
         # The user's NAMED favorite sets ("Default", "for server", ...), which

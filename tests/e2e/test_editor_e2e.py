@@ -1501,6 +1501,98 @@ class EditorE2ETestCase(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_18_rerun_naming_dialog_cancel_and_confirm(self):
+        """PLAN-peer-conflicts.md P10, phase 3: the panel's "Re-run naming"
+        button on a peer_name_claim row opens a read-only old->new diff;
+        Cancel writes nothing, Confirm renames and the row is gone after
+        reload. Mirrors test_17's own-throwaway-design pattern exactly."""
+        site_id = self._api("GET", f"/api/dcim/racks/{RACK_PK}/")["site"]["id"]
+        dup_name = f"e2e-dup-rename-{uuid.uuid4()}"
+
+        peer = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        mine = self._api("POST", "/api/plugins/rack-design/designs/", {
+            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "racks": [int(RACK_PK)],
+        })
+        try:
+            u = self._live_free_u
+            self._api("POST", "/api/plugins/rack-design/placements/", {
+                "design": peer["id"], "kind": "add", "device_type": self._dt_id,
+                "proposed_name": dup_name, "target_rack": int(RACK_PK),
+                "target_position": u, "target_face": "front",
+            })
+            mine_placement = self._api(
+                "POST", "/api/plugins/rack-design/placements/", {
+                    "design": mine["id"], "kind": "add",
+                    "device_type": self._dt_id,
+                    "proposed_name": dup_name, "target_rack": int(RACK_PK),
+                    "target_position": u, "target_face": "front",
+                })
+            mine_pid = mine_placement["id"]
+
+            def _current_proposed_name():
+                return self._api(
+                    "GET",
+                    f"/api/plugins/rack-design/placements/{mine_pid}/",
+                )["proposed_name"]
+
+            self.assertEqual(_current_proposed_name(), dup_name)
+
+            mine_url = (
+                f"{BASE}/plugins/rack-design/designs/{mine['id']}/editor/{RACK_PK}/")
+            self.page.goto(mine_url, wait_until="networkidle")
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self._dismiss_debug_toolbar()
+
+            button_selector = (
+                f"[data-rd-rerun-naming][data-rd-placement-ids='{mine_pid}']")
+            self.page.wait_for_selector(button_selector, timeout=5000)
+
+            # ---- Cancel: dialog opens with the diff, Cancel writes nothing.
+            self.page.click(button_selector)
+            self.page.wait_for_selector(".nbx-rd-rerun-naming-modal", timeout=5000)
+            diff_text = self.page.eval_on_selector(
+                ".nbx-rd-rerun-naming-lines", "el => el.textContent")
+            self.assertIn(dup_name, diff_text,
+                          f"diff line should show the OLD (colliding) name: {diff_text!r}")
+            self.page.click(
+                ".nbx-rd-rerun-naming-modal button.btn-link:has-text('Cancel')")
+            self.page.wait_for_selector(
+                ".nbx-rd-rerun-naming-modal", state="detached", timeout=5000)
+            self.assertEqual(
+                _current_proposed_name(), dup_name,
+                "Cancel must write nothing")
+            # The row survives Cancel -- the button is still there to retry.
+            self.page.wait_for_selector(button_selector, timeout=5000)
+
+            # ---- Confirm: writes the rename and reloads; the row is gone.
+            self.page.click(button_selector)
+            self.page.wait_for_selector(".nbx-rd-rerun-naming-modal", timeout=5000)
+            with self.page.expect_navigation(wait_until="networkidle", timeout=15000):
+                self.page.click("[data-rd-rerun-naming-confirm]")
+
+            new_name = _current_proposed_name()
+            self.assertNotEqual(
+                new_name, dup_name,
+                "Confirm must rename the colliding placement")
+
+            self.page.wait_for_selector("#rd-editor", timeout=10000)
+            self._dismiss_debug_toolbar()
+            self.assertIsNone(
+                self.page.query_selector(button_selector),
+                "the renamed placement's row must be gone after reload")
+        finally:
+            for design_id in (peer["id"], mine["id"]):
+                try:
+                    self._api(
+                        "DELETE",
+                        f"/api/plugins/rack-design/designs/{design_id}/")
+                except Exception:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

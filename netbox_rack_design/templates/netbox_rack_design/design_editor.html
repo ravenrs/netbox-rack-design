@@ -87,6 +87,8 @@
            data-design-id="{{ object.pk }}"
            data-design-title="{{ object.title }}"
            data-preview-name-url="{{ preview_name_url }}"
+           data-rerun-naming-preview-url="{{ rerun_naming_preview_url }}"
+           data-rerun-naming-url="{{ rerun_naming_url }}"
            data-save-url="{{ save_url }}"
            data-favorites-url="{{ favorites_url }}"
            data-favorite-sets-url="{{ favorite_sets_url }}"
@@ -192,6 +194,13 @@
                       {% for e in row.entries %}<li>{{ e.detail }}</li>{% endfor %}
                     </ul>
                   </details>
+                  {# P10: one "Re-run naming" button acts on the WHOLE batch  #}
+                  {# (P12) -- `data-rd-placement-ids` carries every colliding  #}
+                  {# placement pk this row groups, comma-joined.              #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary ms-1 nbx-rd-rerun-naming"
+                          data-rd-rerun-naming data-rd-placement-ids="{{ row.placement_ids_csv }}">
+                    {% trans "Re-run naming" %}
+                  </button>
                 {% else %}
                   {{ row.detail }}
                   {% if row.source_design_name %}
@@ -199,6 +208,13 @@
                     ({% trans "from" %}
                     {% if row.source_design_id %}<a href="{% url 'plugins:netbox_rack_design:design' pk=row.source_design_id %}">{{ row.source_design_name }}</a>{% else %}{{ row.source_design_name }}{% endif %})
                   </span>
+                  {% endif %}
+                  {% if row.kind == "peer_name_claim" %}
+                  {# P10: the single-collision case -- same button, one pk.   #}
+                  <button type="button" class="btn btn-sm btn-outline-secondary ms-1 nbx-rd-rerun-naming"
+                          data-rd-rerun-naming data-rd-placement-ids="{{ row.placement_ids_csv }}">
+                    {% trans "Re-run naming" %}
+                  </button>
                   {% endif %}
                 {% endif %}
               </li>

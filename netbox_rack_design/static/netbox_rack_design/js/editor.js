@@ -711,6 +711,168 @@
         }
     }
 
+    // PLAN-peer-conflicts.md P10, phase 3: the "Re-run naming" dialog. A
+    // READ-ONLY diff -- one line per colliding placement, "old -> new" --
+    // with Cancel/Confirm, modelled on showDisplaceConfirmDialog's shape
+    // above (fresh overlay per open, `decided` guard, transition-safe hide,
+    // blur-before-hide, every `data-bs-dismiss` control wired explicitly).
+    // Not editable: per-name editing already exists elsewhere (P12 note),
+    // so this dialog's only job is "here is what I am about to do".
+    // `lines` is the preview response's `{placement_id, old_name, new_name,
+    // still_colliding}` array. Confirm calls `onConfirm()` with no args --
+    // the caller already knows which placement_ids it asked to preview, and
+    // POSTs that SAME list to the commit endpoint, which recomputes the
+    // diff itself rather than trusting anything from this dialog (P9).
+    function showRerunNamingDialog(lines, onConfirm, onCancel) {
+        var overlay = document.createElement("div");
+        overlay.className = "modal fade nbx-rd-rerun-naming-modal";
+        overlay.setAttribute("tabindex", "-1");
+        var rows = (lines || []).map(function (line) {
+            var oldName = line.old_name || "(unnamed)";
+            var newName = line.new_name || "(unnamed)";
+            var warn = line.still_colliding
+                ? ' <span class="text-warning-emphasis small" title="'
+                    + "This name is still claimed by a peer design after re-running."
+                    + '">(still collides)</span>'
+                : "";
+            return '<li class="nbx-rd-rerun-naming-line" data-rd-placement-id="' + line.placement_id + '">'
+                + '<code>' + oldName + '</code> &rarr; <code>' + newName + '</code>' + warn
+                + '</li>';
+        }).join("");
+        overlay.innerHTML =
+            '<div class="modal-dialog modal-dialog-centered modal-sm">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header">'
+            + '<h5 class="modal-title">' + "Re-run naming" + "</h5>"
+            + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+            + "</div>"
+            + '<div class="modal-body">'
+            + '<p class="small text-muted">These planned names collide with a peer '
+            + "design; confirming renames every line below.</p>"
+            + '<ul class="mb-0 ps-3 nbx-rd-rerun-naming-lines">' + rows + "</ul>"
+            + "</div>"
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
+            + '<button type="button" class="btn btn-sm btn-primary" data-rd-rerun-naming-confirm>Confirm</button>'
+            + "</div>"
+            + "</div></div>";
+        document.body.appendChild(overlay);
+
+        var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
+        var modal = ctor ? new ctor(overlay) : null;
+        var decided = false;
+
+        var shownDone = false, hidePending = false;
+        overlay.addEventListener("shown.bs.modal", function () {
+            shownDone = true;
+            if (hidePending && modal) { modal.hide(); }
+        });
+        function requestHide() {
+            if (!modal) { overlay.remove(); return; }
+            if (shownDone) { modal.hide(); } else { hidePending = true; }
+        }
+
+        function finishConfirm() {
+            if (decided) { return; }
+            decided = true;
+            if (typeof onConfirm === "function") { onConfirm(); }
+        }
+        function finishCancel() {
+            if (decided) { return; }
+            decided = true;
+            if (typeof onCancel === "function") { onCancel(); }
+        }
+
+        overlay.querySelector("[data-rd-rerun-naming-confirm]").addEventListener("click", function () {
+            finishConfirm();
+            requestHide();
+        });
+        overlay.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                finishCancel();
+                requestHide();
+            });
+        });
+        overlay.addEventListener("hide.bs.modal", function () {
+            if (overlay.contains(document.activeElement)) {
+                document.activeElement.blur();
+            }
+        });
+        overlay.addEventListener("hidden.bs.modal", function () {
+            finishCancel();
+            overlay.remove();
+        });
+
+        if (modal) {
+            modal.show();
+        } else {
+            finishConfirm();
+            overlay.remove();
+        }
+    }
+
+    // Wiring for every "Re-run naming" button the panel rendered (P10):
+    // both the grouped-row batch button and an ungrouped row's single-name
+    // button carry the SAME `data-rd-rerun-naming` marker and a comma-
+    // joined `data-rd-placement-ids`. Preview is a read-only POST; Confirm
+    // POSTs the SAME id list to the commit endpoint (recomputed server-side,
+    // never trusting this dialog's own copy, P9) and reloads on success so
+    // the panel/tiles re-render from the design's new state.
+    (function wireRerunNamingButtons() {
+        var previewUrl = root.getAttribute("data-rerun-naming-preview-url") || "";
+        var commitUrl = root.getAttribute("data-rerun-naming-url") || "";
+        if (!previewUrl || !commitUrl) { return; }
+        root.querySelectorAll("[data-rd-rerun-naming]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var idsAttr = btn.getAttribute("data-rd-placement-ids") || "";
+                var placementIds = idsAttr.split(",").map(function (s) {
+                    return parseInt(s, 10);
+                }).filter(function (n) { return !isNaN(n); });
+                if (!placementIds.length) { return; }
+                btn.disabled = true;
+                fetch(previewUrl, {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": getCsrfToken(),
+                    },
+                    body: JSON.stringify({ placement_ids: placementIds }),
+                }).then(function (resp) {
+                    return resp.ok ? resp.json() : null;
+                }).then(function (data) {
+                    btn.disabled = false;
+                    if (!data || !data.lines) {
+                        createToast("danger", "Re-run naming", "Could not compute a preview.");
+                        return;
+                    }
+                    showRerunNamingDialog(data.lines, function onConfirm() {
+                        fetch(commitUrl, {
+                            method: "POST",
+                            credentials: "same-origin",
+                            headers: {
+                                "Content-Type": "application/json",
+                                "X-CSRFToken": getCsrfToken(),
+                            },
+                            body: JSON.stringify({ placement_ids: placementIds }),
+                        }).then(function (resp) {
+                            if (!resp.ok) {
+                                createToast("danger", "Re-run naming", "The rename could not be saved.");
+                                return;
+                            }
+                            window.location.reload();
+                        }).catch(function () {
+                            createToast("danger", "Re-run naming", "The rename could not be saved.");
+                        });
+                    });
+                }).catch(function () {
+                    btn.disabled = false;
+                    createToast("danger", "Re-run naming", "Could not compute a preview.");
+                });
+            });
+        });
+    })();
+
     // ---- Planned-PDU / rack power dialogs (docs/pdu-distribution-spec.md) --
     // A planned PDU add has no real device/PowerFeed yet -- the distribution
     // script needs a stored power_config (custom-fields snapshot + feed

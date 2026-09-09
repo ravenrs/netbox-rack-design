@@ -195,6 +195,7 @@ __all__ = (
     "project_rack",
     "baseline_occupancy",
     "device_type_power_summary",
+    "peer_placements_for_design",
 )
 
 PLUGIN_NAME = "netbox_rack_design"
@@ -2541,6 +2542,29 @@ def _peer_severity(peer_design):
     if peer_design.status == DesignStatusChoices.STATUS_APPROVED:
         return "error"
     return "warning"
+
+
+def peer_placements_for_design(design):
+    """Every OTHER design's placement that could conflict with ANY of
+    ``design``'s own placements, across EVERY rack ``design`` scopes --
+    the union ``_peer_conflicts`` computes one rack at a time inside
+    ``project_rack``, gathered once here for the rename action
+    (PLAN-peer-conflicts.md phase 3, P9/P10). Deduplicated by placement pk
+    (a peer design scoping several of ``design``'s racks would otherwise be
+    fetched once per rack). ``[]`` when P13's flag is off or ``design``
+    scopes no racks -- no query either way.
+
+    Public (unlike ``_peer_placements``/``_lineage_exclusion_ids``) because
+    the rename action lives in ``api/views.py``, outside this module.
+    """
+    if not _peer_conflicts_enabled():
+        return []
+    exclusion_ids = _lineage_exclusion_ids(design)
+    peers = {}
+    for rack in design.racks.all():
+        for placement in _peer_placements(rack, exclusion_ids):
+            peers[placement.pk] = placement
+    return list(peers.values())
 
 
 def _peer_conflicts(design, rack, own_placements, front, rear):

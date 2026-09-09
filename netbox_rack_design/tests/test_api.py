@@ -2504,6 +2504,217 @@ class PreviewNameTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
 
 
+@override_settings(PLUGINS_CONFIG=_plugins_config())
+class RerunNamingActionTest(APITestCase):
+    """
+    Tests for the DesignViewSet rerun-naming-preview / rerun-naming actions
+    (PLAN-peer-conflicts.md P9/P10/P11, phase 3): re-running the naming engine
+    over ONLY a design's colliding placements, with a read-only preview and a
+    confirmed write.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+
+        # Design A: the design whose placements we rename. Two placements --
+        # one colliding with peer B's claimed name, one clean (P9: only the
+        # colliding one may ever change).
+        cls.design = Design.objects.create(title="IDS-1", site=cls.site)
+        cls.design.racks.add(cls.racks[1])
+        cls.colliding = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.racks[1],
+            target_position=10,
+            proposed_name="dup-name",
+        )
+        cls.clean = DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.racks[1],
+            target_position=11,
+            proposed_name="A-clean",
+        )
+
+        # Peer B: a DRAFT design (default status) that also scopes rack[1]
+        # and claims the SAME name as `colliding` -- this is what the panel's
+        # "Re-run naming" button would have been rendered from.
+        cls.peer = Design.objects.create(title="IDS-2", site=cls.site)
+        cls.peer.racks.add(cls.racks[1])
+        DesignPlacement.objects.create(
+            design=cls.peer,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.device_type,
+            target_rack=cls.racks[1],
+            target_position=20,
+            proposed_name="dup-name",
+        )
+
+    def _preview_url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-rerun-naming-preview",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def _commit_url(self, design=None):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-rerun-naming",
+            kwargs={"pk": (design or self.design).pk},
+        )
+
+    def test_preview_returns_diff_and_writes_nothing(self):
+        """Preview reports old -> new for the colliding placement only, and
+        persists nothing (the placements are byte-identical afterwards)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        before_colliding = self.colliding.proposed_name
+        before_clean = self.clean.proposed_name
+        response = self.client.post(
+            self._preview_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        lines = response.data["lines"]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["placement_id"], self.colliding.pk)
+        self.assertEqual(lines[0]["old_name"], "dup-name")
+        # Sequence mode: "<title>-<ordinal>" -- `colliding` is ordinal 1
+        # (target_position 10 sorts first), so the fresh name differs from
+        # both the old name and the peer's claim.
+        self.assertEqual(lines[0]["new_name"], "IDS-1-1")
+        self.assertFalse(lines[0]["still_colliding"])
+
+        self.colliding.refresh_from_db()
+        self.clean.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, before_colliding)
+        self.assertEqual(self.clean.proposed_name, before_clean)
+
+    def test_commit_writes_exactly_the_shown_set(self):
+        """Confirm writes every line the preview showed -- the colliding
+        placement is renamed, the clean sibling is untouched byte-for-byte
+        (P9: renaming a clean name is churn, not a fix)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        preview = self.client.post(
+            self._preview_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(preview, status.HTTP_200_OK)
+        expected_new_name = preview.data["lines"][0]["new_name"]
+
+        response = self.client.post(
+            self._commit_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["lines"][0]["new_name"], expected_new_name)
+
+        self.colliding.refresh_from_db()
+        self.clean.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, expected_new_name)
+        self.assertEqual(self.clean.proposed_name, "A-clean")
+
+    def test_commit_rejects_a_non_colliding_placement(self):
+        """A stale dialog naming a placement that is not CURRENTLY colliding
+        is rejected whole -- nothing is written, including the placement
+        that IS colliding in the same payload (P9's guard)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        before_colliding = self.colliding.proposed_name
+        before_clean = self.clean.proposed_name
+        response = self.client.post(
+            self._commit_url(),
+            {"placement_ids": [self.colliding.pk, self.clean.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.colliding.refresh_from_db()
+        self.clean.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, before_colliding)
+        self.assertEqual(self.clean.proposed_name, before_clean)
+
+    def test_commit_rejected_when_design_approved(self):
+        """A FROZEN design refuses the commit with 409, like every other
+        write action; nothing is renamed."""
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        self.design.status = DesignStatusChoices.STATUS_APPROVED
+        self.design.save()
+        before = self.colliding.proposed_name
+        response = self.client.post(
+            self._commit_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.colliding.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, before)
+
+    def test_view_design_is_enough_for_preview_but_not_for_commit(self):
+        """`view_design` alone lets the preview through (P10's precedent:
+        a computing POST needs no more) but a commit with only that
+        permission is refused -- writing requires `change_design`."""
+        self.add_permissions("netbox_rack_design.view_design")
+        preview = self.client.post(
+            self._preview_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(preview, status.HTTP_200_OK)
+
+        commit = self.client.post(
+            self._commit_url(), {"placement_ids": [self.colliding.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(commit, status.HTTP_403_FORBIDDEN)
+        self.colliding.refresh_from_db()
+        self.assertEqual(self.colliding.proposed_name, "dup-name")
+
+    def test_still_colliding_after_rerun_is_reported_not_hidden(self):
+        """P11: the family counter never reserves against a peer draft, so a
+        fresh name CAN land on the exact same name the peer already claims.
+        The response must say so (`still_colliding`), never silently claim a
+        fix -- and the commit still writes it (P10: confirm writes every
+        line shown)."""
+        # Both designs share a title AND an ordinal-1 placement, so sequence
+        # mode's "<title>-<n>" independently computes the SAME fresh name for
+        # both sides, no matter how many times either re-runs (P11's
+        # accepted consequence).
+        shared_a = Design.objects.create(title="Shared", site=self.site)
+        shared_a.racks.add(self.racks[1])
+        placement_a = DesignPlacement.objects.create(
+            design=shared_a, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=self.racks[1],
+            target_position=30, proposed_name="Shared-1",
+        )
+        shared_b = Design.objects.create(title="Shared", site=self.site)
+        shared_b.racks.add(self.racks[1])
+        DesignPlacement.objects.create(
+            design=shared_b, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=self.racks[1],
+            target_position=31, proposed_name="Shared-1",
+        )
+
+        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
+        response = self.client.post(
+            self._commit_url(shared_a), {"placement_ids": [placement_a.pk]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        line = response.data["lines"][0]
+        self.assertEqual(line["new_name"], "Shared-1")
+        self.assertTrue(line["still_colliding"])
+        placement_a.refresh_from_db()
+        # Written anyway (P10) -- still_colliding is reported, not withheld.
+        self.assertEqual(placement_a.proposed_name, "Shared-1")
+
+
 class DesignRackScopeTest(APITestCase):
     """
     Tests for the DesignViewSet add-rack / remove-rack scope actions (Phase A).
