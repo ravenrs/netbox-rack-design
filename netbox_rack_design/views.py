@@ -341,6 +341,8 @@ class DesignElevationRackRedirectView(generic.ObjectView):
 _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor.js",
     "netbox_rack_design/js/editor/model.js",
+    "netbox_rack_design/js/editor/trace.js",
+    "netbox_rack_design/js/editor/hovercard.js",
     "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
     "netbox_rack_design/js/power_heatmap.js",
