@@ -334,11 +334,18 @@ class DesignElevationRackRedirectView(generic.ObjectView):
 # Editor static assets we cache-bust: a ?v=<token> derived from their newest
 # mtime is appended in the template so a browser always fetches the current
 # build instead of a stale cached copy (no manual hard-refresh needed).
+# Every asset the editor page loads belongs here: the token is the NEWEST mtime
+# across the list, so a file left out of it can be edited without moving the
+# token at all -- and then the ?v= on its URL never changes and the browser
+# keeps serving its cached copy.
 _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor.js",
+    "netbox_rack_design/js/editor/model.js",
     "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
+    "netbox_rack_design/js/power_heatmap.js",
     "netbox_rack_design/js/rack_design.js",
+    "netbox_rack_design/js/rack_layout.js",
     "netbox_rack_design/css/editor.css",
     "netbox_rack_design/css/rack_design.css",
 )

@@ -553,9 +553,27 @@
   <script>window.__rdDebugAvailable = true;</script>
   {% endif %}
   <script src="{% static 'netbox_rack_design/js/gridstack-all.js' %}"></script>
-  <script src="{% static 'netbox_rack_design/js/editor.js' %}?v={{ asset_version }}" defer></script>
+  {# ---------------------------------------------------------------------- #}
+  {# editor.js is an ES module and imports its submodules by BARE specifier #}
+  {# ("rd/model.js"), which this map resolves. The indirection buys the one #}
+  {# thing a relative import cannot: the ?v=<asset_version> cache-bust      #}
+  {# token. A relative "./editor/model.js" would resolve to an unversioned  #}
+  {# URL, so an upgrade could pair a fresh editor.js with a browser-cached  #}
+  {# stale model.js -- a broken editor, and a hard refresh the only cure.   #}
+  {# The map must precede every module script on the page.                  #}
+  <script type="importmap">
+  {
+    "imports": {
+      "rd/model.js": "{% static 'netbox_rack_design/js/editor/model.js' %}?v={{ asset_version }}"
+    }
+  }
+  </script>
+  {# Module scripts are deferred implicitly and still execute in document    #}
+  {# order alongside the defer'd classic scripts below, so editor.js keeps   #}
+  {# publishing window.NbxRdEditor before its consumers run.                #}
+  <script type="module" src="{% static 'netbox_rack_design/js/editor.js' %}?v={{ asset_version }}"></script>
   <script src="{% static 'netbox_rack_design/js/editor_panels.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/legend_filter.js' %}?v={{ asset_version }}" defer></script>
   <script src="{% static 'netbox_rack_design/js/power_heatmap.js' %}?v={{ asset_version }}" defer></script>
-<script src="{% static 'netbox_rack_design/js/rack_layout.js' %}?v={{ asset_version }}" defer></script>
+  <script src="{% static 'netbox_rack_design/js/rack_layout.js' %}?v={{ asset_version }}" defer></script>
 {% endblock javascript %}
