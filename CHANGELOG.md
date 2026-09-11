@@ -19,18 +19,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The editor's JavaScript is being split into ES modules.** `editor.js` had
-  grown to 8455 lines in a single closure; the read-model, the drag tracer,
-  the hover card, the CSRF/toast helpers, the three modal dialogs, the
-  device-catalog palette and the planned-PDU/rack-power dialogs now live in
-  their own files under `static/netbox_rack_design/js/editor/`, leaving 5129.
+- **The editor's JavaScript is now split into ES modules.** `editor.js` had
+  grown to 8455 lines in a single closure. The read-model, the drag tracer, the
+  hover card, the CSRF/toast helpers, the three modal dialogs, the device
+  catalog palette, the planned-PDU/rack-power dialogs, cursor-governed
+  placement, GridStack push suppression, the dirty-flag state, the frame/grid
+  options and the cross-rack registry now live in their own files under
+  `static/netbox_rack_design/js/editor/`, as does the per-rack controller
+  itself — thirteen modules, leaving 668 lines of editor.js.
   There is no bundler and no build step: `editor.js` is loaded as a module and
   resolves its submodules through an import map the editor template emits,
   which is what keeps the cache-bust token on every module URL. No behaviour
   changes — each extracted block is byte-identical to the one it replaced,
   apart from named substitutions where a module re-derives a DOM element the
-  enclosing closure used to hold, and guards where a module evaluates at load
-  time in a page that may not contain the editor at all.
+  enclosing closure used to hold, guards where a module evaluates at load time
+  in a page that may not contain the editor at all, and the dirty flag, which
+  was written from both sides of the per-rack boundary and now has one owner
+  behind a setter because an ES module importer cannot assign to an imported
+  binding.
 - **Two long-red editor e2e suites repaired (tests only, no product change).**
   Both had been invalidated by features that shipped after them.
   `test_e5_stripe_bar_outside_rack_frame` required a stripe bar to still carry
