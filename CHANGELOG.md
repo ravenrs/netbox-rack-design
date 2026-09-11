@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Editor assets could be served stale after an upgrade.** The editor page
+  stamps a `?v=<token>` cache-bust on each of its own static files, and the
+  token is the newest modification time across an explicit list — but
+  `power_heatmap.js` and `rack_layout.js` were never on that list. Editing
+  either one therefore never moved the token, so a browser kept serving its
+  cached copy of that file while every other asset refreshed. Both are now
+  registered, along with the editor's new JavaScript modules.
+
+### Changed
+
+- **The editor's JavaScript is being split into ES modules.** `editor.js` had
+  grown to 8455 lines in a single closure; the read-model, the drag tracer,
+  the hover card, the CSRF/toast helpers and the three modal dialogs now live
+  in their own files under `static/netbox_rack_design/js/editor/`, leaving
+  6986. There is no bundler and no build step: `editor.js` is loaded as a
+  module and resolves its submodules through an import map the editor template
+  emits, which is what keeps the cache-bust token on every module URL. No
+  behaviour changes — each extracted block is byte-identical to the one it
+  replaced, apart from named substitutions where a module re-derives a DOM
+  element the enclosing closure used to hold.
+
 ## [0.32.0] - 2026-09-09
 
 ### Release Summary
