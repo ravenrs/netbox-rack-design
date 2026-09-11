@@ -63,6 +63,20 @@ import {
     rdBayItemsForRack,
     rdCursorGesture,
 } from "rd/cursor.js";
+import { rdBeginPushSuppression, rdEndPushSuppression } from "rd/push.js";
+import {
+    isDirtySuppressed,
+    setDirtySuppressed,
+    withDirtySuppressed,
+} from "rd/dirty.js";
+import { syncRackHeight, commonOptions, makeFrame } from "rd/frame.js";
+import {
+    controllersByRackId,
+    tileInFlight,
+    freezeAllTiles,
+    thawAllTiles,
+    findGhostAcrossBlocks,
+} from "rd/registry.js";
 
 (function () {
     "use strict";
@@ -74,109 +88,7 @@ import {
     // The dev-only drag-lifecycle tracer lives in editor/trace.js. It reads
     // only window flags, so it moved with no dependencies at all.
 
-    // Phase 0 (spec §5, §7) used to wrap the shared engine prototype's
-    // _fixCollisions with a per-engine recursion-depth cap here, as a vendor-
-    // level backstop against a densely-packed float:true rack sending
-    // GridStack's engine into infinite mutual recursion between
-    // _fixCollisions()/moveNode(). Phase 2's push neutralization below (which
-    // disables GridStack's collision-driven pushing for the ENTIRE duration
-    // of any gesture, not just capping a runaway cascade) already made that
-    // recursion structurally unreachable; Phase 4 removed the now-redundant
-    // guard once the full gate (incl. the dense-pack E8 + hatch-overlap
-    // regression tests) was confirmed green without it.
-    //
-    // ---- Phase 2 push neutralization (spec §5, §4.1) -----------------------
-    // GridStack's Engine._fixCollisions() is what "resolves" a collision by
-    // pushing either the moving node itself further down (past a locked
-    // neighbour) or the OTHER node aside (moveNode(other, ...)) -- both are
-    // exactly the "the engine decides placement" behaviour the spec forbids:
-    // legality is OUR call (rdCanPlaceAt, see the Phase 1/2 read-model
-    // section below), made once on drop, never GridStack's mid-drag collision
-    // cascade. Every gesture (a real drag, a shim-driven move, a palette
-    // drag-in) is already bracketed by freezeAllTiles/thawAllTiles below;
-    // rdPushSuppressDepth mirrors that SAME bracket as a counter (not a bool)
-    // so a nested freeze/thaw pair -- e.g. a cross-rack adoption's deferred
-    // thaw racing a fresh drag's freeze -- never leaves suppression stuck on,
-    // nor turns it off while an outer gesture is still in flight.
-    //
-    // TWO layers, because a live-mouse drag was confirmed (probe, see the
-    // Phase 2 handoff notes) to relocate OTHER tiles via a path that never
-    // goes through _fixCollisions at all (GridStack's own drag-collision
-    // math can call Engine.moveNode(otherNode, ...) directly) -- suppressing
-    // _fixCollisions alone was NOT sufficient:
-    //   1. _fixCollisions is a no-op while suppressed (belt): stops the
-    //      classic push-cascade (and is what the recursion-depth guard above
-    //      was originally added to cap).
-    //   2. moveNode itself refuses to reposition any node whose element
-    //      freezeOthers has marked `_rdFrozen` for this gesture (suspenders,
-    //      and the one that actually matters): this blocks a relocation
-    //      REGARDLESS of which internal GridStack code path asked for it.
-    //      The gesture's own tile is deliberately excluded from freezing
-    //      (freezeOthers' `exceptEl`), so it alone is still free to move
-    //      wherever the pixel/cell math (or a test shim's fastSetY) puts it,
-    //      colliding or not -- tileOverlapsOther/rdCanPlaceAt independently
-    //      re-scans for a genuine collision on drop and reverts (cancelMove)
-    //      if the target is illegal. THAT is what decides accept/reject, not
-    //      GridStack.
-    // Outside a gesture (suppression off / nothing frozen), both wrapped
-    // methods behave exactly as before -- this is purely additive.
-    var rdPushSuppressDepth = 0;
-    function rdBeginPushSuppression() { rdPushSuppressDepth++; }
-    function rdEndPushSuppression() {
-        if (rdPushSuppressDepth > 0) { rdPushSuppressDepth--; }
-    }
-    (function guardPushDuringGesture() {
-        if (!GridStack.Engine || !GridStack.Engine.prototype) { return; }
-        var proto = GridStack.Engine.prototype;
-        if (proto.__rdPushGuarded) { return; }
-        var origFix = proto._fixCollisions;
-        var origMove = proto.moveNode;
-        var origPack = proto._packNodes;
-        var origMoveCheck = proto.moveNodeCheck;
-        if (typeof origFix !== "function" || typeof origMove !== "function") { return; }
-        proto._fixCollisions = function () {
-            if (rdPushSuppressDepth > 0) { return false; }
-            return origFix.apply(this, arguments);
-        };
-        proto.moveNode = function (node) {
-            if (node && node.el && node.el._rdFrozen) { return false; }
-            return origMove.apply(this, arguments);
-        };
-        // THIRD layer (found root-causing the 2026-07-08 live stale-shadow
-        // bug): the two suppressed/guarded methods above are NOT the only
-        // vendor paths that reposition OTHER nodes during a drag --
-        //   * Engine._packNodes()'s float branch does DIRECT `n.y = ...`
-        //     writes (no moveNode, no _fixCollisions) to float any node whose
-        //     y drifted from its `_orig` snapshot, and it runs from the tail
-        //     of every Engine.moveNode call (`t.pack` defaults on);
-        //   * Engine.moveNodeCheck() -- the entry point GridStack's live
-        //     drag-over uses on a maxRow grid (every rack face grid sets
-        //     gs-max-row) -- simulates the move on a CLONED engine and then
-        //     copies every dirty clone's position back onto the REAL nodes
-        //     via direct copyPos writes, bypassing moveNode entirely.
-        // Both are neutralized the same way as _fixCollisions: while a
-        // gesture's suppression bracket is open, _packNodes is a no-op and
-        // moveNodeCheck degrades to a plain (guarded) moveNode of the checked
-        // node itself -- so during any gesture the ONLY node that can change
-        // position through ANY engine path is the gesture's own tile, which
-        // is exactly spec §4.1's "no other tile may change position as a side
-        // effect".
-        if (typeof origPack === "function") {
-            proto._packNodes = function () {
-                if (rdPushSuppressDepth > 0) { return this; }
-                return origPack.apply(this, arguments);
-            };
-        }
-        if (typeof origMoveCheck === "function") {
-            proto.moveNodeCheck = function (node, o) {
-                if (rdPushSuppressDepth > 0) {
-                    return proto.moveNode.call(this, node, o);
-                }
-                return origMoveCheck.apply(this, arguments);
-            };
-        }
-        proto.__rdPushGuarded = true;
-    })();
+    // GridStack push neutralization lives in editor/push.js.
 
     var root = document.getElementById("rd-editor");
     if (!root) {
@@ -204,13 +116,11 @@ import {
     var changesMade = false;
     var saveButton = document.getElementById("rd-editor-save");
 
-    // Set while a controller is re-deriving its purely-visual full-depth opposite
-    // hatches: those grid mutations are not user edits, so they must not flip the
-    // dirty state or arm the Save button.
-    var suppressDirty = false;
+    // The suppress-dirty flag lives in editor/dirty.js: it is written from both
+    // sides of the initRack boundary, which only works through functions.
 
     function markDirty() {
-        if (suppressDirty) { return; }
+        if (isDirtySuppressed()) { return; }
         changesMade = true;
         if (saveButton) {
             saveButton.removeAttribute("disabled");
@@ -406,130 +316,8 @@ import {
     // the dirty flag, which editor.js owns.
     setPowerHooks({ markDirty: markDirty });
 
-    // ---- Shared rack-height sync -------------------------------------------
-    // The fixed left rail (catalog) + quick-access columns track the height of a
-    // VISIBLE rack elevation so they read as rack-tall. With several racks we
-    // simply measure the first visible elevation found. Recomputed on resize and
-    // when a face is toggled.
-    var layoutEl = document.querySelector(".nbx-rd-editor-layout");
-    function syncRackHeight() {
-        if (!layoutEl) { return; }
-        var grids = root.querySelectorAll(".nbx-rd-rack");
-        var h = 0;
-        for (var i = 0; i < grids.length; i++) {
-            if (grids[i].offsetParent !== null && grids[i].offsetHeight > h) {
-                h = grids[i].offsetHeight;
-            }
-        }
-        if (h > 80) {
-            layoutEl.style.setProperty("--nbx-rd-rack-height", h + "px");
-        }
-    }
-
-    // ---- Shared GridStack options ------------------------------------------
-    function commonOptions(extra) {
-        var opts = {
-            cellHeight: 11,
-            margin: 0,
-            marginBottom: 1,
-            column: 1,
-            float: true,
-            animate: true,
-            disableResize: true,   // slice 2a: move only, no resize
-            acceptWidgets: true,   // overridden per rack to scope cross-grid drops
-            removable: false,
-            // Don't start a drag when the pointer goes down on a tile's remove
-            // (×) button, a palette row's favorite (star) button, or an add
-            // tile's editable name input — otherwise GridStack captures the
-            // pointer and the click/focus never fires.
-            draggable: { cancel: ".nbx-rd-remove-btn, .nbx-rd-fav-btn, .nbx-rd-name-input, .nbx-rd-name-edit-btn" },
-        };
-        if (extra) {
-            Object.keys(extra).forEach(function (k) { opts[k] = extra[k]; });
-        }
-        return opts;
-    }
-
-    // Cursor-governed placement (spec §4.1) lives in editor/cursor.js.
-
-    // ========================================================================
-    // Cross-rack move plumbing (module level, shared by every rack controller).
-    // ------------------------------------------------------------------------
-    // controllersByRackId: each initRack registers itself here so the cross-rack
-    //   flow can reach the OTHER rack's grids (to drop an origin ghost on the
-    //   source, or to snap a tile back into the source on ×/cancel).
-    // tileInFlight: the origin descriptor captured on dragstart of a real-device
-    //   tile. It survives the synchronous removed(source)+dropped(destination)
-    //   events of a GridStack cross-grid drag; the next dragstart overwrites it.
-    // ========================================================================
-    var controllersByRackId = {};
-    var tileInFlight = null;
-
-    // Freeze/thaw every rack's tiles around a drag so a moved or newly-added
-    // device can never displace an existing planned tile (see freezeOthers/thaw).
-    function freezeAllTiles(exceptEl) {
-        // Begin push suppression for the WHOLE gesture this freeze opens (see
-        // guardPushDuringGesture above) -- matched 1:1 by thawAllTiles' end
-        // below, at every call site that already pairs these two today.
-        rdBeginPushSuppression();
-        var prev = suppressDirty;
-        suppressDirty = true;
-        try {
-            Object.keys(controllersByRackId).forEach(function (rid) {
-                controllersByRackId[rid].freezeOthers(exceptEl);
-            });
-        } finally {
-            suppressDirty = prev;
-        }
-    }
-    function thawAllTiles() {
-        var prev = suppressDirty;
-        suppressDirty = true;
-        try {
-            Object.keys(controllersByRackId).forEach(function (rid) {
-                controllersByRackId[rid].thaw();
-            });
-        } finally {
-            suppressDirty = prev;
-            // End push suppression AFTER the thaw itself (a thawed tile's own
-            // grid.update() must still be shielded from _fixCollisions).
-            rdEndPushSuppression();
-        }
-        // Gesture-end settle for EVERY rack (live bug, 2026-07-08): a gesture
-        // can transiently disturb tiles on ANY rack the pointer passed over
-        // (vendor drag-over paths, see guardPushDuringGesture's third layer),
-        // and the per-rack event flow does not guarantee a final refresh on
-        // racks the gesture merely crossed. One deferred refreshGhosts per
-        // rack after every gesture guarantees classes + owned shadows are
-        // re-synced from the settled DOM no matter which path the gesture
-        // took. scheduleRefresh is a debounced setTimeout(0) into an
-        // idempotent reconciliation, so this is cheap.
-        Object.keys(controllersByRackId).forEach(function (rid) {
-            if (controllersByRackId[rid].scheduleRefresh) {
-                controllersByRackId[rid].scheduleRefresh();
-            }
-        });
-        // The gesture is over: disarm the cursor tracker + deny indicator
-        // (spec §4.1 cursor-governed placement). Drop-time enforcement has
-        // already run by now (maybePromptMove precedes the thaw on every
-        // drop path).
-        rdEndCursorGesture();
-    }
-
-    // Search EVERY rendered rack block for the move-out ghost of a placement.
-    // Used by ×/cancel on a RELOADED cross-rack move_in tile (its ghost lives in
-    // a different block than the tile). Returns {controller, ghostEl} or null.
-    function findGhostAcrossBlocks(placementId) {
-        if (placementId == null) { return null; }
-        var hit = null;
-        Object.keys(controllersByRackId).forEach(function (rid) {
-            if (hit) { return; }
-            var c = controllersByRackId[rid];
-            var g = c.findGhost(placementId);
-            if (g) { hit = { controller: c, ghostEl: g }; }
-        });
-        return hit;
-    }
+    // Rack-height sync and the shared GridStack options live in editor/frame.js.
+    // The cross-rack registry and the freeze/thaw bracket live in editor/registry.js.
 
     // ========================================================================
     // Per-rack controller. Initialises one rack block's three grids and wires
@@ -537,117 +325,7 @@ import {
     // hatch, face toggles, palette drops). Returns a small controller the shared
     // Save uses to build that rack's slice of the multi-rack payload.
     // ========================================================================
-    // ========================================================================
-    // Frame / Container (spec §2, §10.3) -- the ONE place that knows how a
-    // physical enclosure differs from another.
-    // ------------------------------------------------------------------------
-    // A FRAME is one enclosure. It owns one or more CONTAINERS (addressable
-    // grids of slots) and, for a rack, a tray:
-    //
-    //   rack     containers [front, rear]   tray yes   pairing yes (full-depth)
-    //   chassis  containers [bays]          tray no    pairing no
-    //
-    // Everything above this object -- add, move, remove, cancel, ghosts,
-    // blocking, homecoming -- is written against SLOTS and ADDRESSES and never
-    // against units or bays. That is the whole point: a rack fix is a chassis
-    // fix, because there is only one implementation.
-    //
-    // Before this existed, a chassis was a rack whose payload got TRANSLATED
-    // afterwards (chassisColumnPayload), and the translation re-derived a bay
-    // from u_position -- so an item with no position, i.e. a cancel, was
-    // silently dropped and the user's edit never reached the server
-    // (user 2026-08-26). An address is now produced ONCE, by whoever owns the
-    // slot, and can never go missing on the way out.
-    // ========================================================================
-    function makeFrame(block) {
-        var isChassis = !!block.getAttribute("data-chassis-key");
-        var uHeight = parseInt(block.getAttribute("data-u-height"), 10);
-        // Ascending slot numbering (bay 1 at the top). A rack numbers its units
-        // the other way up, from the floor.
-        var ascending = block.getAttribute("data-desc-units") === "true";
-        // The pk the SERVER must see. A chassis column's own id is synthetic
-        // (spec §10.3); the real rack is on data-real-rack-id.
-        var realRackId = parseInt(block.getAttribute("data-real-rack-id"), 10);
-        var chassisId = parseInt(block.getAttribute("data-chassis-id"), 10);
-        var chassisPlacement = parseInt(block.getAttribute("data-chassis-placement"), 10);
-        var bayNames = [];
-        var bayIds = [];
-        try { bayNames = JSON.parse(block.getAttribute("data-bay-names") || "[]"); }
-        catch (e) { bayNames = []; }
-        try { bayIds = JSON.parse(block.getAttribute("data-bay-ids") || "[]"); }
-        catch (e) { bayIds = []; }
-
-        return {
-            isChassis: isChassis,
-            // A frame with no pairing rule has no opposite face, so no full-depth
-            // shadow and no hatch can exist in it -- absent, not suppressed.
-            hasPairing: !isChassis,
-            hasTray: !isChassis,
-            serverRackId: !isNaN(realRackId) ? realRackId : parseInt(
-                block.getAttribute("data-rack-id"), 10),
-
-            // ---- geometry <-> slot (inverse of templatetags.slot_gs_y) ------
-            slotFromGeometry: function (gsY, gsH) {
-                var y = gsY / 2;
-                var h = gsH / 2;
-                if (ascending) { return y + 1; }
-                if (h > 1) { return uHeight - y - h + 1; }
-                return uHeight - y;
-            },
-            slotToGeometry: function (slot, gsH) {
-                if (ascending) { return slot * 2 - 2; }
-                if (gsH > 2) { return uHeight * 2 - slot * 2 - gsH + 2; }
-                return uHeight * 2 - slot * 2;
-            },
-
-            // ---- the drop gate (spec §10.3) ---------------------------------
-            // Container/type agreement, enforced BEFORE the gesture completes: a
-            // child type may only land in a chassis, a rack-mountable only in a
-            // rack. Core forbids a child device a position and a face, and
-            // forbids a non-child a device bay, so each is illegal in the other.
-            accepts: function (el) {
-                // A tile that ALREADY LIVES in a chassis column is a bay occupant,
-                // whatever markers it carries: containment is the fact, and
-                // data-subdevice-role is only the hint the palette stamps on rows
-                // that live nowhere yet. Judging a placed tile by that marker made
-                // every real blade unmovable -- the server renders no such
-                // attribute on a tile, so the destination column refused its own
-                // kind and the drag silently did nothing (user 2026-08-26).
-                var placed = el.closest && el.closest(".nbx-rd-chassis-block");
-                var isChild = placed ? true : rdIsChildEl(el);
-                return isChild === isChassis;
-            },
-
-            // ---- the save address -------------------------------------------
-            // Which payload bucket this container's items belong to, and how one
-            // slot in it is addressed. These two are the ONLY things the save
-            // path needs to know about the difference between a rack and a
-            // chassis.
-            bucketFor: function (faceKey) {
-                return isChassis ? "bays" : faceKey;
-            },
-            addressForSlot: function (slot, faceKey) {
-                if (!isChassis) {
-                    // A rack slot is a unit on a face.
-                    return { u_position: slot, face: faceKey };
-                }
-                // A chassis slot is a bay. It carries NO face: a chassis has one
-                // container, and the server stores "" for a bay placement anyway.
-                var address = { target_bay_name: bayNames[slot - 1] || "" };
-                if (!isNaN(chassisId)) {
-                    // Real chassis: address the bay by its dcim pk.
-                    var bayId = bayIds[slot - 1];
-                    if (bayId) { address.target_bay_id = bayId; }
-                } else if (!isNaN(chassisPlacement)) {
-                    // Planned chassis: it is already a saved placement (the layer
-                    // only renders chassis the design has saved), so point at it.
-                    address.parent_placement_id = chassisPlacement;
-                }
-                return address;
-            },
-        };
-    }
-
+    // makeFrame() lives in editor/frame.js.
     function initRack(block) {
         var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
         // The one object that knows how THIS enclosure differs from another:
@@ -943,7 +621,7 @@ import {
         // Lock move_out_ghost / pre-existing remove tiles: they are passive and
         // must never be draggable. Removing the server opposites fires `removed`;
         // suppress dirty so loading the editor never arms Save.
-        suppressDirty = true;
+        setDirtySuppressed(true);
         [[frontGrid, frontEl], [rearGrid, rearEl], [trayGrid, trayEl]].forEach(function (pair) {
             var g = pair[0], host = pair[1];
             if (!g || !host) { return; }
@@ -972,7 +650,7 @@ import {
                 g.removeWidget(el, true);
             });
         });
-        suppressDirty = false;
+        setDirtySuppressed(false);
 
         var faceGrids = {
             front: { grid: frontGrid, host: frontEl },
@@ -1600,9 +1278,7 @@ import {
         // re-syncing its OWN owned shadow/mirror to its OWN current position --
         // no teardown of anything that has not actually moved.
         function syncOwnedShadows() {
-            var prevSuppress = suppressDirty;
-            suppressDirty = true;
-            try {
+            withDirtySuppressed(function () {
                 block.querySelectorAll(".grid-stack-item").forEach(function (itemEl) {
                     if (itemEl.getAttribute("data-rd-temp-ghost")) { return; }
                     if (itemEl.getAttribute("data-rd-derived-opp")) { return; }
@@ -1646,9 +1322,7 @@ import {
                     if (g) { g.removeWidget(hel, true); }
                     else if (hel.parentNode) { hel.parentNode.removeChild(hel); }
                 });
-            } finally {
-                suppressDirty = prevSuppress;
-            }
+            });
         }
 
         function scheduleRefresh() {
@@ -2302,7 +1976,7 @@ import {
                     originRackId = rackId;
                     originWidgetIndex = idx;
                 }
-                tileInFlight = {
+                tileInFlight.current = {
                     sourceRackId: rackId,
                     widgetIndex: idx,
                     // The source widget itself, so an adopted PLANNED add keeps
@@ -2349,7 +2023,7 @@ import {
                     preDragGsY: st.preDragGsY, preDragFace: st.preDragFace,
                 });
             } else {
-                tileInFlight = null;
+                tileInFlight.current = null;
                 rdTrace("dragstart.nonEligible", { idx: idx });
             }
             // Spec §4.1 cursor-governed placement: arm the pointer tracker
@@ -2410,8 +2084,8 @@ import {
                 // A foreign tile just landed here = a cross-rack move. A planned
                 // add has no device_id and is adopted all the same (see
                 // isForeignMovableTile); anything else without one is not ours.
-                if (!tileInFlight || tileInFlight.sourceRackId === rackId) { return; }
-                if (tileInFlight.device_id == null && tileInFlight.kind !== "add") { return; }
+                if (!tileInFlight.current || tileInFlight.current.sourceRackId === rackId) { return; }
+                if (tileInFlight.current.device_id == null && tileInFlight.current.kind !== "add") { return; }
                 (items || []).forEach(function (node) {
                     var el = node && node.el;
                     if (!el) { return; }
@@ -2420,8 +2094,8 @@ import {
                     if (el.getAttribute("data-rd-derived-opp")) { return; }
                     if (el.classList.contains("nbx-rd-opposite")) { return; }
                     rdTrace("added", {
-                        destRackId: rackId, sourceRackId: tileInFlight.sourceRackId,
-                        label: tileInFlight.label,
+                        destRackId: rackId, sourceRackId: tileInFlight.current.sourceRackId,
+                        label: tileInFlight.current.label,
                         // node.y HERE is the placeholder slot -- GridStack has not
                         // yet written the tile's FINAL drop position (see the
                         // `dropped`/onPaletteDrop re-run). Contrast with the
@@ -2432,7 +2106,7 @@ import {
                     });
                     // Homecoming (spec §4.6) takes priority over an ordinary
                     // adoption -- see homecomingAdopt's header comment.
-                    if (homecomingAdopt(el, tileInFlight)) {
+                    if (homecomingAdopt(el, tileInFlight.current)) {
                         scheduleRefresh();
                         maybePromptMove(el);
                         return;
@@ -2450,8 +2124,8 @@ import {
                 // move-out ghost at its origin and drop its abandoned full-depth
                 // opposite-face copy. The guard in onTileDeparted no-ops a plain
                 // within-rack (front<->rear<->tray) move where the tile stays.
-                if (tileInFlight && tileInFlight.sourceRackId === rackId) {
-                    onTileDeparted(tileInFlight);
+                if (tileInFlight.current && tileInFlight.current.sourceRackId === rackId) {
+                    onTileDeparted(tileInFlight.current);
                 }
             });
             grid.on("change", scheduleRefresh);
@@ -2591,7 +2265,7 @@ import {
         // snap-back. Re-stamp the tile's widget index and flag it dirty. The §4a
         // dialog (fired by the destination dropped handler) then names the move.
         function adoptForeignTile(el) {
-            var d = tileInFlight;
+            var d = tileInFlight.current;
             if (!d) { return; }
             var face = faceOfItem(el);   // 'front' | 'rear' ('' tray never adopts)
             var newIdx = state.length;
@@ -2688,8 +2362,8 @@ import {
         // onTileDeparted for a departing `existing` entry -- i.e. THIS
         // rack's own real home -- or rendered by the server from that same
         // fact), so this is a pure DEVICE-IDENTITY lookup, independent of
-        // any in-session hop bookkeeping (tileInFlight/crossRack/
-        // originRackId). That independence matters: tileInFlight's chain is
+        // any in-session hop bookkeeping (tileInFlight.current/crossRack/
+        // originRackId). That independence matters: tileInFlight.current's chain is
         // lost across a page reload, but a SAVED move still leaves a
         // persistent ghost, and this lookup still finds it by device_id.
         function findOwnGhostEntryIndex(deviceId) {
@@ -2718,7 +2392,7 @@ import {
         // being dropped into THIS rack; if THIS rack already holds D's own
         // move-out ghost (findOwnGhostEntryIndex, above -- proof this rack is
         // D's true origin, works for any number of hops AND survives a page
-        // reload, unlike tileInFlight's in-session originRackId chain), this
+        // reload, unlike tileInFlight.current's in-session originRackId chain), this
         // is a homecoming, not an ordinary adoption. Rather than adopt a
         // brand-new state entry (adoptForeignTile) -- which would leave D's
         // real origin entry AND a fresh copy both claiming the device, the
@@ -3889,12 +3563,12 @@ import {
                 // `added` handler instead, so for it we only thaw + refresh. Defer
                 // the thaw one tick so it lands after any sibling `added` handler
                 // has finished resolving a cross-rack adoption.
-                // tileInFlight is only set for a REAL device drag; a null
+                // tileInFlight.current is only set for a REAL device drag; a null
                 // here means a within-rack move of a device_id-less tile (a
                 // palette add changing face -- adds can never cross racks,
                 // the acceptWidgets policy rejects them) -- which must be
                 // validated too (maybePromptMove routes adds through
-                // maybeRevertAddMove). A FOREIGN real tile (tileInFlight set,
+                // maybeRevertAddMove). A FOREIGN real tile (tileInFlight.current set,
                 // different source rack) was already adopted + resolved by
                 // the `added` handler -- but that ran BEFORE GridStack wrote
                 // the drop's FINAL position (confirmed live, 2026-07-08: an
