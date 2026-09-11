@@ -343,6 +343,7 @@ _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor/model.js",
     "netbox_rack_design/js/editor/trace.js",
     "netbox_rack_design/js/editor/hovercard.js",
+    "netbox_rack_design/js/editor/palette.js",
     "netbox_rack_design/js/editor/core.js",
     "netbox_rack_design/js/editor/dialogs.js",
     "netbox_rack_design/js/editor_panels.js",
