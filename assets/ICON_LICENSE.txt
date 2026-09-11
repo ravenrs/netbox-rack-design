@@ -1,0 +1,14 @@
+Icon files in this directory (icon.svg, icon-48.png, icon-500.png) are original
+artwork for the NetBox Rack Design project.
+
+They are dedicated to the public domain under the
+Creative Commons CC0 1.0 Universal (CC0 1.0) Public Domain Dedication:
+
+    https://creativecommons.org/publicdomain/zero/1.0/
+
+You may copy, modify, distribute, and use the icons, including for commercial
+purposes, all without asking permission and without attribution.
+
+(The rest of the NetBox Rack Design project is licensed under Apache-2.0; see
+the top-level LICENSE file. This CC0 dedication applies only to the icon files
+listed above.)
