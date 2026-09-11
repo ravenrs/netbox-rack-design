@@ -352,6 +352,7 @@ _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor/dirty.js",
     "netbox_rack_design/js/editor/frame.js",
     "netbox_rack_design/js/editor/registry.js",
+    "netbox_rack_design/js/editor/rack.js",
     "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
     "netbox_rack_design/js/power_heatmap.js",
