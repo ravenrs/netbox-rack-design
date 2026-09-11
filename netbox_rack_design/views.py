@@ -346,6 +346,7 @@ _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor/palette.js",
     "netbox_rack_design/js/editor/core.js",
     "netbox_rack_design/js/editor/dialogs.js",
+    "netbox_rack_design/js/editor/power.js",
     "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
     "netbox_rack_design/js/power_heatmap.js",
