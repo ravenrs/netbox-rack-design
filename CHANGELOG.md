@@ -21,14 +21,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The editor's JavaScript is being split into ES modules.** `editor.js` had
   grown to 8455 lines in a single closure; the read-model, the drag tracer,
-  the hover card, the CSRF/toast helpers and the three modal dialogs now live
-  in their own files under `static/netbox_rack_design/js/editor/`, leaving
-  6986. There is no bundler and no build step: `editor.js` is loaded as a
-  module and resolves its submodules through an import map the editor template
-  emits, which is what keeps the cache-bust token on every module URL. No
-  behaviour changes — each extracted block is byte-identical to the one it
-  replaced, apart from named substitutions where a module re-derives a DOM
-  element the enclosing closure used to hold.
+  the hover card, the CSRF/toast helpers, the three modal dialogs, the
+  device-catalog palette and the planned-PDU/rack-power dialogs now live in
+  their own files under `static/netbox_rack_design/js/editor/`, leaving 5129.
+  There is no bundler and no build step: `editor.js` is loaded as a module and
+  resolves its submodules through an import map the editor template emits,
+  which is what keeps the cache-bust token on every module URL. No behaviour
+  changes — each extracted block is byte-identical to the one it replaced,
+  apart from named substitutions where a module re-derives a DOM element the
+  enclosing closure used to hold, and guards where a module evaluates at load
+  time in a page that may not contain the editor at all.
+- **Two long-red editor e2e suites repaired (tests only, no product change).**
+  Both had been invalidated by features that shipped after them.
+  `test_e5_stripe_bar_outside_rack_frame` required a stripe bar to still carry
+  its native `title` while the hover card was showing, but the card
+  deliberately parks that title so the browser tooltip cannot cover it — the
+  assertion now reads the tooltip before hovering and checks the parked copy
+  while the card is up. `test_editor_distribution` injected a fixture
+  Distribution into the page, but the toggle it then fired disconnects the
+  MutationObserver in the same synchronous task, discarding the injection's
+  undelivered mutation records so nothing ever repainted; it now asks for the
+  repaint through the `NbxRdPowerHeatmap.refresh()` hook the product exposes
+  for changes that alter the answer without mutating a tile, and serves the
+  fixture as the live recompute's answer so the assertions exercise the real
+  pipeline.
 
 ## [0.32.0] - 2026-09-09
 

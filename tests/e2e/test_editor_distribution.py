@@ -200,6 +200,26 @@ class EditorDistributionTestCase(unittest.TestCase):
             lambda m: self.errors.append(f"{m.type}: {m.text}")
             if m.type == "error" else None)
         self.page.on("pageerror", lambda e: self.errors.append(f"PAGEERROR: {e}"))
+        # The live per-bank recompute (0.15.0+) asks the server to re-run the
+        # distribution engine on every edit, and power_heatmap.js prefers that
+        # answer over the render-time `#rd-distribution-<rackId>` blob -- via
+        # hasOwnProperty, so even a null answer wins. Our fixture rack has no
+        # real PDUs, so the real endpoint answers null and the injected
+        # Distribution below would never be read again. Serve the fixture AS the
+        # server's answer instead, so the assertions exercise the live pipeline
+        # the product actually uses rather than a DOM blob nothing consults.
+        self.page.route(
+            "**/recompute-distribution/",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "distributions": {str(self._rack_id): self._distribution()},
+                    "distribution_status": {},
+                    "power": {},
+                }),
+            ),
+        )
         resp = self.page.goto(self.editor_url, wait_until="networkidle")
         self.assertEqual(resp.status, 200, f"editor URL returned {resp.status}")
         self.page.wait_for_selector(".nbx-rd-rack-block", timeout=15000)
@@ -269,6 +289,15 @@ class EditorDistributionTestCase(unittest.TestCase):
                 el.textContent = JSON.stringify(dist);
                 const t = document.querySelector('[data-rd-power-heatmap]');
                 t.checked = on; t.dispatchEvent(new Event('change', {bubbles:true}));
+                // Appending the blob above queues mutation records, but the
+                // toggle's change handler runs synchronously in this same task
+                // and calls withObserversDetached() -> observer.disconnect(),
+                // which DISCARDS records that have not been delivered yet. So
+                // the injection alone never reaches the observer and nothing
+                // repaints. Ask for the repaint explicitly through the hook the
+                // product exposes for exactly this case: a change that alters
+                // the answer without mutating a tile.
+                window.NbxRdPowerHeatmap.refresh();
             }""",
             [self._distribution(), str(self._rack_id), on],
         )
