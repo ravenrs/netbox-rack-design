@@ -3211,6 +3211,12 @@ class EditorDisplacementTestCase(unittest.TestCase):
                 const hit = document.elementFromPoint(
                     r.left + r.width / 2, r.top + r.height / 2);
                 const cs = getComputedStyle(bar);
+                // Read the tooltip BEFORE hovering: while the card is showing,
+                // editor/hovercard.js deliberately parks the native `title` in
+                // data-rd-title and removes it, so the browser tooltip cannot
+                // pop up on top of the card. Reading it after the pointerover
+                // below therefore always sees null, by design.
+                const titleBefore = bar.getAttribute('title');
                 bar.dispatchEvent(new PointerEvent('pointerover', {bubbles: true}));
                 const card = document.querySelector('.nbx-rd-hovercard');
                 return {
@@ -3220,7 +3226,9 @@ class EditorDisplacementTestCase(unittest.TestCase):
                                     z: getComputedStyle(hit).zIndex} : null,
                     barBox: {left: r.left, top: r.top, w: r.width, h: r.height},
                     pointerEvents: cs.pointerEvents,
+                    titleBefore: titleBefore,
                     title: bar.getAttribute('title'),
+                    parkedTitle: bar.getAttribute('data-rd-title'),
                     cardVisible: card ? card.style.display !== 'none' : false,
                     cardText: card ? card.textContent : null,
                 };
@@ -3228,7 +3236,11 @@ class EditorDisplacementTestCase(unittest.TestCase):
         self.assertNotIn("error", hover, hover)
         self.assertTrue(hover["hitIsBar"], f"bar must be the actual hover target: {hover}")
         self.assertEqual(hover["pointerEvents"], "auto", hover)
-        self.assertIn(self._dev_a_label, hover["title"] or "", hover)
+        self.assertIn(self._dev_a_label, hover["titleBefore"] or "", hover)
+        # ...and while the card is up the tooltip is parked, not lost: it comes
+        # back on pointerout (hovercard.js restores it from data-rd-title).
+        self.assertIsNone(hover["title"], hover)
+        self.assertIn(self._dev_a_label, hover["parkedTitle"] or "", hover)
         self.assertTrue(
             hover["cardVisible"],
             f"hovering the bar must show the device hover-card: {hover}")
