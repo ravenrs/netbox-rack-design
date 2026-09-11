@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.32.1] - 2026-09-11
+
+### Release Summary
+
+A patch release: one bug fix plus internal cleanup, no feature or behaviour
+change beyond it. The dirty flag that arms Save could get stuck disabled
+forever if anything unexpected threw while the editor loaded; that is now
+fixed. The rest of this release is the editor's JavaScript being split out
+of one 8455-line file into ES modules, and two long-red e2e suites being
+repaired to match features that had already shipped — neither changes what
+the editor does.
 
 ### Fixed
 
