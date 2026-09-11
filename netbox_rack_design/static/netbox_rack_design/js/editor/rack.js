@@ -39,7 +39,7 @@ import {
     rdCursorGesture,
 } from "rd/cursor.js";
 import { rdBeginPushSuppression, rdEndPushSuppression } from "rd/push.js";
-import { setDirtySuppressed, withDirtySuppressed } from "rd/dirty.js";
+import { withDirtySuppressed } from "rd/dirty.js";
 import { syncRackHeight, commonOptions, makeFrame } from "rd/frame.js";
 import {
     controllersByRackId,
@@ -373,36 +373,36 @@ function setRackHooks(hooks) {
         // Lock move_out_ghost / pre-existing remove tiles: they are passive and
         // must never be draggable. Removing the server opposites fires `removed`;
         // suppress dirty so loading the editor never arms Save.
-        setDirtySuppressed(true);
-        [[frontGrid, frontEl], [rearGrid, rearEl], [trayGrid, trayEl]].forEach(function (pair) {
-            var g = pair[0], host = pair[1];
-            if (!g || !host) { return; }
-            host.querySelectorAll(".nbx-rd-state-remove").forEach(function (el) {
-                g.update(el, { noMove: true, noResize: true, locked: true });
-            });
-            // A move-out ghost is a passive marker of a VACATED slot, not a real
-            // occupying tile. Lock it, then detach it from the grid ENGINE
-            // (removeWidget with removeDOM=false: the element and its CSS
-            // position stay put, only its collision bookkeeping goes away) so it
-            // can never make GridStack push a real widget -- or a derived
-            // full-depth hatch -- off the exact slot it visually still marks.
-            // removeWidget deletes el.gridstackNode as a side effect; restore the
-            // (now engine-detached) node object right after so `.locked`/`.y`
-            // stay readable exactly as before.
-            host.querySelectorAll(".nbx-rd-state-move_out_ghost").forEach(function (el) {
-                g.update(el, { noMove: true, noResize: true, locked: true });
-                var node = el.gridstackNode;
-                g.removeWidget(el, false, false);
-                el.gridstackNode = node;
-            });
-            // Drop the server-rendered full-depth opposite hatches: they reflect
-            // only the ORIGINAL layout. The live derive pass (recomputeOpposites)
-            // owns them now, tracking each full-depth device's current slot.
-            host.querySelectorAll(".grid-stack-item.nbx-rd-opposite").forEach(function (el) {
-                g.removeWidget(el, true);
+        withDirtySuppressed(function () {
+            [[frontGrid, frontEl], [rearGrid, rearEl], [trayGrid, trayEl]].forEach(function (pair) {
+                var g = pair[0], host = pair[1];
+                if (!g || !host) { return; }
+                host.querySelectorAll(".nbx-rd-state-remove").forEach(function (el) {
+                    g.update(el, { noMove: true, noResize: true, locked: true });
+                });
+                // A move-out ghost is a passive marker of a VACATED slot, not a real
+                // occupying tile. Lock it, then detach it from the grid ENGINE
+                // (removeWidget with removeDOM=false: the element and its CSS
+                // position stay put, only its collision bookkeeping goes away) so it
+                // can never make GridStack push a real widget -- or a derived
+                // full-depth hatch -- off the exact slot it visually still marks.
+                // removeWidget deletes el.gridstackNode as a side effect; restore the
+                // (now engine-detached) node object right after so `.locked`/`.y`
+                // stay readable exactly as before.
+                host.querySelectorAll(".nbx-rd-state-move_out_ghost").forEach(function (el) {
+                    g.update(el, { noMove: true, noResize: true, locked: true });
+                    var node = el.gridstackNode;
+                    g.removeWidget(el, false, false);
+                    el.gridstackNode = node;
+                });
+                // Drop the server-rendered full-depth opposite hatches: they reflect
+                // only the ORIGINAL layout. The live derive pass (recomputeOpposites)
+                // owns them now, tracking each full-depth device's current slot.
+                host.querySelectorAll(".grid-stack-item.nbx-rd-opposite").forEach(function (el) {
+                    g.removeWidget(el, true);
+                });
             });
         });
-        setDirtySuppressed(false);
 
         var faceGrids = {
             front: { grid: frontGrid, host: frontEl },

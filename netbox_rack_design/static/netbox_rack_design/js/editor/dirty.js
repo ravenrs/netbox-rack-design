@@ -19,13 +19,11 @@ function isDirtySuppressed() {
     return suppressDirty;
 }
 
-// The flat form, for the one site that sets and clears around a stretch of
-// straight-line code rather than around a call.
-function setDirtySuppressed(on) {
-    suppressDirty = !!on;
-}
-
-// The save/restore bracket three call sites already wrote out by hand.
+// The save/restore bracket every call site uses. There is deliberately no flat
+// set/clear pair: the one site that had one -- the load-time lock/detach pass
+// over the three grids -- was not exception-safe, so a throw anywhere inside it
+// left the flag stuck true for the life of the page and Save silently stopped
+// arming, with nothing in the console to say why.
 // Restores the PREVIOUS value rather than false, so an inner suppression
 // cannot end an outer one early.
 function withDirtySuppressed(fn) {
@@ -38,4 +36,4 @@ function withDirtySuppressed(fn) {
     }
 }
 
-export { isDirtySuppressed, setDirtySuppressed, withDirtySuppressed };
+export { isDirtySuppressed, withDirtySuppressed };

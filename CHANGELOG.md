@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failure while the editor was loading could permanently disable Save.**
+  Opening a rack locks the passive tiles and detaches the server-rendered
+  full-depth hatches, and that pass suppresses the dirty flag so merely loading
+  the editor never arms Save. The suppression was a plain set-then-clear pair
+  with no exception guard, so if anything inside the pass threw — an unexpected
+  node reaching a GridStack `update` or `removeWidget` — the clear was skipped
+  and the flag stayed set for the life of the page. Every later edit was then
+  applied to the grid but left Save disabled, with nothing in the console to
+  explain it: the changes looked accepted and could not be saved. The pass is
+  now bracketed so the flag is restored even on a throw, and the unguarded
+  set/clear helper has been removed rather than left available.
 - **Editor assets could be served stale after an upgrade.** The editor page
   stamps a `?v=<token>` cache-bust on each of its own static files, and the
   token is the newest modification time across an explicit list — but
