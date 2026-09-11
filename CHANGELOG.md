@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failure while the editor was loading could permanently disable Save.**
+  Opening a rack locks the passive tiles and detaches the server-rendered
+  full-depth hatches, and that pass suppresses the dirty flag so merely loading
+  the editor never arms Save. The suppression was a plain set-then-clear pair
+  with no exception guard, so if anything inside the pass threw — an unexpected
+  node reaching a GridStack `update` or `removeWidget` — the clear was skipped
+  and the flag stayed set for the life of the page. Every later edit was then
+  applied to the grid but left Save disabled, with nothing in the console to
+  explain it: the changes looked accepted and could not be saved. The pass is
+  now bracketed so the flag is restored even on a throw, and the unguarded
+  set/clear helper has been removed rather than left available.
+- **Editor assets could be served stale after an upgrade.** The editor page
+  stamps a `?v=<token>` cache-bust on each of its own static files, and the
+  token is the newest modification time across an explicit list — but
+  `power_heatmap.js` and `rack_layout.js` were never on that list. Editing
+  either one therefore never moved the token, so a browser kept serving its
+  cached copy of that file while every other asset refreshed. Both are now
+  registered, along with the editor's new JavaScript modules.
+
+### Changed
+
+- **The editor's JavaScript is now split into ES modules.** `editor.js` had
+  grown to 8455 lines in a single closure. The read-model, the drag tracer, the
+  hover card, the CSRF/toast helpers, the three modal dialogs, the device
+  catalog palette, the planned-PDU/rack-power dialogs, cursor-governed
+  placement, GridStack push suppression, the dirty-flag state, the frame/grid
+  options and the cross-rack registry now live in their own files under
+  `static/netbox_rack_design/js/editor/`, as does the per-rack controller
+  itself — thirteen modules, leaving 668 lines of editor.js.
+  There is no bundler and no build step: `editor.js` is loaded as a module and
+  resolves its submodules through an import map the editor template emits,
+  which is what keeps the cache-bust token on every module URL. No behaviour
+  changes — each extracted block is byte-identical to the one it replaced,
+  apart from named substitutions where a module re-derives a DOM element the
+  enclosing closure used to hold, guards where a module evaluates at load time
+  in a page that may not contain the editor at all, and the dirty flag, which
+  was written from both sides of the per-rack boundary and now has one owner
+  behind a setter because an ES module importer cannot assign to an imported
+  binding.
+- **Two long-red editor e2e suites repaired (tests only, no product change).**
+  Both had been invalidated by features that shipped after them.
+  `test_e5_stripe_bar_outside_rack_frame` required a stripe bar to still carry
+  its native `title` while the hover card was showing, but the card
+  deliberately parks that title so the browser tooltip cannot cover it — the
+  assertion now reads the tooltip before hovering and checks the parked copy
+  while the card is up. `test_editor_distribution` injected a fixture
+  Distribution into the page, but the toggle it then fired disconnects the
+  MutationObserver in the same synchronous task, discarding the injection's
+  undelivered mutation records so nothing ever repainted; it now asks for the
+  repaint through the `NbxRdPowerHeatmap.refresh()` hook the product exposes
+  for changes that alter the answer without mutating a tile, and serves the
+  fixture as the live recompute's answer so the assertions exercise the real
+  pipeline.
+
 ## [0.32.0] - 2026-09-09
 
 ### Release Summary
