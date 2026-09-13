@@ -410,12 +410,19 @@ for distribution *behaviour* only.
 
 ### 6.4 `DesignRackPower` (rack custom-field override)
 
-Unchanged in shape/purpose: one row per `(design, rack)`, holding the planned
+Unchanged in shape/purpose: one row per `(design, rack)` (or `(design,
+planned_rack)` — PLAN-templates.md D25/D26) holding the planned
 `custom_fields` (e.g. `power_limitation`, `pdu_location`) merged **in-memory**
-over `rack.cf` before the distribution runs (never written to `dcim.Rack`). This
-merge only matters for `distribution_mode = "script"` — a `distribution_script`
-reads it through the `planning_fields` config bridge; the builtin tier ignores
-`rack.cf` entirely. Now populated via the `planning_fields`-driven rack dialog.
+over `rack.cf` before the distribution runs (never written to `dcim.Rack`). For
+a `PlannedRack`, `rack.cf` is always `{}`, so this row is the ONLY source, not
+an override of something already there. This merge only matters for
+`distribution_mode = "script"` — a `distribution_script` reads it through the
+`planning_fields` config bridge, or directly off `rack.cf`; the builtin tier
+ignores `rack.cf` entirely. `apply_rack_power_override` (`distribution.py`)
+patches BOTH `rack.cf` and `rack.custom_field_data` with the merged result (the
+latter because `planning_fields._read_cf` prefers it), so either access
+pattern sees the same effective values, for either rack kind. Now populated via
+the `planning_fields`-driven rack dialog.
 
 **Design chains merge oldest-first** (see [Design chains](design-chains.md)).
 `DesignRackPower.effective_custom_fields(design, rack)` resolves the merge a
@@ -483,10 +490,24 @@ are resolved and uniform.
 
 `generate_distribution(elevation, *, mode=None)` builds, per rack:
 
-- **`rack`** — the planned `dcim.Rack`; the built-in/script reads `rack.u_height`,
-  `rack.cf` (the cf **value dict** — not `.custom_fields`, a manager), and
-  `rack.devices.all()` for real PDUs. Effective cf = real `rack.cf` merged with
-  `DesignRackPower` (§6.4).
+- **`rack`** — the planned rack, passed through **unchanged**: either a real
+  `dcim.Rack` or a `PlannedRack` (PLAN-templates.md D30 — a rack that does not
+  exist in NetBox yet; stamping a template into one places PDUs, so this is a
+  live path, not a theoretical one). A `distribution_script` may safely read
+  `rack.name`, `rack.u_height`, `rack.location`, `rack.site`, `rack.pk`, and
+  `rack.cf` (the cf **value dict** — not `.custom_fields`, a manager) on
+  EITHER kind — for a `PlannedRack`, `rack.cf` is always `{}` (rack-power
+  custom fields are registered against `dcim.rack`'s content type, not
+  `plannedrack`'s), so `DesignRackPower.effective_custom_fields()` merged in by
+  `apply_rack_power_override` (§6.4) is the ONLY source there, never an
+  override of something already present. `rack.devices` is NOT part of the
+  contract — a `PlannedRack` has no such manager and raises; the built-in and
+  the shipped example scripts instead discover PDUs via the `devices` list
+  below and `distribution._collect_pdus` / `rackinfo.rack_devices`, both of
+  which already degrade cleanly for a planned rack. See `distribution.py`'s
+  module docstring for the full contract, including the private-script
+  compatibility argument for why the engine passes the rack through unchanged
+  rather than via a proxy or an engine-level guard.
 - **`devices`** (`devices_from_elevation`) — planned consumers **plus planned PDU
   adds**. Each PDU entry carries:
   - `role = pdu`, `device = None` (planned) or the real device;

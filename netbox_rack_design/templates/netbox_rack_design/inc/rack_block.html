@@ -25,10 +25,16 @@
 
 {% with rack=b.rack front=b.front rear=b.rear non_racked=b.non_racked %}
 {% with front_len=front|length rear_len=rear|length %}
-{% with rid=rack.pk|stringformat:"s" %}
+{# T1.5c (PLAN-templates.md D31): rid is the namespaced rack_key() (models.py  #}
+{# D27), colon-translated for DOM use by the rack_dom_id filter --            #}
+{# "r-<pk>"/"p-<pk>", NOT a bare pk. dcim.Rack and PlannedRack have separate  #}
+{# pk sequences (D28); a bare pk in id/data-rack-id/gs-id let a planned      #}
+{# rack's pk collide with an unrelated real rack sharing that pk (the "Power" #}
+{# button on a planned rack silently wrote power config onto the real rack). #}
+{% with rid=b.rack_meta.id|rack_dom_id %}
 <div class="nbx-rd-rack-block{% if editable and b.hidden %} hidden{% endif %}"
-     id="rd-rack-{{ rack.pk }}"
-     data-rack-id="{{ rack.pk }}"
+     id="rd-rack-{{ rid }}"
+     data-rack-id="{{ rid }}"
      data-u-height="{{ b.rack_meta.u_height }}"
      data-desc-units="{{ b.rack_meta.desc_units|yesno:'true,false' }}">
 
@@ -38,6 +44,13 @@
       <a href="{{ rack.get_absolute_url }}">{{ rack.name }}</a>
       {% if rack.location %}<span class="text-muted small">· {{ rack.location }}</span>
       {% elif rack.site %}<span class="text-muted small">· {{ rack.site }}</span>{% endif %}
+      {# T1.5: a PlannedRack does not exist in DCIM yet -- a planner must #}
+      {# never mistake it for a rack that does. #}
+      {% if b.is_planned %}
+      <span class="badge text-bg-warning" title="{% trans 'This rack does not exist in NetBox yet -- it will be created (or an existing match adopted) when the design is applied.' %}">
+        {% trans "Planned" %}
+      </span>
+      {% endif %}
     </div>
     {# Independent on/off toggles per rack: each shows/hides its OWN face. #}
     {# Both start active; the JS refuses to hide the last visible face.    #}
@@ -52,12 +65,34 @@
     {# pdu_location override, models.DesignRackPower) -- GATED to racks with   #}
     {# NO real PowerFeeds yet. A provisioned rack's PDUs bind straight to its  #}
     {# real feeds via the per-PDU bind-to-feed dialog instead. Editor only.    #}
-    {% if editable and not b.has_real_feeds %}
+    {# T1.5c (PLAN-templates.md D31): the rack-power/feeds endpoints          #}
+    {# (power.js postRackPower/postPlannedFeed/postCopyFeeds) are real-rack-  #}
+    {# only by design (D26) -- there is no PlannedRack-side API to extend to  #}
+    {# yet. Gate the button out for a planned rack rather than let it send a  #}
+    {# bare pk the server would silently treat as a same-pk'd real rack's id. #}
+    {# Least-surprising choice: hide, don't disable-with-tooltip -- there is  #}
+    {# no planning input this button could collect for a planned rack today  #}
+    {# (no rack-power flow exists for one), so a disabled button with nothing #}
+    {# it will ever do would just be a dead affordance. #}
+    {% if editable and not b.has_real_feeds and not b.is_planned %}
     <button type="button" class="btn btn-outline-warning btn-sm ms-2"
             data-rd-rack-power-btn
             title="{% trans 'Rack power (planning input)' %}"
             aria-label="{% trans 'Rack power' %}">
       <i class="mdi mdi-flash" aria-hidden="true"></i> {% trans "Power" %}
+    </button>
+    {% endif %}
+    {# Save-as-template (PLAN-templates.md Sec 4, D18/D32, T4.2): available   #}
+    {# for a PLANNED rack too, deliberately -- the backend (from-design)     #}
+    {# is what refuses it (a planned rack has no devices, D32) and it says   #}
+    {# why, so the button need not re-derive that rule here and can just     #}
+    {# surface whatever the server answers. #}
+    {% if editable %}
+    <button type="button" class="btn btn-outline-secondary btn-sm ms-2"
+            data-rd-save-as-template-btn
+            title="{% trans 'Save this rack as a reusable template' %}"
+            aria-label="{% trans 'Save rack as template' %}">
+      <i class="mdi mdi-content-save-outline" aria-hidden="true"></i> {% trans "Save as template" %}
     </button>
     {% endif %}
   </div>
@@ -95,7 +130,7 @@
       <h3 class="h5">{% trans "Front" %}</h3>
       <div class="d-flex justify-content-center nbx-rd-face-row">
         <ul class="nbx-rd-unit-numbers">
-          {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+          {% for u in rack|rack_unit_numbers %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
         </ul>
         {# Positioning anchor for the displacement stripe bar (spec §3, user #}
         {# ruling 2026-07-09): the bar hangs OUTSIDE the grid's right edge,  #}
@@ -104,7 +139,7 @@
         <div class="nbx-rd-grid-wrap">
         <div class="grid-stack nbx-rd-rack{% if editable %} nbx-rd-editable{% endif %}"
              id="nbx-rd-grid-front-{{ rid }}"
-             data-rack-id="{{ rack.pk }}"
+             data-rack-id="{{ rid }}"
              data-face="front"
              gs-column="1"
              gs-max-row="{{ rack.u_height|mul2 }}"
@@ -137,7 +172,7 @@
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                    {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
-                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% elif slot.placement.target_planned_rack %} data-moved-to="{{ slot.placement.target_planned_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
                    {# Chain provenance/conflict (PLAN-design-chains.md §8.4): flags on top of the existing state, never a new state. Coded defensively -- the server agent is landing these keys concurrently. #}
                    {% if slot.inherited %}data-inherited="1"{% endif %}
                    {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
@@ -202,13 +237,13 @@
       <h3 class="h5">{% trans "Rear" %}</h3>
       <div class="d-flex justify-content-center nbx-rd-face-row">
         <ul class="nbx-rd-unit-numbers">
-          {% for u in rack.units %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
+          {% for u in rack|rack_unit_numbers %}<li>{% if u|rack_whole_unit %}{{ u|floatformat:"0" }}{% endif %}</li>{% endfor %}
         </ul>
         {# Stripe-bar anchor, same as the front face above. #}
         <div class="nbx-rd-grid-wrap">
         <div class="grid-stack nbx-rd-rack{% if editable %} nbx-rd-editable{% endif %}"
              id="nbx-rd-grid-rear-{{ rid }}"
-             data-rack-id="{{ rack.pk }}"
+             data-rack-id="{{ rid }}"
              data-face="rear"
              gs-column="1"
              gs-max-row="{{ rack.u_height|mul2 }}"
@@ -237,7 +272,7 @@
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
                    {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
-                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% elif slot.placement.target_planned_rack %} data-moved-to="{{ slot.placement.target_planned_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
                    {% if slot.inherited %}data-inherited="1"{% endif %}
                    {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
                    {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
@@ -295,7 +330,7 @@
     <h3 class="h6">{% trans "Non-racked tray" %}</h3>
     <div class="grid-stack nbx-rd-tray"
          id="nbx-rd-grid-tray-{{ rid }}"
-         data-rack-id="{{ rack.pk }}"
+         data-rack-id="{{ rid }}"
          data-face=""
          gs-column="1"
          gs-min-row="2">

@@ -176,7 +176,10 @@ function rdCursorCandidate() {
         host: g.lastHost,
         top: top,
         face: g.lastHost.getAttribute("data-face"),
-        rackId: block ? parseInt(block.getAttribute("data-rack-id"), 10) : null,
+        // T1.5c (D31): data-rack-id is the opaque colon-free rack_key()
+        // string ("r-<pk>"/"p-<pk>"); parseInt would collide a PlannedRack
+        // and a dcim.Rack sharing a pk (D28). Keep it as-is.
+        rackId: block ? block.getAttribute("data-rack-id") : null,
     };
 }
 
@@ -340,12 +343,50 @@ function rdBayOwner(cellEl) {
     var block = cellEl.closest(".nbx-rd-rack-block");
     var widx = tile ? parseInt(tile.getAttribute("data-widget-index"), 10) : NaN;
     return {
-        rackId: block ? parseInt(block.getAttribute("data-rack-id"), 10) : null,
+        // T1.5c (D31): data-rack-id is the opaque colon-free rack_key()
+        // string ("r-<pk>"/"p-<pk>"); parseInt would collide a PlannedRack
+        // and a dcim.Rack sharing a pk (D28). Keep it as-is.
+        rackId: block ? block.getAttribute("data-rack-id") : null,
         tileEl: tile,
         widgetIndex: isNaN(widx) ? null : widx,
         bayId: parseInt(cellEl.getAttribute("data-bay-id"), 10) || null,
         bayName: cellEl.getAttribute("data-bay-name") || "",
     };
+}
+
+// Enqueue one planned blade (T4.2, PLAN-templates.md D10/D19): a template
+// stamp places a chassis AND its blades in the same unsaved session, and a
+// blade never takes a unit of its own -- it is addressed by
+// ``target_bay_name`` against the chassis's ``parent_ref`` exactly like a
+// hand-added blade into a same-submit chassis (see the save-address comment
+// on ``rdBayItemsForRack`` below). This is the ONE place that creates a
+// pending bay add, so a stamped blade and a hand-dropped one funnel through
+// the identical representation -- never a second one invented for templates.
+// Returns the client ref stamped on the rendered row so a later remove can
+// find it again.
+function rdAddBayItem(opts) {
+    var ref = rdNextBayRef();
+    rdBayAdds.push({
+        ref: ref,
+        rackId: opts.rackId,
+        deviceTypeId: opts.deviceTypeId,
+        bayName: opts.bayName,
+        bayId: null,   // a stamped chassis is always an `add`; it has no real bays yet.
+        parentWidgetIndex: opts.parentWidgetIndex,
+        deviceRoleId: opts.deviceRoleId != null ? opts.deviceRoleId : null,
+        tenantId: opts.tenantId != null ? opts.tenantId : null,
+        proposedName: opts.proposedName || "",
+        planningData: opts.planningData || null,
+        fromTemplateId: opts.fromTemplateId != null ? opts.fromTemplateId : null,
+        fromTemplateVersion: opts.fromTemplateVersion != null ? opts.fromTemplateVersion : null,
+    });
+    return ref;
+}
+
+// Cancel one pending blade add (the stamped tile's own × on a blade row) --
+// the mirror image of rdAddBayItem, keyed by the same ref.
+function rdRemoveBayItem(ref) {
+    rdBayAdds = rdBayAdds.filter(function (a) { return a.ref !== ref; });
 }
 
 // The pending adds for one rack, in the shape SaveLayoutItemSerializer wants
@@ -366,8 +407,13 @@ function rdBayItemsForRack(rackId, refFor) {
             kind: "add",
             device_type_id: a.deviceTypeId,
             target_bay_name: a.bayName,
-            proposed_name: "",
+            proposed_name: a.proposedName || "",
         };
+        if (a.deviceRoleId != null) { item.device_role_id = a.deviceRoleId; }
+        if (a.tenantId != null) { item.tenant_id = a.tenantId; }
+        if (a.planningData != null) { item.planning_data = a.planningData; }
+        if (a.fromTemplateId != null) { item.from_template_id = a.fromTemplateId; }
+        if (a.fromTemplateVersion != null) { item.from_template_version = a.fromTemplateVersion; }
         if (a.bayId) {
             item.target_bay_id = a.bayId;
         } else {
@@ -391,5 +437,7 @@ export {
     rdBeginCursorGesture,
     rdEndCursorGesture,
     rdBayItemsForRack,
+    rdAddBayItem,
+    rdRemoveBayItem,
     rdCursorGesture,
 };

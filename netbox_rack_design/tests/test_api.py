@@ -2392,9 +2392,18 @@ class RecomputeDistributionTest(APITestCase):
         self.assertHttpStatus(resp, status.HTTP_200_OK)
 
         # Only the requested rack came back; the editor keeps its own numbers
-        # for the rest rather than being handed nulls.
-        self.assertEqual(list(resp.data["distributions"].keys()), [str(self.rack.pk)])
-        self.assertEqual(list(resp.data["power"].keys()), [str(self.rack.pk)])
+        # for the rest rather than being handed nulls. Each real rack is filed
+        # under BOTH its legacy bare-pk key and the namespaced "r:<pk>" form
+        # (T1.4d, PLAN-templates.md D27) -- see recompute_distribution's own
+        # docstring for why the legacy key is kept alongside it.
+        self.assertEqual(
+            sorted(resp.data["distributions"].keys()),
+            sorted([str(self.rack.pk), f"r:{self.rack.pk}"]),
+        )
+        self.assertEqual(
+            sorted(resp.data["power"].keys()),
+            sorted([str(self.rack.pk), f"r:{self.rack.pk}"]),
+        )
         # ...and it reflects the move that was described in the OTHER rack.
         self.assertEqual(self._bank2_load(resp.data), 1000)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
@@ -2417,9 +2426,14 @@ class RecomputeDistributionTest(APITestCase):
             with self.subTest(project_racks=label):
                 resp = self.client.post(self._url(), body, format="json", **self.header)
                 self.assertHttpStatus(resp, status.HTTP_200_OK)
+                # Each real rack under BOTH its legacy bare-pk key and the
+                # namespaced "r:<pk>" form (T1.4d, PLAN-templates.md D27).
                 self.assertEqual(
                     sorted(resp.data["distributions"].keys()),
-                    sorted([str(self.rack.pk), str(self.rack2.pk)]),
+                    sorted([
+                        str(self.rack.pk), str(self.rack2.pk),
+                        f"r:{self.rack.pk}", f"r:{self.rack2.pk}",
+                    ]),
                 )
 
     def test_recompute_returns_live_rack_power_summary(self):

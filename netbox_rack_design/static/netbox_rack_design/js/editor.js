@@ -28,6 +28,7 @@ import { initHoverCard } from "rd/hovercard.js";
 import { getCsrfToken, createToast } from "rd/core.js";
 import { showRerunNamingDialog } from "rd/dialogs.js";
 import { setupPalette } from "rd/palette.js";
+import { setupTemplates, setupSaveAsTemplate } from "rd/templates.js";
 import {
     setPowerHooks,
     postSaveToastKey,
@@ -424,7 +425,12 @@ import { initRack, setRackHooks } from "rd/rack.js";
         if (!force && lastRackBodies) {
             Object.keys(rackBodies).forEach(function (id) {
                 if (rackBodies[id] !== lastRackBodies[id]) {
-                    projectRacks.push(Number(id));
+                    // T1.5c (D31): id is `rack.rack_id` (frame.serverRackId),
+                    // the server's rack_key() string ("r:<pk>"/"p:<pk>") for a
+                    // rack block, or a plain chassis device pk. Number(id)
+                    // would turn "p:7" into NaN and drop it from the payload
+                    // parse_rack_id sees server-side (D28) -- keep it as-is.
+                    projectRacks.push(id);
                 }
             });
         }
@@ -544,6 +550,21 @@ import { initRack, setRackHooks } from "rd/rack.js";
     // reads only root and isChassisLayer from this closure.
     setupPalette(root, isChassisLayer);
 
+    // The Templates tab (PLAN-templates.md §3, T3.3) lives in editor/
+    // templates.js. It calls back into buildLayoutPayload (exposed below via
+    // NbxRdEditor, read lazily -- setupTemplates only wires listeners now,
+    // the payload is built at drop/apply time, by which point NbxRdEditor
+    // already exists) so preview-template sees this session's unsaved edits,
+    // per D19.
+    setupTemplates(root);
+
+    // "Save rack as template" (PLAN-templates.md Sec 4, T4.2) -- one button
+    // per rack block, wired straight to the from-design endpoint. Lives in
+    // the same module as the Templates tab (both talk to the Template API)
+    // but needs no unsaved-layout/preview plumbing of its own: from-design
+    // reads the design's own SAVED+committed projection server-side.
+    setupSaveAsTemplate(root);
+
     // The shared device hover card lives in editor/hovercard.js -- it reads only
     // data-* attributes off the tiles, so `root` was all it needed from here.
     initHoverCard(root);
@@ -559,6 +580,12 @@ import { initRack, setRackHooks } from "rd/rack.js";
         // read back the per-rack save payload without simulating a full
         // GridStack drag.
         rackControllers: rackControllers,
+        // The Templates tab's preview-template calls (both the single-rack
+        // drag-drop and the multi-rack/group apply dialog) pass the editor's
+        // CURRENT unsaved edits so the server-computed stamp lands against
+        // what the planner is actually looking at (D19), not just what is
+        // already saved.
+        buildLayoutPayload: buildLayoutPayload,
         // Live per-bank distribution: power_heatmap.js calls this (debounced, on
         // the same mutation signal that drives the power bar) to re-run the server
         // distribution engine over the unsaved layout. Read-only, never persists.

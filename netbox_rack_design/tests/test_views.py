@@ -715,6 +715,10 @@ class DesignElevationViewTest(TestCase):
         response = self.client.get(self._url(self.design))
         self.assertHttpStatus(response, 200)
         content = response.content.decode()
+        # T1.5c (PLAN-templates.md D31): rack_block.html now identifies a
+        # rack in the DOM by the colon-free rack_key() form ("r-<pk>"), not
+        # the bare pk -- a real dcim.Rack and a PlannedRack can share a pk
+        # (D28), so the bare form is ambiguous. These are all real racks.
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rack-id="{rack.pk}"', content)
             self.assertIn(f"nbx-rd-grid-front-{rack.pk}", content)
@@ -1026,6 +1030,7 @@ class DesignEditorViewTest(TestCase):
         self.assertNotIn("nbx-rd-rack-switcher", content)
         # Both scoped racks render side by side, each with its own front grid +
         # per-rack JSON payload keyed by rack pk.
+        # T1.5c (D31): see test_elevation_renders_each_rack_with_both_faces.
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rack-id="{rack.pk}"', content)
             self.assertIn(f"nbx-rd-grid-front-{rack.pk}", content)
@@ -1247,6 +1252,7 @@ class DesignEditorViewTest(TestCase):
         self.assertEqual([b["hidden"] for b in blocks], [False, True])
         # The hidden rack's block still renders (just visually hidden) so its
         # initRack controller runs and the toggle is reload-free.
+        # T1.5c (D31): dash-form rack_key(), see rack_dom_id.
         self.assertIn(f"rd-editor-data-{self.rack2.pk}", content)
         self.assertIn('class="nbx-rd-rack-block hidden"', content)
         # The visible rack's block is rendered without the hidden class.
@@ -1427,6 +1433,7 @@ class DesignEditorDefaultRouteTest(TestCase):
             [b["rack"].pk for b in response.context["all_rack_blocks"]],
             [self.rack1.pk, self.rack2.pk],
         )
+        # T1.5c (D31): see test_elevation_renders_each_rack_with_both_faces.
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rack-id="{rack.pk}"', content)
             self.assertIn(f"rd-editor-data-{rack.pk}", content)

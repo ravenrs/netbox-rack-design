@@ -9,6 +9,10 @@ from .types import (
     DesignPlacementType,
     DesignPowerFeedType,
     DesignType,
+    PlannedRackType,
+    TemplateGroupType,
+    TemplatePlacementType,
+    TemplateType,
 )
 
 __all__ = ("RackDesignQuery", "schema")
@@ -29,6 +33,18 @@ class RackDesignQuery:
     # NetBox's generated GraphQL queries look for.
     planned_power_feed: DesignPowerFeedType = strawberry_django.field()
     planned_power_feed_list: list[DesignPowerFeedType] = strawberry_django.field()
+
+    planned_rack: PlannedRackType = strawberry_django.field()
+    planned_rack_list: list[PlannedRackType] = strawberry_django.field()
+
+    template_group: TemplateGroupType = strawberry_django.field()
+    template_group_list: list[TemplateGroupType] = strawberry_django.field()
+
+    template: TemplateType = strawberry_django.field()
+    template_list: list[TemplateType] = strawberry_django.field()
+
+    template_placement: TemplatePlacementType = strawberry_django.field()
+    template_placement_list: list[TemplatePlacementType] = strawberry_django.field()
 
 
 schema = [RackDesignQuery]

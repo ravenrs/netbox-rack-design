@@ -3,13 +3,26 @@
 import strawberry_django
 
 from ..compat import GraphQLDescribedModelFilterBase, GraphQLModelFilterBase
-from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from ..models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+)
 
 __all__ = (
     "DesignGroupFilter",
     "DesignFilter",
     "DesignPlacementFilter",
     "DesignPowerFeedFilter",
+    "PlannedRackFilter",
+    "TemplateGroupFilter",
+    "TemplateFilter",
+    "TemplatePlacementFilter",
 )
 
 
@@ -35,4 +48,32 @@ class DesignPlacementFilter(GraphQLModelFilterBase):
 
 @strawberry_django.filter_type(DesignPowerFeed, lookups=True)
 class DesignPowerFeedFilter(GraphQLModelFilterBase):
+    pass
+
+
+# PlannedRack carries `description` + `comments` for the same reason Design
+# does (see Design's docstring and the comment on DesignFilter above) -- it is
+# a NetBoxModel, not a PrimaryModel, so it needs the Described base to keep
+# those two filters rather than dropping to the plain NetBoxModel filter base.
+@strawberry_django.filter_type(PlannedRack, lookups=True)
+class PlannedRackFilter(GraphQLDescribedModelFilterBase):
+    pass
+
+
+# TemplateGroup/Template carry `description` but NOT `comments` -- same shape
+# as DesignGroup above, so they use the plain NetBoxModel filter base, not the
+# Described one (which would add a `comments` filter for a field that does
+# not exist on either model).
+@strawberry_django.filter_type(TemplateGroup, lookups=True)
+class TemplateGroupFilter(GraphQLModelFilterBase):
+    pass
+
+
+@strawberry_django.filter_type(Template, lookups=True)
+class TemplateFilter(GraphQLModelFilterBase):
+    pass
+
+
+@strawberry_django.filter_type(TemplatePlacement, lookups=True)
+class TemplatePlacementFilter(GraphQLModelFilterBase):
     pass

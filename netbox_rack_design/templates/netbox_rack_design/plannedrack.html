@@ -1,0 +1,61 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+{% load i18n %}
+
+{% block content %}
+{# T1.9 decision 3: an unrealized planned rack whose (location, name) now #}
+{# matches a real dcim.Rack is worse than dead weight -- Apply would ADOPT #}
+{# that rack (D5) the moment this row is used, so surface it loudly rather #}
+{# than leaving a planner to discover it only when Apply behaves #}
+{# differently than expected. #}
+{% if object.matches_existing_rack %}
+<div class="alert alert-warning" role="alert">
+  {% trans "A real rack already exists at this location with this name. Applying a design that uses this planned rack will adopt that existing rack (its attributes win), not create a new one." %}
+</div>
+{% endif %}
+<div class="row mb-3">
+  <div class="col col-12 col-md-6">
+    <div class="card">
+      <h2 class="card-header">{% trans "Planned rack" %}</h2>
+      <table class="table table-hover attr-table">
+        <tr>
+          <th scope="row">{% trans "Name" %}</th>
+          <td>{{ object.name }}</td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "Location" %}</th>
+          <td>{{ object.location|linkify }}</td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "Site" %}</th>
+          <td>{{ object.site|linkify|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "U height" %}</th>
+          <td>{{ object.u_height }}</td>
+        </tr>
+        <tr>
+          {# Set only once a design using this planned rack is applied #}
+          {# (PLAN-templates.md D7) -- from then on every design derefs #}
+          {# through this to the real rack. #}
+          <th scope="row">{% trans "Realized rack" %}</th>
+          <td>{{ object.realized_rack|linkify|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "Description" %}</th>
+          <td>{{ object.description|placeholder }}</td>
+        </tr>
+      </table>
+    </div>
+    {% include 'inc/panels/custom_fields.html' %}
+    {% include 'inc/panels/comments.html' %}
+    {% plugin_left_page object %}
+  </div>
+  <div class="col col-12 col-md-6">
+    {% include 'inc/panels/tags.html' %}
+    {% plugin_right_page object %}
+  </div>
+</div>
+{% plugin_full_width_page object %}
+{% endblock content %}

@@ -21,4 +21,18 @@ urlpatterns = (
     path("placements/<int:pk>/", include(get_model_urls("netbox_rack_design", "designplacement"))),
     path("power-feeds/", include(get_model_urls("netbox_rack_design", "designpowerfeed", detail=False))),
     path("power-feeds/<int:pk>/", include(get_model_urls("netbox_rack_design", "designpowerfeed"))),
+    path("planned-racks/", include(get_model_urls("netbox_rack_design", "plannedrack", detail=False))),
+    path("planned-racks/<int:pk>/", include(get_model_urls("netbox_rack_design", "plannedrack"))),
+    path("template-groups/", include(get_model_urls("netbox_rack_design", "templategroup", detail=False))),
+    path("template-groups/<int:pk>/", include(get_model_urls("netbox_rack_design", "templategroup"))),
+    path("templates/", include(get_model_urls("netbox_rack_design", "template", detail=False))),
+    path("templates/<int:pk>/", include(get_model_urls("netbox_rack_design", "template"))),
+    path(
+        "template-placements/",
+        include(get_model_urls("netbox_rack_design", "templateplacement", detail=False)),
+    ),
+    path(
+        "template-placements/<int:pk>/",
+        include(get_model_urls("netbox_rack_design", "templateplacement")),
+    ),
 )

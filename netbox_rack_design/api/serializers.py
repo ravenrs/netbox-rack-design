@@ -5,6 +5,7 @@ from dcim.api.serializers import (
     DeviceRoleSerializer,
     DeviceSerializer,
     DeviceTypeSerializer,
+    LocationSerializer,
     RackSerializer,
     SiteSerializer,
 )
@@ -16,7 +17,17 @@ from rest_framework import serializers
 from tenancy.api.serializers import TenantSerializer
 from users.api.serializers import UserSerializer
 
-from ..models import Design, DesignApply, DesignGroup, DesignPlacement, DesignPowerFeed
+from ..models import (
+    Design,
+    DesignApply,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+)
 
 __all__ = (
     "NestedDesignGroupSerializer",
@@ -25,13 +36,25 @@ __all__ = (
     "DesignGroupSerializer",
     "DesignSerializer",
     "DesignPlacementSerializer",
+    "PlannedRackSerializer",
     "DesignPowerFeedSerializer",
     "DesignApplySerializer",
+    "TemplateGroupSerializer",
+    "NestedTemplateGroupSerializer",
+    "TemplateSerializer",
+    "NestedTemplateSerializer",
+    "TemplatePlacementSerializer",
+    "NestedTemplatePlacementSerializer",
     "SaveLayoutSerializer",
+    "RecomputeDistributionSerializer",
+    "PreviewTemplateSerializer",
     "PreviewNameSerializer",
     "FavoriteSetWriteSerializer",
     "FavoriteToggleSerializer",
     "DesignRackScopeSerializer",
+    "CreatePlannedRackSerializer",
+    "ExtractTemplateFromDesignSerializer",
+    "ExtractTemplateFromRackSerializer",
     "HiddenRackToggleSerializer",
     "HiddenChassisToggleSerializer",
     "HiddenRackShowAllSerializer",
@@ -84,6 +107,133 @@ class DesignGroupSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "name")
 
 
+class PlannedRackSerializer(NetBoxModelSerializer):
+    """A rack that does not exist in DCIM yet (PLAN-templates.md D3/D6/T1.7).
+
+    Mirrors ``DesignPowerFeedSerializer``'s shape -- the closest existing
+    precedent for a plugin ``NetBoxModel`` with its own list/detail API.
+    ``realized_rack`` is exposed read/write like any other nested FK: D7 lets
+    ``Apply`` set it once the plan is realized, but nothing stops a client
+    from linking an already-realized rack by hand (e.g. backfilling history).
+    """
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:plannedrack-detail"
+    )
+    location = LocationSerializer(nested=True)
+    realized_rack = RackSerializer(nested=True, required=False, allow_null=True)
+    is_realized = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = PlannedRack
+        fields = (
+            "id", "url", "display", "name", "u_height", "location", "realized_rack",
+            "is_realized", "description", "comments", "tags", "custom_fields",
+            "created", "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "name")
+
+
+# ---------------------------------------------------------------------------
+# Templates (PLAN-templates.md §2, task T2.1) -- a reusable rack layout with
+# no site. Stamping (Phase 3) is not implemented here.
+# ---------------------------------------------------------------------------
+
+
+class NestedTemplateGroupSerializer(WritableNestedSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:templategroup-detail"
+    )
+
+    class Meta:
+        model = TemplateGroup
+        fields = ("id", "url", "display", "name")
+
+
+class TemplateGroupSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:templategroup-detail"
+    )
+
+    class Meta:
+        model = TemplateGroup
+        fields = (
+            "id", "url", "display", "name", "description",
+            "tags", "custom_fields", "created", "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "name")
+
+
+class NestedTemplateSerializer(WritableNestedSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:template-detail"
+    )
+
+    class Meta:
+        model = Template
+        fields = ("id", "url", "display", "name")
+
+
+class TemplateSerializer(NetBoxModelSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:template-detail"
+    )
+    group = NestedTemplateGroupSerializer(required=False, allow_null=True)
+    # Read-only: bumped by TemplatePlacement.save()/delete(), never set by a
+    # client. Exposed because it is half of D20's provenance -- a placement
+    # records the version it was stamped from, and the only way to tell that a
+    # template has DRIFTED since is to compare that against this.
+    version = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Template
+        fields = (
+            "id", "url", "display", "name", "group", "order", "u_height",
+            "version", "description", "tags", "custom_fields", "created",
+            "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "name")
+
+
+class NestedTemplatePlacementSerializer(WritableNestedSerializer):
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:templateplacement-detail"
+    )
+
+    class Meta:
+        model = TemplatePlacement
+        fields = ("id", "url", "display")
+
+
+class TemplatePlacementSerializer(NetBoxModelSerializer):
+    """
+    A single device within a ``Template`` (PLAN-templates.md §2, D8/D9):
+    everything a ``kind=add`` ``DesignPlacement`` carries except the rack, the
+    absolute position and power -- see the model's own docstring. No name
+    field exists at all: the naming engine assigns names at stamp time
+    (Phase 3, not implemented here), never before.
+    """
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:templateplacement-detail"
+    )
+    template = NestedTemplateSerializer()
+    device_type = DeviceTypeSerializer(nested=True)
+    device_role = DeviceRoleSerializer(nested=True, required=False, allow_null=True)
+    tenant = TenantSerializer(nested=True, required=False, allow_null=True)
+    parent_placement = NestedTemplatePlacementSerializer(required=False, allow_null=True)
+
+    class Meta:
+        model = TemplatePlacement
+        fields = (
+            "id", "url", "display", "template", "device_type", "device_role",
+            "tenant", "planning_data", "face", "anchor", "order", "label",
+            "parent_placement", "target_bay_name",
+            "tags", "custom_fields", "created", "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "device_type")
+
+
 class DesignSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rack_design-api:design-detail"
@@ -93,6 +243,17 @@ class DesignSerializer(NetBoxModelSerializer):
     racks = SerializedPKRelatedField(
         queryset=Rack.objects.all(),
         serializer=RackSerializer,
+        nested=True,
+        required=False,
+        many=True,
+    )
+    # The planned-rack counterpart of ``racks`` above (PLAN-templates.md T1.3):
+    # same writable-nested shape, over the SEPARATE ``PlannedRack`` pk space
+    # (D28) -- a pk here is never confused with a ``racks`` pk because they
+    # round-trip through different querysets/serializers entirely.
+    planned_racks = SerializedPKRelatedField(
+        queryset=PlannedRack.objects.all(),
+        serializer=PlannedRackSerializer,
         nested=True,
         required=False,
         many=True,
@@ -117,7 +278,8 @@ class DesignSerializer(NetBoxModelSerializer):
         model = Design
         fields = (
             "id", "url", "display", "title", "site", "status", "summary", "link",
-            "version", "root", "based_on", "sequence", "depends_on", "racks", "group",
+            "version", "root", "based_on", "sequence", "depends_on", "racks",
+            "planned_racks", "group",
             "description", "comments", "is_frozen", "tags", "custom_fields",
             "created", "last_updated",
         )
@@ -144,6 +306,11 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
     device_role = DeviceRoleSerializer(nested=True, required=False, allow_null=True)
     tenant = TenantSerializer(nested=True, required=False, allow_null=True)
     target_rack = RackSerializer(nested=True, required=False, allow_null=True)
+    # The planned-rack counterpart of ``target_rack`` (PLAN-templates.md T1.2):
+    # a device may be planned into a rack that does not exist in DCIM yet. See
+    # ``PlannedRack``'s docstring for why this is a separate FK rather than a
+    # GenericForeignKey -- this nested serializer is exactly the reason.
+    target_planned_rack = PlannedRackSerializer(nested=True, required=False, allow_null=True)
     # Device-bay targeting: a real dcim.DeviceBay (existing chassis) or the
     # placement of a chassis planned in the same design.
     target_bay = DeviceBaySerializer(nested=True, required=False, allow_null=True)
@@ -157,16 +324,25 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
     # of base_placement). Same round-trip shape: a raw pk on write, a nested
     # object on read.
     base_parent_placement = NestedDesignPlacementSerializer(required=False, allow_null=True)
+    # Provenance (PLAN-templates.md §3, D20): which Template this placement was
+    # stamped from, if any, and the template's ``version`` at that moment.
+    # Nested like target_planned_rack above -- a raw pk on write, a nested
+    # object on read. Populated by save-layout (T3.5) from the
+    # from_template_id/from_template_version the editor echoes back on an
+    # 'add' item, having gotten them from this same design's own
+    # preview-template call.
+    from_template = NestedTemplateSerializer(required=False, allow_null=True)
 
     class Meta:
         model = DesignPlacement
         fields = (
             "id", "url", "display", "design", "kind", "device", "device_type",
             "proposed_name", "device_role", "tenant",
-            "target_rack", "target_position", "target_face",
+            "target_rack", "target_planned_rack", "target_position", "target_face",
             "parent_placement", "target_bay", "target_bay_name",
             "base_placement", "base_parent_placement",
             "planning_data", "stale", "stale_device_name",
+            "from_template", "from_template_version",
             "tags", "custom_fields", "created", "last_updated",
         )
         # Staleness is an OBSERVATION, never a client input: it is stamped when
@@ -189,13 +365,19 @@ class DesignPowerFeedSerializer(NetBoxModelSerializer):
         view_name="plugins-api:netbox_rack_design-api:designpowerfeed-detail"
     )
     design = NestedDesignSerializer()
-    rack = RackSerializer(nested=True)
+    # Nullable on both sides (D25/D26): a planned feed lives in EITHER a real
+    # rack or a planned one, never both/neither (model.clean() enforces
+    # exactly-one). Was previously required=True here, which predates
+    # ``planned_rack`` -- see the model's own docstring for why ``rack``
+    # became nullable in the first place.
+    rack = RackSerializer(nested=True, required=False, allow_null=True)
+    planned_rack = PlannedRackSerializer(nested=True, required=False, allow_null=True)
     derated_watts = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = DesignPowerFeed
         fields = (
-            "id", "url", "display", "design", "rack", "name",
+            "id", "url", "display", "design", "rack", "planned_rack", "name",
             "voltage", "amperage", "phase", "supply", "derated_watts",
             "tags", "custom_fields", "created", "last_updated",
         )
@@ -317,9 +499,38 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     target_bay_name = serializers.CharField(
         required=False, allow_blank=True, max_length=64
     )
+    # --- template provenance (PLAN-templates.md D20) ------------------------
+    # Which Template (and which Template.version) a brand-new 'add' was
+    # stamped from -- ``preview-template`` (T3.4) returns both on every item
+    # it computes, and the editor echoes them back verbatim on the matching
+    # save-layout 'add' item so the placement records where it came from.
+    # WITHOUT a default, like the other add-only fields above: an ordinary
+    # hand-placed device simply omits them, and the viewset leaves
+    # ``from_template``/``from_template_version`` null rather than inventing
+    # zeroes. Suffixed ``_id`` to match ``device_role_id``/``tenant_id`` --
+    # this is the id an 'add' item carries in, not the model's own FK name.
+    from_template_id = serializers.IntegerField(required=False, allow_null=True)
+    from_template_version = serializers.IntegerField(required=False, allow_null=True)
 
     def validate(self, data):
         kind = data["kind"]
+        if kind != "add" and (
+            data.get("from_template_id") is not None
+            or data.get("from_template_version") is not None
+        ):
+            # Provenance is meaningful only for an 'add' -- it records where a
+            # NEW planned identity came from, and a move/remove acts on an
+            # identity that already exists. Rejected here, at the request
+            # boundary, rather than only downstream in
+            # DesignPlacement.clean() (which also enforces it, for any other
+            # caller that builds a placement directly): a save-layout client
+            # sending this on a move/remove is confused about what the field
+            # means, and that deserves an explicit 400, not a value that is
+            # silently ignored because the move/remove branch never reads it.
+            raise serializers.ValidationError({
+                "from_template_id": f"A '{kind}' item must not carry template "
+                                     f"provenance -- it only applies to an 'add'.",
+            })
         if kind == "add" and not data.get("placement_id") and not data.get("device_type_id"):
             # An 'add' item is valid when it either re-asserts an EXISTING add
             # placement (carrying its placement_id, for reposition/cancel) OR
@@ -348,9 +559,19 @@ class SaveLayoutItemSerializer(serializers.Serializer):
 
 
 class SaveLayoutRackSerializer(serializers.Serializer):
-    """One rack's desired contents, split by face plus an off-rack 'other' bucket."""
+    """One rack's desired contents, split by face plus an off-rack 'other' bucket.
 
-    rack_id = serializers.IntegerField()
+    ``rack_id`` is a ``CharField`` rather than ``IntegerField`` (T1.4d) so it
+    accepts EITHER the legacy bare integer (a real ``dcim.Rack`` pk, kept
+    working for one release) or the namespaced ``models.rack_key()`` form
+    (``"r:<pk>"``/``"p:<pk>"``, PLAN-templates.md D27). DRF's ``CharField``
+    already coerces a JSON number to its string form, so an in-flight request
+    from an older editor tab (which only ever sends a plain int) keeps
+    working unchanged. The viewset parses the result via
+    ``parse_real_rack_id``/``parse_rack_id``.
+    """
+
+    rack_id = serializers.CharField(max_length=32)
     front = SaveLayoutItemSerializer(many=True, required=False, default=list)
     rear = SaveLayoutItemSerializer(many=True, required=False, default=list)
     other = SaveLayoutItemSerializer(many=True, required=False, default=list)
@@ -382,9 +603,62 @@ class RecomputeDistributionSerializer(SaveLayoutSerializer):
     an older editor working unchanged against a newer server.
     """
 
+    # CharField child (T1.4d) -- see SaveLayoutRackSerializer's rack_id
+    # docstring; the viewset parses each entry via parse_rack_id.
     project_racks = serializers.ListField(
-        child=serializers.IntegerField(), required=False, default=list
+        child=serializers.CharField(max_length=32), required=False, default=list
     )
+
+
+class PreviewTemplateSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/preview-template/ (PLAN-templates.md §3,
+    T3.2; ``group`` added in T3.6).
+
+    ``racks`` uses the NAMESPACED rack keys from ``models.rack_key()``
+    (D27): ``"r:<pk>"`` for a real ``dcim.Rack``, ``"p:<pk>"`` for a
+    ``PlannedRack``. This is a brand-new endpoint, so it is the first (and
+    for now only) place that format is required on the way IN -- the
+    viewset itself validates and reports a malformed key rather than
+    leaving django-filter/DRF to produce an opaque 400 (or, worse, silently
+    coerce a value that happens to look numeric).
+
+    Exactly ONE of ``template`` / ``group`` is required (``validate()``
+    below). The two give ``racks`` different meanings, matching D14/D24:
+
+    - ``template`` -- REPETITION. Every listed rack gets the SAME content
+      (a single ToR dropped on several racks, or the single-template
+      checklist dialog's "which racks" selection).
+    - ``group`` -- CORRESPONDENCE. ``racks`` is POSITIONAL against the
+      group's ordered ``Template`` members (member 1 -> ``racks[0]``,
+      member 2 -> ``racks[1]``, ...), never repeated content. See the
+      viewset action's docstring for what happens when ``racks`` is
+      SHORTER than the group's member count (PLAN-templates.md §6 "Still
+      open": "Group apply when there are fewer target racks than
+      members" -- T3.6 closes this by refusing the whole apply rather than
+      landing part of the pod).
+
+    ``layout`` is the editor's current (possibly unsaved) ``save-layout``
+    body, reused verbatim -- D19's whole reason for existing server-side is
+    to see exactly this. Optional: a caller previewing against already-saved
+    state omits it entirely, exactly like ``recompute-distribution``'s own
+    ``project_racks``-less full-refresh case.
+    """
+
+    template = serializers.IntegerField(required=False)
+    group = serializers.IntegerField(required=False)
+    racks = serializers.ListField(
+        child=serializers.CharField(max_length=32), allow_empty=False,
+    )
+    layout = SaveLayoutSerializer(required=False)
+
+    def validate(self, attrs):
+        has_template = "template" in attrs
+        has_group = "group" in attrs
+        if has_template == has_group:  # both set, or neither
+            raise serializers.ValidationError(
+                "Provide exactly one of 'template' or 'group'."
+            )
+        return attrs
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +751,65 @@ class DesignRackScopeSerializer(serializers.Serializer):
     confirm = serializers.BooleanField(required=False, default=False)
 
 
+class CreatePlannedRackSerializer(serializers.Serializer):
+    """
+    Body for POST .../designs/<pk>/create-planned-rack/ (PLAN-templates.md
+    §1, the editor's "Create rack" dialog). Deliberately a plain input
+    serializer, not ``PlannedRackSerializer`` itself: the dialog only ever
+    collects the three fields a planner types (name/height/location), never
+    ``realized_rack`` or the NetBoxModel bookkeeping fields, and reusing the
+    model serializer here would let a client set those by accident.
+    """
+
+    name = serializers.CharField(max_length=100)
+    u_height = serializers.IntegerField()
+    location_id = serializers.IntegerField()
+
+
+class ExtractTemplateFromDesignSerializer(serializers.Serializer):
+    """
+    Body for POST .../templates/from-design/ (PLAN-templates.md Sec 4, D18/
+    D32, T4.1): build a new ``Template`` from what a design's rack will LOOK
+    LIKE under that design -- its projected state, not merely this design's
+    own ``kind=add`` placements.
+
+    ``rack`` uses the SAME namespaced key ``models.rack_key()`` defines
+    (D27) that ``preview-template``/``recompute-distribution`` already speak:
+    ``"r:<pk>"`` for a real ``dcim.Rack``, ``"p:<pk>"`` for a ``PlannedRack``.
+    A ``"p:<pk>"`` value is well-formed here (it resolves to a real row) but
+    is refused by the viewset with a 400 (D32: a planned rack has no devices
+    by definition, so extracting from one could only ever produce an empty
+    template).
+    """
+
+    design = serializers.IntegerField()
+    rack = serializers.CharField(max_length=32)
+    name = serializers.CharField(max_length=100)
+    description = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default=""
+    )
+    group_id = serializers.IntegerField(required=False, allow_null=True, default=None)
+
+
+class ExtractTemplateFromRackSerializer(serializers.Serializer):
+    """
+    Body for POST .../templates/from-rack/ (PLAN-templates.md Sec 4, D18,
+    T4.1): build a new ``Template`` from a real ``dcim.Rack``'s actual
+    devices, reading ``device.role``/``device.tenant``. Always a plain
+    ``dcim.Rack`` pk -- a ``PlannedRack`` is never addressable through this
+    action (it has no devices at all, ``rackinfo.rack_devices`` returns
+    ``Device.objects.none()`` for one), so there is no namespaced-key
+    ambiguity to resolve here the way ``from-design`` has to.
+    """
+
+    rack_id = serializers.IntegerField()
+    name = serializers.CharField(max_length=100)
+    description = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default=""
+    )
+    group_id = serializers.IntegerField(required=False, allow_null=True, default=None)
+
+
 class HiddenRackToggleSerializer(serializers.Serializer):
     """Body for POST .../hidden-design-racks/toggle/ (per-user view state)."""
 
@@ -506,9 +839,17 @@ class HiddenChassisToggleSerializer(serializers.Serializer):
 
 
 class RackPowerSerializer(serializers.Serializer):
-    """Body for POST .../designs/<pk>/rack-power/."""
+    """Body for POST .../designs/<pk>/rack-power/.
 
-    rack_id = serializers.IntegerField()
+    ``rack_id`` is a ``CharField`` rather than ``IntegerField`` (T1.4d) so it
+    accepts EITHER the legacy bare integer or the namespaced
+    ``models.rack_key()`` form (``"r:<pk>"``/``"p:<pk>"``) -- DRF's
+    ``CharField`` already coerces a JSON number to its string form, so an
+    older client sending a plain int keeps working unchanged. The viewset
+    parses the result via ``parse_real_rack_id``.
+    """
+
+    rack_id = serializers.CharField(max_length=32)
     power_config = serializers.JSONField(required=False, allow_null=True)
 
 
@@ -530,10 +871,14 @@ class PlannedFeedSerializer(serializers.ModelSerializer):
 
 class CopyFeedsSerializer(serializers.Serializer):
     """Body for POST .../designs/<pk>/copy-feeds/ (clone a rack's feeds as
-    planned feeds onto another rack)."""
+    planned feeds onto another rack).
 
-    rack_id = serializers.IntegerField()
-    source_rack_id = serializers.IntegerField()
+    Both ids are ``CharField`` (T1.4d) -- see ``RackPowerSerializer``'s
+    ``rack_id`` docstring for why.
+    """
+
+    rack_id = serializers.CharField(max_length=32)
+    source_rack_id = serializers.CharField(max_length=32)
 
 
 class PlannedFeedDeleteSerializer(serializers.Serializer):
@@ -545,7 +890,8 @@ class PlannedFeedDeleteSerializer(serializers.Serializer):
     """
 
     feed_id = serializers.IntegerField(required=False)
-    rack_id = serializers.IntegerField(required=False)
+    # CharField (T1.4d) -- see RackPowerSerializer's rack_id docstring.
+    rack_id = serializers.CharField(max_length=32, required=False)
     name = serializers.CharField(max_length=100, required=False)
 
     def validate(self, attrs):
@@ -558,9 +904,13 @@ class PlannedFeedDeleteSerializer(serializers.Serializer):
 
 
 class PlannedFeedUpsertSerializer(serializers.Serializer):
-    """Body for POST .../designs/<pk>/planned-feed/ (upsert by rack+name)."""
+    """Body for POST .../designs/<pk>/planned-feed/ (upsert by rack+name).
 
-    rack_id = serializers.IntegerField()
+    ``rack_id`` is a ``CharField`` (T1.4d) -- see ``RackPowerSerializer``'s
+    ``rack_id`` docstring.
+    """
+
+    rack_id = serializers.CharField(max_length=32)
     name = serializers.CharField(max_length=100)
     voltage = serializers.IntegerField(required=False)
     amperage = serializers.IntegerField(required=False)

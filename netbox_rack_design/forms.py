@@ -28,14 +28,27 @@ from utilities.forms.fields import (
 )
 from utilities.forms.rendering import FieldSet
 
-from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from .choices import DesignPlacementKindChoices, DesignStatusChoices, TemplatePlacementAnchorChoices
+from .models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+)
 
 __all__ = (
     "DesignGroupForm",
     "DesignForm",
     "DesignPlacementForm",
     "DesignPowerFeedForm",
+    "PlannedRackForm",
+    "TemplateGroupForm",
+    "TemplateForm",
+    "TemplatePlacementForm",
     "DesignGroupImportForm",
     "DesignImportForm",
     "DesignPlacementImportForm",
@@ -646,3 +659,98 @@ class DesignPowerFeedFilterForm(NetBoxModelFilterSetForm):
         queryset=Rack.objects.all(), required=False, label="Rack")
     phase = forms.MultipleChoiceField(choices=PowerFeedPhaseChoices, required=False)
     supply = forms.MultipleChoiceField(choices=PowerFeedSupplyChoices, required=False)
+
+
+# ---------------------------------------------------------------------------
+# PlannedRack (PLAN-templates.md §1) -- a rack that does not exist in NetBox
+# yet. Only the model form is provided here: no filterset/bulk import/bulk
+# edit exist yet (those, and the API, are T1.7), so there is no
+# PlannedRackImportForm / PlannedRackBulkEditForm / PlannedRackFilterForm.
+# ---------------------------------------------------------------------------
+
+
+class PlannedRackForm(NetBoxModelForm):
+    location = DynamicModelChoiceField(
+        queryset=Location.objects.all(),
+        help_text=_(
+            "Required: identity is (location, name), the same uniqueness "
+            "dcim.Rack itself enforces -- see PlannedRack's docstring."
+        ),
+    )
+
+    fieldsets = (
+        FieldSet("name", "location", "u_height", "tags", name=_("Planned rack")),
+        FieldSet("description", "comments", name=_("Notes")),
+    )
+
+    class Meta:
+        model = PlannedRack
+        fields = (
+            "name", "location", "u_height", "description", "comments", "tags",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Templates (PLAN-templates.md §2) -- a reusable rack layout with no site.
+# Stamping (Phase 3) is not implemented yet, so these forms cover only the
+# ordinary create/edit path.
+# ---------------------------------------------------------------------------
+
+
+class TemplateGroupForm(NetBoxModelForm):
+    fieldsets = (
+        FieldSet("name", "description", "tags", name=_("Template group")),
+    )
+
+    class Meta:
+        model = TemplateGroup
+        fields = ("name", "description", "tags")
+
+
+class TemplateForm(NetBoxModelForm):
+    group = DynamicModelChoiceField(queryset=TemplateGroup.objects.all(), required=False)
+
+    fieldsets = (
+        FieldSet("name", "group", "order", "u_height", "tags", name=_("Template")),
+        FieldSet("description", name=_("Notes")),
+    )
+
+    class Meta:
+        model = Template
+        fields = ("name", "group", "order", "u_height", "description", "tags")
+
+
+class TemplatePlacementForm(NetBoxModelForm):
+    template = DynamicModelChoiceField(queryset=Template.objects.all())
+    device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all())
+    device_role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
+    tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False)
+    # The chassis this blade goes into, scoped to the same template -- there is
+    # no cross-template case here, unlike DesignPlacement's ancestor-design
+    # variant (a template never references another template's rows, D10).
+    parent_placement = DynamicModelChoiceField(
+        queryset=TemplatePlacement.objects.all(),
+        required=False,
+        label=_("Parent (chassis) placement"),
+        query_params={"template_id": "$template"},
+    )
+
+    fieldsets = (
+        FieldSet(
+            "template", "device_type", "device_role", "tenant", "label", "tags",
+            name=_("Placement"),
+        ),
+        FieldSet("anchor", "order", "face", name=_("Rack slot")),
+        FieldSet("parent_placement", "target_bay_name", name=_("Device bay")),
+    )
+
+    class Meta:
+        model = TemplatePlacement
+        fields = (
+            "template", "device_type", "device_role", "tenant", "label",
+            "anchor", "order", "face", "parent_placement", "target_bay_name",
+            "tags",
+        )
+        widgets = {
+            "anchor": forms.Select(choices=TemplatePlacementAnchorChoices),
+        }

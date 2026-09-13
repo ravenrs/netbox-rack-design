@@ -11,14 +11,16 @@ All terminology is generic — no organization-specific concepts are hardcoded.
 """
 
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
+from dcim.constants import RACK_U_HEIGHT_DEFAULT, RACK_U_HEIGHT_MAX
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
 from netbox.models import NetBoxModel
 
 from . import planning_fields
-from .choices import DesignPlacementKindChoices, DesignStatusChoices
+from .choices import DesignPlacementKindChoices, DesignStatusChoices, TemplatePlacementAnchorChoices
 
 __all__ = (
     "DesignGroup",
@@ -30,6 +32,12 @@ __all__ = (
     "FavoriteSet",
     "HiddenDesignRack",
     "HiddenDesignChassis",
+    "PlannedRack",
+    "resolve_rack",
+    "rack_key",
+    "TemplateGroup",
+    "Template",
+    "TemplatePlacement",
 )
 
 # The plugin's hosted documentation (MkDocs -> GitHub Pages). NetBoxModel's
@@ -181,6 +189,23 @@ class Design(NetBoxModel):
         related_name="scoped_designs",
         blank=True,
         help_text="Racks this design plans across. Every rack must belong to the design's site.",
+    )
+    # The planned-rack counterpart of ``racks`` above (PLAN-templates.md T1.3):
+    # a design may also plan across racks that do not exist in NetBox yet (see
+    # ``PlannedRack``'s docstring). Kept as a SEPARATE M2M rather than merged
+    # into ``racks`` via some real-or-planned union field, for the same reason
+    # ``DesignPlacement`` gets two separate rack FKs instead of one
+    # GenericForeignKey (PlannedRack's docstring, and the target_rack /
+    # target_planned_rack split above): filtering, select_related and the REST
+    # serializers all stay ordinary FK joins on both sides. Reusing the same
+    # related_name (``scoped_designs``) as ``racks`` is fine here -- Django
+    # only requires a related_name to be unique per TARGET model, and the
+    # target here is ``PlannedRack``, not ``dcim.Rack``.
+    planned_racks = models.ManyToManyField(
+        to="netbox_rack_design.PlannedRack",
+        related_name="scoped_designs",
+        blank=True,
+        help_text="Planned racks this design plans across.",
     )
 
     # --- optional grouping ----------------------------------------------------
@@ -416,6 +441,18 @@ class Design(NetBoxModel):
                     {"racks": f"These racks are not in the design's site: {names}."}
                 )
 
+        # Same rule for `planned_racks` (T1.3): a PlannedRack has no site FK of
+        # its own -- its site is reached through `location` (PlannedRack.site)
+        # -- so this filters on `location__site_id` rather than `site_id`
+        # directly. Same M2M-timing caveat as the `racks` check just above.
+        if self.pk and self.site_id:
+            offending_planned = self.planned_racks.exclude(location__site_id=self.site_id)
+            if offending_planned.exists():
+                names = ", ".join(str(rack) for rack in offending_planned)
+                raise ValidationError(
+                    {"planned_racks": f"These planned racks are not in the design's site: {names}."}
+                )
+
 
         # A design's `racks` scope is part of what was approved (§2.2/G4): the
         # `add-rack`/`remove-rack` API actions already refuse to widen or
@@ -580,6 +617,30 @@ class DesignPlacement(NetBoxModel):
         blank=True,
         null=True,
     )
+    # The planned-rack counterpart of ``target_rack`` (PLAN-templates.md T1.2):
+    # a design may plan a device into a rack that does not exist in NetBox yet
+    # (see ``PlannedRack``'s docstring for why that is a shared first-class
+    # object rather than a design-scoped row). Exactly one of ``target_rack``/
+    # ``target_planned_rack`` may be set for an 'add' or 'move' (enforced in
+    # clean()); a 'remove' sets NEITHER -- which is why the database-level
+    # guard in ``Meta.constraints`` below is "not both", not "exactly one"
+    # (D26): a plain exactly-one CheckConstraint would reject every removal.
+    #
+    # CASCADE, mirroring ``target_rack``: this FK names a DESTINATION, not a
+    # reference whose loss must be reported. Contrast ``device`` above, whose
+    # SET_NULL + ``stale`` machinery exists precisely because that FK records
+    # HISTORY (what is being acted on) -- ``target_rack``/``target_planned_rack``
+    # instead record WHERE this row's device is headed, and if that destination
+    # is deleted outright there is nothing left for the placement to mean, so
+    # it disappears with it, exactly as it already does for a deleted
+    # ``target_rack``.
+    target_planned_rack = models.ForeignKey(
+        to="netbox_rack_design.PlannedRack",
+        on_delete=models.CASCADE,
+        related_name="design_placements",
+        blank=True,
+        null=True,
+    )
     target_position = models.DecimalField(
         max_digits=4, decimal_places=1, blank=True, null=True
     )
@@ -732,6 +793,42 @@ class DesignPlacement(NetBoxModel):
         null=True,
     )
 
+    # Provenance: which Template (if any) this placement was stamped from
+    # (PLAN-templates.md §3, D20), and which version of that template it was
+    # stamped at. Enough to answer "which racks use the standard ToR?" and to
+    # warn that the template has since changed -- re-sync / diff-against-template
+    # is explicitly DEFERRED (D20), so nothing here keeps this placement in
+    # sync with its template after the stamp.
+    #
+    # SET_NULL, deliberately NOT CASCADE -- the same reasoning as ``device``
+    # above, for the same reason: this FK records HISTORY (what this placement
+    # was stamped from), not a destination whose loss should take the
+    # placement with it. Deleting a ``Template`` (e.g. because "our standard
+    # ToR" was retired or reorganised) must never delete every design
+    # placement that was ever stamped from it -- those placements are real
+    # devices/plans that stand on their own once stamped, exactly as a design
+    # placement survives the deletion of the real device it referenced.
+    # Unlike ``device``, losing this FK is not reportable data loss: the
+    # provenance was informational from the start ("this came from a
+    # template"), not the placement's identity, so there is no ``stale``-style
+    # flag here -- ``from_template`` simply goes null and the placement is
+    # otherwise unaffected.
+    from_template = models.ForeignKey(
+        to="netbox_rack_design.Template",
+        on_delete=models.SET_NULL,
+        related_name="stamped_placements",
+        blank=True,
+        null=True,
+    )
+    # The template's version (see Template.version below) at the moment this
+    # placement was stamped. Compared against the live ``from_template.version``
+    # to warn "this template has changed since you stamped it" -- the whole
+    # point of D20. Null whenever ``from_template`` is null (an ordinary
+    # hand-placed device never had a version to record), and also stays put
+    # (not re-stamped) if the template is edited afterwards -- that is exactly
+    # the drift this field exists to detect, not something to paper over.
+    from_template_version = models.PositiveIntegerField(blank=True, null=True)
+
     class Meta:
         ordering = ("design", "target_position", "pk")
         verbose_name = "design placement"
@@ -763,6 +860,17 @@ class DesignPlacement(NetBoxModel):
                 fields=("design", "base_parent_placement", "target_bay_name"),
                 condition=models.Q(base_parent_placement__isnull=False),
                 name="%(app_label)s_%(class)s_unique_design_base_parent_bay",
+            ),
+            # "Not both", not "exactly one" (D26, PLAN-templates.md): a plain
+            # exactly-one constraint would reject every 'remove', which sets
+            # neither target_rack nor target_planned_rack. clean() enforces
+            # the stronger "exactly one, for add/move" rule; this is only the
+            # database-level backstop against a row naming both destinations
+            # at once.
+            models.CheckConstraint(
+                condition=models.Q(target_rack__isnull=True)
+                | models.Q(target_planned_rack__isnull=True),
+                name="%(app_label)s_%(class)s_single_target_rack",
             ),
         ]
 
@@ -933,6 +1041,16 @@ class DesignPlacement(NetBoxModel):
                     "stale": "An 'add' can only be stale when the ancestor-planned "
                              "chassis it was to go into is gone.",
                 })
+            # A stamped version with no template to have stamped it from is
+            # meaningless -- ``from_template_version`` only ever records the
+            # ``Template.version`` observed AT THE MOMENT ``from_template`` was
+            # set (see that field's comment), so one without the other is not
+            # a lesser form of provenance, it is an inconsistent one.
+            if self.from_template_version is not None and not self.from_template_id:
+                raise ValidationError({
+                    "from_template_version": "from_template_version requires "
+                                              "from_template to be set.",
+                })
         else:
             # A stale move/remove is device-less AND base_placement-less BY
             # DEFINITION -- whatever it referenced (a real device, or an
@@ -968,6 +1086,24 @@ class DesignPlacement(NetBoxModel):
                     raise ValidationError({"device_role": f"A '{kind}' must not set a device role."})
                 if self.tenant:
                     raise ValidationError({"tenant": f"A '{kind}' must not set a tenant."})
+            # Provenance (D20) records where a NEW planned identity came from
+            # -- it is meaningful only for an 'add', which is the one kind
+            # that creates one. A move/remove acts on something that already
+            # exists (a real device, or an ancestor's still-planned 'add'),
+            # so it has its own provenance already and cannot acquire a
+            # different one by being relocated -- unlike device_role/tenant,
+            # this is refused for BOTH move and remove, not just remove.
+            if self.from_template_id:
+                raise ValidationError({
+                    "from_template": f"A '{kind}' must not set from_template -- "
+                                      f"template provenance only applies to an 'add'.",
+                })
+            if self.from_template_version is not None:
+                raise ValidationError({
+                    "from_template_version": f"A '{kind}' must not set "
+                                              f"from_template_version -- template "
+                                              f"provenance only applies to an 'add'.",
+                })
 
         # A stale placement is inert: it projects nothing (projection skips
         # device-less move/remove rows), so validating its target against the
@@ -991,12 +1127,30 @@ class DesignPlacement(NetBoxModel):
                                    "parent placement.",
             })
 
-        # add / move require a target rack; the target position is optional --
-        # None means a tray (non-racked) target (spec §9.5: mount vs dismount vs
-        # tray-to-tray reassociation are all distinguished by target_position
-        # being set vs None, never by a separate flag).
-        if not self.target_rack:
-            raise ValidationError({"target_rack": "A target rack is required."})
+        # add / move require a target rack OR a target planned rack -- exactly
+        # one of the two (D26 / PLAN-templates.md T1.2): a real rack and a
+        # planned rack are different destinations, never both at once, and
+        # never neither (a 'remove', which already returned above, is the
+        # only kind allowed to set neither).
+        if not self.target_rack and not self.target_planned_rack:
+            raise ValidationError({
+                "target_rack": "A target rack or a target planned rack is required.",
+            })
+        if self.target_rack and self.target_planned_rack:
+            raise ValidationError({
+                "target_planned_rack": "A placement cannot target both a real rack "
+                                       "and a planned rack -- exactly one identifies "
+                                       "where it goes.",
+            })
+
+        if self.target_planned_rack_id:
+            self._validate_planned_rack_target()
+            return
+
+        # the target position is optional -- None means a tray (non-racked)
+        # target (spec §9.5: mount vs dismount vs tray-to-tray reassociation
+        # are all distinguished by target_position being set vs None, never
+        # by a separate flag).
         if self.target_position is None:
             self._validate_tray_target()
             return
@@ -1235,6 +1389,25 @@ class DesignPlacement(NetBoxModel):
         if self.design_id and self.target_rack.site_id != self.design.site_id:
             raise ValidationError(
                 {"target_rack": "Target rack must be in the design's site."}
+            )
+
+    def _validate_planned_rack_target(self):
+        """
+        The ``target_planned_rack`` counterpart of ``_validate_tray_target``:
+        same-site scope is the only thing checked here, regardless of whether
+        ``target_position`` is set. A ``PlannedRack`` has no real
+        ``dcim.Rack`` row to run ``get_available_units`` against and no
+        occupancy of its own until Apply realizes it, so slot-collision
+        checking against a planned rack's own (still hypothetical) layout is
+        a projection-layer concern, not this model's -- out of scope here
+        (PLAN-templates.md T1.2/T1.4 split).
+        """
+        # PlannedRack has no site FK of its own -- ``site`` is a property that
+        # derefs through ``location`` (see PlannedRack.site) -- so this reads
+        # location_id/site_id rather than comparing a column directly.
+        if self.design_id and self.target_planned_rack.location.site_id != self.design.site_id:
+            raise ValidationError(
+                {"target_planned_rack": "Target planned rack must be in the design's site."}
             )
 
     def _validate_target_slot(self):
@@ -1619,9 +1792,17 @@ class DesignPowerFeed(NetBoxModel):
     page and a delete button of its own (user 2026-08-28), which is exactly what
     the generic views give a NetBoxModel. Read-only w.r.t. dcim; nothing is ever
     written to a real ``PowerFeed``.
+
+    ``planned_rack`` (PLAN-templates.md D25/T1.8b) is the greenfield case this
+    model's own docstring already names: a planned PDU in a rack that does not
+    exist yet has no ``dcim.PowerFeed`` rows to size its breaker from, because
+    it has no rack row at all. ``rack`` is therefore nullable too, and exactly
+    one of the two is required (D26) -- unlike ``DesignPlacement``'s "not both"
+    shape, a feed always belongs to SOME rack, real or planned, so there is no
+    "neither" case to leave room for.
     """
 
-    clone_fields = ("design", "rack", "voltage", "amperage", "phase", "supply")
+    clone_fields = ("design", "rack", "planned_rack", "voltage", "amperage", "phase", "supply")
 
     design = models.ForeignKey(
         to="netbox_rack_design.Design",
@@ -1632,6 +1813,19 @@ class DesignPowerFeed(NetBoxModel):
         to="dcim.Rack",
         on_delete=models.CASCADE,
         related_name="+",
+        blank=True,
+        null=True,
+    )
+    # The planned-rack counterpart of ``rack`` above (D25/D26). CASCADE, same as
+    # ``rack``: this FK names WHERE the feed lives, not a reference whose loss
+    # must be reported, so deleting the planned rack legitimately deletes the
+    # feed planned for it.
+    planned_rack = models.ForeignKey(
+        to="netbox_rack_design.PlannedRack",
+        on_delete=models.CASCADE,
+        related_name="+",
+        blank=True,
+        null=True,
     )
     # The feed's identity/leg, e.g. "Feed A" -- the bank/leg the bound PDUs sit on.
     name = models.CharField(max_length=100)
@@ -1649,13 +1843,33 @@ class DesignPowerFeed(NetBoxModel):
     )
 
     class Meta:
-        ordering = ("design", "rack", "name")
+        ordering = ("design", "rack", "planned_rack", "name")
         verbose_name = "planned power feed"
         verbose_name_plural = "planned power feeds"
         constraints = [
+            # Nullable ``rack`` (D26): Postgres treats NULLs as distinct, so a
+            # plain UniqueConstraint(design, rack, name) stops constraining
+            # anything once every planned-rack-only row shares a NULL there.
+            # Two partial constraints, one per destination kind, instead.
             models.UniqueConstraint(
                 fields=("design", "rack", "name"),
+                condition=models.Q(rack__isnull=False),
                 name="%(app_label)s_%(class)s_unique_design_rack_name",
+            ),
+            models.UniqueConstraint(
+                fields=("design", "planned_rack", "name"),
+                condition=models.Q(planned_rack__isnull=False),
+                name="%(app_label)s_%(class)s_unique_design_planned_rack_name",
+            ),
+            # EXACTLY one of rack / planned_rack, not merely "not both" (D26):
+            # a feed always lives in some rack, real or planned -- there is no
+            # "remove" case here the way DesignPlacement has one.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(rack__isnull=False, planned_rack__isnull=True)
+                    | models.Q(rack__isnull=True, planned_rack__isnull=False)
+                ),
+                name="%(app_label)s_%(class)s_exactly_one_rack",
             ),
         ]
 
@@ -1686,6 +1900,31 @@ class DesignPowerFeed(NetBoxModel):
         # viewset / HTML delete views instead, same as for placements.)
         if self.design_id and self.design.is_frozen:
             raise ValidationError(_frozen_design_clean_message("its planned power feeds"))
+
+        # Python-level mirror of the CheckConstraint above, for a friendlier
+        # form/API error than a bare IntegrityError.
+        if self.rack_id and self.planned_rack_id:
+            raise ValidationError({
+                "planned_rack": "A planned feed cannot bind to both a real rack "
+                                 "and a planned rack -- exactly one identifies "
+                                 "where it lives.",
+            })
+        if not self.rack_id and not self.planned_rack_id:
+            raise ValidationError({
+                "rack": "A planned feed requires a rack or a planned rack.",
+            })
+
+        # Same-site scope as DesignPlacement._validate_planned_rack_target: a
+        # PlannedRack has no site FK of its own -- ``site`` is a property that
+        # derefs through ``location`` -- so this reads location_id/site_id
+        # rather than comparing a column directly.
+        if (
+            self.planned_rack_id and self.design_id
+            and self.planned_rack.location.site_id != self.design.site_id
+        ):
+            raise ValidationError({
+                "planned_rack": "Planned rack must be in the design's site.",
+            })
 
     @property
     def derated_watts(self):
@@ -1720,6 +1959,13 @@ class DesignRackPower(models.Model):
 
     Plain ``models.Model`` (like HiddenDesignRack): this is planning scratch
     data, not a change-logged/searchable object with its own cf/tags.
+
+    ``planned_rack`` (PLAN-templates.md D25/T1.8b): a planned rack has no
+    ``dcim.Rack`` row and therefore no ``rack.cf`` at all, so for it this row
+    is not an override merged over something else -- it is the ONLY source of
+    ``power_limitation``/``pdu_location``. Same nullable-``rack``-plus-partial-
+    constraints shape as ``DesignPowerFeed`` (D26): exactly one of ``rack`` /
+    ``planned_rack`` is required, never both, never neither.
     """
 
     design = models.ForeignKey(
@@ -1731,29 +1977,91 @@ class DesignRackPower(models.Model):
         to="dcim.Rack",
         on_delete=models.CASCADE,
         related_name="+",
+        blank=True,
+        null=True,
+    )
+    # The planned-rack counterpart of ``rack`` above (D25/D26). CASCADE, same
+    # reasoning as DesignPowerFeed.planned_rack: this names WHERE the override
+    # applies, so deleting the planned rack legitimately deletes it.
+    planned_rack = models.ForeignKey(
+        to="netbox_rack_design.PlannedRack",
+        on_delete=models.CASCADE,
+        related_name="+",
+        blank=True,
+        null=True,
     )
     # Same JSON shape as DesignPlacement.power_config, minus "feed" (a rack has
     # no feed of its own): {"source", "copied_from", "custom_fields": {...}}.
     power_config = models.JSONField(blank=True, null=True)
 
     class Meta:
-        ordering = ("design", "rack")
+        ordering = ("design", "rack", "planned_rack")
         verbose_name = "design rack power"
         verbose_name_plural = "design rack power"
         constraints = [
+            # Same D26 shape as DesignPowerFeed: nullable ``rack`` destroys a
+            # plain UniqueConstraint(design, rack)'s meaning, so two partial
+            # constraints replace it, one per destination kind.
             models.UniqueConstraint(
                 fields=("design", "rack"),
+                condition=models.Q(rack__isnull=False),
                 name="%(app_label)s_%(class)s_unique_design_rack",
+            ),
+            models.UniqueConstraint(
+                fields=("design", "planned_rack"),
+                condition=models.Q(planned_rack__isnull=False),
+                name="%(app_label)s_%(class)s_unique_design_planned_rack",
+            ),
+            # EXACTLY one of rack / planned_rack: an override always applies to
+            # SOME rack, real or planned -- there is no "neither" case here.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(rack__isnull=False, planned_rack__isnull=True)
+                    | models.Q(rack__isnull=True, planned_rack__isnull=False)
+                ),
+                name="%(app_label)s_%(class)s_exactly_one_rack",
             ),
         ]
 
     def __str__(self):
-        return f"{self.design}: power for {self.rack}"
+        return f"{self.design}: power for {self.rack or self.planned_rack}"
+
+    def clean(self):
+        super().clean()
+        # Python-level mirror of the CheckConstraint above, for a friendlier
+        # form/API error than a bare IntegrityError.
+        if self.rack_id and self.planned_rack_id:
+            raise ValidationError({
+                "planned_rack": "A rack power override cannot bind to both a "
+                                 "real rack and a planned rack -- exactly one "
+                                 "identifies where it applies.",
+            })
+        if not self.rack_id and not self.planned_rack_id:
+            raise ValidationError({
+                "rack": "A rack power override requires a rack or a planned rack.",
+            })
+
+        # Same-site scope as DesignPowerFeed.clean() / DesignPlacement.
+        # _validate_planned_rack_target: PlannedRack has no site FK of its
+        # own -- ``site`` is a property that derefs through ``location``.
+        if (
+            self.planned_rack_id and self.design_id
+            and self.planned_rack.location.site_id != self.design.site_id
+        ):
+            raise ValidationError({
+                "planned_rack": "Planned rack must be in the design's site.",
+            })
 
     @classmethod
     def effective_custom_fields(cls, design, rack):
         """The MERGED rack power custom fields ``design`` should read for
         ``rack``, across its baseline chain (PLAN-design-chains.md G5 item 2).
+
+        ``rack`` may be EITHER a real ``dcim.Rack`` or a ``PlannedRack``
+        (PLAN-templates.md D25/T1.8b) -- a planned rack has no ``rack.cf`` at
+        all, so this is the only place its power custom fields can come from.
+        Both kinds are looked up the same way; only which FK column is
+        queried differs, so no caller needs to branch on real-vs-planned.
 
         The rule: a child INHERITS an approved ancestor's override for this
         rack, and MAY OVERRIDE any key of its own -- the same shape as a child
@@ -1779,16 +2087,20 @@ class DesignRackPower(models.Model):
         """
         from . import projection  # local: projection imports this module
 
+        rack_filter = (
+            {"planned_rack": rack} if isinstance(rack, PlannedRack) else {"rack": rack}
+        )
+
         merged = {}
         chain, conflict = projection.resolve_baseline_chain(design)
         for ancestor in chain:
             try:
-                row = cls.objects.get(design=ancestor, rack=rack)
+                row = cls.objects.get(design=ancestor, **rack_filter)
             except cls.DoesNotExist:
                 continue
             merged.update((row.power_config or {}).get("custom_fields") or {})
         try:
-            own = cls.objects.get(design=design, rack=rack)
+            own = cls.objects.get(design=design, **rack_filter)
         except cls.DoesNotExist:
             own = None
         if own is not None:
@@ -1924,3 +2236,590 @@ class DesignApply(models.Model):
         design_label = self.design or self.design_title or "?"
         device_label = self.device or self.device_name or "?"
         return f"{design_label}: apply of {device_label}"
+
+
+class PlannedRack(NetBoxModel):
+    """
+    A rack that does not exist in NetBox yet (PLAN-templates.md §1, D3/D6): the
+    prerequisite for planning a greenfield row. Today ``Design.racks`` and
+    ``DesignPlacement.target_rack`` can only point at a ``dcim.Rack`` that
+    already exists, so there was no way to plan a rack before it is built.
+
+    A shared first-class object, not a design-scoped row (D3/D6): it is not
+    owned by any one ``Design``. Designs reference it the same way they
+    reference a real rack, so two planners drafting the same future rack
+    share one row and see each other's placements through the existing
+    peer-conflict machinery, with no new projection path. Rejected:
+    materializing a real ``dcim.Rack`` with ``status=planned`` up front --
+    that leaks into DCIM before anything is approved, orphans on design
+    deletion, and gives two planners two racks instead of one shared plan.
+
+    A ``NetBoxModel``, NOT a ``PrimaryModel``: see ``Design``'s docstring above
+    for why the plugin owns ``description``/``comments`` directly rather than
+    inheriting a base whose field set changes between NetBox minors
+    (``PrimaryModel`` gained an ``owner`` FK in 4.5). The same reasoning
+    applies here without qualification.
+
+    ``location`` is REQUIRED (D4), which is the whole reason Apply can never
+    hit an ``IntegrityError``. ``dcim.Rack`` itself is unique only on
+    ``(location, name)`` (see ``Rack.Meta.constraints`` in dcim/models/racks.py)
+    because ``location`` is nullable there and Postgres treats NULLs as
+    distinct -- two real racks named "R1" with no location are not a
+    conflict. If this model allowed the same, ``(location, name)`` would stop
+    constraining anything for the planned racks that share a null location,
+    and Apply's "does a matching rack already exist" lookup could find more
+    than one candidate, or silently diverge from what ``dcim.Rack`` itself
+    considers a duplicate. Making ``location`` mandatory here keeps this
+    model's identity exactly as narrow as core's, so a match is always
+    unique and creation on Apply can never violate core's own constraint.
+
+    ``realized_rack`` (D7) is null until a design that uses this planned rack
+    is applied; Apply then either adopts a matching real rack or creates one,
+    and sets this to whichever it is. The row is never deleted at that
+    point -- it survives forever, marked realized, so every design that still
+    references it derefs to the real rack from then on (see ``resolve_rack``
+    below), and the fact that this rack was once only planned is not erased.
+    """
+
+    clone_fields = ("u_height", "location")
+
+    name = models.CharField(max_length=100)
+    u_height = models.PositiveSmallIntegerField(default=RACK_U_HEIGHT_DEFAULT)
+    location = models.ForeignKey(
+        to="dcim.Location",
+        on_delete=models.PROTECT,
+        related_name="planned_racks",
+        help_text=_(
+            "Required -- see PlannedRack's docstring: this is what makes "
+            "(location, name) a unique identity, matching dcim.Rack's own "
+            "constraint, so Apply's adopt-or-create lookup can never be "
+            "ambiguous."
+        ),
+    )
+    # Null until a design using this planned rack is applied (D7). SET_NULL
+    # rather than CASCADE/PROTECT: deleting the real rack later must not take
+    # this bookkeeping row down with it -- the row's whole purpose is to
+    # outlive that and keep saying "this used to be planned".
+    realized_rack = models.ForeignKey(
+        to="dcim.Rack",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+    description = models.CharField(max_length=200, blank=True)
+    comments = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("location", "name")
+        verbose_name = "planned rack"
+        verbose_name_plural = "planned racks"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("location", "name"),
+                name="%(app_label)s_%(class)s_unique_location_name",
+            ),
+        ]
+
+    def __str__(self):
+        return self.name or f"Planned rack {self.pk}"
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_rack_design:plannedrack", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
+
+    def clean(self):
+        super().clean()
+        # dcim.Rack validates u_height with MinValueValidator(1) plus
+        # RACK_U_HEIGHT_MAX (there is no RACK_U_HEIGHT_MIN constant in
+        # dcim.constants across 4.4-4.6 -- core hardcodes the lower bound of 1
+        # inline). Mirrored here rather than invented, so a planned rack can
+        # never describe a height core itself would reject once realized.
+        if self.u_height < 1 or self.u_height > RACK_U_HEIGHT_MAX:
+            raise ValidationError({
+                "u_height": _(
+                    "U height must be between 1 and {max}."
+                ).format(max=RACK_U_HEIGHT_MAX),
+            })
+
+    @property
+    def site(self):
+        # Convenience mirror of dcim.Rack.site: every reader that groups or
+        # filters racks by site (the editor, the projection) can treat a
+        # planned rack the same way without a location-vs-site branch.
+        return self.location.site
+
+    @property
+    def is_realized(self):
+        return self.realized_rack_id is not None
+
+    # --- deletion rules (PLAN-templates.md §1 "Still open" / T1.9) -------------
+    #
+    # A PlannedRack is a SHARED object (D6): several designs, possibly owned by
+    # different people, can reference the very same row. That is what makes the
+    # deletion question different from an ordinary NetBoxModel delete -- there
+    # is no single "owner" to ask. The guards below are deliberately a FULL
+    # REFUSAL, not the two-step confirm/retry shape ``remove_rack`` (api/views.py)
+    # uses: ``remove_rack`` detaches ONE rack from ONE design's own scope, a
+    # blast radius the requesting user can see and confirm in the same request.
+    # Deleting this row outright can destroy placements/feeds/rack-power
+    # belonging to OTHER designs the requester may not even have permission to
+    # view, some of which may be FROZEN (approved) -- exactly the kind of
+    # cross-design, silent, possibly-irreversible loss the ``device`` FK's
+    # SET_NULL+``stale`` treatment (DesignPlacement, above) exists to prevent
+    # for a single design. A confirm click here would let one user blow away
+    # another design's approved layout; refusing forces every referencing
+    # design to detach first, mirroring how ``_design_children_rest_message``
+    # refuses a Design delete outright rather than offering to confirm through it.
+    def referencing_designs(self):
+        """
+        Every ``Design`` that still depends on this planned rack, through ANY
+        of the paths that can name one: the explicit planning-scope M2M
+        (``scoped_designs``), or a CASCADE FK from ``DesignPlacement``
+        (``target_planned_rack``), ``DesignPowerFeed`` or ``DesignRackPower``
+        (``planned_rack``, D25/D26). Nothing enforces that the CASCADE paths
+        stay inside a design's declared scope, so all four are checked
+        independently rather than trusting ``scoped_designs`` alone -- a
+        placement pointed at a planned rack the design never formally scoped
+        would otherwise be an undetected loss. The two power models declare
+        ``related_name="+"`` (no reverse accessor), so they are queried
+        directly rather than through a Python attribute.
+        """
+        design_ids = set(self.scoped_designs.values_list("pk", flat=True))
+        design_ids |= set(self.design_placements.values_list("design_id", flat=True))
+        design_ids |= set(
+            DesignPowerFeed.objects.filter(planned_rack=self).values_list(
+                "design_id", flat=True
+            )
+        )
+        design_ids |= set(
+            DesignRackPower.objects.filter(planned_rack=self).values_list(
+                "design_id", flat=True
+            )
+        )
+        return Design.objects.filter(pk__in=design_ids).order_by("pk")
+
+    @property
+    def is_orphan(self):
+        """No design references this row through any path any more --
+        PLAN-templates.md decision 3: dead weight, safe to delete, and exactly
+        what the list view's ``orphan`` filter (filtersets.py) surfaces for a
+        human to review and remove manually. Realization does not exempt a row
+        from being an orphan -- a realized rack every design has since stopped
+        referencing is still an orphan in this sense, it is just also
+        protected from deletion by ``is_realized`` (see the delete guards in
+        views.py / api/views.py, which check both independently).
+        """
+        return not self.referencing_designs().exists()
+
+    @classmethod
+    def orphaned(cls):
+        """The queryset backing ``is_orphan`` above, without an N+1 per-row
+        query for a list view: every PlannedRack with none of ``scoped_designs``,
+        a referencing ``DesignPlacement``, ``DesignPowerFeed`` or
+        ``DesignRackPower``.
+        """
+        referenced_via_placement = DesignPlacement.objects.filter(
+            target_planned_rack__isnull=False
+        ).values_list("target_planned_rack_id", flat=True)
+        referenced_via_feed = DesignPowerFeed.objects.filter(
+            planned_rack__isnull=False
+        ).values_list("planned_rack_id", flat=True)
+        referenced_via_power = DesignRackPower.objects.filter(
+            planned_rack__isnull=False
+        ).values_list("planned_rack_id", flat=True)
+        return (
+            cls.objects.filter(scoped_designs__isnull=True)
+            .exclude(pk__in=referenced_via_placement)
+            .exclude(pk__in=referenced_via_feed)
+            .exclude(pk__in=referenced_via_power)
+        )
+
+    @property
+    def matches_existing_rack(self):
+        """
+        True when a REAL ``dcim.Rack`` now exists at this row's ``(location,
+        name)`` -- NetBox's own uniqueness identity (D4) -- while this row is
+        STILL UNREALIZED. This is worse than a plain orphan (decision 3): Apply
+        would silently ADOPT that rack (D5) the moment any design using this
+        row is applied, so a planner editing this row today may already be
+        looking at a plan for a rack somebody else created (or renamed onto)
+        by hand outside this plugin, with no indication anything changed.
+        Always ``False`` once realized -- ``realized_rack`` already names the
+        one real rack this row means from that point on, and a second
+        same-named rack appearing later in DCIM is none of this row's concern.
+        """
+        if self.is_realized:
+            return False
+        # Local import: avoids a module-load-order dependency on dcim from
+        # this plugin's models module (see the string-only "dcim.Rack" FKs
+        # elsewhere in this file for the same reason).
+        from dcim.models import Rack
+
+        return Rack.objects.filter(location=self.location, name=self.name).exists()
+
+
+def resolve_rack(real, planned):
+    """
+    The one place D7's deref happens: return the ``dcim.Rack`` a reader
+    should actually look at, or ``None`` while the rack is still only
+    planned.
+
+    ``real`` and ``planned`` are whatever a caller's own two FKs currently
+    hold (e.g. ``DesignPlacement.target_rack`` / ``target_planned_rack``,
+    once those exist -- T1.2). A real rack always wins outright: if it is
+    set there is no planned rack to resolve at all. Otherwise, a set
+    ``planned`` rack derefs through ``realized_rack``, which is ``None``
+    until Apply runs and the real rack from then on. Written once here
+    because a realized ``PlannedRack`` must deref identically everywhere it
+    is read -- ``DesignPlacement``, ``DesignPowerFeed``, ``DesignRackPower``
+    and the projection all call this rather than re-deriving the same
+    ``if``/``else`` four separate ways, which is exactly how such logic
+    drifts.
+    """
+    if real is not None:
+        return real
+    if planned is not None:
+        return planned.realized_rack
+    return None
+
+
+def rack_key(real, planned):
+    """
+    A namespaced string key identifying a rack across BOTH kinds, for use
+    anywhere racks are keyed by pk -- most notably the
+    ``recompute-distribution`` API response and ``rack.js``'s indexing of it.
+
+    ``dcim.Rack`` pk 5 and ``PlannedRack`` pk 5 are different racks, so a bare
+    integer key collides the moment a design has both kinds in play. The
+    format is ``"r:<pk>"`` for a real rack and ``"p:<pk>"`` for a planned one.
+    Negative integers for planned racks and a shared pk sequence across the
+    two apps were both considered and rejected (PLAN-templates.md D27): the
+    first is a trick that still needs explaining years later, the second
+    isn't possible when the two models live in different Django apps.
+    Exactly one of ``real``/``planned`` is expected to be set (mirrors
+    ``resolve_rack``'s inputs); returns ``None`` if neither is.
+    """
+    if real is not None:
+        return f"r:{real.pk}"
+    if planned is not None:
+        return f"p:{planned.pk}"
+    return None
+
+
+class TemplateGroup(NetBoxModel):
+    """
+    An ordered set of ``Template``s describing a multi-rack product pod
+    (PLAN-templates.md §2, D14) -- e.g. "compute pod": a spine template, a
+    leaf template repeated per rack, a storage template. Purely organizational,
+    exactly like ``DesignGroup``: this model never affects stamping by itself.
+    A group's stamping semantics -- repetition vs. correspondence -- belong to
+    Phase 3 (stamping a template into a design), which is out of scope here.
+    """
+
+    name = models.CharField(max_length=100, unique=True)
+    description = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ("name",)
+        verbose_name = "template group"
+        verbose_name_plural = "template groups"
+
+    def __str__(self):
+        return self.name
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_rack_design:templategroup", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
+
+
+class Template(NetBoxModel):
+    """
+    A reusable rack layout with no site (PLAN-templates.md §2, D13/D14): "our
+    standard ToR", "our standard product rack". Built once, then stamped onto
+    racks in real designs -- stamping itself is Phase 3 and is NOT implemented
+    here. Exactly ONE rack per ``Template``: a multi-rack product pod is a
+    ``TemplateGroup`` of several Templates, not one Template with several
+    racks, so stamping always answers "which rack does THIS template's content
+    go in" without needing an inner index.
+
+    A ``NetBoxModel``, NOT a ``PrimaryModel``, and NOT ``Design(is_template=
+    True)`` (D13) -- see ``Design``'s and ``PlannedRack``'s docstrings above
+    for why the plugin owns ``description`` directly rather than inheriting a
+    base whose field set changes between NetBox minors (``PrimaryModel``
+    gained an ``owner`` FK in 4.5). Reusing ``Design`` was rejected separately:
+    it would mean making ``site`` nullable -- it is ``PROTECT, NOT NULL`` and
+    ``Meta.ordering`` starts with it -- and filtering templates out of every
+    design list, filterset and API endpoint that currently assumes every
+    ``Design`` has one.
+
+    ``u_height`` (D21) is a NOMINAL CANVAS SIZE ONLY, so a template editor has
+    a rack to draw while there is no real rack yet. It is IGNORED once the
+    template is stamped -- stamping checks only whether the template's devices
+    fit in the TARGET rack's free space (PLAN-templates.md §3), never this
+    field. A template drawn at 47U that only uses 5U of it stamps fine onto a
+    24U rack. Do not read this field as a constraint anywhere outside the
+    editor's canvas sizing -- that would reintroduce, backwards, exactly the
+    "middle anchor" rule Phase 3 deliberately rejected (D15/D16).
+    """
+
+    name = models.CharField(max_length=100)
+    description = models.CharField(max_length=200, blank=True)
+    group = models.ForeignKey(
+        to="netbox_rack_design.TemplateGroup",
+        on_delete=models.SET_NULL,
+        related_name="templates",
+        blank=True,
+        null=True,
+    )
+    # Position within the group (e.g. a spine template before the leaves).
+    # Meaningless for a group-less template, which still gets a default so
+    # ordering never depends on comparing against NULL.
+    order = models.PositiveSmallIntegerField(default=0)
+    u_height = models.PositiveSmallIntegerField(default=RACK_U_HEIGHT_DEFAULT)
+    # An explicit counter, bumped whenever this template's CONTENTS change --
+    # a ``TemplatePlacement`` under it is added, edited, or removed (see
+    # ``bump_version()`` and ``TemplatePlacement.save()``/``delete()`` below).
+    # Recorded on every ``DesignPlacement.from_template_version`` (D20) at
+    # stamp time, so provenance can later ask "has this template changed
+    # since I stamped it?" by comparing that snapshot against the live value.
+    #
+    # NOT ``last_updated`` (the ``NetBoxModel`` timestamp this row already
+    # has): ``last_updated`` only changes when THIS row is saved, and saving a
+    # child ``TemplatePlacement`` does not touch its parent row at all -- the
+    # exact case D20 exists to detect (a planner edits a device inside the
+    # template, the Template row itself is never written). An explicit
+    # counter, bumped by the child's own save/delete, is the only mechanism
+    # that actually observes that edit. It also survives a deployment
+    # correcting the template's own name/description without that alone
+    # looking like a content change, which a naive "any save bumps it" rule
+    # would not.
+    version = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        ordering = ("group", "order", "name")
+        verbose_name = "template"
+        verbose_name_plural = "templates"
+
+    def __str__(self):
+        return self.name
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_rack_design:template", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
+
+    def clean(self):
+        super().clean()
+        # Mirrors PlannedRack.clean(): a canvas height core itself would
+        # reject once any rack (planned or real) is actually built at it.
+        # dcim.Rack validates u_height with MinValueValidator(1) plus
+        # RACK_U_HEIGHT_MAX; there is no RACK_U_HEIGHT_MIN constant, core
+        # hardcodes the lower bound of 1 inline, so this is mirrored rather
+        # than invented.
+        if self.u_height < 1 or self.u_height > RACK_U_HEIGHT_MAX:
+            raise ValidationError({
+                "u_height": _(
+                    "U height must be between 1 and {max}."
+                ).format(max=RACK_U_HEIGHT_MAX),
+            })
+
+    def bump_version(self):
+        """Increment ``version`` in place, atomically.
+
+        Called by ``TemplatePlacement.save()``/``delete()`` whenever this
+        template's contents change. An ``F()``-expression update rather than
+        ``self.version += 1; self.save()`` -- the latter would race two
+        planners editing different placements of the same template
+        concurrently (last writer's increment wins, the other's is lost); the
+        ``F()`` update is a single atomic SQL statement instead. ``self.version``
+        is refreshed from the database afterwards so the in-memory instance
+        (e.g. one already loaded by the caller) reflects the new value too.
+        """
+        type(self).objects.filter(pk=self.pk).update(version=models.F("version") + 1)
+        self.refresh_from_db(fields=["version"])
+
+
+class TemplatePlacement(NetBoxModel):
+    """
+    One device within a ``Template`` (PLAN-templates.md §2, D8/D9): everything
+    a ``kind=add`` ``DesignPlacement`` carries EXCEPT the rack, the absolute
+    position, and power --
+
+        stored:      device_type, device_role, tenant, planning_data, face
+        NOT stored:  power_config, power_source_device, planned_power_feed,
+                     a device name, an absolute U position
+
+    Power is site-bound and is configured after the device is dropped into an
+    actual design, exactly as for a device dragged in by hand -- a real feed
+    cannot travel with a template. Names are never stored (D9) -- the naming
+    engine produces them at stamp time from the target design/site/rack, none
+    of which this row has.
+
+    Placement within the rack is ANCHOR + ORDER, not an absolute position or a
+    stored offset (D15/D16/D17): ``anchor`` is ``"top"`` or ``"bottom"`` --
+    there is no "middle" -- and ``order`` is this placement's position in the
+    walk outward from that anchor. There is no reserved-gap field: stamping
+    (Phase 3, not implemented here) compacts every placement against its
+    anchor, skipping only slots a real occupant already holds in the TARGET
+    rack. A deliberate gap is expressed by putting an actual blanking-panel
+    device type in the template, the same as a real rack elevation would show
+    one.
+
+    ``label`` (D22) is free text for a human reading the template in an
+    editor -- "leaf A", "spine 2" -- documentation only. It never becomes a
+    device name and never leaves the template.
+
+    Chassis and blades nest via ``parent_placement`` + ``target_bay_name``,
+    mirroring ``DesignPlacement`` case B (a chassis planned in the SAME
+    design has no real ``dcim.DeviceBay`` rows yet, so a blade addresses it by
+    name against the chassis type's ``DeviceBayTemplate``s instead -- there is
+    no case A/C here, because a template never references a real device or
+    another template's placement). ``clean()`` below refuses two shapes
+    (D10): a child (blade) device type with no ``parent_placement`` at all --
+    an orphan child, which may not exist in a template without its chassis --
+    and a ``parent_placement`` naming a placement that belongs to a DIFFERENT
+    template.
+    """
+
+    template = models.ForeignKey(
+        to="netbox_rack_design.Template",
+        on_delete=models.CASCADE,
+        related_name="placements",
+    )
+    device_type = models.ForeignKey(
+        to="dcim.DeviceType",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    device_role = models.ForeignKey(
+        to="dcim.DeviceRole",
+        on_delete=models.PROTECT,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+    tenant = models.ForeignKey(
+        to="tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+    # Values for the deployment's config-declared placement fields (D8) --
+    # the same schema and validation DesignPlacement.planning_data uses (see
+    # planning_fields.validate_planning_data), always validated as though for
+    # an 'add' since a template placement IS the precursor of one.
+    planning_data = models.JSONField(blank=True, null=True)
+    face = models.CharField(max_length=10, blank=True)
+    anchor = models.CharField(
+        max_length=10,
+        choices=TemplatePlacementAnchorChoices,
+        default=TemplatePlacementAnchorChoices.ANCHOR_TOP,
+    )
+    order = models.PositiveSmallIntegerField(default=0)
+    label = models.CharField(max_length=100, blank=True)
+    # The chassis this blade goes into, within THIS SAME template (D10). CASCADE
+    # is safe -- unlike DesignPlacement's cross-design base_parent_placement,
+    # a template's own chassis and the blades planned into it are one row's
+    # worth of work, so deleting the chassis legitimately deletes its blades.
+    parent_placement = models.ForeignKey(
+        to="self",
+        on_delete=models.CASCADE,
+        related_name="bay_children",
+        blank=True,
+        null=True,
+        help_text="The placement of the chassis this blade goes into, within "
+                  "this same template.",
+    )
+    target_bay_name = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ("template", "order", "pk")
+        verbose_name = "template placement"
+        verbose_name_plural = "template placements"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("template", "parent_placement", "target_bay_name"),
+                condition=models.Q(parent_placement__isnull=False),
+                name="%(app_label)s_%(class)s_unique_template_planned_bay",
+            ),
+        ]
+
+    def __str__(self):
+        if self.label:
+            return f"{self.device_type} \"{self.label}\""
+        return str(self.device_type)
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_rack_design:templateplacement", args=[self.pk])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
+
+    def clean(self):
+        super().clean()
+
+        self.planning_data = planning_fields.validate_planning_data(self.planning_data, "add") or None
+
+        if self.parent_placement_id:
+            parent = self.parent_placement
+            if parent.pk == self.pk:
+                raise ValidationError({"parent_placement": "A placement cannot be its own parent."})
+            if self.template_id and parent.template_id != self.template_id:
+                raise ValidationError({
+                    "parent_placement": "The chassis placement must belong to the same template.",
+                })
+            parent_type = parent.device_type
+            if parent_type is None or not parent_type.is_parent_device:
+                raise ValidationError({
+                    "parent_placement": "The referenced placement is not a parent "
+                                        "(chassis) device type.",
+                })
+            if not self.target_bay_name:
+                raise ValidationError({
+                    "target_bay_name": "A bay name is required when the chassis is "
+                                       "itself planned.",
+                })
+            valid_bays = set(
+                parent_type.devicebaytemplates.values_list("name", flat=True)
+            )
+            if valid_bays and self.target_bay_name not in valid_bays:
+                raise ValidationError({
+                    "target_bay_name": f"{parent_type} has no bay named "
+                                       f"{self.target_bay_name!r}.",
+                })
+        elif self.device_type_id and self.device_type.is_child_device:
+            # D10: a blade may not exist in a template without its chassis.
+            raise ValidationError({
+                "parent_placement": "A child (blade) device type requires "
+                                    "parent_placement naming its chassis "
+                                    "within this template.",
+            })
+
+    def save(self, *args, **kwargs):
+        # A template's ``version`` (D20) exists to detect exactly this: its
+        # CONTENTS changed. The parent Template row itself is not written when
+        # a child placement is added or edited, so nothing observes that
+        # unless the child bumps it explicitly here -- see Template.version's
+        # docstring for why `last_updated` cannot substitute for this.
+        super().save(*args, **kwargs)
+        self.template.bump_version()
+
+    def delete(self, *args, **kwargs):
+        # Capture the template before the row (and its FK) is gone, so the
+        # bump below still has something to bump -- removing a placement is
+        # as much a content change as adding or editing one.
+        template = self.template
+        result = super().delete(*args, **kwargs)
+        template.bump_version()
+        return result

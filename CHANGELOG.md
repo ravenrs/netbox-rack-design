@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Planned racks.** A design can now plan into a rack that does not exist in
+  NetBox yet — press **Create rack** in the editor, give it a name, a U
+  height and a location, and it behaves like any other rack in the design
+  from that point on: devices, power, naming and peer-conflict detection all
+  work against it unchanged. It is a shared object, not owned by the design
+  that created it, so two designs planning the same future rack see each
+  other's placements the normal way. On Apply it is resolved by
+  `(location, name)` — a matching real rack is **adopted** (and its real
+  attributes win over the plan's), otherwise a new rack is created; either
+  way the planned rack survives, recording which rack it resolved to. It
+  cannot be deleted while any design still references it, and never once
+  realized. REST and GraphQL both expose it, and `DesignPlacement`,
+  `DesignPowerFeed` and `DesignRackPower` each gained a parallel field
+  alongside their existing real-rack one. See
+  [docs/planned-racks.md](docs/planned-racks.md).
+- **Templates.** A reusable rack layout with no site — build one once ("our
+  standard ToR"), then stamp it into any design instead of dragging in the
+  same devices by hand. `TemplateGroup` orders several templates into a
+  multi-rack pod. Each placement stores device type, role, tenant, planning
+  fields, face and an anchor (`top`/`bottom`) — never a position, a name, or
+  power, all of which only make sense once the template lands somewhere
+  real. Stamp from a **Templates** tab in the editor: drag a template card
+  onto one rack, or open a dialog to apply it to several racks or map a
+  group's members onto specific racks. The server computes every resulting
+  position and name in a single pass and writes nothing until the ordinary
+  Save persists it, so Escape/Cancel/further drags all keep working exactly
+  as they do for anything else. Templates can also be built from what
+  already exists — extracted from a rack in a design (its full projected
+  layout, not only what this design itself added) or from any real rack in
+  DCIM — and each extraction reports, rather than silently drops, any
+  "island" device (dead air on both sides) that a template's anchor+order
+  shape cannot represent. See [docs/templates.md](docs/templates.md).
+
+### Fixed
+
+- **A per-rack power override could silently fail to reach a distribution
+  script, on real racks, in production.** `DesignRackPower` records a
+  per-design override of a rack's power custom fields, merged over the
+  rack's own for the distribution engine to read. The merge only ever
+  patched the rack's cached `.cf` property; `planning_fields._read_cf`, the
+  resolver behind `power_limitation`/`pdu_location`, prefers the raw
+  `custom_field_data` over `.cf` for query-cost reasons and never saw the
+  override at all — a script read the rack's *unmerged*, stored values
+  instead of the planned override, with nothing to indicate the override
+  was being ignored. The merge now refreshes both, so a script sees the
+  same effective values however it reads them.
+- **Deleting a design while a planned rack was being created for it could
+  500.** A race between a design delete and a concurrent create-planned-rack
+  request against the same design could leave an uncollected join row behind
+  and raise an `IntegrityError`. Both paths now lock consistently, and the
+  race resolves to an ordinary `409` instead of a server error.
+
 ## [0.32.1] - 2026-09-11
 
 ### Release Summary

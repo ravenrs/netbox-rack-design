@@ -6,6 +6,7 @@
  */
 
 import { rdIsChildEl } from "rd/cursor.js";
+import { rackKeyToServer } from "rd/core.js";
 
 // The editor root, re-derived here: editor.js holds it in its closure and
 // returns early when it is absent, and only makeFrame() below dereferences it.
@@ -114,8 +115,14 @@ function makeFrame(block) {
         // shadow and no hatch can exist in it -- absent, not suppressed.
         hasPairing: !isChassis,
         hasTray: !isChassis,
-        serverRackId: !isNaN(realRackId) ? realRackId : parseInt(
-            block.getAttribute("data-rack-id"), 10),
+        // T1.5c (D31): the rack-block fallback (data-rack-id) is now the
+        // opaque colon-free rack_key() string ("r-<pk>"/"p-<pk>") -- do NOT
+        // parseInt it, a PlannedRack and a dcim.Rack can share a pk (D28)
+        // and this value is what buildLayoutPayload sends the server as
+        // rack_id. data-real-rack-id (the chassis case) is always a real
+        // device pk and stays an int.
+        serverRackId: !isNaN(realRackId) ? realRackId :
+            rackKeyToServer(block.getAttribute("data-rack-id")),
 
         // ---- geometry <-> slot (inverse of templatetags.slot_gs_y) ------
         slotFromGeometry: function (gsY, gsH) {

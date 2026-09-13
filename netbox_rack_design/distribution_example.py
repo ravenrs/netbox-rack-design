@@ -51,6 +51,16 @@ rack cf is named e.g. ``rack_power_cap`` maps it via config; a site using the
 generic names needs no ``planning_fields`` config at all (the shipped default,
 ``{}``, falls back cleanly: ``pdu_location`` defaults to ``"bottom"``,
 ``power_limitation`` is absent -- no rack cap).
+
+Planned-rack safe (PLAN-templates.md D30), unchanged: every ``rack`` attribute
+this file touches (``rack.name``, ``rack.u_height``, and ``rack.cf`` via
+``read_planning_fields``) is on the documented safe list in
+``distribution.py``'s module docstring, and PDU discovery goes through
+``distribution._collect_pdus``, which is itself planned-rack-safe. Nothing in
+this file needed to change for a ``PlannedRack`` to work here -- it already
+did, once the engine's rack-cf override (``distribution.
+apply_rack_power_override``) started patching ``custom_field_data`` as well as
+``.cf`` (``read_planning_fields`` reads the former).
 """
 
 import logging

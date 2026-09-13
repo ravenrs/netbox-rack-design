@@ -9,7 +9,7 @@ and Django's test loader silently collects NOTHING from it. This module ran
 ChangeLoggedFilterSetTests)`` is core's own spelling; keep it.
 """
 
-from dcim.models import DeviceRole
+from dcim.models import DeviceRole, Location
 from django.test import TestCase
 from tenancy.models import Tenant
 from utilities.testing import ChangeLoggedFilterSetTests, create_test_device
@@ -20,8 +20,9 @@ from ..filtersets import (
     DesignGroupFilterSet,
     DesignPlacementFilterSet,
     DesignPowerFeedFilterSet,
+    PlannedRackFilterSet,
 )
-from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed, PlannedRack
 from .utils import create_dcim_environment
 
 
@@ -55,8 +56,11 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
     # The ``racks`` M2M filter is spelled ``racks_id``, not the ``rack_id`` this
     # check derives from the related model's verbose_name: ``?rack_id=`` is
     # already a parameter of the Design viewset's own detail actions. See the
-    # comment on ``DesignFilterSet.racks_id``.
-    filter_name_map = {"rack": "racks"}
+    # comment on ``DesignFilterSet.racks_id``. Same reasoning for
+    # ``planned_racks_id`` (T1.3): the check derives ``planned_rack_id`` from
+    # ``PlannedRack``'s verbose_name, but the filter is named after the MODEL
+    # FIELD instead, mirroring ``racks_id``.
+    filter_name_map = {"rack": "racks", "planned_rack": "planned_racks"}
 
     @classmethod
     def setUpTestData(cls):
@@ -83,6 +87,15 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
         rack = self.site.racks.first()
         self.design_1.racks.add(rack)
         params = {"racks_id": [rack.pk]}
+        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
+
+    def test_planned_racks_id(self):
+        location = Location.objects.create(
+            name="Filter Location", slug="filter-location", site=self.site
+        )
+        planned_rack = PlannedRack.objects.create(name="Filter PR", location=location)
+        self.design_1.planned_racks.add(planned_rack)
+        params = {"planned_racks_id": [planned_rack.pk]}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
 
     def test_site_id(self):
@@ -192,6 +205,21 @@ class DesignPlacementFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
     def test_target_rack_id(self):
         params = {"target_rack_id": [self.rack.pk]}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
+
+    def test_target_planned_rack_id(self):
+        location = Location.objects.create(
+            name="Placement Filter Location", slug="placement-filter-location", site=self.rack.site,
+        )
+        planned_rack = PlannedRack.objects.create(name="Placement Filter PR", location=location)
+        placement = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_planned_rack=planned_rack,
+            target_position=10,
+        )
+        params = {"target_planned_rack_id": [planned_rack.pk]}
+        self.assertEqual(list(self.filterset(params, self.queryset).qs), [placement])
 
     def test_device_id(self):
         params = {"device_id": [self.device.pk]}
@@ -329,6 +357,17 @@ class DesignPowerFeedFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
         params = {"rack_id": [self.rack.pk]}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 2)
 
+    def test_planned_rack_id(self):
+        location = Location.objects.create(
+            name="Feed Filter Location", slug="feed-filter-location", site=self.rack.site,
+        )
+        planned_rack = PlannedRack.objects.create(name="Feed Filter PR", location=location)
+        feed = DesignPowerFeed.objects.create(
+            design=self.design, planned_rack=planned_rack, name="Feed D"
+        )
+        params = {"planned_rack_id": [planned_rack.pk]}
+        self.assertEqual(list(self.filterset(params, self.queryset).qs), [feed])
+
     def test_name(self):
         params = {"name": ["Feed A", "Feed B"]}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 2)
@@ -339,4 +378,46 @@ class DesignPowerFeedFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
 
     def test_search(self):
         params = {"q": "Feed A"}
+        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
+
+
+class PlannedRackFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
+    """T1.7 -- PlannedRack's REST filtering, and ``test_missing_filters`` on it
+    for the first time (it had no filterset test at all before this task)."""
+
+    queryset = PlannedRack.objects.all()
+    filterset = PlannedRackFilterSet
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.location = Location.objects.create(
+            name="PlannedRack Filter Loc 1", slug="plannedrack-filter-loc-1", site=cls.site,
+        )
+        other_location = Location.objects.create(
+            name="PlannedRack Filter Loc 2", slug="plannedrack-filter-loc-2", site=cls.site,
+        )
+        cls.rack = env["racks"][0]
+
+        PlannedRack.objects.create(name="PR 1", location=cls.location, description="alpha")
+        PlannedRack.objects.create(name="PR 2", location=cls.location, description="bravo")
+        cls.realized = PlannedRack.objects.create(
+            name="PR 3", location=other_location, realized_rack=cls.rack,
+        )
+
+    def test_name(self):
+        params = {"name": ["PR 1", "PR 2"]}
+        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 2)
+
+    def test_location_id(self):
+        params = {"location_id": [self.location.pk]}
+        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 2)
+
+    def test_realized_rack_id(self):
+        params = {"realized_rack_id": [self.rack.pk]}
+        self.assertEqual(list(self.filterset(params, self.queryset).qs), [self.realized])
+
+    def test_search(self):
+        params = {"q": "alpha"}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)

@@ -29,7 +29,12 @@ Three modes are supported, selected by the plugin config key ``naming_mode``
       resolved from the placement (``{device.site.name}``,
       ``{device.device_type.model}``, ``{device.rack.name}``,
       ``{device.role.name}``, ``{device.tenant.name}``, ``{device.position}``,
-      ``{device.face}``, ``{device.name}``).
+      ``{device.face}``, ``{device.name}``). ``{device.rack.*}`` resolves the
+      same way whether the placement targets a real ``dcim.Rack`` or a
+      not-yet-built ``PlannedRack`` (PLAN-templates.md D29) -- a greenfield
+      rack stamped from a template is the primary case this exists for, not
+      an edge one. ``{device.rack.cf.*}`` is the one thing that legitimately
+      stays empty for a planned rack: it has no rack custom fields.
     * ``n`` -- the ordinal.
 
     Traversal is *safe*: a missing/blank attribute (or any
@@ -234,11 +239,43 @@ class _AddDevicePlaceholderProxy:
 
     @property
     def site(self):
+        # Design.site, not rack.site: for an 'add', the target rack (real or
+        # planned) is always validated to be in the design's own site
+        # (DesignPlacement._validate_tray_target / _validate_planned_rack_target
+        # in models.py both raise otherwise), so the two are guaranteed to
+        # agree for any placement that reaches naming. Reading it off the
+        # design avoids re-deriving it from whichever of the two rack FKs
+        # happens to be set.
         return self._placement.design.site
 
     @property
     def rack(self):
-        return self._placement.target_rack
+        """
+        The rack this device is heading into -- real or still only planned.
+
+        Deliberately NOT ``models.resolve_rack()``. That helper answers "which
+        real ``dcim.Rack`` should a DCIM reader look at", which is ``None`` for
+        an unrealized ``PlannedRack`` (D7) -- correct for a DCIM reader, wrong
+        for naming. Naming wants "the rack THIS PLACEMENT targets", real or
+        not, because a greenfield rack stamped from a template is exactly the
+        case where the rack belongs in the device name (PLAN-templates.md
+        D29): resolving through ``resolve_rack`` would render ``None`` (and
+        every ``{device.rack.*}`` token blank) for exactly the placements this
+        exists to name.
+
+        ``PlannedRack`` exposes the same ``name`` / ``location`` / ``site``
+        shape a ``dcim.Rack`` does (see its docstring in models.py), so
+        ``{device.rack.name}`` and ``{device.rack.site.name}`` resolve
+        unchanged either way. ``{device.rack.cf.*}`` is the one thing that
+        legitimately differs: a planned rack has no rack custom fields, so it
+        renders empty -- that is correct, not a gap, and no fallback is added
+        for it.
+
+        Exactly one of ``target_rack`` / ``target_planned_rack`` is set for an
+        'add' or 'move' (enforced in ``DesignPlacement.clean()``), so `or` is
+        safe here -- it is never the case that both resolve to a truthy rack.
+        """
+        return self._placement.target_rack or self._placement.target_planned_rack
 
     @property
     def position(self):
@@ -304,7 +341,13 @@ class _MoveDeviceProxy:
 
     @property
     def rack(self):
-        return self._placement.target_rack
+        # Same reasoning as _AddDevicePlaceholderProxy.rack (PLAN-templates.md
+        # D29): resolve through BOTH target FKs, not through models.resolve_rack
+        # (which would answer None for an unrealized planned rack -- exactly
+        # the case a move into a freshly-created planned rack needs named).
+        # Kept consistent with the add proxy on purpose, per D29's own
+        # instruction to keep the two proxies in agreement.
+        return self._placement.target_rack or self._placement.target_planned_rack
 
     @property
     def position(self):

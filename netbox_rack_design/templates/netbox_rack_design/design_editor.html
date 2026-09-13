@@ -52,6 +52,13 @@
               <i class="mdi mdi-star" aria-hidden="true"></i> {% trans "Favorites" %}
             </button>
             <button type="button" class="btn btn-outline-secondary"
+                    data-rd-section-toggle="templates"
+                    aria-controls="nbx-rd-drawer"
+                    aria-expanded="false"
+                    title="{% trans 'Rack templates' %}">
+              <i class="mdi mdi-view-grid-plus-outline" aria-hidden="true"></i> {% trans "Templates" %}
+            </button>
+            <button type="button" class="btn btn-outline-secondary"
                     data-rd-section-toggle="racks"
                     aria-controls="nbx-rd-drawer"
                     aria-expanded="false"
@@ -92,7 +99,16 @@
            data-save-url="{{ save_url }}"
            data-favorites-url="{{ favorites_url }}"
            data-favorite-sets-url="{{ favorite_sets_url }}"
+           data-templates-url="{{ templates_url }}"
+           data-template-groups-url="{{ template_groups_url }}"
+           data-create-planned-rack-url="{{ create_planned_rack_url }}"
            data-csrf-token="{{ csrf_token }}">
+
+        {# T1.5 "Create rack" dialog data: the design's own site's locations, #}
+        {# read once by editor_panels.js to populate the dialog's plain      #}
+        {# <select> (no TomSelect -- the modal is built at open time, same   #}
+        {# as dialogs.js's own dialogs).                                     #}
+        {{ site_locations|json_script:"rd-site-locations" }}
 
         {# ---- Persistent conflicts panel (PLAN-design-chains.md §8.3) ---- #}
         {# ONE component for every "this design has a problem that isn't a   #}
@@ -405,6 +421,27 @@
               </div>
             </div>
 
+            {# ---- Create a rack that does not exist in NetBox yet (T1.5, ---- #}
+            {# PLAN-templates.md §1: a "planned rack"). Opens a dialog (name,   #}
+            {# U height, location); editor_panels.js builds it at click time,   #}
+            {# the same pattern power.js's own dialogs use, and POSTs to        #}
+            {# create-planned-rack, then reloads on success so the server       #}
+            {# re-renders the new (badged) rack block -- identical to Add rack  #}
+            {# above. #}
+            <div class="card mt-2" id="nbx-rd-create-planned-rack-card" data-rd-create-planned-rack>
+              <div class="card-header">
+                <h3 class="card-title">{% trans "Create rack" %}</h3>
+              </div>
+              <div class="card-body">
+                <p class="small text-muted mb-2">
+                  {% trans "Plan a rack before it exists in NetBox -- it is created (or an existing match adopted) when the design is applied." %}
+                </p>
+                <button type="button" class="btn btn-outline-primary btn-sm w-100" id="nbx-rd-create-planned-rack-btn">
+                  <i class="mdi mdi-plus-thick" aria-hidden="true"></i> {% trans "Create rack" %}
+                </button>
+              </div>
+            </div>
+
             {# ---- Design racks: per-rack show/hide + remove-from-design ---- #}
             {# Visibility toggles are personal view-state (they POST to            #}
             {# hidden-design-racks and toggle the .hidden class on the matching     #}
@@ -506,6 +543,29 @@
             </div>
           </div>{# /section: favorites #}
 
+          {# ===== Section: Templates (PLAN-templates.md Sec 3, T3.3) ===== #}
+          {# One card per Template/TemplateGroup, fetched from the plugin's #}
+          {# own REST API by editor/templates.js (same pattern palette.js    #}
+          {# uses for core's device-type catalog). Drag a template card     #}
+          {# onto a rack to stamp it there directly; click a template OR a  #}
+          {# group card to open the multi-rack / group-mapping dialog.      #}
+          {# Nothing is written until the ordinary design-level Save (D19). #}
+          <div class="nbx-rd-drawer-section" data-rd-section="templates">
+            <div class="card nbx-rd-templates-card" id="nbx-rd-templates" data-rd-templates>
+              <div class="card-header">
+                <h3 class="card-title">{% trans "Templates" %}</h3>
+              </div>
+              <div class="card-body nbx-rd-templates-controls">
+                <div class="text-muted small mt-1 nbx-rd-templates-hint">
+                  <i class="mdi mdi-information-outline" aria-hidden="true"></i>
+                  {% blocktrans %}Drag a template onto a rack, or click a template (or a group) to pick target racks.{% endblocktrans %}
+                </div>
+                <div class="nbx-rd-templates-status text-muted small mt-1" id="nbx-rd-templates-status"></div>
+              </div>
+              <div class="list-group list-group-flush nbx-rd-templates-list" id="nbx-rd-templates-list"></div>
+            </div>
+          </div>{# /section: templates #}
+
           </div>{# /.nbx-rd-drawer #}
 
           {# ---- Multi-rack workspace: one block per VISIBLE scoped rack, laid #}
@@ -576,7 +636,8 @@
       "rd/dirty.js": "{% static 'netbox_rack_design/js/editor/dirty.js' %}?v={{ asset_version }}",
       "rd/frame.js": "{% static 'netbox_rack_design/js/editor/frame.js' %}?v={{ asset_version }}",
       "rd/registry.js": "{% static 'netbox_rack_design/js/editor/registry.js' %}?v={{ asset_version }}",
-      "rd/rack.js": "{% static 'netbox_rack_design/js/editor/rack.js' %}?v={{ asset_version }}"
+      "rd/rack.js": "{% static 'netbox_rack_design/js/editor/rack.js' %}?v={{ asset_version }}",
+      "rd/templates.js": "{% static 'netbox_rack_design/js/editor/templates.js' %}?v={{ asset_version }}"
     }
   }
   </script>

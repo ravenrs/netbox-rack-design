@@ -290,7 +290,11 @@ function rdBuildModel() {
     var widgetsByRack = {};
 
     document.querySelectorAll(".nbx-rd-rack-block").forEach(function (block) {
-        var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
+        // T1.5c (PLAN-templates.md D31): keep data-rack-id as the opaque
+        // colon-free rack_key() string ("r-<pk>"/"p-<pk>") -- parseInt would
+        // collapse a PlannedRack and a dcim.Rack sharing a pk to one number
+        // (D28). Every downstream use is a getElementById/object-key/===.
+        var rackId = block.getAttribute("data-rack-id");
         var uHeight = parseInt(block.getAttribute("data-u-height"), 10);
         var descUnits = block.getAttribute("data-desc-units") === "true";
         var dataEl = document.getElementById("rd-editor-data-" + rackId);
@@ -306,7 +310,11 @@ function rdBuildModel() {
     // derived opposite-face hatch (shadow, possibly a ghost's mirror), or a
     // persistent move-out ghost.
     document.querySelectorAll(".nbx-rd-rack-block").forEach(function (block) {
-        var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
+        // T1.5c (PLAN-templates.md D31): keep data-rack-id as the opaque
+        // colon-free rack_key() string ("r-<pk>"/"p-<pk>") -- parseInt would
+        // collapse a PlannedRack and a dcim.Rack sharing a pk to one number
+        // (D28). Every downstream use is a getElementById/object-key/===.
+        var rackId = block.getAttribute("data-rack-id");
         var rack = model.racks[rackId];
         var widgets = widgetsByRack[rackId] || [];
 
@@ -418,7 +426,9 @@ function rdBuildModel() {
             ghost.label = pg.label;
             ghost.deviceId = pg.deviceId;
             ghost.placementId = pg.placementId;
-            ghost.rackId = parseInt(rid, 10);
+            // T1.5c (D31): rid is an Object.keys(model.racks) key, itself the
+            // opaque rack_key() string above -- do not re-coerce to a number.
+            ghost.rackId = rid;
             ghost.widgetIndex = pg.widgetIndex;
             if (owner) { owner.ghost = ghost; } else { model.orphanGhosts.push(ghost); }
             if (ghost.face === "front" || ghost.face === "rear") {
@@ -444,7 +454,8 @@ function rdBuildModel() {
             var mirrorFace = (ps.face === "front") ? "rear" : ((ps.face === "rear") ? "front" : "");
             var shadow = new RDShadow(null, ps.el, ps.face, ps.y, ps.rows);
             shadow.label = ps.label;
-            shadow.rackId = parseInt(rid, 10);
+            // T1.5c (D31): same as ghost.rackId above -- keep the string.
+            shadow.rackId = rid;
 
             var pool = ps.isGhostMirror ? rack.faces[mirrorFace].ghosts : rack.faces[mirrorFace].devices;
             var owner = null;

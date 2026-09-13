@@ -37,3 +37,22 @@ class DesignPlacementKindChoices(ChoiceSet):
         (KIND_MOVE, "Move", "blue"),
         (KIND_REMOVE, "Remove", "red"),
     ]
+
+
+class TemplatePlacementAnchorChoices(ChoiceSet):
+    """
+    Where a template placement's ``order`` is walked from when it is stamped
+    (PLAN-templates.md §2/§3, D15/D16). Deliberately just these two -- a
+    "middle" anchor was considered and dropped, so this is not merely today's
+    default set, it is the complete set.
+    """
+
+    key = "TemplatePlacement.anchor"
+
+    ANCHOR_TOP = "top"
+    ANCHOR_BOTTOM = "bottom"
+
+    CHOICES = [
+        (ANCHOR_TOP, "Top", "blue"),
+        (ANCHOR_BOTTOM, "Bottom", "gray"),
+    ]

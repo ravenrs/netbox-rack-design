@@ -7,7 +7,7 @@
  */
 
 import { rdTrace } from "rd/trace.js";
-import { getCsrfToken, createToast } from "rd/core.js";
+import { getCsrfToken, createToast, rackKeyToServer, rackDomIdToRealPk } from "rd/core.js";
 
 // The editor's root element. editor.js reads it once and returns early when it
 // is absent; this module is imported unconditionally, so API_BASE below guards
@@ -266,7 +266,7 @@ renderPlacementRail();
 // the bind-to-feed picker (real first, then planned). Never writes.
 function fetchFeeds(rackId) {
     rdTrace("feed.fetch", { rackId: rackId });
-    return fetch(apiFeedsUrl() + "?rack_id=" + encodeURIComponent(rackId), {
+    return fetch(apiFeedsUrl() + "?rack_id=" + encodeURIComponent(rackKeyToServer(rackId)), {
         credentials: "same-origin",
         headers: { "Accept": "application/json" },
     }).then(function (resp) { return resp.ok ? resp.json() : null; })
@@ -277,8 +277,13 @@ function fetchFeeds(rackId) {
 // Upsert a planned DesignPowerFeed (docs/pdu-distribution-spec.md §6.1) --
 // the "define planned feed" fallback, always available in the bind dialog.
 function postPlannedFeed(rackId, feed) {
+    // T1.5c (D31): rackId is the DOM's colon-free rack_key() ("r-<pk>"/
+    // "p-<pk>") -- parseInt would collide a PlannedRack and a same-pk'd
+    // dcim.Rack (D28) instead of the server's parse_real_rack_id correctly
+    // rejecting a "p:<pk>" as "no such rack." Convert to the server's colon
+    // form, don't coerce to a number.
     var body = {
-        rack_id: parseInt(rackId, 10),
+        rack_id: rackKeyToServer(rackId),
         name: feed.name, voltage: feed.voltage, amperage: feed.amperage,
         phase: feed.phase, supply: feed.supply,
     };
@@ -297,7 +302,14 @@ function postPlannedFeed(rackId, feed) {
 // (docs/pdu-distribution-spec.md §6): a planned PDU can inherit its cf live
 // from one of these via power_source_device. Read-only against core dcim.
 function fetchRackPdus(rackId) {
-    var url = "/api/dcim/devices/?rack_id=" + encodeURIComponent(rackId)
+    // T1.5c (D31): this hits core NetBox's OWN dcim API, which has no idea
+    // what a PlannedRack is and wants a plain dcim.Rack int pk -- not this
+    // plugin's rack_key() form. A planned rack can never have a real PDU
+    // (no dcim.Rack row exists for it), so short-circuit rather than ask
+    // core to filter by a nonsense value.
+    var realPk = rackDomIdToRealPk(rackId);
+    if (realPk == null) { return Promise.resolve([]); }
+    var url = "/api/dcim/devices/?rack_id=" + encodeURIComponent(realPk)
         + "&role=pdu&role=unmanageable-pdu&brief=1&limit=200";
     rdTrace("pdu.cf.fetchpdus", { rackId: rackId });
     return fetch(url, {
@@ -309,7 +321,7 @@ function fetchRackPdus(rackId) {
 }
 
 function fetchPowerSource(rackId, kind, feed) {
-    var qs = "rack_id=" + encodeURIComponent(rackId) + "&kind=" + encodeURIComponent(kind);
+    var qs = "rack_id=" + encodeURIComponent(rackKeyToServer(rackId)) + "&kind=" + encodeURIComponent(kind);
     if (feed) { qs += "&feed=" + encodeURIComponent(feed); }
     rdTrace("dist.powersource.fetch", { rackId: rackId, kind: kind, feed: feed || null });
     return fetch(API_BASE + "power-source/?" + qs, {
@@ -338,8 +350,10 @@ function postCopyFeeds(rackId, sourceRackId) {
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
         body: JSON.stringify({
-            rack_id: parseInt(rackId, 10),
-            source_rack_id: parseInt(sourceRackId, 10),
+            // T1.5c (D31): colon form for the server, not a bare parsed int
+            // -- see postPlannedFeed above.
+            rack_id: rackKeyToServer(rackId),
+            source_rack_id: rackKeyToServer(sourceRackId),
         }),
     }).then(function (resp) {
         if (!resp.ok) { throw new Error("HTTP " + resp.status); }
@@ -350,7 +364,7 @@ function postCopyFeeds(rackId, sourceRackId) {
 // This rack's PLANNED feeds (DesignPowerFeed rows), for the rack power
 // dialog's "current supply" list. Read-only.
 function fetchPlannedFeeds(rackId) {
-    return fetch(apiPlannedFeedUrl() + "?rack_id=" + encodeURIComponent(rackId), {
+    return fetch(apiPlannedFeedUrl() + "?rack_id=" + encodeURIComponent(rackKeyToServer(rackId)), {
         credentials: "same-origin",
         headers: { "Accept": "application/json" },
     }).then(function (resp) { return resp.ok ? resp.json() : []; })
@@ -381,7 +395,8 @@ function postRackPower(rackId, powerConfig) {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-CSRFToken": getCsrfToken() },
-        body: JSON.stringify({ rack_id: parseInt(rackId, 10), power_config: powerConfig }),
+        // T1.5c (D31): colon form for the server -- see postPlannedFeed above.
+        body: JSON.stringify({ rack_id: rackKeyToServer(rackId), power_config: powerConfig }),
     }).then(function (resp) {
         if (!resp.ok) { throw new Error("HTTP " + resp.status); }
         return resp.json();
@@ -389,7 +404,7 @@ function postRackPower(rackId, powerConfig) {
 }
 
 function getRackPower(rackId) {
-    return fetch(apiRackPowerUrl() + "?rack_id=" + encodeURIComponent(rackId), {
+    return fetch(apiRackPowerUrl() + "?rack_id=" + encodeURIComponent(rackKeyToServer(rackId)), {
         credentials: "same-origin",
         headers: { "Accept": "application/json" },
     }).then(function (resp) { return resp.ok ? resp.json() : null; })
@@ -1186,7 +1201,12 @@ function buildRackPowerDialog(rackId, rackName, existing) {
             loadedCf = data.custom_fields || {};
             setFieldValues(loadedCf);
             var srcRackName = (rackSelect.selectedOptions[0] || {}).textContent || "";
-            copiedFrom = { rack_id: parseInt(srcRackId, 10), rack_name: srcRackName };
+            // T1.5c (D31): keep the DOM's dash-form id (matches rackSelect's
+            // own option values, populated from racksInDom() below, so the
+            // reopen prefill at rackSelect.value = ... above still matches)
+            // -- not a bare parsed int. postCopyFeeds converts to the
+            // server's colon form at its own wire boundary.
+            copiedFrom = { rack_id: srcRackId, rack_name: srcRackName };
             // Preview BOTH halves of the copy: the feeds this rack will
             // inherit (created as planned feeds on Save) and how many
             // planning custom fields came across.

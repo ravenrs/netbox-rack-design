@@ -5,11 +5,16 @@
  * personal per-rack visibility.
  *
  *   1. "Add rack"     — POST designs/<pk>/add-rack/ {rack_id}; reload on success.
+ *   1b."Create rack"  — a dialog (name/height/location) that POSTs
+ *                       create-planned-rack/ to draft a rack that does not
+ *                       exist in NetBox yet (T1.5, PLAN-templates.md §1);
+ *                       reload on success, same contract as Add rack.
  *   2. "Design racks" — per-rack visibility toggle (hidden-design-racks/toggle/,
  *                       reload-free: just toggles the .hidden class on the rack
  *                       block), an "All" button (show-all/), and a destructive
  *                       remove-from-design control (remove-rack/, with the 409
- *                       requires_confirmation two-step).
+ *                       requires_confirmation two-step). Planned racks are not
+ *                       listed here (D25): they have no per-user hide toggle.
  *
  * Visibility is VIEW state, never a design edit: toggling here never marks the
  * layout dirty and never arms editor.js's beforeunload guard.
@@ -84,7 +89,14 @@
     }
 
     function rackBlock(rackId) {
-        return root.querySelector('.nbx-rd-rack-block[data-rack-id="' + rackId + '"]');
+        // T1.5c (PLAN-templates.md D31): this panel is real-rack-only by
+        // construction (scoped_rack_rows in views.py is built from
+        // design.racks only, never design.planned_racks -- D25), so rackId
+        // here is always a bare real dcim.Rack pk. rack_block.html's
+        // data-rack-id is now the DOM's colon-free rack_key() form
+        // ("r-<pk>"/"p-<pk>", templatetags/rack_design.py rack_dom_id), so
+        // the lookup needs the same "r-" prefix to still match.
+        return root.querySelector('.nbx-rd-rack-block[data-rack-id="r-' + rackId + '"]');
     }
     function rackRow(rackId) {
         return root.querySelector('[data-rd-rack-row="' + rackId + '"]');
@@ -148,6 +160,171 @@
                     btn.removeAttribute("disabled");
                     toast("danger", "Error", String(err));
                 });
+        });
+    })();
+
+    // ========================================================================
+    // 1b. Create rack: a rack that does not exist in NetBox yet (T1.5,
+    // PLAN-templates.md §1/D3/D4/D6 -- a "PlannedRack"). A Bootstrap modal
+    // built at click time (name / U height / location), the same pattern
+    // dialogs.js's own dialogs and power.js's plain <select> rows use -- no
+    // TomSelect widget to initialize on markup that does not exist in the DOM
+    // until the dialog opens. POSTs to create-planned-rack and reloads on
+    // 201, mirroring Add rack above (the server re-renders the new block,
+    // badged "Planned" by inc/rack_block.html).
+    // ========================================================================
+    (function setupCreatePlannedRack() {
+        var openBtn = document.getElementById("nbx-rd-create-planned-rack-btn");
+        if (!openBtn) { return; }
+
+        var createUrl = root.getAttribute("data-create-planned-rack-url");
+        if (!createUrl) { return; }
+
+        // Read once: the design's own site's locations (views._design_editor_
+        // context's `site_locations`), the same same-site scope add_rack_form
+        // enforces for a real rack.
+        var locationsEl = document.getElementById("rd-site-locations");
+        var locations = [];
+        if (locationsEl) {
+            try {
+                locations = JSON.parse(locationsEl.textContent) || [];
+            } catch (e) {
+                locations = [];
+            }
+        }
+
+        function optionsHtml() {
+            if (!locations.length) {
+                return '<option value="">(no locations in this site)</option>';
+            }
+            return locations.map(function (loc) {
+                return '<option value="' + loc.id + '">' + loc.name + "</option>";
+            }).join("");
+        }
+
+        openBtn.addEventListener("click", function () {
+            var overlay = document.createElement("div");
+            overlay.className = "modal fade nbx-rd-create-rack-modal";
+            overlay.setAttribute("tabindex", "-1");
+            overlay.innerHTML =
+                '<div class="modal-dialog modal-dialog-centered">'
+                + '<div class="modal-content">'
+                + '<div class="modal-header">'
+                + '<h5 class="modal-title">Create rack</h5>'
+                + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+                + "</div>"
+                + '<div class="modal-body">'
+                + '<div class="mb-2">'
+                + '<label class="form-label small mb-1">Name</label>'
+                + '<input type="text" class="form-control form-control-sm nbx-rd-create-rack-name" placeholder="e.g. R101">'
+                + "</div>"
+                + '<div class="mb-2">'
+                + '<label class="form-label small mb-1">U height</label>'
+                + '<input type="number" class="form-control form-control-sm nbx-rd-create-rack-height" value="42" min="1">'
+                + "</div>"
+                + '<div class="mb-2">'
+                + '<label class="form-label small mb-1">Location</label>'
+                + '<select class="form-select form-select-sm nbx-rd-create-rack-location">'
+                + '<option value="">Choose a location…</option>'
+                + optionsHtml()
+                + "</select>"
+                + "</div>"
+                + '<div class="text-danger small nbx-rd-create-rack-error" style="display:none"></div>'
+                + "</div>"
+                + '<div class="modal-footer">'
+                + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
+                + '<button type="button" class="btn btn-sm btn-primary" data-rd-create-rack-submit>Create</button>'
+                + "</div>"
+                + "</div></div>";
+            document.body.appendChild(overlay);
+
+            var nameInput = overlay.querySelector(".nbx-rd-create-rack-name");
+            var heightInput = overlay.querySelector(".nbx-rd-create-rack-height");
+            var locationSelect = overlay.querySelector(".nbx-rd-create-rack-location");
+            var errorEl = overlay.querySelector(".nbx-rd-create-rack-error");
+            var submitBtn = overlay.querySelector("[data-rd-create-rack-submit]");
+
+            function showError(msg) {
+                errorEl.textContent = msg;
+                errorEl.style.display = "";
+            }
+
+            var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
+            var modal = ctor ? new ctor(overlay) : null;
+
+            // Transition-safe hide (dialogs.js's own comment explains why: a
+            // hide() issued while the show-fade is still running is silently
+            // dropped by Bootstrap and strands the dialog on screen forever).
+            var shownDone = false, hidePending = false;
+            overlay.addEventListener("shown.bs.modal", function () {
+                shownDone = true;
+                if (hidePending && modal) { modal.hide(); }
+                nameInput.focus();
+            });
+            function requestHide() {
+                if (!modal) { overlay.remove(); return; }
+                if (shownDone) { modal.hide(); } else { hidePending = true; }
+            }
+            overlay.addEventListener("hide.bs.modal", function () {
+                if (overlay.contains(document.activeElement)) {
+                    document.activeElement.blur();
+                }
+            });
+            overlay.addEventListener("hidden.bs.modal", function () { overlay.remove(); });
+            overlay.querySelectorAll("[data-bs-dismiss='modal']").forEach(function (btn) {
+                btn.addEventListener("click", function () { requestHide(); });
+            });
+
+            submitBtn.addEventListener("click", function () {
+                var name = nameInput.value.trim();
+                var uHeight = parseInt(heightInput.value, 10);
+                var locationId = locationSelect.value ? parseInt(locationSelect.value, 10) : null;
+
+                errorEl.style.display = "none";
+                if (!name) {
+                    showError("Name is required.");
+                    return;
+                }
+                if (!uHeight || uHeight < 1) {
+                    showError("U height must be a positive number.");
+                    return;
+                }
+                // Location is MANDATORY (D4): (location, name) is this
+                // model's whole identity, matching dcim.Rack's own
+                // uniqueness constraint -- there is no such thing as a
+                // planned rack with no location.
+                if (!locationId) {
+                    showError("Location is required.");
+                    return;
+                }
+
+                submitBtn.setAttribute("disabled", "disabled");
+                postJSON(createUrl, { name: name, u_height: uHeight, location_id: locationId })
+                    .then(function (response) {
+                        if (response.status === 201) {
+                            // The server re-renders the new (badged) block on reload,
+                            // identical to Add rack's own success path above.
+                            window.location.reload();
+                            return;
+                        }
+                        submitBtn.removeAttribute("disabled");
+                        readError(response, "The rack could not be created.").then(function (msg) {
+                            showError(msg);
+                        });
+                    })
+                    .catch(function (err) {
+                        submitBtn.removeAttribute("disabled");
+                        showError(String(err));
+                    });
+            });
+
+            if (modal) {
+                modal.show();
+            } else {
+                // No Bootstrap JS: degrade the same way dialogs.js's dialogs do.
+                toast("danger", "Error", "This dialog needs Bootstrap's modal JS.");
+                overlay.remove();
+            }
         });
     })();
 
@@ -356,7 +533,7 @@
         if (!buttons.length) { return; }
 
         var STORE_KEY = "nbxRdDrawerSections";
-        var VALID = { device: true, favorites: true, racks: true };
+        var VALID = { device: true, favorites: true, racks: true, templates: true };
 
         // The active set, as a plain object used as a string-set. Membership is
         // the single source of truth; the DOM/storage are derived from it.

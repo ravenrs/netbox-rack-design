@@ -37,6 +37,58 @@ the plugin config key ``distribution_mode`` (read via ``get_plugin_config``):
     that differs from the built-in (direction, ceilings, PSU schemes) -- never
     for feed *data*, which always comes from the binding.
 
+The ``rack`` a script receives (PLAN-templates.md D30): the planned world
+includes racks that do not exist in NetBox yet (:class:`~netbox_rack_design.
+models.PlannedRack`, projected the moment a template is stamped into one --
+that is a live path, not a theoretical one, since stamping places PDUs and
+``devices`` becomes non-empty for real). ``rack`` is EITHER a real
+``dcim.Rack`` OR a ``PlannedRack``, passed through **unchanged** -- the engine
+does not wrap it in a proxy, and does not skip script mode for a planned rack
+(skipping would silently blank out the heatmap for the exact case D30 calls
+out: a greenfield rack whose PDUs were just stamped in from a template). A
+script's own device/PDU discovery should go through the shared helpers this
+module and :mod:`netbox_rack_design.rackinfo` already provide
+(:func:`devices_from_elevation`'s ``devices`` list, :func:`_collect_pdus`,
+:func:`rackinfo.rack_devices`) -- those are already planned-rack-safe, which is
+exactly how the shipped ``distribution_example.py`` /
+``distribution_advanced_example.py`` work unchanged for both rack kinds today.
+
+**The contract for whatever a script reads directly off ``rack`` itself:**
+
+* Safe on both kinds: ``rack.name``, ``rack.u_height``, ``rack.location``,
+  ``rack.site``, ``rack.pk``.
+* Safe on both kinds, but note the difference: ``rack.cf`` -- for a real rack
+  this is its stored custom-field values; for a ``PlannedRack`` it is ALWAYS
+  ``{}``, because rack-power custom fields are registered against
+  ``dcim.rack``'s content type, not ``plannedrack``'s. Read it anyway (never
+  hardcode a branch on rack kind) -- :func:`apply_rack_power_override` merges
+  :meth:`~netbox_rack_design.models.DesignRackPower.effective_custom_fields`
+  over it (and over ``rack.custom_field_data``, the same generic path
+  ``planning_fields.read_planning_fields`` reads) BEFORE the script runs, in
+  "script" mode only, so the merged value is what a script sees either way --
+  this is the ONLY source of ``power_limitation``/``pdu_location`` for a
+  planned rack, never an override of something already there.
+* NOT part of the contract, and will raise: ``rack.devices`` (and any other
+  ``dcim.Rack``-only manager/relation). ``PlannedRack`` has no such attribute
+  at all -- it has no ``dcim.Rack`` row for one to point at. A script that
+  needs "every device/PDU already in this rack" should read the ``devices``
+  list this module hands it, or call :func:`rackinfo.rack_devices` (which
+  degrades to an empty, chainable queryset for a planned rack, matching what
+  a freshly-stamped greenfield rack actually has).
+* A script that must branch on rack kind explicitly (rather than just reading
+  the safe attributes above) can call
+  :func:`netbox_rack_design.rackinfo.is_planned`.
+
+A raising script is caught by :func:`generate_distribution_status` and
+surfaced as ``state: "failed"`` with the exception type/message -- loud, never
+silent -- but the message will name whatever attribute the script actually
+touched, not "this rack is planned", so this contract is what turns that into
+an actionable fix rather than a support ticket. This also governs a
+deployment's own PRIVATE ``distribution_script``, which cannot be edited from
+here: a script written only against the safe attributes above, or through the
+shared helpers, keeps working unchanged for a planned rack with no code
+change on the deployment's side.
+
 The ``devices`` the script receives are the planned consumers built by
 :func:`devices_from_elevation` -- the same planned world the projection already
 computed (adds applied, removes dropped, moves at their target). Each entry
@@ -54,6 +106,8 @@ import re
 
 from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
+
+from . import rackinfo
 
 logger = logging.getLogger("netbox_rack_design.distribution")
 
@@ -288,9 +342,13 @@ def apply_rack_power_override(elevation):
     When the merge is non-empty, sets
     ``elevation.rack.__dict__["cf"] = {**rack.cf, **custom_fields}`` --
     ``Rack.cf`` is a ``cached_property``, so overriding the instance
-    ``__dict__`` shadows it for the lifetime of this in-memory object only.
-    Never persisted; never touches ``dcim``. A no-op when no override exists
-    anywhere in the chain (mirrors the ``DoesNotExist`` no-op this replaced).
+    ``__dict__`` shadows it for the lifetime of this in-memory object only --
+    AND ``elevation.rack.custom_field_data`` to the same merged dict, so a
+    script reading either access pattern sees the same effective values (see
+    ``planning_fields._read_cf``, which prefers ``custom_field_data`` and
+    would otherwise never observe this merge). Never persisted; never touches
+    ``dcim``. A no-op when no override exists anywhere in the chain (mirrors
+    the ``DoesNotExist`` no-op this replaced).
     """
     from .models import DesignRackPower
 
@@ -305,6 +363,19 @@ def apply_rack_power_override(elevation):
 
     merged = {**rack.cf, **custom_fields}
     rack.__dict__["cf"] = merged
+    # Also refresh the raw stored field, not only the cached `.cf` property.
+    # `planning_fields._read_cf` (the generic resolver behind
+    # `read_planning_fields`, which the shipped example scripts use for
+    # `power_limitation`/`pdu_location`) prefers `custom_field_data` over
+    # `.cf` for query-cost reasons, and would otherwise never see this merge
+    # at all -- for a real rack it would silently read the UNMERGED stored cf,
+    # and for a `PlannedRack` it would always read an empty dict (planned
+    # racks carry no rack-power custom fields of their own; see this module's
+    # docstring). Setting the instance attribute directly is safe and
+    # in-memory only, exactly like the `.cf` override above: it never touches
+    # the database, and works identically for a real ``dcim.Rack`` and a
+    # ``PlannedRack`` (both are plain model fields, not managers).
+    rack.custom_field_data = merged
     logger.debug(
         "distribution.apply_rack_power_override: rack=%r design=%r merged keys=%s",
         getattr(rack, "name", None), getattr(elevation.design, "pk", None),
@@ -430,7 +501,7 @@ def _collect_pdus(rack, devices):
     by_device_pk = {d["device"].pk: d for d in devices if d.get("device") is not None}
     pdus = {}
 
-    for dev in rack.devices.all():
+    for dev in rackinfo.rack_devices(rack):
         try:
             role = (dev.role.slug if dev.role else "").lower()
             if role not in PDU_ROLE_SLUGS:
@@ -807,7 +878,7 @@ def _omitted_pdu_reasons(rack, devices):
     """
     by_device_pk = {d["device"].pk: d for d in devices if d.get("device") is not None}
     out = []
-    for dev in rack.devices.all():
+    for dev in rackinfo.rack_devices(rack):
         role = (dev.role.slug if dev.role else "").lower()
         if role not in PDU_ROLE_SLUGS:
             continue

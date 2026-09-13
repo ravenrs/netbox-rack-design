@@ -80,6 +80,26 @@ WHAT THIS VERSION DELIBERATELY DOES NOT DO
   ``Device.objects.restrict(user, ...)``, so a site/tenant-constrained user is
   correctly refused there.
 
+PLANNED RACKS
+------------------------------------------------------------------------------
+
+A placement may target a ``PlannedRack`` instead of a real ``dcim.Rack``
+(PLAN-templates.md T1.2/T1.6) -- a rack that does not exist in DCIM yet.
+Applying such a placement first turns the ``PlannedRack`` into a real rack:
+adopting one that already matches its ``(location, name)`` identity (D4), or
+creating one if none does, and either way stamping ``PlannedRack.
+realized_rack`` (D7) so every design that still references it derefs to the
+real rack from then on -- the row itself is never deleted. On adoption the
+real rack's own attributes win silently (D5): a plan drawn for 42U that turns
+out to already exist as a 47U rack places its devices against the real 47U,
+no reconciliation, no warning. Every planned rack a design's workable
+placements touch is resolved this way BEFORE any device is written -- see
+``_resolve_planned_racks``/``_realize_planned_racks`` -- so a rack that
+cannot be resolved aborts the whole apply cleanly rather than leaving some
+devices placed and others not. A rack created this way is never deleted by
+any path in this module, cancel/undo included -- see
+``_realize_planned_racks``'s docstring.
+
 IDEMPOTENCY
 ------------------------------------------------------------------------------
 
@@ -114,19 +134,19 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from dcim.choices import DeviceFaceChoices
-from dcim.models import Device
+from dcim.models import Device, Rack
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
 from netbox.plugins import get_plugin_config
 
 from . import projection
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import DesignApply, DesignPlacement
+from .models import DesignApply, DesignPlacement, PlannedRack
 
 logger = logging.getLogger("netbox_rack_design.apply")
 
 __all__ = ("ApplyResult", "CreatedDevice", "UpdatedDevice", "RemovedDevice",
-           "DeletedDevice", "RevertedDevice", "plan", "run")
+           "DeletedDevice", "RevertedDevice", "ResolvedRack", "plan", "run")
 
 
 # --- result shapes -----------------------------------------------------------
@@ -204,6 +224,27 @@ class RevertedDevice:
 
 
 @dataclass
+class ResolvedRack:
+    """One ``PlannedRack`` this design's workable placements target (T1.6,
+    PLAN-templates.md D4/D5/D7): apply must turn it into a real ``dcim.Rack``
+    -- by adopting one that already matches ``(location, name)``, or by
+    creating one -- before any device can be placed into it.
+
+    ``created`` distinguishes the two outcomes purely for reporting; apply's
+    own placement machinery treats them identically once ``rack`` is filled
+    in. Mirrors :class:`CreatedDevice`'s own ``device=None``-until-``run()``
+    shape: :func:`plan` can already tell (via a read-only lookup) whether an
+    adoption will happen, so ``rack``/``created`` are set then for an
+    adoption, but a to-be-created rack's ``rack`` stays ``None`` until
+    :func:`run` actually writes it -- ``plan`` must perform no writes.
+    """
+
+    planned_rack: object
+    rack: object = None
+    created: bool = False
+
+
+@dataclass
 class ApplyResult:
     """The full answer :func:`plan`/:func:`run` give: intended actions + problems.
 
@@ -212,7 +253,10 @@ class ApplyResult:
     are the intended (or, after :func:`run`, the actual) creates/updates/
     status-flags/prunes/reverts, always populated by :func:`plan` regardless
     of whether problems exist elsewhere in the design -- a planner sees the
-    whole picture, not just the first failure.
+    whole picture, not just the first failure. ``resolved_racks`` is the T1.6
+    addition: one entry per distinct ``PlannedRack`` this design's workable
+    placements target, reporting whether it will be (or was) adopted or
+    created.
     """
 
     problems: list = field(default_factory=list)
@@ -221,6 +265,7 @@ class ApplyResult:
     removed: list = field(default_factory=list)
     deleted: list = field(default_factory=list)
     reverted: list = field(default_factory=list)
+    resolved_racks: list = field(default_factory=list)
 
     @property
     def ok(self):
@@ -248,6 +293,72 @@ def _footprint(rack_id, position, u_height, face, full_depth):
     start = int(position)
     end = int(position + u_height)
     return {(rack_id, u, f) for f in faces for u in range(start, end)}
+
+
+def _find_realized_or_adopt(planned):
+    """Read-only D4 lookup: the ``dcim.Rack`` ``planned`` already resolves to,
+    WITHOUT creating anything -- ``None`` means apply will need to create one.
+
+    Trusts ``realized_rack`` only after re-confirming the row it points at
+    still exists: a prior apply may have realized this planned rack and then
+    someone deleted that rack in DCIM since. When that happens (or the rack
+    was never realized at all) this falls through to the same
+    ``(location, name)`` lookup a first-time resolution would use -- D4 made
+    that pair unique specifically so this lookup can never be ambiguous.
+    Used identically by :func:`plan` (a pure read, safe to call there) and by
+    :func:`_execute`'s actual create-or-adopt step below.
+    """
+    if planned.realized_rack_id is not None:
+        rack = Rack.objects.filter(pk=planned.realized_rack_id).first()
+        if rack is not None:
+            return rack
+    return Rack.objects.filter(location_id=planned.location_id, name=planned.name).first()
+
+
+def _resolve_planned_racks(placements):
+    """The read-only half of T1.6: for every DISTINCT ``PlannedRack`` a
+    workable 'add'/'move' placement targets, look up (never create) the real
+    rack it would resolve to. Returns ``(resolved_racks, rack_by_planned_id)``
+    -- the former is the ``ResolvedRack`` list :func:`plan` reports (a
+    to-be-created rack's own ``.rack`` stays ``None``, since plan() must not
+    write one), the latter maps ``planned_rack_id -> dcim.Rack or None`` for
+    the occupancy scan and per-placement rack assignment below.
+
+    One query per distinct planned rack referenced, not per placement -- see
+    the module docstring's QUERY BUDGET section; a design with no planned-rack
+    placements at all pays nothing extra.
+    """
+    planned_ids = {
+        pl.target_planned_rack_id for pl in placements
+        if pl.kind in (DesignPlacementKindChoices.KIND_ADD, DesignPlacementKindChoices.KIND_MOVE)
+        and pl.target_planned_rack_id
+    }
+    resolved_racks = []
+    rack_by_planned_id = {}
+    if not planned_ids:
+        return resolved_racks, rack_by_planned_id
+
+    planned_racks = PlannedRack.objects.filter(pk__in=planned_ids).select_related("location")
+    for planned in planned_racks:
+        rack = _find_realized_or_adopt(planned)
+        rack_by_planned_id[planned.pk] = rack
+        resolved_racks.append(ResolvedRack(planned_rack=planned, rack=rack, created=rack is None))
+    return resolved_racks, rack_by_planned_id
+
+
+def _effective_target_rack(pl, rack_by_planned_id):
+    """The ``dcim.Rack`` a placement's footprint should be checked against,
+    whichever kind of destination it names (T1.6): the real rack directly, or
+    -- for a placement targeting a still-planned rack -- whatever
+    :func:`_resolve_planned_racks` already resolved it to. ``None`` means the
+    rack does not exist yet and apply will create it, in which case there is
+    by definition nothing occupying it to conflict with.
+    """
+    if pl.target_rack_id:
+        return pl.target_rack
+    if pl.target_planned_rack_id:
+        return rack_by_planned_id.get(pl.target_planned_rack_id)
+    return None
 
 
 def _is_bay_placement(pl):
@@ -376,7 +487,8 @@ def plan(design, user):
         design.placements.filter(stale=False)
         .select_related(
             "device", "device__role", "device__tenant", "device__device_type",
-            "device__rack", "target_rack", "device_type", "device_role", "tenant",
+            "device__rack", "target_rack", "target_planned_rack",
+            "target_planned_rack__location", "device_type", "device_role", "tenant",
             "base_placement",
         )
         .order_by("pk")
@@ -412,12 +524,24 @@ def plan(design, user):
         else:
             workable.append(pl)
 
+    # --- T1.6: resolve every PlannedRack these placements target, BEFORE any
+    # occupancy scan or device is planned/written, so a rack that cannot be
+    # resolved never leaves a half-applied design (module docstring / D4/D7).
+    # Read-only here -- see _find_realized_or_adopt's docstring -- the actual
+    # create-or-adopt write happens in _execute() below.
+    result.resolved_racks, rack_by_planned_id = _resolve_planned_racks(workable)
+
     # --- one scan covering BOTH occupancy and site-wide name conflicts ------
     target_rack_ids = {
         pl.target_rack_id for pl in workable
         if pl.kind in (DesignPlacementKindChoices.KIND_ADD, DesignPlacementKindChoices.KIND_MOVE)
         and pl.target_rack_id and pl.target_position is not None
     }
+    # An ADOPTED planned rack already has real occupants that must be scanned
+    # for conflicts exactly like any other real rack (T1.6) -- a rack that
+    # will be freshly CREATED contributes nothing here, since it cannot
+    # possibly have any devices in it yet.
+    target_rack_ids |= {rack.pk for rack in rack_by_planned_id.values() if rack is not None}
     devices_in_scope = list(
         Device.objects.filter(Q(site_id=design.site_id) | Q(rack_id__in=target_rack_ids))
         .exclude(pk__in=own_planned_ids)
@@ -442,17 +566,23 @@ def plan(design, user):
             device_type = pl.device_type if pl.kind == DesignPlacementKindChoices.KIND_ADD else pl.device.device_type
             name = _target_name(pl)
             blocked = False
+            # The real rack this placement's device will actually sit in --
+            # either its real target directly, or (T1.6) whatever the planned
+            # rack it targets was already resolved to above. None means the
+            # rack itself does not exist yet and will be CREATED by run(), in
+            # which case there is nothing yet to occupy it.
+            target_rack = _effective_target_rack(pl, rack_by_planned_id)
 
-            if pl.target_position is not None:
+            if pl.target_position is not None and target_rack is not None:
                 u_height = _u_height(device_type)
                 full_depth = _is_full_depth(device_type)
-                cells = _footprint(pl.target_rack_id, pl.target_position, u_height, pl.target_face, full_depth)
+                cells = _footprint(target_rack.pk, pl.target_position, u_height, pl.target_face, full_depth)
                 conflict = next((occupied[c] for c in cells if c in occupied), None)
                 if conflict is not None:
                     face_label = pl.target_face or DeviceFaceChoices.FACE_FRONT
                     result.problems.append(
                         f"U{projection._fmt_u(pl.target_position)} {face_label} in rack "
-                        f"{pl.target_rack} is occupied by {conflict.name}."
+                        f"{target_rack} is occupied by {conflict.name}."
                     )
                     blocked = True
 
@@ -473,19 +603,19 @@ def plan(design, user):
             if row is None:
                 result.created.append(CreatedDevice(
                     placement=pl, name=name, device_type=device_type, role=role,
-                    tenant=tenant, rack=pl.target_rack, position=pl.target_position,
+                    tenant=tenant, rack=target_rack, position=pl.target_position,
                     face=pl.target_face, status=planned_status,
                 ))
             elif row.device_id is None:
                 result.created.append(CreatedDevice(
                     placement=pl, name=name, device_type=device_type, role=role,
-                    tenant=tenant, rack=pl.target_rack, position=pl.target_position,
+                    tenant=tenant, rack=target_rack, position=pl.target_position,
                     face=pl.target_face, status=planned_status, recreated=True,
                     apply_row=row,
                 ))
             else:
                 changes = _diff_device(
-                    row.device, name=name, rack=pl.target_rack, position=pl.target_position,
+                    row.device, name=name, rack=target_rack, position=pl.target_position,
                     face=pl.target_face, role=role, tenant=tenant, status=planned_status,
                 )
                 if changes:
@@ -590,8 +720,72 @@ def run(design, user):
         return result
 
 
+def _realize_planned_racks(result):
+    """The WRITE half of T1.6: adopt or create the real ``dcim.Rack`` for
+    every ``ResolvedRack`` :func:`plan` identified, BEFORE any device is
+    written -- a failure resolving a rack must abort cleanly rather than
+    leaving some devices placed in a design where others could not be (module
+    docstring's all-or-nothing contract; this runs inside the same
+    transaction as everything else in :func:`_execute`).
+
+    Re-runs :func:`_find_realized_or_adopt` rather than trusting
+    ``entry.rack`` from :func:`plan`: :func:`plan` and :func:`run` execute
+    back-to-back inside ONE transaction here, so nothing can have changed
+    between them in practice, but re-resolving costs one query per distinct
+    planned rack and keeps this function correct even if that ever stops
+    being true (e.g. a future caller that plans once and executes later).
+
+    ``PlannedRack.realized_rack`` (D7) is set to whichever rack it is -- the
+    row itself is NEVER deleted, by design: it is what lets every design
+    still referencing it deref to the real rack from now on (``resolve_rack``
+    in models.py). A rack CREATED here is, symmetrically, never deleted by
+    any path in this module -- not by the cancel/undo cleanup below (which
+    only ever deletes a *planned device*, never the rack it stood in), and
+    not by a later rollback: by the time anything could reconsider, the rack
+    may already hold real hardware.
+    """
+    for entry in result.resolved_racks:
+        planned = entry.planned_rack
+        rack = _find_realized_or_adopt(planned)
+        if rack is None:
+            rack = Rack(
+                name=planned.name, location=planned.location,
+                site=planned.location.site, u_height=planned.u_height,
+            )
+            rack.full_clean()
+            rack.save()
+            entry.created = True
+        else:
+            entry.created = False
+        entry.rack = rack
+        if planned.realized_rack_id != rack.pk:
+            planned.realized_rack = rack
+            planned.save(update_fields=["realized_rack"])
+
+
 def _execute(design, user, result):
     removal_status = get_plugin_config("netbox_rack_design", "removal_status")
+
+    _realize_planned_racks(result)
+    if result.resolved_racks:
+        # Some CreatedDevice/UpdatedDevice entries were built by plan() before
+        # their planned rack existed, so their `rack`/`changes["rack"]` is
+        # still None -- patch them now that _realize_planned_racks() above has
+        # filled in the real rack. (An UpdatedDevice can only reference a
+        # planned rack that a PRIOR apply already realized -- the device
+        # being updated could not exist otherwise -- so this is a no-op there
+        # in practice; handled anyway for robustness, never a duplicated
+        # resolution.)
+        rack_by_planned_id = {e.planned_rack.pk: e.rack for e in result.resolved_racks}
+        for entry in result.created:
+            if entry.rack is None and entry.placement.target_planned_rack_id:
+                entry.rack = rack_by_planned_id[entry.placement.target_planned_rack_id]
+        for entry in result.updated:
+            if (
+                "rack" in entry.changes and entry.changes["rack"] is None
+                and entry.placement.target_planned_rack_id
+            ):
+                entry.changes["rack"] = rack_by_planned_id[entry.placement.target_planned_rack_id]
 
     for entry in result.created:
         device = Device(

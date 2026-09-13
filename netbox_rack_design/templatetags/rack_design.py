@@ -14,9 +14,49 @@ import json
 from django import template
 from utilities.html import foreground_color
 
-from .. import planning_fields, projection
+from .. import planning_fields, projection, rackinfo
 
 register = template.Library()
+
+
+@register.filter()
+def rack_dom_id(rack_key):
+    """
+    Turn a namespaced ``rack_key()`` string (``"r:<pk>"`` / ``"p:<pk>"``,
+    models.py D27) into the spelling used in HTML ``id`` / ``gs-id`` /
+    ``data-rack-id`` attributes.
+
+    **A real rack keeps its BARE pk; only a planned rack is prefixed**
+    (``"p-<pk>"``). That asymmetry is deliberate, and it is the whole point:
+
+    - The collision D31 describes only ever happens BETWEEN the two kinds --
+      ``dcim.Rack`` pk 1 and ``PlannedRack`` pk 1 are different racks (D28).
+      Real pks are unique among real racks and planned pks among planned
+      ones, so prefixing just one side removes the overlap completely. The
+      invariant "no two racks in one page share a DOM id" holds either way.
+    - Prefixing BOTH sides was tried first and broke all 125 editor e2e
+      tests at once: they build selectors like
+      ``"#nbx-rd-grid-front-" + rack_pk`` from the Python side, and every
+      one of them went dead with ``Cannot read properties of null``.
+      Rewriting 125 tests to buy nothing extra is churn, not safety.
+    - "A bare integer means a real rack" is already this codebase's rule on
+      the wire: ``api/views.py:parse_real_rack_id`` maps a bare int to a
+      real rack, and D27 keeps accepting that form for one release. The DOM
+      now says the same thing the API says.
+
+    ``-`` rather than ``:`` for the planned prefix because ``:`` is a CSS
+    selector metacharacter -- ``document.querySelector("#rd-rack-p:1")``
+    would silently match nothing rather than raise. No such ``#id`` selector
+    exists today (T1.5c-survey.md checked exhaustively); this is designing
+    out a future footgun. The colon form stays everywhere else (JS-internal
+    values, API payloads), so ``rackKeyToServer()`` is what converts back.
+    """
+    key = str(rack_key or "")
+    if key.startswith("r:"):
+        return key[2:]
+    if key.startswith("p:"):
+        return "p-" + key[2:]
+    return key
 
 
 @register.filter()
@@ -38,6 +78,18 @@ def mul2(value):
 
 
 @register.filter()
+def rack_unit_numbers(rack):
+    """
+    The numbering column's U values, top to bottom, for either rack kind
+    (T1.5): ``rack.units`` does not exist on a ``models.PlannedRack``, so
+    this shared template (used by both the editor and the read-only
+    elevation) reads through ``rackinfo.rack_unit_numbers`` instead of the
+    raw property.
+    """
+    return rackinfo.rack_unit_numbers(rack)
+
+
+@register.filter()
 def slot_gs_y(slot, rack):
     """
     Compute a slot's ``gs-y`` (top grid row) for a half-U GridStack column.
@@ -45,12 +97,15 @@ def slot_gs_y(slot, rack):
     GridStack lays out from row 0 at the top. NetBox racks number U1 at the
     bottom (ascending) unless ``desc_units`` flips them. Mirrors reorder-rack's
     ``calculate_u_position`` so the elevation reads top-of-rack first.
+    ``rackinfo.rack_desc_units`` rather than the raw ``rack.desc_units``
+    (T1.5): a ``PlannedRack`` has no field of its own for this -- see that
+    helper's docstring for why ``False`` is the right default.
     """
     u_height = int(rack.u_height) * 2
     height = int(slot["u_height"]) * 2
     unit_id = int(slot["u_position"]) * 2
 
-    if rack.desc_units:
+    if rackinfo.rack_desc_units(rack):
         return unit_id - 2
     if height > 1:
         return u_height - unit_id - height + 2

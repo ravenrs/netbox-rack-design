@@ -36,6 +36,8 @@ import {
     rdBeginCursorGesture,
     rdEndCursorGesture,
     rdBayItemsForRack,
+    rdAddBayItem,
+    rdRemoveBayItem,
     rdCursorGesture,
 } from "rd/cursor.js";
 import { rdBeginPushSuppression, rdEndPushSuppression } from "rd/push.js";
@@ -79,7 +81,13 @@ function setRackHooks(hooks) {
 
 
     function initRack(block) {
-        var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
+        // T1.5c (PLAN-templates.md D31): data-rack-id is now the colon-free
+        // DOM form of rack_key() ("r-<pk>"/"p-<pk>", templatetags/rack_design.py
+        // rack_dom_id) -- dcim.Rack and PlannedRack have separate pk sequences
+        // (D28), so a bare-int parseInt here would collapse two different
+        // racks' ids to the same number. Keep it as an opaque string; every use
+        // below is a getElementById/object-key/=== comparison, never arithmetic.
+        var rackId = block.getAttribute("data-rack-id");
         // The one object that knows how THIS enclosure differs from another:
         // slot geometry, what it accepts, and how a slot is addressed on save.
         var frame = makeFrame(block);
@@ -3028,6 +3036,20 @@ function setRackHooks(hooks) {
                     if (PLACEMENT_FIELDS.length) {
                         item.planning_data = w.planning_data || {};
                     }
+                    // D20 provenance, set on a brand-new add only (the
+                    // serializer rejects it on any other kind). Deliberately
+                    // OUTSIDE the PLACEMENT_FIELDS guard above: provenance has
+                    // nothing to do with the deployment's config-declared
+                    // planning fields, and nesting it there made it fire only
+                    // where `placement_fields` happened to be configured --
+                    // which looked exactly like a NetBox-version bug (green on
+                    // one dev env, silently dropped on the other two).
+                    if (w.from_template_id != null) {
+                        item.from_template_id = w.from_template_id;
+                        if (w.from_template_version != null) {
+                            item.from_template_version = w.from_template_version;
+                        }
+                    }
                     // Reference a real PDU for live cf (§6, mutually exclusive with
                     // power_config -- showPduPowerDialog's confirm handler clears
                     // whichever mode isn't active).
@@ -3836,9 +3858,278 @@ function setRackHooks(hooks) {
             return names;
         }
 
+        // ---- Template stamping (PLAN-templates.md §3, T3.3) ----------------
+        // Materialize the SERVER-COMPUTED result of preview-template as
+        // ordinary unsaved `add` tiles -- exactly the state finishAdd's
+        // "displaced.length === 0" branch produces, minus the drag-specific
+        // bits (cursor governance, the displace-confirm dialog) that make no
+        // sense for a position the server already validated against THIS
+        // rack's current occupancy (real devices + this design's own
+        // placements, D12). D19 is the whole point: the server computed
+        // where these land, so the client's job here is to PLACE them, not
+        // re-derive whether it may.
+        //
+        // `items` -- built by editor/templates.js from preview-template's
+        // response entries plus a bulk /api/dcim/device-types/ lookup for
+        // u_height/is_full_depth (the response itself carries neither, only
+        // the device type's pk) -- one per TOP-LEVEL template placement:
+        //   {device_type_id, u_height, is_full_depth, device_role_id,
+        //    tenant_id, position, face, label_text, model, name,
+        //    name_collision, blades}
+        // Blades (a chassis's nested `blades` entries in the response,
+        // already filtered by editor/templates.js against the chassis
+        // device type's ACTUAL bays -- a name that does not exist there is
+        // reported to the planner, never silently placed or dropped) go
+        // through the SAME pending-bay-add representation a hand-added
+        // blade into a same-submit chassis uses (editor/cursor.js
+        // rdAddBayItem/rdBayItemsForRack, spec §10.6): a blade never takes a
+        // unit of its own, so it is addressed by target_bay_name against
+        // this chassis tile's OWN widget index rather than placed on a grid.
+        function stampTemplateItems(items) {
+            (items || []).forEach(function (item) {
+                var uHeight = item.u_height || 1;
+                var gsH = Math.max(1, Math.round(uHeight * 2));
+                var face = item.face === "rear" ? "rear" : "front";
+                var grid = (face === "rear") ? rearGrid : frontGrid;
+                if (!grid) { return; }
+                var gsY = uPositionToGsY(item.position, gsH);
+
+                var el = document.createElement("div");
+                el.className = "grid-stack-item nbx-rd-state-add";
+                el.setAttribute("gs-w", "1");
+                el.setAttribute("gs-h", String(gsH));
+
+                // Same bracket finishAdd/ensureTempGhost use: addWidget ->
+                // Engine.addNode -> _fixCollisions can otherwise cascade a
+                // push onto a neighbour instead of landing exactly where the
+                // server said to.
+                rdBeginPushSuppression();
+                try {
+                    grid.addWidget(el, { x: 0, y: gsY, w: 1, h: gsH });
+                } finally {
+                    rdEndPushSuppression();
+                }
+
+                var newIdx = state.length;
+                var label = item.label_text || item.model || ("Device type " + item.device_type_id);
+                var widget = {
+                    kind: "add",
+                    device_type_id: item.device_type_id,
+                    device_id: null,
+                    placement_id: null,
+                    device_role_id: (item.device_role_id != null) ? item.device_role_id : null,
+                    tenant_id: (item.tenant_id != null) ? item.tenant_id : null,
+                    u_height: uHeight,
+                    label: label,
+                    face: face,
+                    is_full_depth: !!item.is_full_depth,
+                    // Carries the template placement's config-declared
+                    // planning fields (D8) through to save-layout exactly
+                    // like a manual add's attachPlacementFieldsButton does
+                    // (buildRackPayload reads w.planning_data verbatim for
+                    // an "add" widget) -- previously always {} here, so a
+                    // stamped tile silently dropped this data.
+                    planning_data: item.planning_data || {},
+                    // D20 provenance. preview-template returns which template
+                    // (and which Template.version) produced this item; save-layout
+                    // persists both onto the DesignPlacement. Without these two
+                    // lines the whole provenance feature is dead for an ordinary
+                    // stamp -- only blades carried it, so "which racks use the
+                    // standard ToR?" answered "none" however many were stamped,
+                    // and T3.6's re-stamp warning could never fire.
+                    from_template_id: (item.from_template != null) ? item.from_template : null,
+                    from_template_version: (item.from_template_version != null)
+                        ? item.from_template_version : null,
+                    proposed_name: item.name || "",
+                };
+                state.push({
+                    widget: widget, origUPosition: item.position, origFace: face,
+                    removed: false, shadowEl: null, displaces: [],
+                });
+                el.setAttribute("data-widget-index", newIdx);
+
+                var content = document.createElement("div");
+                content.className = "grid-stack-item-content";
+                el.appendChild(content);
+                content.setAttribute(
+                    "title",
+                    label + " (U" + Math.round(item.position) + ", add, from template)"
+                );
+                content.setAttribute("data-name", label);
+                if (item.model) { content.setAttribute("data-device-type-name", item.model); }
+                content.setAttribute("data-draw-w", "0");
+                content.setAttribute("data-draw-known", "1");
+
+                var btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "nbx-rd-remove-btn";
+                btn.setAttribute("title", "Cancel this planned add");
+                btn.setAttribute("aria-label", "Cancel this planned add");
+                btn.innerHTML = "&times;";
+                var span = document.createElement("span");
+                span.className = "nbx-rd-label";
+                span.textContent = label;
+                content.appendChild(btn);
+                content.appendChild(span);
+
+                // Same editable-name + collision-warning affordance every add
+                // tile gets (finishAdd's own copy, above) -- pre-filled from
+                // the naming pass preview-template already ran, not a fresh
+                // auto-fill call: that pass is what batches naming across
+                // every rack the stamp touches (D19), and re-deriving it here
+                // per tile could hand back a DIFFERENT name than the one the
+                // apply dialog just showed the planner.
+                var nameInput = document.createElement("input");
+                nameInput.type = "text";
+                nameInput.className = "form-control form-control-sm nbx-rd-name-input";
+                nameInput.setAttribute("placeholder", "name…");
+                nameInput.setAttribute("aria-label", "Proposed name");
+                nameInput.value = widget.proposed_name;
+                var warn = document.createElement("span");
+                warn.className = "nbx-rd-name-warning";
+                warn.setAttribute("title", "A device with this name already exists in the site.");
+                warn.innerHTML = '<i class="mdi mdi-alert" aria-hidden="true"></i>';
+                warn.style.display = item.name_collision ? "" : "none";
+                content.classList.toggle("nbx-rd-name-collision", !!item.name_collision);
+                content.appendChild(nameInput);
+                content.appendChild(warn);
+                setTileDisplayName(content, widget.proposed_name);
+
+                var editBtn = document.createElement("button");
+                editBtn.type = "button";
+                editBtn.className = "nbx-rd-name-edit-btn";
+                editBtn.title = "Edit name";
+                editBtn.setAttribute("aria-label", "Edit name");
+                editBtn.innerHTML = '<i class="mdi mdi-pencil" aria-hidden="true"></i>';
+                content.appendChild(editBtn);
+                var gridItem = content.closest(".grid-stack-item");
+                function openNameEdit() {
+                    content.classList.add("nbx-rd-editing");
+                    if (gridItem) { gridItem.classList.add("nbx-rd-editing-item"); }
+                    nameInput.focus();
+                    nameInput.select();
+                }
+                function closeNameEdit() {
+                    content.classList.remove("nbx-rd-editing");
+                    if (gridItem) { gridItem.classList.remove("nbx-rd-editing-item"); }
+                }
+                editBtn.addEventListener("click", function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openNameEdit();
+                });
+                nameInput.addEventListener("blur", closeNameEdit);
+                nameInput.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === "Escape") {
+                        e.preventDefault();
+                        nameInput.blur();
+                    }
+                });
+                nameInput.addEventListener("input", function () {
+                    widget.nameUserSet = true;
+                    widget.proposed_name = nameInput.value;
+                    content.setAttribute("data-name", nameInput.value || label);
+                    setTileDisplayName(content, nameInput.value);
+                    markDirty();
+                });
+
+                attachPlacementFieldsButton(widget, content);
+
+                // Role/tenant are ids, not the name string looksLikePdu also
+                // matches on -- the template's own device type/proposed name
+                // are the signals available here (finishAdd's roleName comes
+                // from the palette rail's live <select>, which a template
+                // stamp never touches).
+                if (looksLikePdu(null, "", widget.proposed_name, item.model || "")) {
+                    var pduBtn = document.createElement("button");
+                    pduBtn.type = "button";
+                    pduBtn.className = "nbx-rd-power-btn";
+                    pduBtn.title = "PDU power (planning input)";
+                    pduBtn.setAttribute("aria-label", "PDU power");
+                    pduBtn.innerHTML = '<i class="mdi mdi-flash" aria-hidden="true"></i>';
+                    content.appendChild(pduBtn);
+                    pduBtn.addEventListener("click", function (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showPduPowerDialog(widget, content, { rackId: rackId });
+                    });
+                }
+
+                // Blades (D10): a stamped chassis's nested `blades` land in
+                // their bays via the SAME pending-bay-add path a hand-added
+                // blade uses (rdAddBayItem -> rdBayItemsForRack, spec
+                // §10.6) -- `newIdx` is this chassis tile's OWN widget
+                // index, which is exactly what refForWidgetIndex (above,
+                // buildRackPayload) resolves to a client `ref` once this
+                // chassis add is itself in the payload. editor/templates.js
+                // has already dropped any blade whose bay name does not
+                // exist on this device type, so every entry here is placeable.
+                (item.blades || []).forEach(function (blade) {
+                    var bayRef = rdAddBayItem({
+                        rackId: rackId,
+                        deviceTypeId: blade.device_type_id,
+                        bayName: blade.target_bay_name,
+                        parentWidgetIndex: newIdx,
+                        deviceRoleId: blade.device_role_id,
+                        tenantId: blade.tenant_id,
+                        proposedName: blade.name || "",
+                        planningData: blade.planning_data,
+                        fromTemplateId: blade.from_template,
+                        fromTemplateVersion: blade.from_template_version,
+                    });
+
+                    var bladeLabel = blade.label || blade.model
+                        || ("Device type " + blade.device_type_id);
+                    var bladeRow = document.createElement("li");
+                    bladeRow.className = "nbx-rd-stamped-blade";
+                    bladeRow.setAttribute("data-rd-bay-ref", bayRef);
+                    bladeRow.setAttribute(
+                        "title",
+                        "Bay " + blade.target_bay_name + " -- " + bladeLabel
+                            + (blade.name ? " (" + blade.name + ")" : "")
+                    );
+                    var bladeText = document.createElement("span");
+                    bladeText.textContent = blade.target_bay_name + ": " + bladeLabel;
+                    bladeRow.appendChild(bladeText);
+                    if (blade.name_collision) {
+                        var bladeWarn = document.createElement("i");
+                        bladeWarn.className = "mdi mdi-alert text-warning ms-1";
+                        bladeWarn.setAttribute(
+                            "title", "A device with this name already exists in the site."
+                        );
+                        bladeRow.appendChild(bladeWarn);
+                    }
+                    var bladeRemove = document.createElement("button");
+                    bladeRemove.type = "button";
+                    bladeRemove.className = "nbx-rd-remove-btn nbx-rd-stamped-blade-remove";
+                    bladeRemove.title = "Cancel this planned blade";
+                    bladeRemove.setAttribute("aria-label", "Cancel this planned blade");
+                    bladeRemove.innerHTML = "&times;";
+                    bladeRemove.addEventListener("click", function (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        rdRemoveBayItem(bayRef);
+                        bladeRow.remove();
+                        markDirty();
+                    });
+                    bladeRow.appendChild(bladeRemove);
+                    if (!content._rdBladeList) {
+                        content._rdBladeList = document.createElement("ul");
+                        content._rdBladeList.className = "nbx-rd-stamped-blades";
+                        content.appendChild(content._rdBladeList);
+                    }
+                    content._rdBladeList.appendChild(bladeRow);
+                });
+            });
+
+            markDirty();
+            scheduleRefresh();
+        }
+
         var controller = {
             rackId: rackId,
             buildRackPayload: buildRackPayload,
+            stampTemplateItems: stampTemplateItems,
             highlightError: highlightError,
             freezeOthers: freezeOthers,
             thaw: thaw,

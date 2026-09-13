@@ -65,6 +65,12 @@ among them carry a resolved ``custom_fields`` dict and/or the raw ``device``,
 per docs/pdu-distribution-spec.md Sec 6.5). Returns the ``Distribution`` dict
 (Sec 3), or ``None`` when the rack has no PDUs to distribute across. Strictly
 **read-only** -- it never writes to ``dcim``.
+
+Planned-rack safe (PLAN-templates.md D30), unchanged: it only reuses
+``distribution_example``'s helpers (already documented as planned-rack safe
+there) plus its own additions, which read no rack attributes at all --
+``_scheme_label``/``_pdu_scheme_override`` work off the ``pdus``/``devices``
+data structures, and ``_thresholds`` reads plugin config, not the rack.
 """
 
 import logging
