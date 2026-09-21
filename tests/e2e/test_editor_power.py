@@ -75,6 +75,7 @@ class EditorPowerTestCase(unittest.TestCase):
     @classmethod
     def _provision_fixture(cls):
         suffix = uuid.uuid4().hex[:8]
+        cls._suffix = suffix
         cf = {"custom_fields": {"warranty_type": ""}}
         mfr = cls._api("POST", "/api/dcim/manufacturers/", {
             "name": f"E2E PWR Mfr {suffix}", "slug": f"e2e-pwr-mfr-{suffix}"})
@@ -369,7 +370,9 @@ class EditorPowerTestCase(unittest.TestCase):
         self.page.wait_for_selector("#nbx-rd-palette-search", state="visible", timeout=8000)
         # Filter the palette to our throwaway types so they are guaranteed to
         # render (the default top-50 may not include them on a busy instance).
-        self.page.fill("#nbx-rd-palette-search", "E2E-PWR-")
+        # Search by this run's unique suffix: killed runs leave E2E-PWR-* types
+        # behind and the palette only shows the top 50 matches.
+        self.page.fill("#nbx-rd-palette-search", self._suffix)
         # Wait for OUR powered row specifically to be rendered AND stamped by the
         # device-type-power fetch (a pre-existing favorites row could otherwise
         # satisfy a generic [data-draw-w] wait before the search results land).
