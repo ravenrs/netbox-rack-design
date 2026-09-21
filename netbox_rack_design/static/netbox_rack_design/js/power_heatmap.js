@@ -314,15 +314,24 @@
         legend.className = "nbx-rd-dist-legend";
         // The PDU header itself carries the feed color (A blue / B orange), which
         // matches each tile's accent edge -- so no separate key row is needed.
-        // Group the bank chips by PDU so one PDU's banks stack under each other
-        // (one column per PDU), rather than one long flat row.
+        // Group the bank chips by PDU so one PDU's banks stack under each
+        // other, and the PDU blocks by FEED LEG so a 4-PDU rack reads as two
+        // columns (A: a1 over a2, B: b1 over b2) with the paired PDUs level
+        // with each other, rather than four blocks wrapping at random.
         var order = [];
         var byPdu = {};
         idx.banks.forEach(function (b) {
             if (!byPdu[b.pdu]) { byPdu[b.pdu] = []; order.push(b.pdu); }
             byPdu[b.pdu].push(b);
         });
-        var cols = order.map(function (pduName) {
+        var legOrder = [];
+        var byLeg = {};
+        order.forEach(function (pduName) {
+            var key = byPdu[pduName][0].feedLetter || ("pdu:" + pduName);
+            if (!byLeg[key]) { byLeg[key] = []; legOrder.push(key); }
+            byLeg[key].push(pduName);
+        });
+        var pduBlock = function (pduName) {
             var first = byPdu[pduName][0];
             // Header carries the feed color (A blue / B orange) + a 3φ flag for
             // three-phase PDUs; it matches the tiles' accent edge = the key.
@@ -340,8 +349,11 @@
             return '<div class="nbx-rd-dist-pdu">'
                 + '<span class="nbx-rd-dist-pdu-head nbx-rd-feedhead-' + first.feedLetter
                 + '">' + head + "</span>" + chips + "</div>";
+        };
+        legend.innerHTML = legOrder.map(function (key) {
+            return '<div class="nbx-rd-dist-leg">'
+                + byLeg[key].map(pduBlock).join("") + "</div>";
         }).join("");
-        legend.innerHTML = cols;
         var rack = dist.rack || {};
         if (rack.alarm && (rack.warnings || []).length) {
             var alarm = document.createElement("span");

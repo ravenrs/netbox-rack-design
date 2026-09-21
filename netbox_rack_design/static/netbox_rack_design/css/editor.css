@@ -1613,9 +1613,17 @@
    block width (flex-grow from a 8.5rem basis) so the strip tracks the rack
    block exactly like the power bar above it -- hiding a face narrows the block,
    and the chips narrow with it instead of staying a fixed island. */
-.nbx-rd-dist-pdu {
+/* One column per feed leg; the leg's PDU blocks stack inside it so a1/b1
+   and a2/b2 sit level with each other across the two columns. */
+.nbx-rd-dist-leg {
     display: flex;
     flex: 1 1 8.5rem;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.nbx-rd-dist-pdu {
+    display: flex;
     min-width: 0;
     flex-direction: column;
     gap: 0.2rem;
