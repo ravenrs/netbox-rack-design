@@ -1035,6 +1035,10 @@ class DesignViewSet(NetBoxModelViewSet):
         desired_placement_ids = set()
         self._made_db_change = False
         self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
+        # Request-scoped point-lookup cache (see _collect_batch_cache) so
+        # _reconcile_item's per-item helpers read a dict instead of issuing
+        # their own Device/DeviceType/DesignPlacement SELECT per item.
+        self._batch = self._collect_batch_cache(data)
 
         # Every real rack's entry is filed under BOTH its bare-pk string (the
         # shape this response has always had) and its namespaced "r:<pk>"
@@ -1377,6 +1381,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 desired_placement_ids = set()
                 self._made_db_change = False
                 self._batch_vacated_device_ids = self._compute_vacated_device_ids(layout)
+                self._batch = self._collect_batch_cache(layout)
                 for rack_data in layout["racks"]:
                     # This nested "layout" bucket is the SAME save-layout
                     # rack format, which now accepts a bare int or "r:<pk>"
@@ -2487,6 +2492,10 @@ class DesignViewSet(NetBoxModelViewSet):
         # the slot they vacate (the swap / move-into-vacated case). Computed once
         # over the whole batch so cross-rack and not-yet-persisted moves are seen.
         self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
+        # Request-scoped point-lookup cache (see _collect_batch_cache) so
+        # _reconcile_item's per-item helpers read a dict instead of issuing
+        # their own Device/DeviceType/DesignPlacement SELECT per item.
+        self._batch = self._collect_batch_cache(data)
 
         # Parse every rack id BEFORE any reconciliation starts (T1.4d), for the
         # same reason recompute-distribution does: a malformed key discovered
@@ -2687,6 +2696,58 @@ class DesignViewSet(NetBoxModelViewSet):
         return sorted(items, key=lambda pair: 0 if pair[1].get("cancel") else 1)
 
     @staticmethod
+    def _collect_batch_cache(data):
+        """
+        Pre-load every Device / DeviceType / DesignPlacement the payload's
+        items will look up by pk, so _reconcile_item's per-item helpers hit a
+        dict instead of issuing their own point SELECT for each item (profile:
+        design 835's 14-item recompute-distribution issued 34 dcim_device and
+        28 designplacement queries from these lookups alone).
+
+        Only pks of rows that exist BEFORE the loop starts are safe to batch
+        here. A placement this same submit CREATES (a brand-new "add") is
+        added to the cache at creation time in _reconcile_item, so a later
+        item that references it by pk still hits the cache. The "existing
+        placement for (design, rack, device)" lookup in _reconcile_item is
+        deliberately NOT served from here -- it must see rows the loop itself
+        creates/deletes as it goes, which a point-in-time batch cannot
+        represent.
+
+        Returns {"devices": {pk: Device}, "device_types": {pk: DeviceType},
+        "placements": {pk: DesignPlacement}}.
+        """
+        device_ids = set()
+        device_type_ids = set()
+        placement_ids = set()
+        for rack_data in data.get("racks", []):
+            for face_key in ("front", "rear", "other", "bays"):
+                for item in rack_data.get(face_key, []):
+                    if item.get("device_id"):
+                        device_ids.add(item["device_id"])
+                    if item.get("device_type_id"):
+                        device_type_ids.add(item["device_type_id"])
+                    if item.get("placement_id"):
+                        placement_ids.add(item["placement_id"])
+                    if item.get("parent_placement_id"):
+                        placement_ids.add(item["parent_placement_id"])
+                    if item.get("power_source_device_id"):
+                        device_ids.add(item["power_source_device_id"])
+        return {
+            "devices": {
+                d.pk: d for d in
+                Device.objects.filter(pk__in=device_ids).select_related("device_type")
+            } if device_ids else {},
+            "device_types": {
+                dt.pk: dt for dt in DeviceType.objects.filter(pk__in=device_type_ids)
+            } if device_type_ids else {},
+            "placements": {
+                p.pk: p for p in
+                DesignPlacement.objects.filter(pk__in=placement_ids)
+                .select_related("device_type", "device__device_type", "design")
+            } if placement_ids else {},
+        }
+
+    @staticmethod
     def _compute_vacated_device_ids(data):
         """Device PKs the whole submit frees from their real slots.
 
@@ -2760,8 +2821,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     candidate_ids.add(device_id)
         return candidate_ids
 
-    @staticmethod
-    def _item_is_full_depth(item):
+    def _item_is_full_depth(self, item):
         """
         True when the item's device/device_type spans the full rack depth.
 
@@ -2770,22 +2830,36 @@ class DesignViewSet(NetBoxModelViewSet):
         editor stamps it on every tile), else the device's type, else the
         referenced placement's type. Callers normalise a full-depth item's face to
         "" so the per-face copies reconcile to a single, idempotent placement.
+
+        A regular method (not @staticmethod) so it can read the request-scoped
+        ``self._batch`` cache (_collect_batch_cache) when the caller set one up,
+        falling back to the original point queries when it did not.
         """
+        batch = getattr(self, "_batch", None)
         dt_id = item.get("device_type_id")
         if dt_id:
-            dt = DeviceType.objects.filter(pk=dt_id).only("is_full_depth").first()
+            if batch is not None:
+                dt = batch["device_types"].get(dt_id)
+            else:
+                dt = DeviceType.objects.filter(pk=dt_id).only("is_full_depth").first()
             return bool(dt and dt.is_full_depth)
         dev_id = item.get("device_id")
         if dev_id:
-            dev = Device.objects.filter(pk=dev_id).select_related("device_type").first()
+            if batch is not None:
+                dev = batch["devices"].get(dev_id)
+            else:
+                dev = Device.objects.filter(pk=dev_id).select_related("device_type").first()
             return bool(dev and dev.device_type and dev.device_type.is_full_depth)
         placement_id = item.get("placement_id")
         if placement_id:
-            p = (
-                DesignPlacement.objects.filter(pk=placement_id)
-                .select_related("device_type", "device__device_type")
-                .first()
-            )
+            if batch is not None:
+                p = batch["placements"].get(placement_id)
+            else:
+                p = (
+                    DesignPlacement.objects.filter(pk=placement_id)
+                    .select_related("device_type", "device__device_type")
+                    .first()
+                )
             if p is not None:
                 dt = p.device_type or (p.device.device_type if p.device_id else None)
                 return bool(dt and dt.is_full_depth)
@@ -2913,22 +2987,30 @@ class DesignViewSet(NetBoxModelViewSet):
 
         return True, real_id, planned_id
 
-    @staticmethod
-    def _resolve_power_source_device(item):
+    def _resolve_power_source_device(self, item):
         """
         Resolve the optional ``power_source_device_id`` on a PDU add item
         (docs/pdu-distribution-spec.md §6): the real PDU device this planned PDU
         inherits its custom fields from (read live off ``device.cf``). An id that
         does not resolve to a real device is skipped gracefully (logged), never a
         hard error. Returns the id to assign, or None. Absent key -> None.
+
+        A regular method (not @staticmethod) so an existence check can be
+        served from ``self._batch`` (_collect_batch_cache) when set up.
         """
         source_id = item.get("power_source_device_id")
-        if source_id and not Device.objects.filter(pk=source_id).exists():
-            logger.debug(
-                "api._reconcile_item: power_source_device_id=%s does not exist, skipping",
-                source_id,
+        if source_id:
+            batch = getattr(self, "_batch", None)
+            exists = (
+                source_id in batch["devices"] if batch is not None
+                else Device.objects.filter(pk=source_id).exists()
             )
-            return None
+            if not exists:
+                logger.debug(
+                    "api._reconcile_item: power_source_device_id=%s does not exist, skipping",
+                    source_id,
+                )
+                return None
         return source_id
 
     def _resolve_target(self, design, rack, face_key, item, ref_map, errors):
@@ -2980,9 +3062,16 @@ class DesignViewSet(NetBoxModelViewSet):
                 fail(f"Unknown parent reference {parent_ref!r} for a bay placement.")
                 return None
         elif item.get("parent_placement_id"):
-            parent_placement = DesignPlacement.objects.filter(
-                pk=item["parent_placement_id"], design=design
-            ).first()
+            parent_placement_id = item["parent_placement_id"]
+            batch = getattr(self, "_batch", None)
+            if batch is not None:
+                parent_placement = batch["placements"].get(parent_placement_id)
+                if parent_placement is not None and parent_placement.design_id != design.pk:
+                    parent_placement = None
+            else:
+                parent_placement = DesignPlacement.objects.filter(
+                    pk=parent_placement_id, design=design
+                ).first()
             if parent_placement is None:
                 fail("Parent chassis placement does not exist in this design.")
                 return None
@@ -3035,12 +3124,21 @@ class DesignViewSet(NetBoxModelViewSet):
         # outside this design.
         foreign_placement = None
         if placement_id:
-            foreign_placement = (
-                DesignPlacement.objects.filter(pk=placement_id)
-                .exclude(design=design)
-                .select_related("design")
-                .first()
-            )
+            batch = getattr(self, "_batch", None)
+            if batch is not None:
+                candidate = batch["placements"].get(placement_id)
+                foreign_placement = (
+                    candidate
+                    if candidate is not None and candidate.design_id != design.pk
+                    else None
+                )
+            else:
+                foreign_placement = (
+                    DesignPlacement.objects.filter(pk=placement_id)
+                    .exclude(design=design)
+                    .select_related("design")
+                    .first()
+                )
 
         target = self._resolve_target(design, rack, face_key, item, ref_map, errors)
         if target is None:
@@ -3092,7 +3190,11 @@ class DesignViewSet(NetBoxModelViewSet):
         if kind == "add":
             # Brand-new catalog add: no placement to reposition, build a fresh one.
             if not placement_id and device_type_id:
-                dt = DeviceType.objects.filter(pk=device_type_id).first()
+                batch = getattr(self, "_batch", None)
+                dt = (
+                    batch["device_types"].get(device_type_id) if batch is not None
+                    else DeviceType.objects.filter(pk=device_type_id).first()
+                )
                 if dt is None:
                     errors.append({
                         "rack_id": rack.pk,
@@ -3160,6 +3262,13 @@ class DesignViewSet(NetBoxModelViewSet):
                     new_add.full_clean()
                     new_add.save()
                     self._made_db_change = True
+                    # A later item in THIS submit may reference the new row by
+                    # placement_id (e.g. a bay item's parent_placement_id) --
+                    # the batch cache was built before this row existed, so it
+                    # is added now rather than left to miss on a cache read.
+                    batch = getattr(self, "_batch", None)
+                    if batch is not None:
+                        batch["placements"][new_add.pk] = new_add
                 except ValidationError as exc:
                     detail = "; ".join(
                         f"{k}: {' '.join(str(m) for m in v)}"
@@ -3187,11 +3296,22 @@ class DesignViewSet(NetBoxModelViewSet):
                 return new_add
             if not placement_id:
                 return None
-            add = DesignPlacement.objects.filter(
-                pk=placement_id,
-                design=design,
-                kind=DesignPlacementKindChoices.KIND_ADD,
-            ).first()
+            batch = getattr(self, "_batch", None)
+            if batch is not None:
+                candidate = batch["placements"].get(placement_id)
+                add = (
+                    candidate
+                    if candidate is not None
+                    and candidate.design_id == design.pk
+                    and candidate.kind == DesignPlacementKindChoices.KIND_ADD
+                    else None
+                )
+            else:
+                add = DesignPlacement.objects.filter(
+                    pk=placement_id,
+                    design=design,
+                    kind=DesignPlacementKindChoices.KIND_ADD,
+                ).first()
             if add is None:
                 return None
             # The user flagged this planned addition for cancellation via the
@@ -3201,6 +3321,8 @@ class DesignViewSet(NetBoxModelViewSet):
             if item.get("cancel"):
                 add.delete()
                 self._made_db_change = True
+                if batch is not None:
+                    batch["placements"].pop(placement_id, None)
                 return None
             ok, device_role_id, tenant_id = self._resolve_add_refs(
                 item, rack, u_position, errors
@@ -3279,7 +3401,11 @@ class DesignViewSet(NetBoxModelViewSet):
 
         device = None
         if device_id:
-            device = Device.objects.filter(pk=device_id).first()
+            batch = getattr(self, "_batch", None)
+            device = (
+                batch["devices"].get(device_id) if batch is not None
+                else Device.objects.filter(pk=device_id).first()
+            )
             if device is None:
                 errors.append({
                     "rack_id": rack.pk,
