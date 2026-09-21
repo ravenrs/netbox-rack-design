@@ -62,6 +62,22 @@ let previewName = function () { return Promise.resolve(null); };
 let nextAddIndex = function () { return 0; };
 let root = null;
 
+// Cross-module drag gate (see power_heatmap.js's "drag gate" section): a
+// GridStack drag rewrites gs-y on the dragged tile once per row crossed, and
+// each such mutation used to ask the server to recompute a layout the user
+// had already moved past. rack.js owns "is a drag in progress" (it wires
+// GridStack's dragstart/dragstop and the cross-grid convergence where
+// dragstop never fires); power_heatmap.js owns the recompute scheduling. This
+// is the same window.NbxRdPowerHeatmap convention power.js's getLegs() uses,
+// not a new global. Guarded + a no-op on a read-only elevation (no editor
+// present, so the hook is never installed).
+function rdSetDragActive(active) {
+    var hm = window.NbxRdPowerHeatmap;
+    if (hm && typeof hm.setDragActive === "function") {
+        hm.setDragActive(active);
+    }
+}
+
 // A setter rather than a widened `initRack(block, deps)` signature, because the
 // call site in editor.js is
 //     Array.prototype.map.call(nodes, initRack)
@@ -1657,6 +1673,10 @@ function setRackHooks(hooks) {
             if (!el) { return; }
             var idx = parseInt(el.getAttribute("data-widget-index"), 10);
             rdNextGesture();
+            // Open the drag gate for the WHOLE gesture, however it ends
+            // (same-grid dragstop, or the cross-grid dropped/added convergence
+            // below where dragstop never fires) -- see rdSetDragActive.
+            rdSetDragActive(true);
             rdTrace("dragstart", {
                 rackId: rackId, idx: idx,
                 label: (state[idx] && state[idx].widget && state[idx].widget.label) || null,
@@ -1815,6 +1835,13 @@ function setRackHooks(hooks) {
                 maybePromptMove(el);
                 thawAllTiles();
                 scheduleRefresh();
+                // Same-grid gesture end (the common case: a within-grid move,
+                // or a drop rejected/reverted by maybePromptMove/snapBack --
+                // both still fire dragstop on the grid the drag started in).
+                // The final position is already on the DOM by now;
+                // requestLiveDistribution reads it fresh when it actually
+                // fires.
+                rdSetDragActive(false);
             });
             grid.on("dropped", function (event, previousNode, newNode) {
                 curDragIdx = null;
@@ -3335,6 +3362,15 @@ function setRackHooks(hooks) {
             if (!el) { return; }
             var dtId = el.getAttribute("data-device-type-id");
             if (dtId == null) {
+                // Close the drag gate here too: this branch is the cross-grid
+                // gesture end (within-rack face change or a cross-rack move),
+                // and dragstop -- the OTHER place the gate closes -- never
+                // fires for it (see the comment below). A palette add (the
+                // other branch, dtId != null) never opened the gate in the
+                // first place, since onDragStart only fires for a tile that
+                // is already a widget in some grid -- so no matching close is
+                // needed there.
+                rdSetDragActive(false);
                 // Not a palette add: a real device tile was dropped here after
                 // crossing GridStack instances -- a within-rack front<->rear face
                 // change, or a cross-rack move. GridStack does NOT fire `dragstop`

@@ -708,6 +708,56 @@
         }, LIVE_DIST_DEBOUNCE_MS);
     }
 
+    // ---- drag gate ----------------------------------------------------------
+    //
+    // GridStack rewrites `gs-y` on the dragged tile once per row crossed, so
+    // the MutationObserver (attributeFilter includes "gs-y") fires continuously
+    // mid-drag -- each firing asks the server to recompute a layout the user
+    // has already moved past (measured: ~600ms/~235 queries per call). rack.js
+    // calls setDragActive(true)/(false) around a GridStack drag gesture
+    // (dragstart..dragstop, or the cross-grid dropped/added convergence where
+    // dragstop never fires); while active, the SERVER recompute is withheld --
+    // the local bar/heat re-render (recomputeAll, cheap/client-side) still runs
+    // on every mutation so the live shadow/preview stays accurate. Exactly one
+    // server recompute fires when the gate releases, and only if a mutation
+    // was actually suppressed while it was up.
+    //
+    // Not per-grid, deliberately: a cross-rack drag fires GridStack events on
+    // BOTH the source and destination grid instances, and per-grid state could
+    // desync (one side thinks it's still dragging). One shared boolean can
+    // only ever be released too early (harmless -- worst case an extra
+    // recompute reaches the existing debounce/latch) or, if some ending we
+    // did not anticipate never calls setDragActive(false), get stuck -- which
+    // the defensive timeout below covers.
+    var dragActive = false;
+    var dragSuppressed = false;
+    var dragGateTimer = null;
+    // Backstop only. Every real ending (drop, cross-grid convergence, a drag
+    // released outside any grid) is expected to call setDragActive(false)
+    // itself; this exists so an ending path nobody thought of cannot wedge the
+    // editor into never recomputing again.
+    var DRAG_GATE_MAX_MS = 15000;
+
+    function releaseDragGate() {
+        dragActive = false;
+        if (dragGateTimer) { window.clearTimeout(dragGateTimer); dragGateTimer = null; }
+        if (dragSuppressed) {
+            dragSuppressed = false;
+            requestLiveDistribution();
+        }
+    }
+
+    function setDragActive(active) {
+        if (active) {
+            dragActive = true;
+            dragSuppressed = false;
+            if (dragGateTimer) { window.clearTimeout(dragGateTimer); }
+            dragGateTimer = window.setTimeout(releaseDragGate, DRAG_GATE_MAX_MS);
+        } else {
+            releaseDragGate();
+        }
+    }
+
     function scheduleRecompute() {
         if (pending) { window.clearTimeout(pending); }
         pending = window.setTimeout(function () {
@@ -717,6 +767,10 @@
         // Kick the server recompute off the raw mutation (its own longer debounce),
         // NOT from recomputeAll -- recomputeAll writes DOM with observers detached,
         // so applying the result never re-triggers this and cannot loop.
+        if (dragActive) {
+            dragSuppressed = true;
+            return;
+        }
         requestLiveDistribution();
     }
 
@@ -881,6 +935,11 @@
                 return { letter: letter, name: byLetter[letter] };
             });
         },
+        // Drag gate (see above): rack.js calls this true on GridStack
+        // dragstart and false on every gesture-ending event it knows about.
+        // Idempotent either way -- a redundant true re-arms the backstop
+        // timer, a redundant false is a no-op.
+        setDragActive: setDragActive,
     };
 
     if (document.readyState === "loading") {
