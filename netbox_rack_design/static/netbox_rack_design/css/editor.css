@@ -1677,7 +1677,7 @@
 }
 .nbx-rd-bank-col {
     position: relative;
-    width: 8px;
+    width: 12px;                            /* = BANK_COL_W in power_heatmap.js */
 }
 /* Feed letter above the column, in the feed's chip color (see
    .nbx-rd-feedhead-*), so the two leg columns can be told apart at a glance. */
@@ -1714,6 +1714,23 @@
     right: 0;
     bottom: 0;
     background: var(--tblr-green, #2fb344);
+}
+/* PDU name written up the column from the floor of that PDU's lowest bank. */
+.nbx-rd-bank-pdu-tag {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 3px;
+    z-index: 1;                             /* over the fill */
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 10px;
+    color: #fff;
+    text-shadow: 0 0 2px #000, 0 0 2px #000;
+    pointer-events: none;
+    white-space: nowrap;
 }
 /* First bank of the NEXT PDU up the same leg column: a heavy dark rule marks
    where one PDU's zones end and the next one's begin. */

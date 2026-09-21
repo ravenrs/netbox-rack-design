@@ -374,6 +374,7 @@
     // A bank with no ``units`` is skipped: the builtin engine always fills them
     // (_unit_to_bank), but a custom distribution script need not, and half a
     // strip is worse than none.
+    var BANK_COL_W = 12;  // px, must match .nbx-rd-bank-col width
     function renderBankStrips(block, dist) {
         var uh = parseInt(block.getAttribute("data-u-height"), 10) || 0;
         var cols = [];
@@ -439,7 +440,8 @@
                     var hi = Math.max.apply(null, b.units);
                     var seg = document.createElement("div");
                     seg.className = "nbx-rd-bank-seg nbx-rd-dist-" + b.state;
-                    if (i > 0 && ordered[i - 1].pdu !== b.pdu) {
+                    var pduStart = i === 0 || ordered[i - 1].pdu !== b.pdu;
+                    if (pduStart && i > 0) {
                         seg.classList.add("nbx-rd-bank-seg-pdu-start");
                     }
                     // U1 is the rack FLOOR, so a zone is measured up from the
@@ -451,7 +453,16 @@
                     fill.style.height =
                         Math.max(0, Math.min(100, b.util || 0)).toFixed(1) + "%";
                     seg.appendChild(fill);
-                    // The strip carries no text, so the tooltip is the readout.
+                    if (pduStart) {
+                        // The PDU's name, written up the column from the
+                        // bottom of its lowest bank, over the fill: the
+                        // rack-name prefix is dropped ("0201_a2" -> "a2").
+                        var tag = document.createElement("span");
+                        tag.className = "nbx-rd-bank-pdu-tag";
+                        tag.textContent = String(b.pdu || "").split(/[_\-\s]+/).pop();
+                        seg.appendChild(tag);
+                    }
+                    // The tooltip is the full readout.
                     attachInstantTip(seg, b.feed + " · " + b.pdu + " · bank " + b.bank
                         + "\nU" + lo + "–" + hi
                         + "\n" + Math.round(b.load) + " / " + Math.round(b.max)
@@ -463,7 +474,7 @@
             // Reserve the gutter the absolutely-positioned strip sits in, so it
             // never lands on top of the U-number column beside it.
             wrap.style.marginLeft =
-                (cols.length * 8 + (cols.length - 1) * 2 + 6) + "px";
+                (cols.length * BANK_COL_W + (cols.length - 1) * 2 + 6) + "px";
         });
     }
 
