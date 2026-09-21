@@ -1702,6 +1702,11 @@
     bottom: 0;
     background: var(--tblr-green, #2fb344);
 }
+/* First bank of the NEXT PDU up the same leg column: a heavy dark rule marks
+   where one PDU's zones end and the next one's begin. */
+.nbx-rd-bank-seg.nbx-rd-bank-seg-pdu-start {
+    border-bottom: 4px solid var(--tblr-body-color, #1d273b);
+}
 .nbx-rd-bank-seg.nbx-rd-dist-warn .nbx-rd-bank-fill {
     background: var(--tblr-yellow, #f59f00);
 }

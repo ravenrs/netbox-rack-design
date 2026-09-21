@@ -412,11 +412,21 @@
             cols.forEach(function (banks) {
                 var colEl = document.createElement("div");
                 colEl.className = "nbx-rd-bank-col";
-                banks.forEach(function (b) {
+                // Floor-up order so each segment knows the PDU directly below
+                // it: where that changes, the segment gets a heavy bottom rule
+                // -- the PDU boundary is the one thing a leg column would
+                // otherwise not show (the banks of one PDU stay hairlined).
+                var ordered = banks.slice().sort(function (x, y) {
+                    return Math.min.apply(null, x.units) - Math.min.apply(null, y.units);
+                });
+                ordered.forEach(function (b, i) {
                     var lo = Math.min.apply(null, b.units);
                     var hi = Math.max.apply(null, b.units);
                     var seg = document.createElement("div");
                     seg.className = "nbx-rd-bank-seg nbx-rd-dist-" + b.state;
+                    if (i > 0 && ordered[i - 1].pdu !== b.pdu) {
+                        seg.classList.add("nbx-rd-bank-seg-pdu-start");
+                    }
                     // U1 is the rack FLOOR, so a zone is measured up from the
                     // bottom -- matching how the tiles are laid out.
                     seg.style.bottom = ((lo - 1) / uh * 100).toFixed(3) + "%";
