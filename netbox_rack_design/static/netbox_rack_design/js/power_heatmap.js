@@ -416,6 +416,21 @@
                 // it: where that changes, the segment gets a heavy bottom rule
                 // -- the PDU boundary is the one thing a leg column would
                 // otherwise not show (the banks of one PDU stay hairlined).
+                // The one label the strip carries: the feed letter, in the
+                // feed's chip color, sitting just above the column so a leg
+                // column can be told from its neighbour without hovering.
+                var letter = banks[0].feedLetter || "";
+                var label = document.createElement("div");
+                label.className = "nbx-rd-bank-col-label"
+                    + (letter ? " nbx-rd-feedhead-" + letter : "");
+                label.textContent = letter ? letter.toUpperCase() : "?";
+                var pduNames = [];
+                banks.forEach(function (b) {
+                    if (pduNames.indexOf(b.pdu) < 0) { pduNames.push(b.pdu); }
+                });
+                attachInstantTip(label, (banks[0].feed || "no feed")
+                    + "\n" + pduNames.join(", "));
+                colEl.appendChild(label);
                 var ordered = banks.slice().sort(function (x, y) {
                     return Math.min.apply(null, x.units) - Math.min.apply(null, y.units);
                 });

@@ -1679,6 +1679,19 @@
     position: relative;
     width: 8px;
 }
+/* Feed letter above the column, in the feed's chip color (see
+   .nbx-rd-feedhead-*), so the two leg columns can be told apart at a glance. */
+.nbx-rd-bank-col-label {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: help;
+}
 /* Zones ABUT -- every unit is owned by some bank, so a gap here would read as
    "these U are unserved". Adjacent borders are what marks the boundary.
    The background is a visible TRACK, not the page surface: the unfilled part
