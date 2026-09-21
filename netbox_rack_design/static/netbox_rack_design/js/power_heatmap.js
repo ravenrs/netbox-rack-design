@@ -357,10 +357,12 @@
         }
     }
 
-    // Bank ZONE strip: one narrow vertical bar per PDU hanging off each face
-    // grid's LEFT edge (the right edge belongs to the displacement stripe),
-    // split into that PDU's banks at the real U boundaries the engine assigned
-    // (``bank.units``). Each segment fills from the floor up with the bank's
+    // Bank ZONE strip: one narrow vertical bar per FEED LEG hanging off each
+    // face grid's LEFT edge (the right edge belongs to the displacement
+    // stripe), split into that leg's banks at the real U boundaries the engine
+    // assigned (``bank.units``). A leg's PDUs (a1, a2 on feed A) serve disjoint
+    // U ranges, so they stack in the same column: a 4-PDU rack still gets two
+    // columns, not four (user 2026-09-21). Each segment fills from the floor up with the bank's
     // load/breaker ratio, colored by state like the chips above it.
     //
     // WHY: the chips say a bank is full but not WHERE it is, so there was no
@@ -376,11 +378,18 @@
         var uh = parseInt(block.getAttribute("data-u-height"), 10) || 0;
         var cols = [];
         if (dist && uh > 0 && bankZonesOn()) {
-            var byPdu = {};
+            var byLeg = {};
             indexBanks(dist).banks.forEach(function (b) {
                 if (!(b.units || []).length) { return; }
-                if (!byPdu[b.pdu]) { byPdu[b.pdu] = []; cols.push(byPdu[b.pdu]); }
-                byPdu[b.pdu].push(b);
+                // A PDU with no feed letter gets its own column rather than
+                // being merged into some other unlettered PDU's.
+                var key = b.feedLetter || ("pdu:" + b.pdu);
+                if (!byLeg[key]) { byLeg[key] = []; cols.push(byLeg[key]); }
+                byLeg[key].push(b);
+            });
+            cols.sort(function (x, y) {
+                var kx = x[0].feedLetter || "~", ky = y[0].feedLetter || "~";
+                return kx < ky ? -1 : kx > ky ? 1 : 0;
             });
         }
         // Face grids only -- a chassis body uses the same wrapper class.
