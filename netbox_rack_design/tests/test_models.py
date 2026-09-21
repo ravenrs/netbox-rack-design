@@ -619,6 +619,43 @@ class DesignPlacementTestCase(TestCase):
         placement = self._pdu_add(power_source_device=self.devices[0])
         placement.full_clean()  # no manual cf -> fine
 
+    # --- preferred_feed_legs (power projection override) ----------------------
+
+    def test_preferred_feed_legs_defaults_to_none(self):
+        self.assertIsNone(self._pdu_add().preferred_feed_legs)
+
+    def test_preferred_feed_legs_none_and_empty_list_are_valid(self):
+        self._pdu_add(preferred_feed_legs=None).full_clean()
+        self._pdu_add(preferred_feed_legs=[]).full_clean()
+
+    def test_preferred_feed_legs_single_leg_valid(self):
+        placement = self._pdu_add(preferred_feed_legs=["b"])
+        placement.full_clean()
+        placement.save()
+        placement.refresh_from_db()
+        self.assertEqual(placement.preferred_feed_legs, ["b"])
+
+    def test_preferred_feed_legs_multiple_legs_valid(self):
+        placement = self._pdu_add(preferred_feed_legs=["c", "d"])
+        placement.full_clean()
+
+    def test_preferred_feed_legs_rejects_non_list(self):
+        placement = self._pdu_add(preferred_feed_legs="b")
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
+    def test_preferred_feed_legs_rejects_bad_letter(self):
+        for bad in (["1"], ["ab"], ["A"], [""], [1], [None]):
+            with self.subTest(bad=bad):
+                placement = self._pdu_add(preferred_feed_legs=bad)
+                with self.assertRaises(ValidationError):
+                    placement.full_clean()
+
+    def test_preferred_feed_legs_rejects_duplicates(self):
+        placement = self._pdu_add(preferred_feed_legs=["a", "a"])
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
     # --- frozen design (§2.2) --------------------------------------------------
 
     def test_create_placement_rejected_on_approved_design(self):

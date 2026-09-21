@@ -908,16 +908,78 @@ function planningFieldInputHtml(f, cssClass) {
         + f.key + '">';
 }
 
+// ---- Manual per-PSU feed-leg override (this file's own feature) --------
+// A device not yet cabled (a planned add, or one this design moves) is
+// attributed to legs automatically by the distribution engine: one PSU ->
+// leg a, two or more -> a+b (docs/pdu-distribution-spec.md). A planner who
+// wants a specific device on C/D instead sets it here, per PSU, ordered by
+// PSU index. Contract: `preferred_feed_legs` is a list of lowercase
+// single-letter legs (e.g. ["b"], ["a","b"]), one entry per PSU in index
+// order; empty/absent means "automatic". Stored on the widget and forwarded
+// on save by buildRackPayload (rack.js); the server/model own everything
+// past that.
+
+// PSU count for a tile: the SAME "name:draw:conn|..." blob the hover card
+// reads off data-power (stamped by the server for an existing/cabled
+// device, or by the palette for a fresh catalog drop -- see palette.js).
+// A tile with no power-port information at all still gets ONE select
+// rather than none, per the agreed UX.
+function tilePsuCount(content) {
+    var raw = content && content.getAttribute("data-power");
+    if (!raw) { return 1; }
+    var n = raw.split("|").filter(function (s) { return s !== ""; }).length;
+    return n > 0 ? n : 1;
+}
+
+// The tile's rack's distinct feed legs, `{letter, name}` sorted by letter --
+// read from the same live-preferred distribution the power bar/chip strip
+// use (power_heatmap.js), so this dialog never disagrees with what the rack
+// is showing right now. [] when the rack has no distribution yet, or is not
+// resolvable (window.NbxRdPowerHeatmap absent, e.g. a read-only elevation).
+function tileRackLegs(content) {
+    var block = content && content.closest(".nbx-rd-rack-block");
+    var rackId = block && block.getAttribute("data-rack-id");
+    if (!rackId || !window.NbxRdPowerHeatmap
+            || typeof window.NbxRdPowerHeatmap.getLegs !== "function") {
+        return [];
+    }
+    try {
+        return window.NbxRdPowerHeatmap.getLegs(rackId) || [];
+    } catch (e) {
+        return [];
+    }
+}
+
+// One <select> per PSU: "Automatic" plus every leg, labelled "A — Feed A".
+function feedLegSelectHtml(legs, psuIndex) {
+    var opts = '<option value="">Automatic</option>' + legs.map(function (l) {
+        var safeName = String(l.name || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+        return '<option value="' + l.letter + '">' + l.letter.toUpperCase() + " — " + safeName
+            + "</option>";
+    }).join("");
+    return '<div class="mb-2"><label class="form-label small mb-0">PSU ' + (psuIndex + 1)
+        + "</label>"
+        + '<select class="form-select form-select-sm nbx-rd-placement-leg-field" data-psu-index="'
+        + psuIndex + '">' + opts + "</select></div>";
+}
+
 // ---- The per-tile planning-attributes dialog ---------------------------
 // The values a planner sets on a PLANNED device, declared per deployment in
 // the `placement_fields` config (planning_fields.py) and stored on the
 // placement's planning_data. The rail supplies the sticky defaults; this
 // dialog is where a single tile departs from them. Nothing here knows a
 // custom-field name -- the schema drives the inputs, `f.key` drives the blob.
+// The built-in Power section (feed-leg override, above) is independent of
+// that schema -- it renders whenever the tile's rack has 2+ legs, even for
+// a deployment that declares no placement_fields at all.
 function showPlacementFieldsDialog(widget, content, kind) {
     var fields = placementFieldsFor(kind || widget.kind || "add");
-    if (!fields.length) { return; }
+    var legs = tileRackLegs(content);
+    var showPower = legs.length >= 2;
+    if (!fields.length && !showPower) { return; }
     var current = widget.planning_data || {};
+    var currentLegs = Array.isArray(widget.preferred_feed_legs) ? widget.preferred_feed_legs : [];
+    var psuCount = showPower ? tilePsuCount(content) : 0;
 
     var overlay = document.createElement("div");
     overlay.className = "modal fade nbx-rd-placement-modal";
@@ -928,6 +990,14 @@ function showPlacementFieldsDialog(widget, content, kind) {
             + (f.required ? ' <span class="text-danger">*</span>' : "")
             + "</label>" + planningFieldInputHtml(f, "nbx-rd-placement-field") + "</div>";
     }).join("");
+    var powerHtml = "";
+    if (showPower) {
+        var selectsHtml = "";
+        for (var i = 0; i < psuCount; i++) { selectsHtml += feedLegSelectHtml(legs, i); }
+        powerHtml = '<div class="nbx-rd-placement-power mt-2 pt-2 border-top">'
+            + '<div class="form-label small mb-1 fw-semibold">Power</div>'
+            + selectsHtml + "</div>";
+    }
     var title = (widget.proposed_name || widget.label || "device").replace(/</g, "&lt;");
     overlay.innerHTML =
         '<div class="modal-dialog modal-dialog-centered">'
@@ -936,7 +1006,7 @@ function showPlacementFieldsDialog(widget, content, kind) {
         + '<h5 class="modal-title">Planning attributes — ' + title + "</h5>"
         + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
         + "</div>"
-        + '<div class="modal-body">' + rowsHtml
+        + '<div class="modal-body">' + rowsHtml + powerHtml
         + '<div class="form-text">Carried on the planned device when this design is applied.</div>'
         + "</div>"
         + '<div class="modal-footer">'
@@ -951,17 +1021,39 @@ function showPlacementFieldsDialog(widget, content, kind) {
         var key = input.getAttribute("data-field-key");
         if (key && current[key] != null) { input.value = current[key]; }
     });
+    overlay.querySelectorAll(".nbx-rd-placement-leg-field").forEach(function (sel) {
+        var idx = parseInt(sel.getAttribute("data-psu-index"), 10);
+        if (currentLegs[idx]) { sel.value = currentLegs[idx]; }
+    });
 
     var decided = { cancelled: false };
     var wired = wireModal(overlay, decided);
     overlay.querySelector("[data-rd-placement-confirm]").addEventListener("click", function () {
         var data = readPlacementFieldInputs(overlay, ".nbx-rd-placement-field");
         widget.planning_data = data;
+        var legsSet = false;
+        if (showPower) {
+            var picked = Array.prototype.slice
+                .call(overlay.querySelectorAll(".nbx-rd-placement-leg-field"))
+                .sort(function (a, b) {
+                    return parseInt(a.getAttribute("data-psu-index"), 10)
+                        - parseInt(b.getAttribute("data-psu-index"), 10);
+                })
+                .map(function (sel) { return sel.value || ""; });
+            legsSet = picked.some(function (v) { return v !== ""; });
+            if (legsSet) {
+                widget.preferred_feed_legs = picked;
+            } else {
+                delete widget.preferred_feed_legs;
+            }
+        }
         stampPlanningAttr(widget, content);
         if (widget._rdAttrStash === undefined) { widget._rdAttrStash = null; }
         if (content) {
             var btn = content.querySelector(".nbx-rd-placement-btn");
-            if (btn) { btn.classList.toggle("has-config", Object.keys(data).length > 0); }
+            if (btn) {
+                btn.classList.toggle("has-config", Object.keys(data).length > 0 || legsSet);
+            }
         }
         markDirty();
         wired.requestHide();
@@ -1014,13 +1106,16 @@ function stampPlanningAttr(widget, content) {
 // through its CSS state alone, so the widget cannot answer for itself.
 function attachPlacementFieldsButton(widget, content, kind) {
     if (!content || content.querySelector(".nbx-rd-placement-btn")) { return; }
-    if (!placementFieldsFor(kind || widget.kind || "add").length) { return; }
+    var hasFields = placementFieldsFor(kind || widget.kind || "add").length > 0;
+    var hasPower = tileRackLegs(content).length >= 2;
+    if (!hasFields && !hasPower) { return; }
     // A fresh drop inherits the rail defaults but has no server-rendered
     // attribute yet, so the hover card would come up empty until a reload.
     stampPlanningAttr(widget, content);
     var btn = document.createElement("button");
     btn.type = "button";
-    var filled = Object.keys(widget.planning_data || {}).length > 0;
+    var filled = Object.keys(widget.planning_data || {}).length > 0
+        || (Array.isArray(widget.preferred_feed_legs) && widget.preferred_feed_legs.length > 0);
     btn.className = "nbx-rd-placement-btn" + (filled ? " has-config" : "");
     btn.title = "Planning attributes";
     btn.setAttribute("aria-label", "Planning attributes");

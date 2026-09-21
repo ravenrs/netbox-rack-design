@@ -1763,6 +1763,7 @@ function setRackHooks(hooks) {
                     device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
                     tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
                     planning_data: w.planning_data || null,
+                    preferred_feed_legs: w.preferred_feed_legs || null,
                     origUPosition: st.origUPosition,
                     origFace: st.origFace,
                     originRackId: originRackId,
@@ -2075,6 +2076,7 @@ function setRackHooks(hooks) {
                 device_role_id: (d.device_role_id != null) ? d.device_role_id : null,
                 tenant_id: (d.tenant_id != null) ? d.tenant_id : null,
                 planning_data: d.planning_data || null,
+                preferred_feed_legs: d.preferred_feed_legs || null,
             };
             applyRailToMove(widget);
             var adoptContent = el.querySelector(".grid-stack-item-content");
@@ -2510,6 +2512,7 @@ function setRackHooks(hooks) {
                     device_role_id: (info.device_role_id != null) ? info.device_role_id : null,
                     tenant_id: (info.tenant_id != null) ? info.tenant_id : null,
                     planning_data: info.planning_data || null,
+                    preferred_feed_legs: info.preferred_feed_legs || null,
                 },
                 origUPosition: info.origUPosition, origFace: info.origFace,
                 removed: false, shadowEl: null, crossRack: true, needsRename: false,
@@ -2579,6 +2582,7 @@ function setRackHooks(hooks) {
                     device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
                     tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
                     planning_data: w.planning_data || null,
+                    preferred_feed_legs: w.preferred_feed_legs || null,
                     origUPosition: st.origUPosition, origFace: st.origFace,
                     originRackId: st.originRackId, originWidgetIndex: st.originWidgetIndex,
                 };
@@ -3036,6 +3040,13 @@ function setRackHooks(hooks) {
                     if (PLACEMENT_FIELDS.length) {
                         item.planning_data = w.planning_data || {};
                     }
+                    // Manual per-PSU feed-leg override (editor/power.js's
+                    // Power section, built-in -- not a placement_fields
+                    // config entry). Sent only when this tile actually set
+                    // it; an absent key leaves the model field untouched.
+                    if (w.preferred_feed_legs && w.preferred_feed_legs.length) {
+                        item.preferred_feed_legs = w.preferred_feed_legs;
+                    }
                     // D20 provenance, set on a brand-new add only (the
                     // serializer rejects it on any other kind). Deliberately
                     // OUTSIDE the PLACEMENT_FIELDS guard above: provenance has
@@ -3099,6 +3110,9 @@ function setRackHooks(hooks) {
                     if (PLACEMENT_FIELDS.length && w.planning_data
                             && Object.keys(w.planning_data).length) {
                         item.planning_data = w.planning_data;
+                    }
+                    if (w.preferred_feed_legs && w.preferred_feed_legs.length) {
+                        item.preferred_feed_legs = w.preferred_feed_legs;
                     }
                 }
 

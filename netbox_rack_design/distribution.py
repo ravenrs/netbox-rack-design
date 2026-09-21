@@ -271,11 +271,16 @@ def devices_from_elevation(elevation):
     handing over the raw ``dcim.Device`` for scripts that walk real cabling.
 
     Each entry: ``{name, role, status, u_position, face, draw_w, draw_known,
-    power_ports, device, device_type, power_config, feed, feed_source}``.
+    power_ports, device, device_type, power_config, feed, feed_source, moved,
+    preferred_feed_legs}``. ``preferred_feed_legs`` is a planning-hint list of
+    lowercase leg letters (e.g. ``["c", "d"]``) from the placement, or
+    ``None`` for automatic attribution (see ``_legs_for_native``).
     ``device`` is the real ``dcim.Device`` for an existing/moved device, or
     ``None`` for a planned add. ``feed``/``feed_source`` are resolved from the
     placement's ``bound_feed`` (docs/pdu-distribution-spec.md §6.2) -- ``None``
-    when the slot has no placement or the placement is unbound.
+    when the slot has no placement or the placement is unbound. ``moved`` is
+    ``True`` only for a ``move_in`` slot: the design relocates this device, so
+    its existing cabling is stale and must not be trusted for attribution.
     """
     out = []
     seen = set()
@@ -312,6 +317,10 @@ def devices_from_elevation(elevation):
                 # or there is no placement (a plain existing/uninvolved device).
                 "feed": feed,
                 "feed_source": feed_source,
+                "moved": slot.get("state") == "move_in",
+                # Planning hint from DesignPlacement.preferred_feed_legs; getattr
+                # with a default keeps this safe even before that field exists.
+                "preferred_feed_legs": getattr(placement, "preferred_feed_legs", None) if placement else None,
             })
     with_custom_fields = sum(1 for entry in out if entry.get("custom_fields"))
     with_feed = sum(1 for entry in out if entry.get("feed") is not None)
@@ -632,26 +641,43 @@ def _unit_to_bank(rack, pdus, *, reversed_direction=False):
 
 def _legs_for_native(device, unit_map, pdus):
     """The ``(pdu, bank)`` refs a device charges (docs/pdu-distribution-spec.md
-    §2.2/§2.3):
+    §2.2/§2.3). A design plans a FUTURE state, so the general rule is: a device
+    the design MOVES is attributed by its NEW U position, ignoring its
+    existing cabling (which will be re-plugged when the design is
+    implemented); a device that stays put keeps cabling-based attribution.
 
-    * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU) **in this
-      rack**: charge the outlet's bank directly, one ref per cabling -- full-
-      per-leg redundancy falls out naturally (2 cablings -> 2 full charges).
-    * **Uncabled** (planned or unconnected) -- and a device whose cabling
-      leads OUT of this rack: attributed by U position via ``unit_map`` --
-      leg ``a`` only for a single PSU, ``a``+``b`` (never split) for 2+ PSUs.
-      A leg absent from ``unit_map`` (fewer than 2 bound feeds in the rack) is
-      silently skipped -- robust to any feed count.
+    * **Cabled and not moved** (a real device's PowerPort -> PowerOutlet on a
+      PDU **in this rack**): charge the outlet's bank directly, one ref per
+      cabling -- full-per-leg redundancy falls out naturally (2 cablings -> 2
+      full charges). This wins even when the outlet's bank differs from what
+      the device's U position would imply -- real cabling does not always
+      follow the tidy U-slice split.
+    * **Uncabled, moved, or a device whose cabling leads OUT of this rack**:
+      attributed by U position via ``unit_map``. If the device carries a
+      non-empty ``preferred_feed_legs`` (a planning hint set on the
+      placement -- e.g. ``["c", "d"]``), those exact legs are charged
+      instead of the automatic heuristic below; this override takes
+      precedence whenever present. Otherwise, automatic attribution charges
+      the first leg (single PSU) or first two legs (2+ PSUs) in sorted
+      order -- ``a`` (+``b``) when the rack's legs are lettered that way,
+      same as before. A leg absent from ``unit_map`` (fewer than 2 bound
+      feeds in the rack, or an override naming a feed this rack doesn't
+      have) is silently skipped -- robust to any feed count.
 
-    A device MOVED into this rack still carries its cabling to the source
-    rack's PDU until the design is implemented, so those refs name PDUs that
-    are not part of this topology. Treating that like no cabling is what makes
-    the draw follow the device across racks instead of vanishing from both.
+    A device MOVED into this rack from another rack still carries its cabling
+    to the source rack's PDU until the design is implemented, so those refs
+    name PDUs that are not part of this topology -- this is just a special
+    case of the general moved rule above (the ``moved`` flag already forces
+    position-based attribution before the cross-rack/unresolvable check would
+    even matter), and it's what makes the draw follow the device across racks
+    instead of vanishing from both.
     """
-    cabled = [
-        ref for ref in _cabled_bank_refs(device.get("device"))
-        if ref[0] in pdus and ref[1] in pdus[ref[0]]["banks"]
-    ]
+    cabled = []
+    if not device.get("moved"):
+        cabled = [
+            ref for ref in _cabled_bank_refs(device.get("device"))
+            if ref[0] in pdus and ref[1] in pdus[ref[0]]["banks"]
+        ]
     if cabled:
         return cabled
     unit = device.get("u_position")
@@ -660,13 +686,23 @@ def _legs_for_native(device, unit_map, pdus):
     except (TypeError, ValueError):
         return []
     psu_count = len(device.get("power_ports") or [])
-    preferred = ["a", "b"] if psu_count >= 2 else ["a"]
+    override = [leg for leg in (device.get("preferred_feed_legs") or []) if isinstance(leg, str)]
+    if override:
+        # Explicit planning hint wins outright -- no heuristic, no fallback.
+        # A leg the rack doesn't have is just filtered out below.
+        preferred = override
+    else:
+        # Automatic: charge the first N legs in sorted order, N matching the
+        # device's redundancy (1 leg for a single PSU, 2 for 2+ PSUs). Using
+        # sorted(unit_map) rather than a hardcoded ["a", "b"] means this
+        # naturally reaches ``a``/``b`` on a two-feed rack (byte-identical to
+        # the old hardcoded heuristic there) while still landing on whatever
+        # legs actually exist for any other feed count/naming. It deliberately
+        # stays conservative -- only ever the first one or two legs -- and
+        # never reaches into c/d/... on its own; that's what the explicit
+        # ``preferred_feed_legs`` override above is for.
+        preferred = sorted(unit_map)[:2 if psu_count >= 2 else 1]
     legs = [leg for leg in preferred if leg in unit_map]
-    if not legs and unit_map:
-        # Leg letters come from the feed NAMES ("Feed B" -> b), so a rack can
-        # legitimately have no ``a`` leg at all. Charge the legs it does have
-        # rather than dropping the device's draw on the floor.
-        legs = sorted(unit_map)[:len(preferred)]
     refs = []
     for leg in legs:
         ref = unit_map.get(leg, {}).get(unit)

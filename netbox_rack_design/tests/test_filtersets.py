@@ -1,18 +1,18 @@
-"""FilterSet tests for NetBox Rack Design (subclassing ChangeLoggedFilterSetTests).
+"""FilterSet tests for NetBox Rack Design (subclassing ChangeLoggedFilterSetTestMixin).
 
 Every class below MUST list ``TestCase`` explicitly as its first base:
-``ChangeLoggedFilterSetTests`` is a plain NetBox *mixin* (see
+``ChangeLoggedFilterSetTestMixin`` is a plain NetBox *mixin* (see
 ``utilities/testing/filtersets.py`` -- it derives from ``object``, not from
 ``TestCase``), so a class that inherits the mixin ALONE is not a ``TestCase``
 and Django's test loader silently collects NOTHING from it. This module ran
 0 tests for its whole existence because of exactly that. ``class X(TestCase,
-ChangeLoggedFilterSetTests)`` is core's own spelling; keep it.
+ChangeLoggedFilterSetTestMixin)`` is core's own spelling; keep it.
 """
 
 from dcim.models import DeviceRole, Location
 from django.test import TestCase
 from tenancy.models import Tenant
-from utilities.testing import ChangeLoggedFilterSetTests, create_test_device
+from utilities.testing import create_test_device
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..filtersets import (
@@ -23,10 +23,13 @@ from ..filtersets import (
     PlannedRackFilterSet,
 )
 from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed, PlannedRack
-from .utils import create_dcim_environment
+
+# Renamed in NetBox 4.7; .utils carries the alias so this module imports
+# on the whole supported range (see the comment there).
+from .utils import ChangeLoggedFilterSetTestMixin, create_dcim_environment
 
 
-class DesignGroupFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
+class DesignGroupFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
     queryset = DesignGroup.objects.all()
     filterset = DesignGroupFilterSet
 
@@ -50,7 +53,7 @@ class DesignGroupFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
 
 
-class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
+class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
     queryset = Design.objects.all()
     filterset = DesignFilterSet
     # The ``racks`` M2M filter is spelled ``racks_id``, not the ``rack_id`` this
@@ -137,15 +140,17 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
         self.assertEqual(list(parented), [child])
 
 
-class DesignPlacementFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
+class DesignPlacementFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
     queryset = DesignPlacement.objects.all()
     filterset = DesignPlacementFilterSet
     # Opaque planning/power JSON blobs written and read only by the editor and
     # the distribution engine. There is no meaningful lookup to expose, so they
     # are declared to core's documented exclusion hook (same as dcim's
     # ``local_context_data`` / ``attribute_data``) rather than being papered
-    # over by weakening the assertion.
-    ignore_fields = ("planning_data", "power_config")
+    # over by weakening the assertion. ``preferred_feed_legs`` (a JSONField
+    # list of leg letters, e.g. ``["a", "b"]``) is the same shape of opaque
+    # blob read only by the distribution engine -- same treatment.
+    ignore_fields = ("planning_data", "power_config", "preferred_feed_legs")
 
     @classmethod
     def setUpTestData(cls):
@@ -325,7 +330,7 @@ class DesignPlacementFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
         self.assertEqual(list(self.filterset(params, self.queryset).qs), [])
 
 
-class DesignPowerFeedFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
+class DesignPowerFeedFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
     """The fourth filterset had no test class at all, so ``test_missing_filters``
     had never been applied to it either."""
 
@@ -381,7 +386,7 @@ class DesignPowerFeedFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
 
 
-class PlannedRackFilterSetTest(TestCase, ChangeLoggedFilterSetTests):
+class PlannedRackFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
     """T1.7 -- PlannedRack's REST filtering, and ``test_missing_filters`` on it
     for the first time (it had no filterset test at all before this task)."""
 

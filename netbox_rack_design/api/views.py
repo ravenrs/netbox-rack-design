@@ -2658,6 +2658,7 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.proposed_name or "",
             placement.power_config,
             placement.planning_data,
+            placement.preferred_feed_legs,
             placement.real_power_feed_id,
             placement.planned_power_feed_id,
             placement.power_source_device_id,
@@ -3139,6 +3140,11 @@ class DesignViewSet(NetBoxModelViewSet):
                     # against that schema by DesignPlacement.clean(). Absent =>
                     # None.
                     planning_data=item.get("planning_data"),
+                    # Operator override of which feed leg(s) this device's PSUs
+                    # draw from (docs/pdu-distribution-spec.md), for the power
+                    # projection only. Absent => None (engine's automatic
+                    # heuristic).
+                    preferred_feed_legs=item.get("preferred_feed_legs"),
                     # The feed this PDU binds to (docs/pdu-distribution-spec.md
                     # §6.2); at most one of the pair is set (enforced above and
                     # again by DesignPlacement.clean()).
@@ -3224,6 +3230,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 add.power_config = item.get("power_config")
             if "planning_data" in item:
                 add.planning_data = item.get("planning_data")
+            if "preferred_feed_legs" in item:
+                add.preferred_feed_legs = item.get("preferred_feed_legs")
             if "power_source_device_id" in item:
                 add.power_source_device_id = self._resolve_power_source_device(item)
             # Only overwrite the binding when the editor actually sent one of the
@@ -3384,6 +3392,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 placement.tenant_id = move_tenant_id
             if "planning_data" in item:
                 placement.planning_data = item.get("planning_data")
+            if "preferred_feed_legs" in item:
+                placement.preferred_feed_legs = item.get("preferred_feed_legs")
             # A full-depth device occupies BOTH faces, so a client may still POST
             # one copy per face (the editor no longer does -- buildRackPayload
             # skips the opposite-face tile). Both copies reconcile to the same

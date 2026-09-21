@@ -341,7 +341,7 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
             "target_rack", "target_planned_rack", "target_position", "target_face",
             "parent_placement", "target_bay", "target_bay_name",
             "base_placement", "base_parent_placement",
-            "planning_data", "stale", "stale_device_name",
+            "planning_data", "preferred_feed_legs", "stale", "stale_device_name",
             "from_template", "from_template_version",
             "tags", "custom_fields", "created", "last_updated",
         )
@@ -467,6 +467,12 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     # item that omits the key leaves the placement's stored values alone; an
     # explicit ``{}`` clears them.
     planning_data = serializers.JSONField(required=False, allow_null=True)
+    # An operator override of which feed leg(s) this device's PSUs draw from
+    # (docs/pdu-distribution-spec.md), for the power projection only --
+    # e.g. ``["b"]`` or ``["a", "b"]``. WITHOUT a default so an item that
+    # omits the key leaves the placement's stored override alone; an explicit
+    # ``null``/``[]`` clears it back to the engine's automatic heuristic.
+    preferred_feed_legs = serializers.JSONField(required=False, allow_null=True)
     # The feed this PDU add binds to (docs/pdu-distribution-spec.md §6.2/§8) --
     # a real dcim.PowerFeed OR a planned DesignPowerFeed, never both. WITHOUT a
     # default so an item that omits both (any other role, or an untouched

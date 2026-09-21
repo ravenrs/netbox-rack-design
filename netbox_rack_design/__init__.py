@@ -24,7 +24,7 @@ class RackdesignConfig(PluginConfig):
     version = __version__
     base_url = "rack-design"
     min_version = "4.4.0"
-    max_version = "4.6.99"
+    max_version = "4.7.99"
     graphql_schema = "graphql.schema"
     default_settings = {
         # The device status the plugin treats as "planned". Writing a status

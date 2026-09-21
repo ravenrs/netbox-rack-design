@@ -758,6 +758,21 @@ class DesignPlacement(NetBoxModel):
     # Null for every non-PDU placement. Never written to dcim.
     power_config = models.JSONField(blank=True, null=True)
 
+    # An operator override of which feed leg(s) this device's PSUs draw from,
+    # e.g. ``["b"]`` (single-PSU) or ``["a", "b"]`` / ``["c", "d"]``
+    # (multi-PSU, ordered by PSU index -- a 2-PSU device sits on BOTH legs at
+    # once, that is what redundancy means). ``None``/``[]`` means "use the
+    # distribution engine's automatic a/a+b heuristic", unchanged. This is a
+    # PLANNING HINT for the power projection only -- it steers which leg the
+    # engine attributes an uncabled device's draw to and is never written to
+    # dcim, never carried onto the real device when the design is applied.
+    # That boundary is exactly why it is its own field rather than living in
+    # ``planning_data`` (deployment-schema data that DOES get copied onto the
+    # applied device) or ``power_config`` (documented as PDU-only, for a
+    # planned PDU's own custom fields). Validated in clean(): a list of
+    # distinct lowercase single-letter strings, or null/empty.
+    preferred_feed_legs = models.JSONField(blank=True, null=True)
+
     # A planned PDU may INHERIT its custom fields from a real PDU device rather
     # than typing them (docs/pdu-distribution-spec §6): this FK is that source
     # device, and the distribution script reads ``power_source_device.cf`` LIVE
@@ -965,6 +980,28 @@ class DesignPlacement(NetBoxModel):
         # ``placement_fields`` schema and normalised in place, so what reaches
         # the database is always type-correct and free of keys nothing reads.
         self.planning_data = planning_fields.validate_planning_data(self.planning_data, kind) or None
+
+        # An operator's feed-leg override, if set, must be a list of distinct
+        # lowercase single-letter leg identifiers. Deliberately NOT validated
+        # against the rack's actual legs here -- a design can legitimately be
+        # edited before its PDUs are bound, and the distribution engine
+        # already ignores a leg that does not exist in the rack.
+        if self.preferred_feed_legs:
+            if not isinstance(self.preferred_feed_legs, list):
+                raise ValidationError(
+                    {"preferred_feed_legs": "Must be a list of feed leg letters."}
+                )
+            seen = set()
+            for leg in self.preferred_feed_legs:
+                if not isinstance(leg, str) or len(leg) != 1 or not ("a" <= leg <= "z"):
+                    raise ValidationError(
+                        {"preferred_feed_legs": f"Invalid feed leg {leg!r}: must be a single lowercase letter."}
+                    )
+                if leg in seen:
+                    raise ValidationError(
+                        {"preferred_feed_legs": f"Duplicate feed leg {leg!r}."}
+                    )
+                seen.add(leg)
 
         # A planned PDU binds to at most ONE feed (real xor planned).
         if self.real_power_feed_id and self.planned_power_feed_id:

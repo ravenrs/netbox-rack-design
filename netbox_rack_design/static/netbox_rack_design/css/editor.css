@@ -1658,6 +1658,60 @@
 }
 .nbx-rd-dist-critical .nbx-rd-dist-label,
 .nbx-rd-dist-overload .nbx-rd-dist-label { color: #fff; }
+/* ---- Bank ZONE strip (hangs off each face grid's LEFT edge) ------------- */
+/* One narrow bar per PDU, split into that PDU's banks at the U boundaries the
+   distribution engine assigned -- so the segment breaks ARE the bank
+   boundaries, and you can read straight off the rack which U to drag a device
+   to for it to land on a different bank. The LEFT edge because the right one
+   is the displacement stripe's. No text: each segment is a gauge filling from
+   the floor up with the bank's load/breaker ratio, colored by state like the
+   chips above, and the numbers live in its hover tooltip. */
+.nbx-rd-bank-strip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: calc(100% + 4px);
+    display: flex;
+    gap: 2px;
+    z-index: 4;
+}
+.nbx-rd-bank-col {
+    position: relative;
+    width: 8px;
+}
+/* Zones ABUT -- every unit is owned by some bank, so a gap here would read as
+   "these U are unserved". Adjacent borders are what marks the boundary.
+   The background is a visible TRACK, not the page surface: the unfilled part
+   of a lightly-loaded bank still has to show that bank's extent. On white it
+   read as nothing, so the fill looked like a stub floating in space and the
+   boundaries -- the whole point of the strip -- were invisible. */
+.nbx-rd-bank-seg {
+    position: absolute;
+    left: 0;
+    right: 0;
+    overflow: hidden;
+    border: 1px solid var(--tblr-border-color-active, #9da5ae);
+    border-radius: 2px;
+    background: var(--tblr-bg-surface-secondary, #e9ecef);
+    cursor: help;
+}
+.nbx-rd-bank-fill {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--tblr-green, #2fb344);
+}
+.nbx-rd-bank-seg.nbx-rd-dist-warn .nbx-rd-bank-fill {
+    background: var(--tblr-yellow, #f59f00);
+}
+.nbx-rd-bank-seg.nbx-rd-dist-critical .nbx-rd-bank-fill {
+    background: var(--tblr-red, #d63939);
+}
+.nbx-rd-bank-seg.nbx-rd-dist-overload .nbx-rd-bank-fill {
+    background: #b01919;
+}
+
 .nbx-rd-dist-alarm {
     flex: 0 0 auto;                         /* never stretches with the columns */
     align-self: flex-start;

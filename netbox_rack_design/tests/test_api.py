@@ -1988,6 +1988,157 @@ class SaveLayoutTest(APITestCase):
         placement = DesignPlacement.objects.get(design=self.design)
         self.assertIsNone(placement.power_config)
 
+    # --- preferred_feed_legs (power projection override) ---------------------
+
+    def test_brand_new_add_persists_preferred_feed_legs(self):
+        """A brand-new add carrying preferred_feed_legs persists it."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "preferred_feed_legs": ["b"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.preferred_feed_legs, ["b"])
+
+    def test_reposition_existing_add_sets_preferred_feed_legs(self):
+        """Repositioning an existing add can also set preferred_feed_legs."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front",
+                     "preferred_feed_legs": ["c", "d"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(existing_add.preferred_feed_legs, ["c", "d"])
+
+    def test_add_without_preferred_feed_legs_leaves_it_null(self):
+        """An 'add' item that omits preferred_feed_legs persists it as NULL."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.preferred_feed_legs)
+
+    def test_reposition_add_omitting_preferred_feed_legs_does_not_clobber(self):
+        """An 'add' reposition that omits the key preserves a previously
+        stored override (same idempotent-omission contract as power_config)."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+            preferred_feed_legs=["a", "b"],
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(existing_add.preferred_feed_legs, ["a", "b"])
+
+    def test_move_persists_preferred_feed_legs(self):
+        """A move item carrying preferred_feed_legs persists it onto the
+        move placement, the same as planning_data."""
+        self._grant_all()
+        device = self.devices[0]
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 10,
+                     "face": "front", "preferred_feed_legs": ["b"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(placement.preferred_feed_legs, ["b"])
+
+    def test_move_omitting_preferred_feed_legs_does_not_clobber(self):
+        """A follow-up move save that omits the key preserves a previously
+        stored override."""
+        self._grant_all()
+        device = self.devices[0]
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 10,
+                     "face": "front", "preferred_feed_legs": ["a", "b"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.preferred_feed_legs, ["a", "b"])
+
+        # Second save, same move, key omitted -> override must survive.
+        payload2 = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 11,
+                     "face": "front"},
+                ],
+            },
+        ])
+        response2 = self.client.post(self._url(self.design), payload2, format="json", **self.header)
+        self.assertHttpStatus(response2, status.HTTP_200_OK)
+        placement.refresh_from_db()
+        self.assertEqual(placement.preferred_feed_legs, ["a", "b"])
+        self.assertEqual(float(placement.target_position), 11.0)
+
     # --- slice 2d: multi-rack save round-trip (the conservative-guard contract)
 
     def _multi_rack_payload(self, rack_a, rack_b, add_position=5):

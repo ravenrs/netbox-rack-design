@@ -57,11 +57,16 @@ The built-in mode works without a script or custom config, iff:
 
 Under these conventions, the plugin distributes each device's load per bank:
 
-- **Cabled device** (real or planned, with a power outlet on a PDU) → charge the
-  outlet's bank directly.
-- **Uncabled device** (planned, not yet cabled) → its position in the rack
-  determines which bank feeds it; redundant devices (2+ PSUs) charge both
-  feed-legs in full (worst-case failover).
+- **A device the design moves** (a planned add, or an existing device dragged
+  to a new position) → charged by its **new U position**, regardless of any
+  cabling it still carries. Moving a device in a design means its cable will
+  be re-run when the design is implemented, so the old outlet doesn't say
+  where the power will actually come from.
+- **A device the design leaves in place** → charged to its **real outlet's
+  bank**, even if that bank doesn't match what the device's U position would
+  suggest. Real cabling is ground truth for anything nobody is touching.
+- Redundant devices (2+ PSUs) charge both feed-legs in full (worst-case
+  failover), whichever rule above assigned their bank.
 
 Per-bank breaker = `pdu_input_draw / power_bank_count` (where
 `power_bank_count` is the distinct bank IDs on that PDU).
@@ -346,9 +351,10 @@ A quick end-to-end check that distribution works the way you expect:
    - Overload warnings in red if any bank exceeds its breaker.
 
 4. **Drag a device to a different rack unit.** The bank colors should update
-   to reflect the new load distribution. If the device is cabled to a specific
-   PDU outlet, it charges that bank; if uncabled (planned), it charges the bank
-   corresponding to its new U position.
+   to reflect the new load distribution: a device the design moves is charged
+   to the bank at its **new** U position, even if it still has a real cable to
+   a different outlet — that cabling is assumed to be re-run when the design is
+   implemented. A device you leave alone keeps charging its real outlet's bank.
 
 5. **Check custom fields (script tier only).** If you've switched to
    `distribution_mode = "script"` with `planning_fields` configured, add a rack
@@ -393,11 +399,17 @@ degrades to `none` gracefully — logs a warning, never errors the editor.
 
 **The distribution looks wrong; devices are charged to the wrong banks.**
 
-- Verify cabling: a cabled device should charge the PDU outlet's bank directly
-  (the first segment before `/`).
-- Verify uncabled devices are placed at their intended U positions. The rack
-  distribution assumes a unit-to-bank mapping based on direction and bank
-  count; a device at U5 might charge a different bank than U7.
+- Check whether the design **moves** the device. A moved device (a new add, or
+  an existing device dragged to a different unit) is always charged by its
+  **new** U position — any cabling it still carries is ignored, because that
+  cable is assumed to be re-run when the design is implemented.
+- For a device the design does **not** move: verify cabling — it should charge
+  the PDU outlet's bank directly (the first segment before `/`), even if that
+  differs from what its U position would suggest.
+- For a device the design does not move and that has no cabling: verify it's
+  placed at its intended U position. The rack distribution assumes a
+  unit-to-bank mapping based on direction and bank count; a device at U5 might
+  charge a different bank than U7.
 - **`distribution_mode = "builtin"`** always splits in a fixed direction (bank 1
   at the bottom) — it does not read the rack custom field `pdu_location` or any
   other cf.

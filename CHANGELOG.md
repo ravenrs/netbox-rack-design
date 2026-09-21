@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request against the same design could leave an uncollected join row behind
   and raise an `IntegrityError`. Both paths now lock consistently, and the
   race resolves to an ordinary `409` instead of a server error.
+- **Moving a cabled device within the same rack didn't move its charged
+  bank.** The distribution engine always attributed a cabled device to its
+  real outlet's bank, even when a design relocated it elsewhere in the same
+  rack — a dual-corded server dragged from U20 to U12 kept charging bank 1
+  on both PDUs at its old position. A device the design moves is now
+  attributed by its **new** U position, ignoring stale cabling; a device left
+  in place still keeps its real cabled bank. See
+  [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md) §2.2.
 
 ## [0.32.1] - 2026-09-11
 

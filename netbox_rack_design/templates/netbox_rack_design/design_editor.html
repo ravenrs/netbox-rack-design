@@ -314,6 +314,12 @@
           <label class="nbx-rd-filter" title="{% trans 'Color devices by power consumption (share of rack total)' %}">
             <input type="checkbox" data-rd-power-heatmap>{% trans "Power heatmap" %}
           </label>
+          {# Bank zone strip toggle: the narrow per-PDU bars beside each face #}
+          {# grid showing which U range each power bank serves. Independent  #}
+          {# of the heatmap -- these are structural, not a coloring view.    #}
+          <label class="nbx-rd-filter" title="{% trans 'Show which U range each PDU power bank serves, beside the rack' %}">
+            <input type="checkbox" data-rd-bank-zones>{% trans "Bank zones" %}
+          </label>
           <span class="nbx-rd-heat-legend" aria-hidden="true">
             <span class="small text-muted">{% trans "low" %}</span>
             <span class="nbx-rd-heat-scale"></span>
