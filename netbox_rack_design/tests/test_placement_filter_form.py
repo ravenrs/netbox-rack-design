@@ -16,8 +16,8 @@ from utilities.testing import TestCase
 
 from ..choices import DesignPlacementKindChoices
 from ..forms import DesignPlacementFilterForm
-from ..models import Design, DesignPlacement
-from .utils import create_dcim_environment
+from ..models import DesignPlacement
+from .utils import create_dcim_environment, make_design
 
 
 class DesignPlacementFilterFormFieldsTest(TestCase):
@@ -54,7 +54,7 @@ class DesignPlacementFilterFormRenderAndSubmitTest(TestCase):
         site = env["site"]
         device_type = env["device_type"]
         rack = env["racks"][1]
-        design = Design.objects.create(title="Filter form design", site=site)
+        design = make_design(title="Filter form design", site=site)
 
         cls.role = DeviceRole.objects.create(name="Compute", slug="compute")
         cls.tenant = Tenant.objects.create(name="Tenant X", slug="tenant-x")

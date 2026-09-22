@@ -34,10 +34,10 @@ from ..distribution import (
     apply_rack_power_override,
     generate_distribution_status,
 )
-from ..models import Design, DesignPlacement, DesignPowerFeed, DesignRackPower, PlannedRack
+from ..models import DesignPlacement, DesignPowerFeed, DesignRackPower, PlannedRack
 from ..projection import project_rack
 from ..rackinfo import is_planned
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 # --- module-level script probes (must be importable dotted paths) ----------
 
@@ -121,7 +121,7 @@ class DistributionPlannedRackTestCase(TestCase):
         cls.planned_rack = PlannedRack.objects.create(
             name="Planned R1", location=cls.location, u_height=12,
         )
-        cls.design = Design.objects.create(title="Greenfield T5.1", site=cls.site)
+        cls.design = make_design(title="Greenfield T5.1", site=cls.site)
 
     def _plan_pdu(self, rack, planned_rack_target=True, feed_watts=(230, 16)):
         """Create a planned PDU add on ``rack`` bound to a fresh

@@ -641,12 +641,30 @@ def _design_editor_context(request, design):
         for planned_rack in scoped_planned_racks
     ]
     # Rows for the "Design racks" panel: one per scoped rack with its current
-    # shown/hidden state for this user. Planned racks are deliberately NOT
-    # listed here (D25) -- this panel's show/hide + remove-from-design
-    # actions are real-rack-only; a planned rack has no hide toggle to draw.
+    # shown/hidden state for this user, followed by the design's PLANNED
+    # racks. A planned rack still has no hide toggle (D25 -- it has no device
+    # row, so "you just added it" is the only useful default), but it does
+    # need the REMOVE action: deleting a PlannedRack is refused while any
+    # design still plans across it, and the refusal says to remove it from
+    # each design's scope first -- which nothing could do until this row
+    # existed (user report 2026-09-22). ``key`` is the namespaced rack id the
+    # remove-rack endpoint parses ("r:<pk>" / "p:<pk>", D28).
     scoped_rack_rows = [
-        {"rack": scoped_rack, "hidden": scoped_rack.pk in hidden_rack_ids}
+        {
+            "rack": scoped_rack,
+            "hidden": scoped_rack.pk in hidden_rack_ids,
+            "planned": False,
+            "key": f"r:{scoped_rack.pk}",
+        }
         for scoped_rack in scoped_racks
+    ] + [
+        {
+            "rack": planned_rack,
+            "hidden": False,
+            "planned": True,
+            "key": f"p:{planned_rack.pk}",
+        }
+        for planned_rack in scoped_planned_racks
     ]
     # Chain + peer conflicts (PLAN-design-chains.md §8.2/§8.3/G3,
     # PLAN-peer-conflicts.md P7): every rack's ``ProjectedElevation.conflicts``,
@@ -799,9 +817,12 @@ def _design_editor_context(request, design):
         # Drives the left-rail manufacturer/role/tenant selectors as NetBox
         # API-backed searchable selects (see forms.DesignEditorPaletteForm).
         "palette_form": forms.DesignEditorPaletteForm(),
-        # Drives the "Add rack" panel's Location + Rack choosers, scoped to this
-        # design's site (see forms.DesignEditorAddRackForm).
-        "add_rack_form": forms.DesignEditorAddRackForm(site_id=design.site_id),
+        # Drives the "Add rack" panel's Site -> Location -> Rack choosers
+        # (PLAN-multi-site.md M8/P3, see forms.DesignEditorAddRackForm):
+        # add_site is scoped to this design's own sites (M1, a design has one
+        # or more); with exactly one site it comes back pre-selected and the
+        # template renders it as a read-only chip instead of a live picker.
+        "add_rack_form": forms.DesignEditorAddRackForm(sites=design.sites),
         # T1.5 "Create rack" dialog (PLAN-templates.md §1): creates a
         # PlannedRack (a rack that does not exist in DCIM yet). ``location``
         # is REQUIRED there (D4 -- it is the whole reason Apply can never hit
@@ -816,9 +837,19 @@ def _design_editor_context(request, design):
         "create_planned_rack_url": (
             f"/api/plugins/rack-design/designs/{design.pk}/create-planned-rack/"
         ),
+        # Grouped by site (M8) -- the Create-rack dialog's Site select filters
+        # its Location select from this; a one-site design pre-selects its one
+        # entry (editor_panels.js) and shows it as a chip, same as add_rack_form.
         "site_locations": [
-            {"id": location.pk, "name": str(location)}
-            for location in Location.objects.filter(site=design.site).order_by("name")
+            {
+                "site_id": site.pk,
+                "site": str(site),
+                "locations": [
+                    {"id": location.pk, "name": str(location)}
+                    for location in Location.objects.filter(site=site).order_by("name")
+                ],
+            }
+            for site in design.sites.order_by("name")
         ],
         # Custom-field bridge schema (docs/pdu-distribution-spec.md §5): drives
         # the rack-power dialog's dynamically-rendered fields. `{}` (default) ->
@@ -1224,8 +1255,11 @@ class ElevationBrowserView(ContentTypePermissionRequiredMixin, View):
             models.DesignPlacement.objects.filter(
                 Q(target_rack__isnull=False) | Q(device__rack__isnull=False)
             )
+            # "design__site" dropped (PLAN-multi-site.md M1/M2): `site` is no
+            # longer a FK select_related can traverse, and this row's own
+            # "site" (below) is read off the RACK, not the design, anyway.
             .select_related(
-                "design", "design__site",
+                "design",
                 "target_rack", "target_rack__site",
                 "device__rack", "device__rack__site",
             )
@@ -1611,6 +1645,65 @@ class PlannedRackDeleteView(generic.ObjectDeleteView):
         return super().post(request, *args, **kwargs)
 
 
+@register_model_view(models.PlannedRack, "bulk_import", detail=False)
+class PlannedRackBulkImportView(generic.BulkImportView):
+    queryset = models.PlannedRack.objects.all()
+    model_form = forms.PlannedRackImportForm
+
+
+@register_model_view(models.PlannedRack, "bulk_edit", path="edit", detail=False)
+class PlannedRackBulkEditView(generic.BulkEditView):
+    queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
+    filterset = filtersets.PlannedRackFilterSet
+    table = tables.PlannedRackTable
+    form = forms.PlannedRackBulkEditForm
+
+
+@register_model_view(models.PlannedRack, "bulk_delete", path="delete", detail=False)
+class PlannedRackBulkDeleteView(generic.BulkDeleteView):
+    """The list's "Delete Selected", with :class:`PlannedRackDeleteView`'s guards.
+
+    Two reasons this view has to exist at all: NetBox renders the bulk
+    buttons for any list whose table has a checkbox column, and the form's
+    action is ``get_viewname(model, "bulk_delete")`` -- which is ``None``
+    when the view is missing, so the POST lands on ``/planned-racks/None``
+    and 404s (user report 2026-09-22).
+
+    The guards then have to be restated here, exactly as
+    ``DesignBulkDeleteView`` restates ``DesignDeleteView``'s: a bulk delete
+    never calls the single view. A realized row is kept forever (D7) and a
+    still-referenced one would silently strip other designs' placements
+    (T1.9), so a batch containing either is refused WHOLE -- deleting the
+    innocent half of a selection the user asked for as one action would be
+    a surprise in the destructive direction.
+    """
+
+    queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
+    filterset = filtersets.PlannedRackFilterSet
+    table = tables.PlannedRackTable
+
+    def post(self, request, **kwargs):
+        if "_confirm" in request.POST:
+            if request.POST.get("_all"):
+                qs = self.queryset.all()
+                if self.filterset is not None:
+                    qs = self.filterset(request.GET, qs, request=request).qs
+                pk_list = list(qs.values_list("pk", flat=True))
+            else:
+                pk_list = [int(pk) for pk in request.POST.getlist("pk")]
+            blocked = False
+            for planned_rack in self.queryset.filter(pk__in=pk_list):
+                if planned_rack.is_realized:
+                    messages.error(request, _planned_rack_realized_message(planned_rack))
+                    blocked = True
+                elif not planned_rack.is_orphan:
+                    messages.error(request, _planned_rack_referenced_message(planned_rack))
+                    blocked = True
+            if blocked:
+                return redirect(self.get_return_url(request))
+        return super().post(request, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Templates (PLAN-templates.md §2, task T2.1) -- a reusable rack layout with no
 # site, and the group that orders several of them into a product pod. Minimum
@@ -1787,7 +1880,6 @@ class DesignDeriveView(generic.ObjectView):
 
         child = models.Design(
             title=form.cleaned_data["title"],
-            site=design.site,
             group=design.group,
             based_on=design,
             status=DesignStatusChoices.STATUS_DRAFT,
@@ -1796,6 +1888,10 @@ class DesignDeriveView(generic.ObjectView):
             with transaction.atomic():
                 child.full_clean()
                 child.save()
+                # M5: a derived design starts with the parent's own sites --
+                # mirrors api/views.py's `derive` action. Must run after
+                # save() (M2M needs a pk), same as `racks` below.
+                child.sites.set(design.sites.all())
                 # G6: seed the child's rack scope with a SNAPSHOT of the
                 # parent's racks at derive time, not a live link -- a rack
                 # added to the parent later does NOT retroactively appear on
@@ -2128,11 +2224,14 @@ def _chain_health_rows(user):
     if not candidate_pks:
         return []
 
+    # "site" -> "sites" (PLAN-multi-site.md M1/M2): a M2M is prefetched, not
+    # select_related. The `design.site` read below (the `site` property) uses
+    # this prefetch instead of a query per row.
     visible_designs = {
         d.pk: d
         for d in models.Design.objects.restrict(user, "view")
         .filter(pk__in=candidate_pks)
-        .select_related("site")
+        .prefetch_related("sites")
     }
     if not visible_designs:
         return []
@@ -2218,3 +2317,70 @@ class DesignChainHealthView(ContentTypePermissionRequiredMixin, View):
             "table": table,
             "row_count": len(rows),
         })
+
+
+@register_model_view(models.TemplateGroup, "bulk_import", detail=False)
+class TemplateGroupBulkImportView(generic.BulkImportView):
+    queryset = models.TemplateGroup.objects.all()
+    model_form = forms.TemplateGroupImportForm
+
+
+@register_model_view(models.TemplateGroup, "bulk_edit", path="edit", detail=False)
+class TemplateGroupBulkEditView(generic.BulkEditView):
+    queryset = models.TemplateGroup.objects.all()
+    filterset = filtersets.TemplateGroupFilterSet
+    table = tables.TemplateGroupTable
+    form = forms.TemplateGroupBulkEditForm
+
+
+@register_model_view(models.TemplateGroup, "bulk_delete", path="delete", detail=False)
+class TemplateGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.TemplateGroup.objects.all()
+    filterset = filtersets.TemplateGroupFilterSet
+    table = tables.TemplateGroupTable
+
+
+@register_model_view(models.Template, "bulk_import", detail=False)
+class TemplateBulkImportView(generic.BulkImportView):
+    queryset = models.Template.objects.all()
+    model_form = forms.TemplateImportForm
+
+
+@register_model_view(models.Template, "bulk_edit", path="edit", detail=False)
+class TemplateBulkEditView(generic.BulkEditView):
+    queryset = models.Template.objects.select_related("group")
+    filterset = filtersets.TemplateFilterSet
+    table = tables.TemplateTable
+    form = forms.TemplateBulkEditForm
+
+
+@register_model_view(models.Template, "bulk_delete", path="delete", detail=False)
+class TemplateBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.Template.objects.select_related("group")
+    filterset = filtersets.TemplateFilterSet
+    table = tables.TemplateTable
+
+
+@register_model_view(models.TemplatePlacement, "bulk_import", detail=False)
+class TemplatePlacementBulkImportView(generic.BulkImportView):
+    queryset = models.TemplatePlacement.objects.all()
+    model_form = forms.TemplatePlacementImportForm
+
+
+@register_model_view(models.TemplatePlacement, "bulk_edit", path="edit", detail=False)
+class TemplatePlacementBulkEditView(generic.BulkEditView):
+    queryset = models.TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    )
+    filterset = filtersets.TemplatePlacementFilterSet
+    table = tables.TemplatePlacementTable
+    form = forms.TemplatePlacementBulkEditForm
+
+
+@register_model_view(models.TemplatePlacement, "bulk_delete", path="delete", detail=False)
+class TemplatePlacementBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    )
+    filterset = filtersets.TemplatePlacementFilterSet
+    table = tables.TemplatePlacementTable

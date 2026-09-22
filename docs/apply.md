@@ -131,13 +131,17 @@ entire point of [design chains](design-chains.md).
 
 Apply runs with **your** permissions: `dcim.add_device`, `change_device` and
 `delete_device`, as the run actually needs them, checked through NetBox's
-object permissions so per-site and per-tenant constraints apply.
+object permissions, so per-site and per-tenant constraints apply. Each planned
+device is checked against the site of its own target rack; on a multi-site
+design you therefore need write rights in every site the design touches — a
+missing one is reported as a problem up front and, like any other problem,
+refuses the whole run.
 
 There is no service account behind the button, deliberately — otherwise
 pressing it would let you do something you could not do directly. The practical
-consequence: whoever applies a design needs DCIM write rights. Where planners
-should not have those, apply belongs to operators or to automation with its own
-token.
+consequence: whoever applies a design needs DCIM write rights in the target
+sites. Where planners should not have those, apply belongs to operators or to
+automation with its own token.
 
 ## Cleanup, and the one irreversible step
 

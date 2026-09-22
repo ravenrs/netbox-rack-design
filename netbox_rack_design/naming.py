@@ -197,15 +197,25 @@ _FORMATTER = _SafeFormatter()
 class _DesignProxy:
     """
     Wraps a ``Design`` so ``{design.name}`` resolves to its ``title`` (the model
-    has no ``name`` field). All other attributes delegate to the real design.
+    has no ``name`` field), and ``{design.site}`` resolves to the PLACEMENT's
+    own site (PLAN-multi-site.md M4), not ``Design.site`` (the back-compat
+    property, ``None`` once a design has more than one -- M2). For a one-site
+    design the two agree, so the token is unchanged there; for a multi-site
+    design it now equals the target rack's site instead of going blank.
+    All other attributes delegate to the real design.
     """
 
-    def __init__(self, design):
+    def __init__(self, design, placement):
         self._design = design
+        self._placement = placement
 
     @property
     def name(self):
         return self._design.title
+
+    @property
+    def site(self):
+        return self._placement.site
 
     def __getattr__(self, item):
         return getattr(self._design, item)
@@ -239,14 +249,19 @@ class _AddDevicePlaceholderProxy:
 
     @property
     def site(self):
-        # Design.site, not rack.site: for an 'add', the target rack (real or
-        # planned) is always validated to be in the design's own site
-        # (DesignPlacement._validate_tray_target / _validate_planned_rack_target
-        # in models.py both raise otherwise), so the two are guaranteed to
-        # agree for any placement that reaches naming. Reading it off the
-        # design avoids re-deriving it from whichever of the two rack FKs
-        # happens to be set.
-        return self._placement.design.site
+        # PLAN-multi-site.md M4: a multi-site design has no single ``.site``
+        # (the back-compat property is ``None`` once a design has more than
+        # one), so this reads the PLACEMENT's own site first -- the target
+        # rack's (real or planned) site, validated to be one of the design's
+        # sites by DesignPlacement._validate_tray_target /
+        # _validate_planned_rack_target in models.py. Falls back to the
+        # design's own site when the placement has no target yet (the
+        # preview-name action builds a scratch, not-yet-targeted placement
+        # from a partial request body) -- ``None`` for a multi-site design
+        # there, same as before this phase. For a one-site design this is
+        # exactly the site the old ``design.site`` read resolved to either
+        # way, so the token is unchanged there.
+        return self._placement.site or self._placement.design.site
 
     @property
     def rack(self):
@@ -372,7 +387,7 @@ def _build_context(placement, n):
     else:
         device = _AddDevicePlaceholderProxy(placement)
     return {
-        "design": _DesignProxy(placement.design),
+        "design": _DesignProxy(placement.design, placement),
         "device": device,
         "n": n,
     }
@@ -615,14 +630,23 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
     """
     Read-only collision check: return ``True`` if ``name`` is already used in
     ``site`` -- either by a real ``dcim.Device``, or by another
-    ``DesignPlacement.proposed_name`` equal to ``name`` whose design targets
-    the same site (excluding ``exclude_placement``).
+    ``DesignPlacement.proposed_name`` equal to ``name`` whose own PLACEMENT
+    site (``DesignPlacement.site``, PLAN-multi-site.md M4) is ``site``
+    (excluding ``exclude_placement``). Callers always pass a placement's own
+    site (``placement.site``), never a design's -- a multi-site design has one
+    name space per site, so scoping by the design alone would treat a
+    same-named placement in a DIFFERENT one of the design's sites as a
+    collision.
 
     Performs no writes. Callers use this to WARN; the engine never resolves the
     collision itself.
 
-    Two queries, regardless of how many designs or how deep any chain is: a
-    ``dcim.Device`` existence check, and a ``DesignPlacement`` existence check.
+    ``design__sites=site`` narrows the candidate rows to designs that touch
+    ``site`` at all (one query, indexed) before the exact per-placement site
+    (which may differ from ``site`` for a multi-site design) is checked in
+    Python -- a placement's own site has no scalar column to filter by
+    directly (it is a property derived from whichever of ``target_rack`` /
+    ``target_planned_rack`` / a planned chassis parent is set).
     """
     if not name or site is None:
         return False
@@ -634,10 +658,12 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
     if Device.objects.filter(site=site, name=name).exists():
         return True
 
-    qs = DesignPlacement.objects.filter(design__site=site, proposed_name=name)
+    qs = DesignPlacement.objects.filter(design__sites=site, proposed_name=name).select_related(
+        "target_rack", "target_planned_rack__location",
+    )
     if exclude_placement is not None and exclude_placement.pk:
         qs = qs.exclude(pk=exclude_placement.pk)
-    return qs.exists()
+    return any(placement.site == site for placement in qs)
 
 
 def effective_name(placement):

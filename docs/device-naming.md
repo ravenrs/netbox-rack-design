@@ -43,6 +43,11 @@ model objects** — not flat aliases. Available roots:
 Traversal is safe: a missing attribute renders as an empty string and never
 raises.
 
+**Multi-site designs:** `{design.site.name}` resolves to the target rack's site
+on a multi-site design (same as `{device.site.name}`), ensuring device names
+stay unique within each site's namespace. On a single-site design it behaves
+unchanged.
+
 ```python
 "naming_template": "{design.name}-{device.site.name}-{device.role.name}-{n}"
 # -> "Migration-AMS1-Server-3"

@@ -28,8 +28,8 @@ from utilities.testing import APITestCase
 
 from .. import views
 from ..api.views import parse_rack_id, parse_real_rack_id, resolve_rack_from_id
-from ..models import Design, DesignPlacement, PlannedRack
-from .utils import create_dcim_environment
+from ..models import DesignPlacement, PlannedRack
+from .utils import create_dcim_environment, make_design
 
 
 class ParseRackIdTest(TestCase):
@@ -116,7 +116,7 @@ class EditorContextRackKeyTest(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.rack = env["racks"][0]
-        cls.design = Design.objects.create(title="RK editor design", site=cls.site)
+        cls.design = make_design(title="RK editor design", site=cls.site)
         cls.design.racks.add(cls.rack)
 
     def test_project_rack_bundle_emits_namespaced_id(self):
@@ -136,7 +136,7 @@ class SaveLayoutDualFormTest(APITestCase):
         cls.racks = env["racks"]
         cls.device_type = env["device_type"]
         cls.device_role = env["device_role"]
-        cls.design = Design.objects.create(title="RK save-layout design", site=cls.site)
+        cls.design = make_design(title="RK save-layout design", site=cls.site)
 
     def _url(self, design):
         return reverse(
@@ -215,7 +215,7 @@ class RecomputeDistributionDualFormTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.rack = env["racks"][0]
-        cls.design = Design.objects.create(title="RK recompute design", site=cls.site)
+        cls.design = make_design(title="RK recompute design", site=cls.site)
 
     def _url(self):
         return reverse(

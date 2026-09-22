@@ -17,9 +17,9 @@ from django.test import TestCase, override_settings
 
 from .. import naming_example
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignPlacement, PlannedRack
+from ..models import DesignPlacement, PlannedRack
 from ..naming import generate_name
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 def planned_rack_script_fn(placement):
@@ -59,7 +59,7 @@ class NamingPlannedRackTestCase(TestCase):
             name="Planned Rack 1", u_height=42, location=cls.location,
         )
 
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
 
         # 'add' into a PLANNED rack -- the primary case D29 exists for.
         cls.p_add_planned = DesignPlacement.objects.create(

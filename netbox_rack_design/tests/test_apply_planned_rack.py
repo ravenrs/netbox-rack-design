@@ -23,8 +23,8 @@ from users.models import User
 
 from .. import apply
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignPlacement, PlannedRack
-from .utils import create_dcim_environment
+from ..models import DesignPlacement, PlannedRack
+from .utils import create_dcim_environment, make_design
 
 
 class PlannedRackApplyTestCase(TestCase):
@@ -43,7 +43,7 @@ class PlannedRackApplyTestCase(TestCase):
         )
 
     def _design(self, title="Plan"):
-        return Design.objects.create(title=title, site=self.site)
+        return make_design(title=title, site=self.site)
 
     def _approve(self, design):
         design.status = DesignStatusChoices.STATUS_APPROVED

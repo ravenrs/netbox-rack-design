@@ -10,7 +10,7 @@ from dcim.api.serializers import (
     SiteSerializer,
 )
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
-from dcim.models import Rack
+from dcim.models import Rack, Site
 from netbox.api.fields import SerializedPKRelatedField
 from netbox.api.serializers import BaseModelSerializer, NetBoxModelSerializer, WritableNestedSerializer
 from rest_framework import serializers
@@ -258,7 +258,18 @@ class DesignSerializer(NetBoxModelSerializer):
         required=False,
         many=True,
     )
-    site = SiteSerializer(nested=True)
+    # M9 (PLAN-multi-site.md): a design covers one or more sites. Writable-M2M
+    # nested (same pattern as ``racks``/``depends_on`` above): brief Site
+    # representations on read, a list of Site PKs on write. ``Design.clean()``
+    # is the real "at least one" enforcement point (M1); the serializer also
+    # rejects an empty list itself so an API client gets a clear 400 rather
+    # than discovering the model-level error only after a save attempt.
+    sites = SerializedPKRelatedField(
+        queryset=Site.objects.all(),
+        serializer=SiteSerializer,
+        nested=True,
+        many=True,
+    )
     group = NestedDesignGroupSerializer(required=False, allow_null=True)
     root = NestedDesignSerializer(required=False, allow_null=True)
     based_on = NestedDesignSerializer(required=False, allow_null=True)
@@ -277,13 +288,26 @@ class DesignSerializer(NetBoxModelSerializer):
     class Meta:
         model = Design
         fields = (
-            "id", "url", "display", "title", "site", "status", "summary", "link",
+            "id", "url", "display", "title", "sites", "status", "summary", "link",
             "version", "root", "based_on", "sequence", "depends_on", "racks",
             "planned_racks", "group",
             "description", "comments", "is_frozen", "tags", "custom_fields",
             "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "title", "version", "status")
+
+    def validate(self, data):
+        # M1 (PLAN-multi-site.md): at least one site is required. ``Design.clean()``
+        # enforces this too, but a plain ``ModelSerializer`` for an M2M field does
+        # not run the model's ``clean()`` by default the way it does for scalar
+        # fields, so this is the actual guard for an API write; the model-level
+        # check remains for non-API callers (management commands, scripts).
+        sites = data.get("sites")
+        if sites is not None and len(sites) == 0:
+            raise serializers.ValidationError(
+                {"sites": "A design must have at least one site."}
+            )
+        return data
 
 
 class NestedDesignPlacementSerializer(WritableNestedSerializer):
@@ -688,7 +712,11 @@ class PreviewNameSerializer(serializers.Serializer):
     device = serializers.IntegerField(required=False, allow_null=True)
     device_role = serializers.IntegerField(required=False, allow_null=True)
     tenant = serializers.IntegerField(required=False, allow_null=True)
-    target_rack = serializers.IntegerField(required=False, allow_null=True)
+    # A rack KEY, not strictly a pk: the editor sends what it drew the tile
+    # in -- a bare pk (or "r:<pk>") for a real rack, "p:<pk>" for a planned
+    # one (D28/D31, frame.js serverRackId). A planned rack names its tiles
+    # like any other, so this must accept both spellings.
+    target_rack = serializers.CharField(required=False, allow_null=True)
     target_position = serializers.DecimalField(
         max_digits=4, decimal_places=1, required=False, allow_null=True
     )
@@ -749,9 +777,16 @@ class FavoriteSetWriteSerializer(serializers.Serializer):
 
 
 class DesignRackScopeSerializer(serializers.Serializer):
-    """Body for POST .../designs/<pk>/add-rack/ and .../remove-rack/."""
+    """Body for POST .../designs/<pk>/add-rack/ and .../remove-rack/.
 
-    rack_id = serializers.IntegerField()
+    ``rack_id`` is a rack KEY, not strictly an integer: a bare pk (or
+    ``"r:<pk>"``) is a real ``dcim.Rack``, ``"p:<pk>"`` a ``PlannedRack``
+    (``parse_rack_id``, D28). remove-rack accepts both -- a planned rack has
+    to be detachable from a design, since deleting one is refused while any
+    design still plans across it. add-rack resolves real racks only.
+    """
+
+    rack_id = serializers.CharField()
     # remove-rack only: must be true to confirm a destructive removal when the
     # rack still has planned placements targeting it. Ignored by add-rack.
     confirm = serializers.BooleanField(required=False, default=False)

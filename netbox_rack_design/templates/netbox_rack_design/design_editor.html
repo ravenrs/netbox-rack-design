@@ -104,10 +104,11 @@
            data-create-planned-rack-url="{{ create_planned_rack_url }}"
            data-csrf-token="{{ csrf_token }}">
 
-        {# T1.5 "Create rack" dialog data: the design's own site's locations, #}
-        {# read once by editor_panels.js to populate the dialog's plain      #}
-        {# <select> (no TomSelect -- the modal is built at open time, same   #}
-        {# as dialogs.js's own dialogs).                                     #}
+        {# T1.5 "Create rack" dialog data (PLAN-multi-site.md M8): the         #}
+        {# design's own sites, each with its own locations, read once by      #}
+        {# editor_panels.js to populate the dialog's plain <select>s (no      #}
+        {# TomSelect -- the modal is built at open time, same as dialogs.js's #}
+        {# own dialogs). One entry -> the dialog shows a read-only Site chip. #}
         {{ site_locations|json_script:"rd-site-locations" }}
 
         {# ---- Persistent conflicts panel (PLAN-design-chains.md §8.3) ---- #}
@@ -414,6 +415,15 @@
               </div>
               <div class="card-body">
                 <div class="mb-2">
+                  <label class="form-label small mb-1" for="id_add_site">{% trans "Site" %}</label>
+                  {# A live picker over every site, never a fixed chip (user  #}
+                  {# ruling 2026-09-22): it is the filter for Location/Rack,  #}
+                  {# and picking a site the design does not cover yet is how  #}
+                  {# a design becomes multi-site -- add-rack widens it. A     #}
+                  {# design with exactly one site starts pre-filled with it.  #}
+                  {{ add_rack_form.add_site }}
+                </div>
+                <div class="mb-2">
                   <label class="form-label small mb-1" for="id_add_location">{% trans "Location" %}</label>
                   {{ add_rack_form.add_location }}
                 </div>
@@ -467,7 +477,16 @@
               <div class="list-group list-group-flush nbx-rd-design-racks-list" id="nbx-rd-design-racks-list">
                 {% for row in scoped_rack_rows %}
                 <div class="list-group-item nbx-rd-design-rack-row{% if row.hidden %} is-hidden{% endif %}"
-                     data-rd-rack-row="{{ row.rack.pk }}">
+                     data-rd-rack-row="{{ row.rack.pk }}"{% if row.planned %} data-rd-rack-planned="1"{% endif %}>
+                  {% if row.planned %}
+                  {# A planned rack has no per-user hide toggle (D25): it has  #}
+                  {# no device row, so there is nothing to hide FROM. The      #}
+                  {# badge keeps the row's shape and says why.                 #}
+                  <span class="nbx-rd-visi-toggle text-warning"
+                        title="{% trans 'This rack does not exist in NetBox yet' %}">
+                    <i class="mdi mdi-progress-wrench" aria-hidden="true"></i>
+                  </span>
+                  {% else %}
                   <button type="button"
                           class="nbx-rd-visi-toggle"
                           data-rd-visi-toggle="{{ row.rack.pk }}"
@@ -476,13 +495,15 @@
                           aria-label="{% trans 'Toggle visibility' %}">
                     <i class="mdi {% if row.hidden %}mdi-eye-off-outline{% else %}mdi-eye-outline{% endif %}" aria-hidden="true"></i>
                   </button>
+                  {% endif %}
                   <span class="nbx-rd-design-rack-name">
                     {{ row.rack.name }}
+                    {% if row.planned %}<span class="badge text-bg-warning ms-1">{% trans "Planned" %}</span>{% endif %}
                     {% if row.rack.location %}<span class="text-muted small">· {{ row.rack.location }}</span>{% endif %}
                   </span>
                   <button type="button"
                           class="nbx-rd-design-rack-remove"
-                          data-rd-remove-rack="{{ row.rack.pk }}"
+                          data-rd-remove-rack="{{ row.key }}"
                           data-rack-name="{{ row.rack.name }}"
                           title="{% trans 'Remove from design' %}"
                           aria-label="{% trans 'Remove from design' %}">

@@ -30,10 +30,10 @@ from django.test import TestCase
 
 from ..choices import DesignPlacementKindChoices
 from ..distribution import generate_distribution_status
-from ..models import Design, DesignPlacement, PlannedRack
+from ..models import DesignPlacement, PlannedRack
 from ..projection import ProjectedSlotState, project_rack
 from ..rackinfo import is_planned, rack_desc_units, rack_devices, rack_starting_unit, rack_units
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 class ProjectRackPlannedRackTestCase(TestCase):
@@ -48,7 +48,7 @@ class ProjectRackPlannedRackTestCase(TestCase):
         cls.planned_rack = PlannedRack.objects.create(
             name="Planned R1", location=cls.location, u_height=6,
         )
-        cls.design = Design.objects.create(title="Greenfield plan", site=cls.site)
+        cls.design = make_design(title="Greenfield plan", site=cls.site)
 
     def test_project_rack_does_not_raise(self):
         # The core crash this task fixes: project_rack used to call
@@ -197,7 +197,7 @@ class DistributionPlannedRackTestCase(TestCase):
         cls.planned_rack = PlannedRack.objects.create(
             name="Planned R1", location=cls.location, u_height=6,
         )
-        cls.design = Design.objects.create(title="Greenfield plan", site=cls.site)
+        cls.design = make_design(title="Greenfield plan", site=cls.site)
 
     def test_distribution_status_not_failed_for_planned_rack(self):
         result = project_rack(self.design, self.planned_rack)

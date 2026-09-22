@@ -39,8 +39,9 @@ from django.test import TestCase
 from utilities.testing import create_test_device
 
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignApply, DesignPlacement, PlannedRack
+from ..models import DesignApply, DesignPlacement, PlannedRack
 from ..projection import ProjectedSlotState, project_rack
+from .utils import make_design
 
 
 class ProjectRackPkCollisionTestCase(TestCase):
@@ -59,8 +60,8 @@ class ProjectRackPkCollisionTestCase(TestCase):
             position=1, face="front",
         )
 
-        cls.design = Design.objects.create(title="Design PK collision", site=cls.site)
-        cls.other_design = Design.objects.create(title="Apply owner", site=cls.site)
+        cls.design = make_design(title="Design PK collision", site=cls.site)
+        cls.other_design = make_design(title="Apply owner", site=cls.site)
 
         # An UNRELATED real placement in real_rack -- must never surface when
         # projecting the pk-colliding PlannedRack.

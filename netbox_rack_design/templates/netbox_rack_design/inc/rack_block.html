@@ -171,8 +171,8 @@
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
-                   {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
-                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% elif slot.placement.target_planned_rack %} data-moved-to="{{ slot.placement.target_planned_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %}{% with mf=slot|slot_moved_from %}{% if mf %} data-moved-from="{{ mf }}"{% endif %}{% endwith %}{% endif %}
+                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% with mt=slot|slot_moved_to %}{% if mt %} data-moved-to="{{ mt }}"{% endif %}{% endwith %}{% endif %}
                    {# Chain provenance/conflict (PLAN-design-chains.md §8.4): flags on top of the existing state, never a new state. Coded defensively -- the server agent is landing these keys concurrently. #}
                    {% if slot.inherited %}data-inherited="1"{% endif %}
                    {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
@@ -271,8 +271,8 @@
                    {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
-                   {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · U{{ slot.u_position|floatformat:'0' }}"{% endif %}
-                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% if slot.placement.target_rack %} data-moved-to="{{ slot.placement.target_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% elif slot.placement.target_planned_rack %} data-moved-to="{{ slot.placement.target_planned_rack.name }}{% if slot.placement.target_position %} · U{{ slot.placement.target_position|floatformat:'0' }}{% else %} · tray{% endif %}"{% endif %}{% endif %}
+                   {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %}{% with mf=slot|slot_moved_from %}{% if mf %} data-moved-from="{{ mf }}"{% endif %}{% endwith %}{% endif %}
+                   {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% with mt=slot|slot_moved_to %}{% if mt %} data-moved-to="{{ mt }}"{% endif %}{% endwith %}{% endif %}
                    {% if slot.inherited %}data-inherited="1"{% endif %}
                    {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
                    {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
@@ -358,7 +358,7 @@
                {% with tn=slot|slot_tenant_name %}{% if tn %}data-tenant-name="{{ tn }}"{% endif %}{% endwith %}
                    {# Config-declared planning fields, resolved for EVERY slot state: the placement override if set, else the real device custom field. JSON [[label, value], ...]. #}
                    {% with pj=slot|slot_planning %}{% if pj %}data-planning="{{ pj }}"{% endif %}{% endwith %}
-               {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %} data-moved-to="{{ rack.name }} · tray"{% endif %}
+               {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %}{% with mf=slot|slot_moved_from %}{% if mf %} data-moved-from="{{ mf }}"{% endif %}{% endwith %}{% endif %}
                {% if slot.inherited %}data-inherited="1"{% endif %}
                {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
                {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}

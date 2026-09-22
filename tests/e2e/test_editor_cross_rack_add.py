@@ -101,7 +101,7 @@ class EditorCrossRackAddTestCase(unittest.TestCase):
         cls.rack_a, cls.rack_b = pair[0]["id"], pair[1]["id"]
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-xrack-add-{uuid.uuid4().hex[:8]}",
-            "site": pair[0]["site"]["id"], "status": "draft",
+            "sites": [pair[0]["site"]["id"]], "status": "draft",
             "racks": [cls.rack_a, cls.rack_b],
         })
         cls._design_id = design["id"]
@@ -127,7 +127,7 @@ class EditorCrossRackAddTestCase(unittest.TestCase):
             site = devs[next(iter(by_rack[pick]))]["site"]["id"]
             chassis_design = cls._api("POST", "/api/plugins/rack-design/designs/", {
                 "title": f"e2e-xchassis-add-{uuid.uuid4().hex[:8]}",
-                "site": site, "status": "draft", "racks": [pick],
+                "sites": [site], "status": "draft", "racks": [pick],
             })
             cls._chassis_design_id = chassis_design["id"]
             cls.chassis_url = (

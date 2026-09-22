@@ -29,8 +29,14 @@
           <td>{{ object.title }}</td>
         </tr>
         <tr>
-          <th scope="row">{% trans "Site" %}</th>
-          <td>{{ object.site|linkify }}</td>
+          <th scope="row">{% trans "Sites" %}</th>
+          <td>
+            {% for site in object.sites.all %}
+              {{ site|linkify }}{% if not forloop.last %}, {% endif %}
+            {% empty %}
+              {{ ''|placeholder }}
+            {% endfor %}
+          </td>
         </tr>
         <tr>
           <th scope="row">{% trans "Status" %}</th>

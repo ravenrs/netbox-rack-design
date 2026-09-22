@@ -33,13 +33,13 @@ from utilities.testing import APITestCase, create_test_device
 
 from ..choices import DesignPlacementKindChoices, TemplatePlacementAnchorChoices
 from ..models import (
-    Design,
     DesignPlacement,
     PlannedRack,
     Template,
     TemplateGroup,
     TemplatePlacement,
 )
+from .utils import make_design
 
 
 def _url(design):
@@ -63,7 +63,7 @@ class PreviewTemplateTest(APITestCase):
         cls.device_role = DeviceRole.objects.create(name="PT Role", slug="pt-role")
         cls.tenant = Tenant.objects.create(name="PT Tenant", slug="pt-tenant")
 
-        cls.design = Design.objects.create(title="PT Design", site=cls.site)
+        cls.design = make_design(title="PT Design", site=cls.site)
 
         # The worked example from PLAN-templates.md Sec 3: a 5-item top-anchored
         # ToR (patch panel, organizer, switch, organizer, switch), each 1U.
@@ -269,7 +269,7 @@ class PreviewTemplateTest(APITestCase):
     def test_peer_design_claim_does_not_block(self):
         self._add_permission()
         rack = Rack.objects.create(name="PT Rack Peer", site=self.site, u_height=5)
-        peer = Design.objects.create(title="Peer design", site=self.site)
+        peer = make_design(title="Peer design", site=self.site)
         DesignPlacement.objects.create(
             design=peer, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=self.device_type, target_rack=rack,

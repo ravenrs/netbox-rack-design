@@ -120,7 +120,7 @@ class EditorPduPowerTestCase(unittest.TestCase):
             "role_slug": "pdu", "manufacturer": mfr["id"], "site": site["id"],
         }
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"pp-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"pp-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls._rack_id = rack["id"]
         cls.editor_url = (

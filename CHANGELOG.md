@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-site designs.** A design can now span multiple sites, allowing a
+  single plan to coordinate racks across a campus or multiple halls. Every
+  site-scoped rule ("rack must be in the design's site") now reads "in one of
+  the design's sites". Device-name uniqueness and naming family counters are
+  scoped per rack's site, so a multi-site design can use the same name in
+  different sites. Chains require parent and child to share at least one site.
+  Editor's Add rack panel now uses Site → Location → Rack hierarchy, with Site
+  selector listing only the design's sites. REST and GraphQL expose a `sites`
+  nested list replacing `site`. See [docs/design-chains.md](docs/design-chains.md)
+  and [docs/device-naming.md](docs/device-naming.md).
 - **Planned racks.** A design can now plan into a rack that does not exist in
   NetBox yet — press **Create rack** in the editor, give it a name, a U
   height and a location, and it behaves like any other rack in the design
@@ -58,6 +68,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`sequence` is now a global number.** Previously a `Design.sequence` was
+  per-site, which only made sense when a design had a single site. Now a
+  global gapped sequence orders all designs (`("sequence", "pk")`), and each
+  design may span multiple sites. Existing designs keep their site-local
+  sequence number as their new global sequence.
+- **Design chains now require shared sites, not identical sites.** When a
+  design is based on another (a child on a parent), parent and child must
+  share at least one site for the chain to project. A `Derive design` or
+  `New version` copies the parent's sites into the child. See
+  [docs/design-chains.md](docs/design-chains.md).
 - **One live power recompute per drag.** The editor used to ask the server
   to recompute the per-bank distribution on every row a dragged tile
   crossed. The request is now withheld until the tile is dropped (or the
@@ -93,6 +113,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attributed by its **new** U position, ignoring stale cabling; a device left
   in place still keeps its real cabled bank. See
   [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md) §2.2.
+
+### Upgrade notes
+
+- **Migration `0023_design_sites`** converts the single `Design.site` FK into
+  a many-to-many `Design.sites` relationship, backfilling each existing
+  design with its single site. The migration is reversible.
+- **REST and GraphQL clients:** the `site` field on `GET /api/plugins/rack-design/designs/`
+  is replaced by `sites` (a nested list of site objects, also in brief mode).
+  Filters `site_id` and `site` (slug) remain functional as multi-value filters
+  over the sites. API clients sending `site: <id>` must send `sites: [<id>, …]`.
+- **NetBox object-permission constraints** written as `{"site__slug": "…"}` for
+  designs must be changed to `{"sites__slug": "…"}`. Update any automation or
+  external systems that check design permissions using object-permission syntax.
 
 ## [0.32.1] - 2026-09-11
 

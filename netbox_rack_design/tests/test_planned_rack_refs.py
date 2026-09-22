@@ -21,8 +21,8 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignPlacement, PlannedRack, resolve_rack
-from .utils import create_dcim_environment
+from ..models import DesignPlacement, PlannedRack, resolve_rack
+from .utils import create_dcim_environment, make_design
 
 
 class DesignPlacementTargetPlannedRackTestCase(TestCase):
@@ -33,7 +33,7 @@ class DesignPlacementTargetPlannedRackTestCase(TestCase):
         cls.device_type = env["device_type"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
         cls.location = Location.objects.create(
             name="Location 1", slug="location-1", site=cls.site
         )
@@ -148,7 +148,7 @@ class DesignPlannedRacksTestCase(TestCase):
         cls.planned_rack = PlannedRack.objects.create(name="Planned R1", location=cls.location)
 
     def test_planned_rack_in_same_site_validates(self):
-        design = Design.objects.create(title="Scoped", site=self.site)
+        design = make_design(title="Scoped", site=self.site)
         design.planned_racks.add(self.planned_rack)
         design.full_clean()  # must not raise
 
@@ -158,7 +158,7 @@ class DesignPlannedRacksTestCase(TestCase):
             name="Other Location", slug="other-location", site=other_site
         )
         foreign_planned = PlannedRack.objects.create(name="Foreign", location=other_location)
-        design = Design.objects.create(title="Scoped", site=self.site)
+        design = make_design(title="Scoped", site=self.site)
         design.planned_racks.add(foreign_planned)
         with self.assertRaises(ValidationError) as ctx:
             design.full_clean()
@@ -173,7 +173,7 @@ class ResolveRackForPlacementTestCase(TestCase):
         cls.device_type = env["device_type"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
         cls.location = Location.objects.create(
             name="Location 1", slug="location-1", site=cls.site
         )

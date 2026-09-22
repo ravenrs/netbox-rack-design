@@ -593,18 +593,34 @@ import { initRack, setRackHooks } from "rd/rack.js";
         looksLikePdu: looksLikePdu,
         showPduPowerDialog: showPduPowerDialog,
         showRackPowerDialog: showRackPowerDialog,
+        // The Racks panel (editor_panels.js) has to RELOAD to show a rack
+        // block the server renders -- which is a navigation, and would throw
+        // away unsaved edits behind the browser's own "Reload site?" prompt.
+        // These three let it ask the same three-choice question this file
+        // already asks for the layer switch, in the app's own words.
+        hasUnsavedChanges: function () { return !!changesMade; },
+        discardUnsavedChanges: function () { changesMade = false; },
+        promptUnsavedChanges: showUnsavedChangesDialog,
+        // Save, then go to `redirectTo` (pass the current URL to reload).
+        saveLayout: doSave,
     };
 
     // The Phase 1 read-model (spec §2), its invariant checks and rdCanPlaceAt
     // now live in editor/model.js -- imported at the top of this file. They
     // closed over nothing here, so the move was a pure lift.
 
-    // ---- Layer switch with unsaved changes (spec §10.3) --------------------
-    // The rack view and the chassis layer are separate pages, so switching is a
-    // navigation and would drop unsaved edits. The browser's beforeunload guard
-    // below catches that, but a bare "leave site?" is a poor answer when the
-    // user's actual intent is "keep my work". Offer the three real choices.
-    function showSaveBeforeSwitchDialog(targetUrl) {
+    // ---- Unsaved changes, in the app's own words (spec §10.3) --------------
+    // Anything that leaves or re-renders this page would drop unsaved edits:
+    // the layer switch (a navigation to the chassis page) and the Racks
+    // panel's add/create/remove (which reload so the server can render the
+    // new block). The browser's beforeunload guard below catches both, but
+    // "Reload site? Changes you made may not be saved." is a poor answer
+    // when the user's actual intent is "keep my work" -- and its Reload
+    // button silently discards it. Offer the three real choices instead.
+    //
+    // opts: {body, saveLabel, discardLabel, onSave, onDiscard}
+    function showUnsavedChangesDialog(opts) {
+        var o = opts || {};
         var overlay = document.createElement("div");
         overlay.className = "modal fade nbx-rd-switch-modal";
         overlay.setAttribute("tabindex", "-1");
@@ -615,14 +631,15 @@ import { initRack, setRackHooks } from "rd/rack.js";
             + '<h5 class="modal-title">Unsaved changes</h5>'
             + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
             + "</div>"
-            + '<div class="modal-body"><p>You have unsaved changes. '
-            + "Save them before switching view?</p></div>"
+            + '<div class="modal-body"><p>' + (o.body
+                || "You have unsaved changes. Save them before switching view?")
+            + "</p></div>"
             + '<div class="modal-footer">'
             + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
             + '<button type="button" class="btn btn-sm btn-outline-danger" data-rd-switch-discard>'
-            + "Discard</button>"
+            + (o.discardLabel || "Discard") + "</button>"
             + '<button type="button" class="btn btn-sm btn-primary" data-rd-switch-save>'
-            + "Save and switch</button>"
+            + (o.saveLabel || "Save and switch") + "</button>"
             + "</div></div></div>";
         document.body.appendChild(overlay);
 
@@ -633,15 +650,24 @@ import { initRack, setRackHooks } from "rd/rack.js";
         overlay.querySelector("[data-rd-switch-discard]").addEventListener("click", function () {
             changesMade = false;                 // disarm beforeunload
             if (modal) { modal.hide(); }
-            window.location.href = targetUrl;
+            if (o.onDiscard) { o.onDiscard(); }
         });
         overlay.querySelector("[data-rd-switch-save]").addEventListener("click", function () {
             if (modal) { modal.hide(); }
-            doSave(targetUrl);
+            if (o.onSave) { o.onSave(); }
         });
-        if (modal) { modal.show(); } else if (window.confirm("Save your changes before switching?")) {
-            doSave(targetUrl);
+        if (modal) {
+            modal.show();
+        } else if (window.confirm(o.body || "Save your changes first?")) {
+            if (o.onSave) { o.onSave(); }
         }
+    }
+
+    function showSaveBeforeSwitchDialog(targetUrl) {
+        showUnsavedChangesDialog({
+            onDiscard: function () { window.location.href = targetUrl; },
+            onSave: function () { doSave(targetUrl); },
+        });
     }
 
     document.addEventListener("click", function (event) {

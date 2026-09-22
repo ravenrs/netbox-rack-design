@@ -6,6 +6,7 @@ repo_name: ravenrs/netbox-rack-design
 nav:
   - Home: index.md
   - Guides:
+      - The editor: editor.md
       - Device naming: device-naming.md
       - Power distribution: power-distribution.md
       - Planning fields: planning-fields.md

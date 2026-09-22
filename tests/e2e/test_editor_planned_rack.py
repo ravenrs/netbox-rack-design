@@ -116,7 +116,7 @@ class EditorCreatePlannedRackTestCase(unittest.TestCase):
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-planned-rack-{uuid.uuid4().hex[:8]}",
-            "site": cls.site_id, "status": "draft",
+            "sites": [cls.site_id], "status": "draft",
         })
         cls._design_id = design["id"]
         cls.editor_url = (

@@ -69,6 +69,11 @@ is where one device departs from the rail default. The button is filled in when
 the tile carries at least one value, so a glance across the rack shows what is
 still blank.
 
+The same dialog carries a **Power** block — one select per PSU, `Automatic`
+or a specific feed leg — which is not a planning field but the placement's
+`preferred_feed_legs`; see
+[Power distribution](power-distribution.md#bank-zones-and-choosing-a-feed-per-device).
+
 A removal takes none of this: re-attributing gear you are decommissioning means
 nothing, so `remove` is rejected.
 

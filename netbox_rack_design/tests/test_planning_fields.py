@@ -20,6 +20,7 @@ from utilities.testing import APITestCase, create_test_user
 from .. import planning_fields
 from ..choices import DesignPlacementKindChoices
 from ..models import Design, DesignPlacement
+from .utils import make_design
 
 # One deployment's declaration: two scalar fields, one of them a rail default.
 # The cf names live ONLY here, exactly as they would in a real PLUGINS_CONFIG.
@@ -188,7 +189,7 @@ class ReadPlanningFieldsTest(TestCase):
         # "design.cf.project" walks to ``obj.design`` first -- what lets a
         # descriptor's ``source``/``target`` root itself at a related object
         # through this ONE resolver instead of a second, subtly different one.
-        design = Design.objects.create(
+        design = make_design(
             title="D-cf", site=self.site, custom_field_data={"project": "IDS-1000"},
         )
         self.assertEqual(planning_fields.resolve_source(design, "cf.project"), "IDS-1000")
@@ -218,7 +219,7 @@ class _PlacementFixture:
         )
         DeviceRole.objects.create(name="Server-pf", slug="server-pf")
         rack = Rack.objects.create(name="R-pf", site=site, u_height=42)
-        design = Design.objects.create(title="D-pf", site=site)
+        design = make_design(title="D-pf", site=site)
         design.racks.add(rack)
         return site, device_type, rack, design
 
@@ -444,7 +445,7 @@ class SlotPlanningFilterTest(TestCase):
         )
         cls.device.custom_field_data["acme_hw_class"] = "storage"
         cls.device.save()
-        cls.design = Design.objects.create(title="D-hc", site=cls.site)
+        cls.design = make_design(title="D-hc", site=cls.site)
         cls.design.racks.add(cls.rack)
 
     @override_settings(PLUGINS_CONFIG=_cfg())

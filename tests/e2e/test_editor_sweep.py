@@ -614,7 +614,7 @@ class EditorSweepTestCase(unittest.TestCase):
         cls._front_obstacle_reject_row = 8  # spans [8,16) -> includes rows 12-13
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"sweep-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"sweep-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -650,7 +650,7 @@ class EditorSweepTestCase(unittest.TestCase):
             cls._front_obstacle_reject_row = None  # no known obstacle on this path
             design = cls._api("POST", "/api/plugins/rack-design/designs/", {
                 "title": f"sweep-fallback-{uuid.uuid4()}",
-                "site": rack["site"]["id"], "racks": [rid]})
+                "sites": [rack["site"]["id"]], "racks": [rid]})
             cls._design_id = design["id"]
             cls.editor_url = (
                 f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rid}/")

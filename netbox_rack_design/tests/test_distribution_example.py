@@ -48,8 +48,9 @@ from ..distribution_example import (
     read_planning_field,
     read_planning_fields,
 )
-from ..models import Design, DesignPlacement, DesignPowerFeed
+from ..models import DesignPlacement, DesignPowerFeed
 from ..projection import project_rack
+from .utils import make_design
 
 
 def _script_cfg(**planning_fields):
@@ -110,7 +111,7 @@ class DistributionExampleTestCase(TestCase):
             phase=PowerFeedPhaseChoices.PHASE_SINGLE,
         )
 
-        cls.design = Design.objects.create(title="D Plan", site=cls.site)
+        cls.design = make_design(title="D Plan", site=cls.site)
 
         # Two REAL PDUs cabled to the two feeds -- feed/leg comes from the
         # binding (the native cable path), not from the PDU's name.

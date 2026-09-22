@@ -103,7 +103,15 @@ def _norm_pos(value):
 
 
 class _RackSlotTarget:
-    """A slot on a rack face: the classic target (spec §2 RackFaceContainer)."""
+    """A slot on a rack face: the classic target (spec §2 RackFaceContainer).
+
+    ``rack`` is EITHER a real ``dcim.Rack`` or a ``PlannedRack`` (T1.4e) --
+    exactly one of ``target_rack``/``target_planned_rack`` is ever written,
+    the other always explicitly cleared, mirroring how the bay fields below
+    are cleared. Distinguished by ``isinstance``, not a caller-passed flag:
+    there is exactly one place a target is chosen (this class), so there is
+    exactly one place that needs to know which table ``rack`` came from.
+    """
 
     is_bay = False
 
@@ -111,8 +119,10 @@ class _RackSlotTarget:
         self.rack = rack
         self.u_position = u_position
         self.face = face
+        self.is_planned = isinstance(rack, PlannedRack)
         self.fields = {
-            "target_rack": rack,
+            "target_rack": None if self.is_planned else rack,
+            "target_planned_rack": rack if self.is_planned else None,
             "target_position": u_position,
             "target_face": face,
             # A rack slot is not a bay: clear any bay target a matched placement
@@ -124,6 +134,11 @@ class _RackSlotTarget:
 
     def at_rest(self, device, full_depth=False):
         """The device already physically sits exactly here."""
+        if self.is_planned:
+            # A PlannedRack is not a real dcim.Rack -- no real Device can
+            # already be sitting in a rack that does not exist yet, so this
+            # is never "at rest" and always needs a placement.
+            return False
         if device is None or device.rack_id != self.rack.pk:
             return False
         if _norm_pos(device.position) != _norm_pos(self.u_position):
@@ -141,6 +156,12 @@ class _BayTarget:
     A child device may carry neither a rack position nor a face (core forbids
     both), so the target is a real ``dcim.DeviceBay`` or -- when the chassis is
     itself planned -- the chassis's own placement.
+
+    ``rack`` is EITHER a real ``dcim.Rack`` or a ``PlannedRack`` (T1.4e),
+    same as ``_RackSlotTarget`` -- a blade's chassis may itself be planned
+    into a rack that does not exist yet, so the FK it writes must follow the
+    same real-xor-planned split, or assigning a ``PlannedRack`` to the
+    ``target_rack`` FK would raise ``ValueError`` at save time.
     """
 
     is_bay = True
@@ -151,8 +172,10 @@ class _BayTarget:
         self.parent_placement = parent_placement
         self.u_position = None
         self.face = ""
+        self.is_planned = isinstance(rack, PlannedRack)
         self.fields = {
-            "target_rack": rack,
+            "target_rack": None if self.is_planned else rack,
+            "target_planned_rack": rack if self.is_planned else None,
             "target_position": None,
             "target_face": "",
             "target_bay": target_bay,
@@ -702,9 +725,13 @@ def _occupied_from_elevation(elevation):
 
 
 class DesignViewSet(NetBoxModelViewSet):
+    # "site" -> "sites" (PLAN-multi-site.md M1): a M2M is prefetched, not
+    # select_related.
     queryset = Design.objects.select_related(
-        "site", "group", "root", "based_on"
-    ).prefetch_related("placements", "depends_on", "racks", "planned_racks", "tags")
+        "group", "root", "based_on"
+    ).prefetch_related(
+        "placements", "depends_on", "racks", "planned_racks", "tags", "sites",
+    )
     serializer_class = DesignSerializer
     filterset_class = filtersets.DesignFilterSet
 
@@ -824,7 +851,6 @@ class DesignViewSet(NetBoxModelViewSet):
             ("device", Device),
             ("device_role", DeviceRole),
             ("tenant", Tenant),
-            ("target_rack", Rack),
         ):
             pk_value = data.get(field)
             if pk_value is None:
@@ -838,6 +864,24 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
             resolved[field] = obj
 
+        # The rack is a KEY, and it may name a PLANNED rack: the editor sends
+        # whichever rack it drew the tile in, and a tile dropped into a
+        # planned rack must be named by the same engine as any other (it
+        # used to 400 here and land unnamed -- user report 2026-09-22).
+        resolved["target_rack"] = None
+        resolved["target_planned_rack"] = None
+        rack_key_value = data.get("target_rack")
+        if rack_key_value not in (None, ""):
+            try:
+                kind, _pk, rack_obj = resolve_rack_from_id(rack_key_value)
+            except ValueError as exc:
+                return Response({"target_rack": [str(exc)]},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if rack_obj is None:
+                return Response({"target_rack": ["Rack does not exist."]},
+                                status=status.HTTP_400_BAD_REQUEST)
+            resolved["target_planned_rack" if kind == "p" else "target_rack"] = rack_obj
+
         placement = DesignPlacement(
             design=design,
             kind=data.get("kind", DesignPlacementKindChoices.KIND_ADD),
@@ -846,6 +890,7 @@ class DesignViewSet(NetBoxModelViewSet):
             device_role=resolved["device_role"],
             tenant=resolved["tenant"],
             target_rack=resolved["target_rack"],
+            target_planned_rack=resolved["target_planned_rack"],
             target_position=data.get("target_position"),
             target_face=data.get("target_face") or "",
         )
@@ -856,8 +901,13 @@ class DesignViewSet(NetBoxModelViewSet):
         placement._rd_pending_names = data.get("pending_names") or []
 
         name = naming.generate_name(placement, index=data.get("index"))
+        # M4: scope by the PLACEMENT's own site, not the design's (a
+        # multi-site design has one name space per site) -- falling back to
+        # the design's own site when no target_rack was supplied (this is a
+        # scratch, not-yet-targeted placement, so `placement.site` is None),
+        # matching a one-site design's pre-P1 behaviour.
         exists = naming.name_exists_in_site(
-            name, design.site, exclude_placement=None
+            name, placement.site or design.site, exclude_placement=None
         )
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
@@ -1526,8 +1576,9 @@ class DesignViewSet(NetBoxModelViewSet):
                     placement._rd_pending_names = pending
                     name = naming.generate_name(placement, index=counter)
                     pending.append(name)
+                    # M4: the placement's own site, not the design's.
                     exists = naming.name_exists_in_site(
-                        name, design.site, exclude_placement=None
+                        name, placement.site, exclude_placement=None
                     )
 
                     entry = {
@@ -1577,8 +1628,9 @@ class DesignViewSet(NetBoxModelViewSet):
                         blade_placement._rd_pending_names = pending
                         blade_name = naming.generate_name(blade_placement, index=counter)
                         pending.append(blade_name)
+                        # M4: the placement's own site, not the design's.
                         blade_exists = naming.name_exists_in_site(
-                            blade_name, design.site, exclude_placement=None
+                            blade_name, blade_placement.site, exclude_placement=None
                         )
                         blades.append({
                             "template_placement": blade.pk,
@@ -1645,22 +1697,29 @@ class DesignViewSet(NetBoxModelViewSet):
 
         body = DesignRackScopeSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        rack_id = body.validated_data["rack_id"]
+        try:
+            rack_pk = parse_real_rack_id(body.validated_data["rack_id"])
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-        rack = Rack.objects.filter(pk=rack_id).first()
+        rack = Rack.objects.filter(pk=rack_pk).first()
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Same-site rule, identical to Design.clean(): a scoped rack must belong
-        # to the design's site.
-        if rack.site_id != design.site_id:
-            return Response(
-                {"rack_id": ["This rack is not in the design's site."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # A rack of a site this design does not cover yet WIDENS it (M8, user
+        # ruling 2026-09-22): a design covers one or more sites (M1), and the
+        # editor's Add-rack panel is the only place a planner reaches for a
+        # rack -- so picking one across the hall is how a design becomes
+        # multi-site. Refusing here (as this did, mirroring Design.clean())
+        # left the editor able to work only inside the sites the design was
+        # created with, which is the same single-site world M1 replaced.
+        # Frozen designs never get here: is_frozen is checked above, so an
+        # approved plan's scope still cannot move.
+        if not design.sites.filter(pk=rack.site_id).exists():
+            design.sites.add(rack.site)
         design.racks.add(rack)
 
         rack_ids = list(design.racks.values_list("pk", flat=True))
@@ -1719,13 +1778,12 @@ class DesignViewSet(NetBoxModelViewSet):
                 {"location_id": ["Location does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Same-site rule as add-rack / DesignPowerFeed.planned_rack /
-        # DesignRackPower.planned_rack: a design can only plan into its own site.
-        if location.site_id != design.site_id:
-            return Response(
-                {"location_id": ["This location is not in the design's site."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Planning a rack into a site this design does not cover yet widens
+        # it, exactly as add-rack does (M8, user ruling 2026-09-22) -- the
+        # two are the same gesture, one for a rack that exists and one for a
+        # rack that does not. A frozen design is refused before this point.
+        if not design.sites.filter(pk=location.site_id).exists():
+            design.sites.add(location.site)
 
         # D4's whole point: (location, name) is this model's identity, and
         # checking it here -- rather than catching the UniqueConstraint's
@@ -1813,15 +1871,21 @@ class DesignViewSet(NetBoxModelViewSet):
 
         body = DesignRackScopeSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        rack_id = body.validated_data["rack_id"]
         confirm = body.validated_data["confirm"]
-
-        rack = Rack.objects.filter(pk=rack_id).first()
+        # Both kinds of rack: a PLANNED rack must be detachable too, because
+        # deleting one is refused while any design still plans across it and
+        # the refusal tells the planner to remove it from each design's scope
+        # first -- which nothing could do (user report 2026-09-22).
+        try:
+            kind, _pk, rack = resolve_rack_from_id(body.validated_data["rack_id"])
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        is_planned = kind == "p"
 
         # Removing a rack from scope DELETES the placements targeting it
         # (below), so a frozen design must reject this before anything is
@@ -1830,7 +1894,11 @@ class DesignViewSet(NetBoxModelViewSet):
             return _reject_frozen_design(design)
 
         # Placements made meaningless by the removal: strictly those targeting R.
-        affected = DesignPlacement.objects.filter(design=design, target_rack=rack)
+        # A planned rack is targeted through its own FK (models.py D27).
+        affected = DesignPlacement.objects.filter(
+            design=design,
+            **({"target_planned_rack": rack} if is_planned else {"target_rack": rack}),
+        )
 
         if affected.exists() and not confirm:
             return Response(
@@ -1860,7 +1928,16 @@ class DesignViewSet(NetBoxModelViewSet):
         with transaction.atomic():
             deleted_count = affected.count()
             affected.delete()
-            design.racks.remove(rack)
+            if is_planned:
+                # Detach only: a PlannedRack is shared between designs (D3/D6)
+                # and outlives every one of them -- deleting it here would
+                # take it out from under any other design planning the same
+                # future rack. Its own delete view is where that is decided.
+                design.planned_racks.remove(rack)
+                DesignPowerFeed.objects.filter(design=design, planned_rack=rack).delete()
+                DesignRackPower.objects.filter(design=design, planned_rack=rack).delete()
+            else:
+                design.racks.remove(rack)
 
         rack_ids = list(design.racks.values_list("pk", flat=True))
         return Response(
@@ -2128,9 +2205,9 @@ class DesignViewSet(NetBoxModelViewSet):
         if target is None:
             return Response({"rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        # Same-site rule, mirroring add-rack / rack-power / planned-feed.
-        if target.site_id != design.site_id:
-            return Response({"rack_id": ["This rack is not in the design's site."]},
+        # Same-site rule, mirroring add-rack / rack-power / planned-feed (M3).
+        if not design.sites.filter(pk=target.site_id).exists():
+            return Response({"rack_id": ["This rack is not in one of the design's sites."]},
                             status=status.HTTP_400_BAD_REQUEST)
         source = Rack.objects.filter(pk=source_id).first() if source_id is not None else None
         if source is None:
@@ -2341,11 +2418,11 @@ class DesignViewSet(NetBoxModelViewSet):
                     {"rack_id": ["Rack does not exist."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            # Same-site rule, mirroring add-rack/rack_power: a planned feed can
-            # only be defined for a rack in the design's own site.
-            if rack.site_id != design.site_id:
+            # Same-site rule, mirroring add-rack/rack_power (M3): a planned
+            # feed can only be defined for a rack in one of the design's sites.
+            if not design.sites.filter(pk=rack.site_id).exists():
                 return Response(
-                    {"rack_id": ["This rack is not in the design's site."]},
+                    {"rack_id": ["This rack is not in one of the design's sites."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2473,6 +2550,12 @@ class DesignViewSet(NetBoxModelViewSet):
         # delete the design's stale move/remove rows for those racks afterwards.
         desired_placement_ids = set()
         submitted_rack_ids = set()
+        # PlannedRack pks this submit addressed, kept in a SEPARATE set from
+        # submitted_rack_ids (T1.4e / D28): dcim.Rack and PlannedRack keep
+        # separate pk sequences, so folding the two together could make an
+        # unrelated real rack that happens to share a pk look "submitted"
+        # below.
+        submitted_planned_rack_ids = set()
         # Devices the payload explicitly mentioned, per submitted rack. This is the
         # ONLY basis on which we may delete a pre-existing move/remove placement:
         # the user must have actually addressed that device in the editor (e.g.
@@ -2503,13 +2586,13 @@ class DesignViewSet(NetBoxModelViewSet):
         # ``with transaction.atomic()`` below, which -- unlike the read-only
         # recompute path -- would COMMIT whatever had already been written for
         # earlier racks in this same submit instead of rejecting the whole
-        # request. ``rack_id`` accepts a legacy bare integer or ``"r:<pk>"``
-        # (real rack) for one release; a well-formed ``"p:<pk>"`` key is
-        # treated like an unknown pk below (this action does not write a
-        # planned rack's placements yet -- D25/T1.4d), not as malformed.
+        # request. ``rack_id`` accepts a legacy bare integer, ``"r:<pk>"``
+        # (real rack), or ``"p:<pk>"`` (planned rack) -- only ``parse_rack_id``
+        # (kind + pk, no DB lookup) runs here, so a malformed key still fails
+        # fast without touching the database.
         try:
             parsed_rack_ids = [
-                (rack_data, parse_real_rack_id(rack_data["rack_id"]))
+                (rack_data, *parse_rack_id(rack_data["rack_id"]))
                 for rack_data in data["racks"]
             ]
         except ValueError as exc:
@@ -2517,32 +2600,29 @@ class DesignViewSet(NetBoxModelViewSet):
 
         try:
             with transaction.atomic():
-                for rack_data, rack_id in parsed_rack_ids:
-                    if rack_id is None:
-                        # A well-formed "p:<pk>" key: not malformed, just not
-                        # a real rack this action can place anything in yet.
-                        # NEVER added to submitted_rack_ids -- dcim.Rack and
-                        # PlannedRack keep separate pk sequences (D28), so
-                        # doing so could make an unrelated real rack that
-                        # happens to share this pk look "submitted" below.
-                        errors.append({
-                            "rack_id": rack_data["rack_id"],
-                            "u_position": None,
-                            "device_id": None,
-                            "detail": "Rack does not exist.",
-                        })
-                        continue
-                    submitted_rack_ids.add(rack_id)
-                    try:
-                        rack = Rack.objects.get(pk=rack_id)
-                    except Rack.DoesNotExist:
-                        errors.append({
-                            "rack_id": rack_id,
-                            "u_position": None,
-                            "device_id": None,
-                            "detail": "Rack does not exist.",
-                        })
-                        continue
+                for rack_data, kind, rack_pk in parsed_rack_ids:
+                    if kind == "p":
+                        rack = PlannedRack.objects.filter(pk=rack_pk).first()
+                        if rack is None:
+                            errors.append({
+                                "rack_id": rack_data["rack_id"],
+                                "u_position": None,
+                                "device_id": None,
+                                "detail": "Rack does not exist.",
+                            })
+                            continue
+                        submitted_planned_rack_ids.add(rack_pk)
+                    else:
+                        rack = Rack.objects.filter(pk=rack_pk).first()
+                        if rack is None:
+                            errors.append({
+                                "rack_id": rack_data["rack_id"],
+                                "u_position": None,
+                                "device_id": None,
+                                "detail": "Rack does not exist.",
+                            })
+                            continue
+                        submitted_rack_ids.add(rack_pk)
 
                     items = []
                     for face_key in ("front", "rear", "other"):
@@ -2601,13 +2681,24 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
                 deleted_any = False
                 for p in stale:
-                    rack_id = p.target_rack_id or (
-                        p.device.rack_id if p.device_id else None
-                    )
+                    # A planned-rack move/remove is scoped against
+                    # submitted_planned_rack_ids, kept separate from the real
+                    # rack set for the same D28 reason it is tracked
+                    # separately above. A real device can never be "at rest"
+                    # in a rack that does not exist yet, so a remove's
+                    # fallback to the device's own (real) rack never applies
+                    # here.
+                    if p.target_planned_rack_id:
+                        rack_submitted = p.target_planned_rack_id in submitted_planned_rack_ids
+                    else:
+                        rack_id = p.target_rack_id or (
+                            p.device.rack_id if p.device_id else None
+                        )
+                        rack_submitted = rack_id in submitted_rack_ids
                     # Require BOTH: the placement's rack was submitted AND its
                     # device was explicitly named in the payload for that submit.
                     if (
-                        rack_id in submitted_rack_ids
+                        rack_submitted
                         and p.device_id is not None
                         and p.device_id in submitted_device_ids
                     ):
@@ -3765,7 +3856,6 @@ class DesignViewSet(NetBoxModelViewSet):
 
         child = Design(
             title=title,
-            site=design.site,
             group=design.group,
             based_on=design,
             status=DesignStatusChoices.STATUS_DRAFT,
@@ -3773,6 +3863,13 @@ class DesignViewSet(NetBoxModelViewSet):
         with transaction.atomic():
             child.full_clean()
             child.save()
+            # M5: a derived design starts with the parent's own sites (a
+            # design cannot be created with zero sites -- Design.clean()
+            # enforces "at least one", M1 -- and copying the parent's is what
+            # guarantees the `based_on` "shares at least one site" check
+            # below passes for a freshly derived child). Must run after
+            # save() (M2M needs a pk), same as `racks` below.
+            child.sites.set(design.sites.all())
             # G6: seed the child's rack scope with a SNAPSHOT of the parent's
             # racks at derive time, not a live link -- a rack added to the
             # parent later does NOT retroactively appear on the child, which

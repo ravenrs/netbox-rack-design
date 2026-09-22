@@ -84,8 +84,14 @@ You don't have to build a template placement-by-placement. Two sources:
 - **From a design.** In the design editor, use **Save as template** on a
   rack to capture its current, projected layout — including real devices
   already standing there, not only the placements this design itself added.
-- **From a real rack in DCIM.** Point extraction at any existing rack and it
-  reads the actual devices, roles and tenants sitting in it.
+- **From a real rack in DCIM.** This one has no button yet — it is an API
+  action. `POST /api/plugins/rack-design/templates/from-rack/` with
+  `{"name": "Standard ToR", "rack_id": 3457, "description": "…",
+  "group_id": null}` reads the actual devices, roles and tenants sitting in
+  the rack (blades in a chassis included) and returns `{"template_id",
+  "placement_count", "warnings"}`. The design-side twin is
+  `POST …/templates/from-design/` with `design` and `rack` (a real rack pk or a
+  `planned:<pk>` key), which is what **Save as template** calls.
 
 Either way, extraction has to decide anchor and order for you, and it does
 this by peeling contiguous runs of devices from the physical top and the

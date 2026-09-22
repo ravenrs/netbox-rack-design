@@ -88,15 +88,76 @@
         }).catch(function () { return fallback; });
     }
 
+    // ---- Reload without losing unsaved work --------------------------------
+    // Add/Create/Remove rack all need the server to re-render the workspace,
+    // so they reload the page. A reload with unsaved edits pending hits
+    // editor.js's beforeunload guard, and the planner is handed the
+    // browser's "Reload site? Changes you made may not be saved." -- whose
+    // Reload button throws the work away. Ask the editor's own three-choice
+    // question first instead, and do the request only once the answer is in
+    // (so "Cancel" never leaves a rack added that the page cannot show).
+    //
+    // `request` returns a Promise that resolves truthy when the change was
+    // made; it is called after the user has chosen.
+    function withUnsavedGuard(opts, request) {
+        var ed = window.NbxRdEditor || {};
+        function run(then) {
+            return request().then(function (ok) { if (ok) { then(); } });
+        }
+        if (!ed.hasUnsavedChanges || !ed.hasUnsavedChanges()) {
+            return run(function () { window.location.reload(); });
+        }
+        ed.promptUnsavedChanges({
+            body: opts.body,
+            saveLabel: opts.saveLabel,
+            discardLabel: opts.discardLabel,
+            onSave: function () {
+                // Request first, then save-and-reload in one step: the save
+                // navigates to the current URL, which renders the new block.
+                run(function () { ed.saveLayout(window.location.href); });
+            },
+            onDiscard: function () {
+                ed.discardUnsavedChanges();
+                run(function () { window.location.reload(); });
+            },
+        });
+        return null;
+    }
+
+    // The removal has already happened server-side by the time we reload, so
+    // this variant does not offer "Cancel" as a way out of the change -- only
+    // a way to keep or drop the unsaved LAYOUT edits the reload would take
+    // with it. Dismissing the dialog leaves the page as it is; the rack is
+    // gone from the design either way and shows on the next reload.
+    function reloadAfterRackChange() {
+        var ed = window.NbxRdEditor || {};
+        if (!ed.hasUnsavedChanges || !ed.hasUnsavedChanges()) {
+            window.location.reload();
+            return;
+        }
+        ed.promptUnsavedChanges({
+            body: "The rack was removed from the design. Reloading shows the "
+                + "result -- save your unsaved edits first?",
+            saveLabel: "Save and reload",
+            discardLabel: "Discard and reload",
+            onSave: function () { ed.saveLayout(window.location.href); },
+            onDiscard: function () { window.location.reload(); },
+        });
+    }
+
     function rackBlock(rackId) {
         // T1.5c (PLAN-templates.md D31): this panel is real-rack-only by
         // construction (scoped_rack_rows in views.py is built from
         // design.racks only, never design.planned_racks -- D25), so rackId
-        // here is always a bare real dcim.Rack pk. rack_block.html's
-        // data-rack-id is now the DOM's colon-free rack_key() form
-        // ("r-<pk>"/"p-<pk>", templatetags/rack_design.py rack_dom_id), so
-        // the lookup needs the same "r-" prefix to still match.
-        return root.querySelector('.nbx-rd-rack-block[data-rack-id="r-' + rackId + '"]');
+        // here is always a bare real dcim.Rack pk -- and that is exactly
+        // what rack_block.html writes into data-rack-id for a real rack.
+        // rack_dom_id (templatetags/rack_design.py) prefixes ONLY a planned
+        // rack ("p-<pk>") and keeps a real rack's pk bare, so this lookup
+        // must NOT prefix. It briefly did ("r-<pk>"), which matched nothing:
+        // the toggle then updated the row and the database but never the
+        // rack, so hiding appeared to do nothing and a rack that loaded
+        // hidden could not be shown again without a reload.
+        return root.querySelector('.nbx-rd-rack-block[data-rack-id="' + rackId + '"]');
     }
     function rackRow(rackId) {
         return root.querySelector('[data-rd-rack-row="' + rackId + '"]');
@@ -130,6 +191,48 @@
     }
 
     // ========================================================================
+    // 0. Add-rack panel: Site -> Location -> Rack chain (PLAN-multi-site.md
+    // M8). NetBox's own DynamicTomSelect already reloads/clears
+    // add_location's and add_rack's OPTIONS whenever add_site changes (the
+    // query_params={"site_id": "$add_site", ...} declared on forms.py's
+    // DesignEditorAddRackForm wire that up for free -- see
+    // project-static/src/select/classes/dynamicTomSelect.ts:handleEvent,
+    // which clears the dependent field's selection and re-fetches on any
+    // dependency's native `change` event). What NetBox does NOT do is toggle
+    // the whole-field `disabled` state, so that is the only thing this panel
+    // wires up by hand: Location/Rack stay disabled until a site is chosen,
+    // and re-disable whenever the site changes (their selection is already
+    // cleared for us by the above).
+    // ========================================================================
+    (function setupAddRackSiteChain() {
+        var siteSel = document.getElementById("id_add_site");
+        var locationSel = document.getElementById("id_add_location");
+        var rackSel = document.getElementById("id_add_rack");
+        if (!siteSel || !locationSel || !rackSel) { return; }
+
+        function setEnabled(select, enabled) {
+            if (select.tomselect) {
+                if (enabled) { select.tomselect.enable(); } else { select.tomselect.disable(); }
+            } else {
+                select.disabled = !enabled;
+            }
+        }
+
+        function syncDependents() {
+            var hasSite = !!siteSel.value;
+            setEnabled(locationSel, hasSite);
+            setEnabled(rackSel, hasSite);
+        }
+
+        // Reflect the server-rendered state immediately (a one-site design
+        // starts pre-filled + enabled; a multi-site one starts empty +
+        // disabled -- forms.DesignEditorAddRackForm.__init__), then keep it in
+        // sync as the user changes the site.
+        syncDependents();
+        siteSel.addEventListener("change", syncDependents);
+    })();
+
+    // ========================================================================
     // 1. Add rack
     // ========================================================================
     (function setupAddRack() {
@@ -144,22 +247,28 @@
                 return;
             }
             btn.setAttribute("disabled", "disabled");
-            postJSON(API + "designs/" + designId + "/add-rack/", { rack_id: rackId })
-                .then(function (response) {
-                    if (response.status === 200) {
-                        // The server re-renders the new block on reload.
-                        window.location.reload();
-                        return;
-                    }
-                    btn.removeAttribute("disabled");
-                    readError(response, "The rack could not be added.").then(function (msg) {
-                        toast("danger", "Could not add rack", msg);
+            // The server re-renders the workspace with the new block, so this
+            // reloads -- ask about unsaved edits first (withUnsavedGuard).
+            withUnsavedGuard({
+                body: "Adding a rack reloads the editor. Save your changes first?",
+                saveLabel: "Save and add",
+                discardLabel: "Discard and add",
+            }, function () {
+                return postJSON(API + "designs/" + designId + "/add-rack/", { rack_id: rackId })
+                    .then(function (response) {
+                        if (response.status === 200) { return true; }
+                        btn.removeAttribute("disabled");
+                        readError(response, "The rack could not be added.").then(function (msg) {
+                            toast("danger", "Could not add rack", msg);
+                        });
+                        return false;
+                    })
+                    .catch(function (err) {
+                        btn.removeAttribute("disabled");
+                        toast("danger", "Error", String(err));
+                        return false;
                     });
-                })
-                .catch(function (err) {
-                    btn.removeAttribute("disabled");
-                    toast("danger", "Error", String(err));
-                });
+            });
         });
     })();
 
@@ -180,20 +289,36 @@
         var createUrl = root.getAttribute("data-create-planned-rack-url");
         if (!createUrl) { return; }
 
-        // Read once: the design's own site's locations (views._design_editor_
-        // context's `site_locations`), the same same-site scope add_rack_form
-        // enforces for a real rack.
+        // Read once: the design's own sites, each with its own locations
+        // (views._design_editor_context's `site_locations`, PLAN-multi-site.md
+        // M8), the same same-site-in-design scope add_rack_form enforces for a
+        // real rack.
         var locationsEl = document.getElementById("rd-site-locations");
-        var locations = [];
+        var siteGroups = [];
         if (locationsEl) {
             try {
-                locations = JSON.parse(locationsEl.textContent) || [];
+                siteGroups = JSON.parse(locationsEl.textContent) || [];
             } catch (e) {
-                locations = [];
+                siteGroups = [];
             }
         }
+        var singleSite = siteGroups.length === 1 ? siteGroups[0] : null;
 
-        function optionsHtml() {
+        function locationsForSite(siteId) {
+            var group = siteGroups.filter(function (g) {
+                return String(g.site_id) === String(siteId);
+            })[0];
+            return group ? group.locations : [];
+        }
+
+        function siteOptionsHtml() {
+            return siteGroups.map(function (g) {
+                return '<option value="' + g.site_id + '">' + g.site + "</option>";
+            }).join("");
+        }
+
+        function locationOptionsHtml(siteId) {
+            var locations = siteId ? locationsForSite(siteId) : [];
             if (!locations.length) {
                 return '<option value="">(no locations in this site)</option>';
             }
@@ -223,10 +348,24 @@
                 + '<input type="number" class="form-control form-control-sm nbx-rd-create-rack-height" value="42" min="1">'
                 + "</div>"
                 + '<div class="mb-2">'
+                + '<label class="form-label small mb-1">Site</label>'
+                + (singleSite
+                    ? '<div class="form-control form-control-sm bg-body-tertiary nbx-rd-create-rack-site-chip" '
+                      + 'data-rd-create-rack-site-value="' + singleSite.site_id + '">'
+                      + '<i class="mdi mdi-map-marker-outline" aria-hidden="true"></i> ' + singleSite.site
+                      + "</div>"
+                    : '<select class="form-select form-select-sm nbx-rd-create-rack-site">'
+                      + '<option value="">Choose a site…</option>'
+                      + siteOptionsHtml()
+                      + "</select>")
+                + "</div>"
+                + '<div class="mb-2">'
                 + '<label class="form-label small mb-1">Location</label>'
-                + '<select class="form-select form-select-sm nbx-rd-create-rack-location">'
+                + '<select class="form-select form-select-sm nbx-rd-create-rack-location"'
+                + (singleSite ? "" : " disabled")
+                + ">"
                 + '<option value="">Choose a location…</option>'
-                + optionsHtml()
+                + (singleSite ? locationOptionsHtml(singleSite.site_id) : "")
                 + "</select>"
                 + "</div>"
                 + '<div class="text-danger small nbx-rd-create-rack-error" style="display:none"></div>'
@@ -240,6 +379,8 @@
 
             var nameInput = overlay.querySelector(".nbx-rd-create-rack-name");
             var heightInput = overlay.querySelector(".nbx-rd-create-rack-height");
+            var siteSelect = overlay.querySelector(".nbx-rd-create-rack-site");
+            var siteChip = overlay.querySelector(".nbx-rd-create-rack-site-chip");
             var locationSelect = overlay.querySelector(".nbx-rd-create-rack-location");
             var errorEl = overlay.querySelector(".nbx-rd-create-rack-error");
             var submitBtn = overlay.querySelector("[data-rd-create-rack-submit]");
@@ -247,6 +388,27 @@
             function showError(msg) {
                 errorEl.textContent = msg;
                 errorEl.style.display = "";
+            }
+
+            // The chosen (or pre-selected, single-site) site id -- read from
+            // either the live <select> or the read-only chip's data attribute.
+            function currentSiteId() {
+                if (siteChip) { return siteChip.getAttribute("data-rd-create-rack-site-value"); }
+                return siteSelect ? siteSelect.value : "";
+            }
+
+            // Multi-site design: Location is empty + disabled until a site is
+            // chosen, then filtered to just that site's locations, and cleared
+            // again on every site change -- the same Site -> Location gating
+            // the Add-rack panel does with its own (TomSelect-backed) fields.
+            if (siteSelect) {
+                siteSelect.addEventListener("change", function () {
+                    var siteId = siteSelect.value;
+                    locationSelect.innerHTML = '<option value="">Choose a location…</option>'
+                        + locationOptionsHtml(siteId);
+                    locationSelect.value = "";
+                    locationSelect.disabled = !siteId;
+                });
             }
 
             var ctor = (window.bootstrap && window.bootstrap.Modal) || window.Modal;
@@ -289,6 +451,13 @@
                     showError("U height must be a positive number.");
                     return;
                 }
+                // Site gates Location (M8): pick a site before a location can
+                // even be chosen (the multi-site case; a one-site design has
+                // its site fixed via the chip and needs no separate check).
+                if (!currentSiteId()) {
+                    showError("Site is required.");
+                    return;
+                }
                 // Location is MANDATORY (D4): (location, name) is this
                 // model's whole identity, matching dcim.Rack's own
                 // uniqueness constraint -- there is no such thing as a
@@ -299,23 +468,32 @@
                 }
 
                 submitBtn.setAttribute("disabled", "disabled");
-                postJSON(createUrl, { name: name, u_height: uHeight, location_id: locationId })
-                    .then(function (response) {
-                        if (response.status === 201) {
-                            // The server re-renders the new (badged) block on reload,
-                            // identical to Add rack's own success path above.
-                            window.location.reload();
-                            return;
-                        }
-                        submitBtn.removeAttribute("disabled");
-                        readError(response, "The rack could not be created.").then(function (msg) {
-                            showError(msg);
+                // Same reload contract as Add rack -- and the same question
+                // about unsaved edits before it.
+                withUnsavedGuard({
+                    body: "Creating a rack reloads the editor. Save your changes first?",
+                    saveLabel: "Save and create",
+                    discardLabel: "Discard and create",
+                }, function () {
+                    return postJSON(createUrl,
+                                    { name: name, u_height: uHeight, location_id: locationId })
+                        .then(function (response) {
+                            if (response.status === 201) {
+                                if (modal) { modal.hide(); }
+                                return true;
+                            }
+                            submitBtn.removeAttribute("disabled");
+                            readError(response, "The rack could not be created.").then(function (msg) {
+                                showError(msg);
+                            });
+                            return false;
+                        })
+                        .catch(function (err) {
+                            submitBtn.removeAttribute("disabled");
+                            showError(String(err));
+                            return false;
                         });
-                    })
-                    .catch(function (err) {
-                        submitBtn.removeAttribute("disabled");
-                        showError(String(err));
-                    });
+                });
             });
 
             if (modal) {
@@ -430,9 +608,13 @@
         }
 
         // ---- Remove from design (destructive; 409 two-step confirm) --------
-        function doRemove(rackId, confirmFlag) {
+        // `rackKey` is the namespaced id the row carries ("r:<pk>" for a real
+        // rack, "p:<pk>" for a planned one, D28) and goes to the server as-is
+        // -- the two kinds keep separate pk sequences, so a bare integer
+        // could name either rack.
+        function doRemove(rackKey, confirmFlag) {
             return postJSON(API + "designs/" + designId + "/remove-rack/", {
-                rack_id: parseInt(rackId, 10),
+                rack_id: String(rackKey),
                 confirm: !!confirmFlag,
             });
         }
@@ -440,7 +622,7 @@
         function onRemove(rackId, rackName) {
             doRemove(rackId, false).then(function (response) {
                 if (response.status === 200) {
-                    window.location.reload();
+                    reloadAfterRackChange();
                     return;
                 }
                 if (response.status === 409) {
@@ -458,7 +640,7 @@
                         if (!window.confirm(msg)) { return; }
                         doRemove(rackId, true).then(function (resp2) {
                             if (resp2.status === 200) {
-                                window.location.reload();
+                                reloadAfterRackChange();
                             } else {
                                 readError(resp2, "The rack could not be removed.").then(function (m) {
                                     toast("danger", "Could not remove rack", m);
@@ -624,9 +806,16 @@
                     writeStored();
                     window.dispatchEvent(new Event("resize"));
                 }
-                var loc = document.getElementById("id_add_location");
-                if (loc && loc.focus) {
-                    try { loc.focus(); } catch (e) { /* ignore */ }
+                // Focus the first field the planner still has to answer:
+                // Site when it is empty (nothing downstream is usable yet),
+                // otherwise Location -- a one-site design starts pre-filled,
+                // so landing on Site would make them tab past a decision
+                // that is already made. Site stays a live picker either way.
+                var site = document.getElementById("id_add_site");
+                var target = (site && !site.value)
+                    ? site : document.getElementById("id_add_location");
+                if (target && target.focus) {
+                    try { target.focus(); } catch (e) { /* ignore */ }
                 }
             });
         }

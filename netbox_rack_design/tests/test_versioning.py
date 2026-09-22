@@ -18,7 +18,7 @@ from extras.models import CustomField, Tag
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignApply, DesignPlacement, DesignPowerFeed, DesignRackPower
 from ..versioning import new_version
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 class NewVersionBasicsTestCase(TestCase):
@@ -47,7 +47,7 @@ class NewVersionBasicsTestCase(TestCase):
         leg_cf = CustomField.objects.create(name="leg", type="text", required=False)
         leg_cf.object_types.set([ObjectType.objects.get_for_model(DesignPowerFeed)])
 
-        cls.design = Design.objects.create(
+        cls.design = make_design(
             title="Plan", site=cls.site, summary="s", link="http://example.com/",
             description="d", comments="c",
             custom_field_data={"project": "IDS-1000"},
@@ -159,7 +159,7 @@ class NewVersionBasicsTestCase(TestCase):
         self.assertEqual(DesignApply.objects.filter(design=clone).count(), 0)
 
     def test_racks_and_depends_on_are_copied(self):
-        other_design = Design.objects.create(title="Dep", site=self.site)
+        other_design = make_design(title="Dep", site=self.site)
         self.design.depends_on.add(other_design)
 
         clone = new_version(self.design)
@@ -221,7 +221,7 @@ class NewVersionParentPlacementTestCase(TestCase):
             u_height=0, subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
         )
 
-        cls.design = Design.objects.create(title="Bay plan", site=cls.site)
+        cls.design = make_design(title="Bay plan", site=cls.site)
         cls.chassis_placement = DesignPlacement.objects.create(
             design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=cls.chassis_type, target_rack=cls.racks[0],
@@ -267,7 +267,7 @@ class NewVersionAncestorReferencesTestCase(TestCase):
             u_height=0, subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
         )
 
-        cls.parent_design = Design.objects.create(title="Parent", site=cls.site)
+        cls.parent_design = make_design(title="Parent", site=cls.site)
         cls.upstream_add = DesignPlacement.objects.create(
             design=cls.parent_design, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=cls.device_type, target_rack=cls.racks[0], target_position=5,
@@ -280,7 +280,7 @@ class NewVersionAncestorReferencesTestCase(TestCase):
         cls.parent_design.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent_design.save()
 
-        cls.child_design = Design.objects.create(
+        cls.child_design = make_design(
             title="Child", site=cls.site, based_on=cls.parent_design,
         )
         cls.child_move = DesignPlacement.objects.create(
@@ -316,7 +316,7 @@ class NewVersionNumberingTestCase(TestCase):
         cls.site = env["site"]
 
     def test_v1_source_clone_is_v2_rooted_at_v1(self):
-        v1 = Design.objects.create(title="Root", site=self.site)
+        v1 = make_design(title="Root", site=self.site)
         self.assertIsNone(v1.root)
 
         clone = new_version(v1)
@@ -324,7 +324,7 @@ class NewVersionNumberingTestCase(TestCase):
         self.assertEqual(clone.root_id, v1.pk)
 
     def test_v2_of_v2_is_v3_rooted_at_v1_not_v2(self):
-        v1 = Design.objects.create(title="Root", site=self.site)
+        v1 = make_design(title="Root", site=self.site)
         v2 = new_version(v1)
         self.assertEqual(v2.version, 2)
         self.assertEqual(v2.root_id, v1.pk)
@@ -345,7 +345,7 @@ class NewVersionAtomicityTestCase(TestCase):
         cls.racks = env["racks"]
         cls.device_type = env["device_type"]
 
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
         cls.p1 = DesignPlacement.objects.create(
             design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=cls.device_type, target_rack=cls.racks[0], target_position=1,

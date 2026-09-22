@@ -310,7 +310,7 @@ class EditorTrayTestCase(unittest.TestCase):
         cls._dt_id = dt["id"]
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"tray-{suffix}", "site": site["id"],
+            "title": f"tray-{suffix}", "sites": [site["id"]],
             "racks": [rack_with_tray["id"], rack_without_tray["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (

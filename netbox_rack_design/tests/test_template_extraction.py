@@ -38,7 +38,8 @@ from utilities.testing import APITestCase
 
 from .. import stamping
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, PlannedRack, Template
+from ..models import PlannedRack, Template
+from .utils import make_design
 
 
 def _from_design_url():
@@ -141,7 +142,7 @@ class TemplateExtractionTest(APITestCase):
             name="AlreadyThere", site=self.site, rack=rack, device_type=self.device_type,
             role=self.role_a, tenant=self.tenant, position=10, face="front",
         )
-        design = Design.objects.create(title="TE Design", site=self.site)
+        design = make_design(title="TE Design", site=self.site)
         design.racks.add(rack)
         from ..models import DesignPlacement
         DesignPlacement.objects.create(
@@ -176,7 +177,7 @@ class TemplateExtractionTest(APITestCase):
         self._add_perms()
         location = Location.objects.create(name="TE Loc", slug="te-loc", site=self.site)
         planned = PlannedRack.objects.create(name="TE Planned", location=location, u_height=10)
-        design = Design.objects.create(title="TE Planned Design", site=self.site)
+        design = make_design(title="TE Planned Design", site=self.site)
         design.planned_racks.add(planned)
 
         resp = self.client.post(
@@ -380,7 +381,7 @@ class TemplateExtractionTest(APITestCase):
 
     def test_from_design_unknown_rack_is_400(self):
         self._add_perms()
-        design = Design.objects.create(title="TE 400 Design", site=self.site)
+        design = make_design(title="TE 400 Design", site=self.site)
         resp = self.client.post(
             _from_design_url(),
             {"design": design.pk, "rack": "r:999999", "name": "Nope"},
@@ -390,7 +391,7 @@ class TemplateExtractionTest(APITestCase):
 
     def test_from_design_malformed_rack_key_is_400(self):
         self._add_perms()
-        design = Design.objects.create(title="TE 400b Design", site=self.site)
+        design = make_design(title="TE 400b Design", site=self.site)
         resp = self.client.post(
             _from_design_url(),
             {"design": design.pk, "rack": "not-a-key", "name": "Nope"},

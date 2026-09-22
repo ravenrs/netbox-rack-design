@@ -542,8 +542,10 @@ def plan(design, user):
     # will be freshly CREATED contributes nothing here, since it cannot
     # possibly have any devices in it yet.
     target_rack_ids |= {rack.pk for rack in rack_by_planned_id.values() if rack is not None}
+    # M7: every device in ANY of the design's sites, not just a single
+    # ``design.site`` (a multi-site design has more than one).
     devices_in_scope = list(
-        Device.objects.filter(Q(site_id=design.site_id) | Q(rack_id__in=target_rack_ids))
+        Device.objects.filter(Q(site_id__in=design.sites.values_list("pk", flat=True)) | Q(rack_id__in=target_rack_ids))
         .exclude(pk__in=own_planned_ids)
         .select_related("device_type")
     )
@@ -665,11 +667,21 @@ def plan(design, user):
                 delete_device_ids.add(row.device_id)
 
     # --- 4. dcim permissions, checked for exactly what the run requires -----
-    need_add = bool(result.created)
-    if need_add and not user.has_perm("dcim.add_device"):
-        result.problems.append(
-            f"You do not have permission to create devices in site {design.site}."
-        )
+    # M7: the message names the DEVICE's own (target rack's) site, not the
+    # design's -- a multi-site design's ``site`` property is None, and even
+    # for a one-site design the rack's site is what actually matters. One
+    # problem per created entry (mirrors the change/delete loops below),
+    # falling back to the still-planned rack's location's site for an entry
+    # whose real rack does not exist yet (a greenfield PlannedRack).
+    if result.created and not user.has_perm("dcim.add_device"):
+        for entry in result.created:
+            if entry.rack is not None:
+                site = entry.rack.site
+            else:
+                site = entry.placement.target_planned_rack.location.site
+            result.problems.append(
+                f"You do not have permission to create devices in site {site}."
+            )
     if change_device_ids:
         allowed = set(
             Device.objects.restrict(user, "change")
@@ -685,8 +697,10 @@ def plan(design, user):
             for device_id in missing:
                 device = by_id.get(device_id)
                 name = device.name if device else device_id
+                # M7: the device's OWN site, not the design's.
+                site = device.site if device else None
                 result.problems.append(
-                    f"You do not have permission to modify device {name} in site {design.site}."
+                    f"You do not have permission to modify device {name} in site {site}."
                 )
     if delete_device_ids:
         allowed = set(
@@ -699,8 +713,10 @@ def plan(design, user):
             for device_id in missing:
                 entry = by_id.get(device_id)
                 name = entry.device_name if entry else device_id
+                # M7: the device's OWN site, not the design's.
+                site = entry.device.site if entry and entry.device is not None else None
                 result.problems.append(
-                    f"You do not have permission to delete device {name} in site {design.site}."
+                    f"You do not have permission to delete device {name} in site {site}."
                 )
 
     return result
@@ -789,8 +805,10 @@ def _execute(design, user, result):
 
     for entry in result.created:
         device = Device(
+            # M7: the device's site is its RACK's site (patched above to a
+            # real rack for every entry by this point), not the design's.
             name=entry.name, device_type=entry.device_type, role=entry.role,
-            tenant=entry.tenant, site=design.site, rack=entry.rack,
+            tenant=entry.tenant, site=entry.rack.site, rack=entry.rack,
             position=entry.position, face=entry.face or "", status=entry.status,
         )
         device.full_clean()

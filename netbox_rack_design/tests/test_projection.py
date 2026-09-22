@@ -34,7 +34,7 @@ from ..projection import (
     project_chassis,
     project_rack,
 )
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 class DisplacedProjectionTestCase(TestCase):
@@ -50,7 +50,7 @@ class DisplacedProjectionTestCase(TestCase):
         cls.racks = env["racks"]
         cls.devices = env["devices"]  # Device 1 @ Rack1/U1/front, Device 2 @ U2/front
         cls.device_type = env["device_type"]
-        cls.design = Design.objects.create(title="Displace plan", site=cls.site)
+        cls.design = make_design(title="Displace plan", site=cls.site)
 
     def test_ghost_overlapped_by_add_is_marked_displaced(self):
         # Device 1 moves U1 -> U10; a new add lands on the vacated U1.
@@ -174,7 +174,7 @@ class DisplayLabelProjectionTestCase(TestCase):
         cls.racks = env["racks"]
         cls.devices = env["devices"]
         cls.device_type = env["device_type"]
-        cls.design = Design.objects.create(title="Rename plan", site=cls.site)
+        cls.design = make_design(title="Rename plan", site=cls.site)
 
     def test_renamed_move_in_display_label_is_proposed_name(self):
         DesignPlacement.objects.create(
@@ -225,7 +225,7 @@ class TrayProjectionTestCase(TestCase):
         cls.site = env["site"]
         cls.racks = env["racks"]
         cls.device_type = env["device_type"]
-        cls.design = Design.objects.create(title="Tray plan", site=cls.site)
+        cls.design = make_design(title="Tray plan", site=cls.site)
 
     def test_real_tray_device_appears_as_existing(self):
         """A real position-less device (e.g. a vertical PDU) shows up in
@@ -609,7 +609,7 @@ class StalePlacementProjectionTestCase(TestCase):
         cls.site = env["site"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]  # Device 1 @ Rack1/U1/front, Device 2 @ Rack1/U2/front
-        cls.design = Design.objects.create(title="Stale plan", site=cls.site)
+        cls.design = make_design(title="Stale plan", site=cls.site)
 
     def test_stale_move_and_remove_disappear_from_projection(self):
         move = DesignPlacement.objects.create(
@@ -692,7 +692,7 @@ class ChainProjectionTestCase(TestCase):
     # --- helpers -----------------------------------------------------------
 
     def _design(self, title, *, based_on=None):
-        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+        return make_design(title=title, site=self.site, based_on=based_on)
 
     def _approve(self, design):
         """Approve a design AFTER its placements exist.
@@ -1506,7 +1506,7 @@ class ChainBayProjectionTestCase(TestCase):
     # --- helpers -----------------------------------------------------------
 
     def _design(self, title, *, based_on=None, scoped=True):
-        design = Design.objects.create(title=title, site=self.site, based_on=based_on)
+        design = make_design(title=title, site=self.site, based_on=based_on)
         if scoped:
             design.racks.add(self.racks[0])
         return design
@@ -2080,7 +2080,7 @@ class ApplyMarkerProjectionTestCase(TestCase):
         cls.superuser = User.objects.create_superuser(username="apply-marker-super")
 
     def _design(self, title, *, based_on=None):
-        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+        return make_design(title=title, site=self.site, based_on=based_on)
 
     def _approve(self, design):
         design.status = DesignStatusChoices.STATUS_APPROVED
@@ -2267,7 +2267,7 @@ class PeerConflictProjectionTestCase(TestCase):
     # --- helpers -------------------------------------------------------
 
     def _design(self, title, *, based_on=None, root=None, version=1):
-        return Design.objects.create(
+        return make_design(
             title=title, site=self.site, based_on=based_on, root=root, version=version,
         )
 

@@ -10,9 +10,10 @@ point where it needs to actually exist.
 ## Creating one
 
 In the design editor, press **Create rack**. Give it a name, a U height, and
-a location chosen from the design's own site. It appears in the editor
-immediately, and from that point on you plan into it exactly as you would a
-real rack: drag devices in, wire up power, run naming.
+a location chosen from one of the design's sites (via the Site → Location
+hierarchy). It appears in the editor immediately, and from that point on you
+plan into it exactly as you would a real rack: drag devices in, wire up power,
+run naming.
 
 ## It is shared, like a real rack
 

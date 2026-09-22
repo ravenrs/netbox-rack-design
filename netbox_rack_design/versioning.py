@@ -25,12 +25,12 @@ def new_version(design, *, title=None):
 
     Copied verbatim onto the new ``Design`` row: ``title`` (the source's own,
     unless ``title`` is given -- versions are distinguished by ``__str__``,
-    "<title> (v<version>)", so no suffix is invented here), ``site``,
-    ``group``, ``description``, ``comments``, ``summary``, ``link``,
-    ``based_on`` (the SAME ancestor as the source -- a version is not a new
-    plan), ``custom_field_data``, ``racks``, ``depends_on`` and ``tags``
-    (``racks``/``depends_on``/``tags`` are M2M, set after ``save()``, since an
-    M2M needs a pk).
+    "<title> (v<version>)", so no suffix is invented here), ``group``,
+    ``description``, ``comments``, ``summary``, ``link``, ``based_on`` (the
+    SAME ancestor as the source -- a version is not a new plan),
+    ``custom_field_data``, ``sites``, ``racks``, ``depends_on`` and ``tags``
+    (``sites``/``racks``/``depends_on``/``tags`` are M2M, set after
+    ``save()``, since an M2M needs a pk).
 
     ``Design``, ``DesignPlacement`` and ``DesignPowerFeed`` are all
     ``NetBoxModel`` -- each carries its own custom field values and tags, and
@@ -46,7 +46,7 @@ def new_version(design, *, title=None):
     ``version_root`` (self when the source IS the root), ``version`` is one
     past the highest version anywhere in that root's group.
 
-    NOT copied: ``sequence`` (auto-assigned per site on first save) and
+    NOT copied: ``sequence`` (auto-assigned globally on first save -- M6) and
     ``DesignApply`` rows (an apply record says "this design created this
     device" -- the clone has created nothing, and copying would additionally
     collide with the ``UniqueConstraint(fields=("placement",))``).
@@ -69,7 +69,6 @@ def new_version(design, *, title=None):
 
         clone = Design(
             title=title if title is not None else design.title,
-            site=design.site,
             group=design.group,
             description=design.description,
             comments=design.comments,
@@ -84,6 +83,9 @@ def new_version(design, *, title=None):
         clone.full_clean()
         clone.save()
         # M2M needs a pk -- same ordering `derive` uses (api/views.py:2289).
+        # `sites` (PLAN-multi-site.md M5): a version is the SAME plan,
+        # revised -- it copies the source's sites unchanged.
+        clone.sites.set(design.sites.all())
         clone.racks.set(design.racks.all())
         clone.depends_on.set(design.depends_on.all())
         clone.tags.set(design.tags.all())

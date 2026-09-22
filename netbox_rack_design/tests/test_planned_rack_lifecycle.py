@@ -39,7 +39,7 @@ from ..models import (
     DesignRackPower,
     PlannedRack,
 )
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 # ---------------------------------------------------------------------------
 # Model-level: referencing_designs / is_orphan / orphaned() / matches_existing_rack
@@ -64,7 +64,7 @@ class PlannedRackReferencingDesignsTest(DjangoTestCase):
 
     def test_scoped_only_planned_rack_is_referenced(self):
         pr = PlannedRack.objects.create(name="Scoped only", location=self.location, u_height=10)
-        design = Design.objects.create(title="Scoping design", site=self.site)
+        design = make_design(title="Scoping design", site=self.site)
         design.planned_racks.add(pr)
         self.assertEqual(list(pr.referencing_designs()), [design])
         self.assertFalse(pr.is_orphan)
@@ -76,7 +76,7 @@ class PlannedRackReferencingDesignsTest(DjangoTestCase):
         # not rely on scoped_designs alone, or this placement's design would
         # be an undetected loss.
         pr = PlannedRack.objects.create(name="Placement only", location=self.location, u_height=10)
-        design = Design.objects.create(title="Placement design", site=self.site)
+        design = make_design(title="Placement design", site=self.site)
         DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -89,14 +89,14 @@ class PlannedRackReferencingDesignsTest(DjangoTestCase):
 
     def test_feed_only_planned_rack_is_referenced(self):
         pr = PlannedRack.objects.create(name="Feed only", location=self.location, u_height=10)
-        design = Design.objects.create(title="Feed design", site=self.site)
+        design = make_design(title="Feed design", site=self.site)
         DesignPowerFeed.objects.create(design=design, planned_rack=pr, name="Feed A")
         self.assertEqual(list(pr.referencing_designs()), [design])
         self.assertFalse(pr.is_orphan)
 
     def test_rack_power_only_planned_rack_is_referenced(self):
         pr = PlannedRack.objects.create(name="Power only", location=self.location, u_height=10)
-        design = Design.objects.create(title="Power design", site=self.site)
+        design = make_design(title="Power design", site=self.site)
         DesignRackPower.objects.create(design=design, planned_rack=pr)
         self.assertEqual(list(pr.referencing_designs()), [design])
         self.assertFalse(pr.is_orphan)
@@ -151,7 +151,7 @@ class PlannedRackAPIDeleteGuardTest(APITestCase):
     def test_delete_still_referenced_returns_409_not_500(self):
         self.add_permissions("netbox_rack_design.delete_plannedrack")
         pr = PlannedRack.objects.create(name="API referenced", location=self.location, u_height=10)
-        design = Design.objects.create(title="API referencing design", site=self.site)
+        design = make_design(title="API referencing design", site=self.site)
         design.planned_racks.add(pr)
         response = self._delete(pr)
         self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
@@ -179,7 +179,7 @@ class PlannedRackAPIDeleteGuardTest(APITestCase):
         pr = PlannedRack.objects.create(
             name="API realized+ref", location=self.location, u_height=10, realized_rack=real,
         )
-        design = Design.objects.create(title="API realized ref design", site=self.site)
+        design = make_design(title="API realized ref design", site=self.site)
         design.planned_racks.add(pr)
         response = self._delete(pr)
         self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
@@ -216,7 +216,7 @@ class PlannedRackHTMLDeleteGuardTest(TestCase):
 
     def test_delete_still_referenced_rejected_with_message(self):
         pr = PlannedRack.objects.create(name="HTML referenced", location=self.location, u_height=10)
-        design = Design.objects.create(title="HTML referencing design", site=self.site)
+        design = make_design(title="HTML referencing design", site=self.site)
         design.planned_racks.add(pr)
         response = self.client.post(self._delete_url(pr), {"confirm": "true"})
         self.assertEqual(response.status_code, 302)
@@ -238,6 +238,98 @@ class PlannedRackHTMLDeleteGuardTest(TestCase):
         self.assertTrue(any("realized" in m.lower() for m in shown))
 
 
+class PlannedRackBulkDeleteGuardTest(TestCase):
+    """The list view's "Delete Selected" must exist, and obey the same guards.
+
+    The list renders NetBox's bulk buttons for any table with a checkbox
+    column, and the form's action is ``get_viewname(model, "bulk_delete")``
+    -- which resolves to ``None`` when no such view is registered, so the
+    POST lands on ``/planned-racks/None`` and 404s (user report
+    2026-09-22). Registering it is only half the fix: a realized or
+    still-referenced planned rack must survive a bulk delete exactly as it
+    survives the single one (D7 / T1.9).
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_plannedrack",
+        "netbox_rack_design.delete_plannedrack",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.location = Location.objects.create(
+            name="Bulk Delete Location", slug="bulk-delete-location", site=cls.site
+        )
+
+    def _bulk_delete_url(self):
+        return reverse("plugins:netbox_rack_design:plannedrack_bulk_delete")
+
+    def _post(self, pks):
+        return self.client.post(
+            self._bulk_delete_url(),
+            {"pk": [str(pk) for pk in pks], "_confirm": "true", "confirm": "true"},
+        )
+
+    def test_bulk_delete_orphans_succeeds(self):
+        a = PlannedRack.objects.create(name="Bulk A", location=self.location, u_height=10)
+        b = PlannedRack.objects.create(name="Bulk B", location=self.location, u_height=10)
+        response = self._post([a.pk, b.pk])
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(PlannedRack.objects.filter(pk__in=[a.pk, b.pk]).exists())
+
+    def test_bulk_delete_referenced_rejected_and_nothing_is_deleted(self):
+        orphan = PlannedRack.objects.create(name="Bulk orphan", location=self.location, u_height=10)
+        held = PlannedRack.objects.create(name="Bulk held", location=self.location, u_height=10)
+        design = make_design(title="Bulk referencing design", site=self.site)
+        design.planned_racks.add(held)
+        response = self._post([orphan.pk, held.pk])
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(PlannedRack.objects.filter(pk=held.pk).exists())
+        self.assertTrue(PlannedRack.objects.filter(pk=orphan.pk).exists(),
+                        "a refused batch deletes nothing -- same as the Design bulk guard")
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("Bulk referencing design" in m for m in shown))
+
+    def test_bulk_delete_realized_rejected(self):
+        real = Rack.objects.create(
+            name="Bulk realized target", site=self.site, location=self.location
+        )
+        pr = PlannedRack.objects.create(
+            name="Bulk realized", location=self.location, u_height=10, realized_rack=real,
+        )
+        response = self._post([pr.pk])
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(PlannedRack.objects.filter(pk=pr.pk).exists())
+        shown = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any("realized" in m.lower() for m in shown))
+
+
+class TemplateBulkViewUrlsTest(TestCase):
+    """Every list that shows bulk buttons must have the views behind them."""
+
+    user_permissions = ("netbox_rack_design.view_template",)
+
+    def test_bulk_urls_resolve(self):
+        for viewname in (
+            "plugins:netbox_rack_design:plannedrack_bulk_delete",
+            "plugins:netbox_rack_design:plannedrack_bulk_edit",
+            "plugins:netbox_rack_design:template_bulk_delete",
+            "plugins:netbox_rack_design:templategroup_bulk_delete",
+            "plugins:netbox_rack_design:templateplacement_bulk_delete",
+            # The Import button on each list resolves through bulk_import --
+            # missing, it rendered href="None" and 404'd exactly as the bulk
+            # delete did.
+            "plugins:netbox_rack_design:plannedrack_bulk_import",
+            "plugins:netbox_rack_design:template_bulk_import",
+            "plugins:netbox_rack_design:templategroup_bulk_import",
+            "plugins:netbox_rack_design:templateplacement_bulk_import",
+        ):
+            with self.subTest(viewname=viewname):
+                self.assertTrue(reverse(viewname))
+
+
 # ---------------------------------------------------------------------------
 # Deleting a Design must not delete a shared PlannedRack (decision 4)
 # ---------------------------------------------------------------------------
@@ -255,8 +347,8 @@ class DesignDeletionLeavesPlannedRackTest(DjangoTestCase):
 
     def test_deleting_one_of_two_referencing_designs_leaves_planned_rack_and_other_design(self):
         pr = PlannedRack.objects.create(name="Shared PR", location=self.location, u_height=10)
-        design_a = Design.objects.create(title="Design A", site=self.site)
-        design_b = Design.objects.create(title="Design B", site=self.site)
+        design_a = make_design(title="Design A", site=self.site)
+        design_b = make_design(title="Design B", site=self.site)
         design_a.planned_racks.add(pr)
         design_b.planned_racks.add(pr)
 
@@ -274,7 +366,7 @@ class DesignDeletionLeavesPlannedRackTest(DjangoTestCase):
         # The row becomes an ORPHAN, which decision 3 leaves for manual
         # cleanup rather than deleting it automatically.
         pr = PlannedRack.objects.create(name="Solo PR", location=self.location, u_height=10)
-        design = Design.objects.create(title="Solo design", site=self.site)
+        design = make_design(title="Solo design", site=self.site)
         design.planned_racks.add(pr)
 
         design.delete()
@@ -290,7 +382,7 @@ class DesignDeletionLeavesPlannedRackTest(DjangoTestCase):
         # delete legitimately takes its own placements with it. The shared
         # PlannedRack row itself still survives.
         pr = PlannedRack.objects.create(name="Placement CASCADE PR", location=self.location, u_height=10)
-        design = Design.objects.create(title="Placement cascade design", site=self.site)
+        design = make_design(title="Placement cascade design", site=self.site)
         placement = DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -322,7 +414,7 @@ class PlannedRackOrphanFilterTest(APITestCase):
         cls.referenced = PlannedRack.objects.create(
             name="Filter referenced", location=cls.location, u_height=10
         )
-        cls.design = Design.objects.create(title="Filter design", site=cls.site)
+        cls.design = make_design(title="Filter design", site=cls.site)
         cls.design.planned_racks.add(cls.referenced)
 
     def test_orphan_true_returns_only_unreferenced(self):

@@ -19,8 +19,8 @@ from dcim.models import Location, Rack, Site
 from django.urls import reverse
 from utilities.testing import TestCase
 
-from ..models import Design, PlannedRack
-from .utils import create_dcim_environment
+from ..models import PlannedRack
+from .utils import create_dcim_environment, make_design
 
 
 class DesignEditorPlannedRackContextTest(TestCase):
@@ -39,7 +39,7 @@ class DesignEditorPlannedRackContextTest(TestCase):
             name="Loc 1", slug="loc-1", site=cls.site
         )
 
-        cls.design = Design.objects.create(title="Planned Rack Editor Design", site=cls.site)
+        cls.design = make_design(title="Planned Rack Editor Design", site=cls.site)
         cls.design.racks.set([cls.rack1])
 
         cls.planned_rack = PlannedRack.objects.create(
@@ -96,7 +96,7 @@ class DesignEditorPlannedRackContextTest(TestCase):
             "setup did not actually force the pk collision this test needs",
         )
 
-        design = Design.objects.create(title="PK Collision Editor Design", site=other_site)
+        design = make_design(title="PK Collision Editor Design", site=other_site)
         design.racks.add(real_rack)
         design.planned_racks.add(colliding_planned)
 

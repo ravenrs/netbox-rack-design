@@ -15,8 +15,8 @@ from rest_framework import status
 from utilities.testing import APITestCase
 
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignPlacement, Template, TemplatePlacement
-from .utils import create_dcim_environment
+from ..models import DesignPlacement, Template, TemplatePlacement
+from .utils import create_dcim_environment, make_design
 
 
 class DesignPlacementProvenanceTestCase(TestCase):
@@ -28,7 +28,7 @@ class DesignPlacementProvenanceTestCase(TestCase):
         cls.site = env["site"]
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][1]
-        cls.design = Design.objects.create(title="Provenance design", site=cls.site)
+        cls.design = make_design(title="Provenance design", site=cls.site)
         cls.template = Template.objects.create(name="Standard ToR", u_height=42)
 
     def test_placement_records_from_template_and_version(self):
@@ -147,7 +147,7 @@ class DesignPlacementProvenanceAPITest(APITestCase):
         cls.site = env["site"]
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][1]
-        cls.design = Design.objects.create(title="Provenance API design", site=cls.site)
+        cls.design = make_design(title="Provenance API design", site=cls.site)
         cls.template = Template.objects.create(name="Standard ToR API", u_height=42)
 
     def test_create_placement_with_from_template_by_pk(self):

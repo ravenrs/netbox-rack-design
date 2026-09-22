@@ -35,9 +35,9 @@ from ..distribution import (
     generate_distribution,
     generate_distribution_status,
 )
-from ..models import Design, DesignPlacement, DesignPowerFeed, DesignRackPower
+from ..models import DesignPlacement, DesignPowerFeed, DesignRackPower
 from ..projection import project_rack
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 # Sentinel object a script can hand back so we can assert it is returned verbatim.
 SENTINEL_DISTRIBUTION = {"scheme": "test", "pdus": {}, "rack": {}}
@@ -103,7 +103,7 @@ class DistributionLoaderTestCase(TestCase):
         cls.device_role = env["device_role"]
         cls.devices = env["devices"]
 
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
         # One planned add so the elevation has at least one drawing consumer.
         cls.p_add = DesignPlacement.objects.create(
             design=cls.design,
@@ -273,7 +273,7 @@ class DistributionStatusTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Status", site=cls.site)
+        cls.design = make_design(title="Status", site=cls.site)
         DesignPlacement.objects.create(
             design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=env["device_type"], device_role=env["device_role"],
@@ -377,7 +377,7 @@ class PlannedPduPowerConfigTestCase(TestCase):
         cls.device_type = env["device_type"]
 
         cls.pdu_role = DeviceRole.objects.create(name="PDU", slug="pdu")
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
         # power_config is now the MANUAL cf bridge only -- no inline feed.
         cls.power_config = {
             "source": "manual",
@@ -454,7 +454,7 @@ class ApplyRackPowerOverrideTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
         cls.rack_power = DesignRackPower.objects.create(
             design=cls.design,
             rack=cls.racks[0],
@@ -544,7 +544,7 @@ class BuildNativeTestCase(TestCase):
             phase=PowerFeedPhaseChoices.PHASE_SINGLE,
         )
 
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
 
     @classmethod
     def _make_real_pdu(cls, name, feed=None, rack=None):

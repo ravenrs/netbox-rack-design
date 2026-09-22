@@ -56,7 +56,7 @@ from rest_framework.test import APIClient
 from users.models import Token, User
 
 from ..models import Design, PlannedRack
-from .utils import api_token_header
+from .utils import api_token_header, make_design
 
 
 class DesignDeleteRaceMechanismTests(TransactionTestCase):
@@ -73,7 +73,7 @@ class DesignDeleteRaceMechanismTests(TransactionTestCase):
             site=self.site, name=f"race-loc-{uuid.uuid4().hex[:8]}",
             slug=f"race-loc-{uuid.uuid4().hex[:8]}",
         )
-        self.design = Design.objects.create(
+        self.design = make_design(
             title=f"race-design-{uuid.uuid4().hex[:8]}", site=self.site, status="draft",
         )
         self.pr1 = PlannedRack.objects.create(
@@ -185,7 +185,7 @@ class DesignDeleteConcurrencyTests(TransactionTestCase):
                 site=self.site, name=f"cloc-{i}-{uuid.uuid4().hex[:8]}",
                 slug=f"cloc-{i}-{uuid.uuid4().hex[:8]}",
             )
-            design = Design.objects.create(
+            design = make_design(
                 title=f"cdesign-{i}-{uuid.uuid4().hex[:8]}", site=self.site, status="draft",
             )
             pr1 = PlannedRack.objects.create(name=f"pr1-{i}", u_height=10, location=location)

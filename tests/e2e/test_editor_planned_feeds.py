@@ -100,7 +100,7 @@ class EditorPlannedFeedsTestCase(unittest.TestCase):
         cls.rack_id = rack["id"]
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-feeds-{uuid.uuid4().hex[:8]}",
-            "site": rack["site"]["id"], "status": "draft", "racks": [cls.rack_id],
+            "sites": [rack["site"]["id"]], "status": "draft", "racks": [cls.rack_id],
         })
         cls._design_id = design["id"]
         cls.editor_url = (

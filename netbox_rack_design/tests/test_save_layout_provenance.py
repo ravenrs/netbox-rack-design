@@ -31,7 +31,8 @@ from tenancy.models import Tenant
 from utilities.testing import APITestCase, create_test_device
 
 from ..choices import TemplatePlacementAnchorChoices
-from ..models import Design, DesignPlacement, Template, TemplatePlacement
+from ..models import DesignPlacement, Template, TemplatePlacement
+from .utils import make_design
 
 
 def _save_layout_url(design):
@@ -64,7 +65,7 @@ class SaveLayoutProvenanceTest(APITestCase):
         cls.device_role = DeviceRole.objects.create(name="SLP Role", slug="slp-role")
         cls.tenant = Tenant.objects.create(name="SLP Tenant", slug="slp-tenant")
         cls.rack = Rack.objects.create(name="SLP Rack", site=cls.site, u_height=47)
-        cls.design = Design.objects.create(title="SLP Design", site=cls.site)
+        cls.design = make_design(title="SLP Design", site=cls.site)
         cls.template = Template.objects.create(name="SLP Standard ToR", u_height=47)
 
     def _grant_all(self):

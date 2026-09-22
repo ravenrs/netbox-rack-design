@@ -18,7 +18,11 @@ class DesignIndex(SearchIndex):
         ("description", 500),
         ("comments", 5000),
     )
-    display_attrs = ("site", "status", "version", "summary")
+    # M9 (PLAN-multi-site.md): `sites_display` (a joined string) rather than
+    # `site` -- the `site` property is None as soon as a design covers more
+    # than one site (M2), which would silently blank this column for any
+    # multi-site design's search result.
+    display_attrs = ("sites_display", "status", "version", "summary")
 
 
 class DesignGroupIndex(SearchIndex):

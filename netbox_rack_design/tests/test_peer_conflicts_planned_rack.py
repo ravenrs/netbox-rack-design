@@ -33,9 +33,9 @@ from dcim.models import Location
 from django.test import TestCase, override_settings
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignPlacement, PlannedRack
+from ..models import DesignPlacement, PlannedRack
 from ..projection import peer_placements_for_design, project_rack
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 def _peer_plugins_config(**overrides):
@@ -60,7 +60,7 @@ class PeerConflictPlannedRackTestCase(TestCase):
         )
 
     def _design(self, title, *, status=DesignStatusChoices.STATUS_DRAFT):
-        design = Design.objects.create(title=title, site=self.site)
+        design = make_design(title=title, site=self.site)
         if status != DesignStatusChoices.STATUS_DRAFT:
             design.status = status
             design.save()
@@ -201,7 +201,7 @@ class PeerConflictRealRackRegressionTestCase(TestCase):
         cls.device_type = env["device_type"]
 
     def test_two_drafts_overlapping_a_unit_on_real_rack_report_each_other(self):
-        a = Design.objects.create(title="Real Peer A", site=self.site)
+        a = make_design(title="Real Peer A", site=self.site)
         a.racks.add(self.racks[1])
         DesignPlacement.objects.create(
             design=a, kind=DesignPlacementKindChoices.KIND_ADD,
@@ -209,7 +209,7 @@ class PeerConflictRealRackRegressionTestCase(TestCase):
             target_position=9, target_face="front", proposed_name="a-real",
         )
 
-        b = Design.objects.create(title="Real Peer B", site=self.site)
+        b = make_design(title="Real Peer B", site=self.site)
         b.racks.add(self.racks[1])
         DesignPlacement.objects.create(
             design=b, kind=DesignPlacementKindChoices.KIND_ADD,
@@ -251,7 +251,7 @@ class PlannedRackPeerConflictPkCollisionTestCase(TestCase):
 
         # A design that scopes the REAL rack (same pk as the planned one) and
         # claims U4 there.
-        cls.real_design = Design.objects.create(title="Real Rack Claimant", site=cls.site)
+        cls.real_design = make_design(title="Real Rack Claimant", site=cls.site)
         cls.real_design.racks.add(cls.real_rack)
         DesignPlacement.objects.create(
             design=cls.real_design, kind=DesignPlacementKindChoices.KIND_ADD,
@@ -261,7 +261,7 @@ class PlannedRackPeerConflictPkCollisionTestCase(TestCase):
 
         # A design that scopes the PLANNED rack (same pk) and claims the SAME
         # unit number, U4, there.
-        cls.planned_design = Design.objects.create(title="Planned Rack Claimant", site=cls.site)
+        cls.planned_design = make_design(title="Planned Rack Claimant", site=cls.site)
         cls.planned_design.planned_racks.add(cls.planned_rack)
         DesignPlacement.objects.create(
             design=cls.planned_design, kind=DesignPlacementKindChoices.KIND_ADD,

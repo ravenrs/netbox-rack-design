@@ -20,8 +20,8 @@ from users.models import ObjectPermission, User
 
 from .. import apply
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignApply, DesignPlacement
-from .utils import create_dcim_environment
+from ..models import DesignApply, DesignPlacement
+from .utils import create_dcim_environment, make_design
 
 
 class ApplyTestCase(TestCase):
@@ -40,7 +40,7 @@ class ApplyTestCase(TestCase):
         cls.superuser = User.objects.create_superuser(username="apply-super")
 
     def _design(self, title="Plan", *, based_on=None, site=None):
-        return Design.objects.create(title=title, site=site or self.site, based_on=based_on)
+        return make_design(title=title, site=site or self.site, based_on=based_on)
 
     def _approve(self, design):
         """Approve a design AFTER its placements exist (see module docstring)."""

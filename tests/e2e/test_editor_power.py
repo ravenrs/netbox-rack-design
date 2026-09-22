@@ -121,7 +121,7 @@ class EditorPowerTestCase(unittest.TestCase):
             "rack": rack["id"], "device_types": [dt_pwr["id"], dt_passive["id"]],
         }
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"pwr-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"pwr-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")

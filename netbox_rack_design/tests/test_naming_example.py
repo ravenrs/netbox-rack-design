@@ -11,9 +11,10 @@ from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Rack, Site
 from django.test import TestCase, override_settings
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignPlacement
+from ..models import DesignPlacement
 from ..naming import generate_name
 from ..naming_example import build_name
+from .utils import make_design
 
 
 def _plugins_config():
@@ -38,7 +39,7 @@ class NamingExampleTestCase(TestCase):
         cls.sw_role = DeviceRole.objects.create(name="Leaf Switch", slug="leaf-switch")
         cls.pdu_role = DeviceRole.objects.create(name="PDU", slug="pdu")
 
-        cls.design = Design.objects.create(title="Build-1", site=cls.site)
+        cls.design = make_design(title="Build-1", site=cls.site)
 
     def _add(self, device_type, device_role, **extra):
         """An UNSAVED add placement (pk=None) -- the shape the preview API builds."""
@@ -118,11 +119,11 @@ class NamingExampleTestCase(TestCase):
         the ancestor's row is matched by its own stored name directly, with no
         planning prefix to strip first (a name is stored only when a plan
         actually changes it)."""
-        base = Design.objects.create(
+        base = make_design(
             title="Base IDS-1000", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child IDS-2000", site=self.site, based_on=base,
         )
         DesignPlacement.objects.create(

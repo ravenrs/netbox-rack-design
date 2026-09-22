@@ -59,11 +59,10 @@ class DesignGroupType(NetBoxObjectType):
 
 @strawberry_django.type(Design, fields="__all__", filters=DesignFilter, pagination=True)
 class DesignType(NetBoxObjectType):
-    # Cross-app FK: under object-level permissions a related object the GraphQL
-    # user cannot view resolves to null, so the field must be nullable (the
-    # established real-plugin pattern, e.g. netbox-bgp) even though site is
-    # required at the DB level.
-    site: Annotated["SiteType", strawberry.lazy("dcim.graphql.types")] | None
+    # M9 (PLAN-multi-site.md): `Design.sites` is now a M2M. A list field, unlike
+    # a nullable-FK field, simply omits any related Site the requesting user
+    # lacks 'view' on rather than needing the whole field to be Optional.
+    sites: list[Annotated["SiteType", strawberry.lazy("dcim.graphql.types")]]
     group: Annotated["DesignGroupType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     based_on: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     root: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None

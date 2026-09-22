@@ -26,8 +26,8 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 
-from ..models import Design, DesignPowerFeed, DesignRackPower, PlannedRack
-from .utils import create_dcim_environment
+from ..models import DesignPowerFeed, DesignRackPower, PlannedRack
+from .utils import create_dcim_environment, make_design
 
 
 class DesignPowerFeedPlannedRackTestCase(TestCase):
@@ -36,7 +36,7 @@ class DesignPowerFeedPlannedRackTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
         cls.location = Location.objects.create(
             name="Location 1", slug="location-1", site=cls.site
         )
@@ -126,7 +126,7 @@ class DesignRackPowerPlannedRackTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
         cls.location = Location.objects.create(
             name="Location 1", slug="location-1", site=cls.site
         )

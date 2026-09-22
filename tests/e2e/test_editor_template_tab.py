@@ -283,7 +283,7 @@ class EditorTemplateTabTestCase(unittest.TestCase):
     def setUp(self):
         suffix = uuid.uuid4().hex[:8]
         design = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-tmpl-tab-{suffix}", "site": self._site_id, "status": "draft",
+            "title": f"e2e-tmpl-tab-{suffix}", "sites": [self._site_id], "status": "draft",
             "racks": [self._rack_large_id, self._rack_tiny_id, self._rack_extract_id],
         })
         self._design_id = design["id"]

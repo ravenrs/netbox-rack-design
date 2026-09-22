@@ -133,10 +133,14 @@ class Design(NetBoxModel):
     comments = models.TextField(blank=True)
 
     title = models.CharField(max_length=200)
-    site = models.ForeignKey(
+    # M2M (PLAN-multi-site.md M1): a design may span one or more sites -- a
+    # rollout across two neighbouring sites, or one plan for a whole campus.
+    # At least one is required (enforced in clean(), same M2M-timing caveat
+    # as `racks`/`planned_racks` below: only checkable once persisted).
+    sites = models.ManyToManyField(
         to="dcim.Site",
-        on_delete=models.PROTECT,
         related_name="rack_designs",
+        help_text="Sites this design plans across. At least one is required.",
     )
     status = models.CharField(
         max_length=30,
@@ -217,10 +221,11 @@ class Design(NetBoxModel):
         null=True,
     )
 
-    clone_fields = ("site", "status", "summary", "link", "group")
+    # `sites` (M2M) is cloned automatically by CloningMixin -- not listed here.
+    clone_fields = ("status", "summary", "link", "group")
 
     class Meta:
-        ordering = ("site", "sequence", "pk")
+        ordering = ("sequence", "pk")
         verbose_name = "design"
         verbose_name_plural = "designs"
         constraints = [
@@ -247,6 +252,34 @@ class Design(NetBoxModel):
     def version_root(self):
         """The root design that groups this plan's versions (self if this is the root)."""
         return self.root or self
+
+    @property
+    def site(self):
+        """
+        Read-only back-compat mirror of the old single-site FK (PLAN-multi-site.md
+        M2): the single site when this design has exactly one, else ``None``.
+
+        Used ONLY by naming tokens and display -- no plugin code path may rely
+        on it for validation or writes; every "must be in the design's site"
+        check reads ``self.sites`` instead (M3).
+        """
+        if self.pk is None:
+            return None
+        sites = list(self.sites.all()[:2])
+        return sites[0] if len(sites) == 1 else None
+
+    @property
+    def sites_display(self):
+        """
+        Comma-joined site names, for contexts that want a display string for
+        EVERY design regardless of how many sites it covers (PLAN-multi-site.md
+        M9) -- unlike ``site`` above, which is None as soon as a design has
+        more than one. Used by ``search.py``'s ``display_attrs`` (global search
+        results show, not filter by, this).
+        """
+        if self.pk is None:
+            return ""
+        return ", ".join(self.sites.values_list("name", flat=True))
 
     @property
     def is_frozen(self):
@@ -327,13 +360,11 @@ class Design(NetBoxModel):
         return self.placements.filter(stale=True).order_by("stale_device_name", "pk")
 
     def save(self, *args, **kwargs):
-        # Auto-assign a gapped per-site execution sequence on first save.
+        # Auto-assign a gapped GLOBAL execution sequence on first save (M6):
+        # it was "per site" only because a design had exactly one; a per-site
+        # number has no single meaning for a design spanning several.
         if self.sequence is None:
-            last = (
-                Design.objects.filter(site=self.site)
-                .aggregate(models.Max("sequence"))
-                .get("sequence__max")
-            )
+            last = Design.objects.aggregate(models.Max("sequence")).get("sequence__max")
             self.sequence = (last or 0) + 10
         super().save(*args, **kwargs)
 
@@ -350,19 +381,24 @@ class Design(NetBoxModel):
             except ValueError as exc:
                 raise ValidationError({"based_on": str(exc)}) from exc
 
-        # A chain across two sites is meaningless (PLAN-design-chains.md gap
-        # 1): a parent's placements are site-scoped, so a child in a different
-        # site could never actually replay them into its own racks. Mirrors
-        # the ``racks`` site check below, but -- unlike ``racks`` (a M2M) --
-        # ``based_on`` is a plain FK, so its value IS visible on an unsaved
-        # instance (no pk needed to read ``self.based_on``); this check does
-        # NOT have the M2M pk-timing caveat documented on the ``racks`` check,
-        # so it runs unconditionally and also covers CREATE, not just edits.
-        if self.based_on_id and self.site_id and self.based_on.site_id != self.site_id:
-            raise ValidationError(
-                {"based_on": "The parent design's site does not match this "
-                              "design's site."}
-            )
+        # A chain across two DISJOINT sites is meaningless (PLAN-design-chains.md
+        # gap 1): a parent's placements are site-scoped, so a child that shares
+        # none of the parent's sites could never actually replay them into its
+        # own racks. (PLAN-multi-site.md M5): the rule loosens from "same site"
+        # to "child and parent share at least one site". ``sites`` is now a
+        # M2M, so -- unlike the old scalar ``site_id`` -- it cannot be read on
+        # an unsaved instance (no pk means no through-rows yet); this check
+        # only runs once persisted (mirrors the ``racks`` M2M-timing caveat
+        # below), so it covers edits, not CREATE -- the form/serializer layer
+        # re-runs full_clean() post-save to enforce it on create, same as the
+        # ``racks`` scope check.
+        if self.pk and self.based_on_id:
+            if not self.sites.filter(pk__in=self.based_on.sites.values_list("pk", flat=True)).exists():
+                raise ValidationError(
+                    {"based_on": "The parent design shares no site with this "
+                                  "design -- a chain across disjoint sites is "
+                                  "meaningless."}
+                )
 
         # depends_on cycle guard (G7): a many-to-many relation cannot be read on
         # an unsaved instance (pk=None) -- Django raises before the through-rows
@@ -426,31 +462,39 @@ class Design(NetBoxModel):
                                    "create one and re-base them onto it instead."}
                     )
 
-        # Every scoped rack must belong to this design's site (consistent with the
-        # site-scoping of placements). M2M-timing caveat: a many-to-many relation
-        # cannot be read on an unsaved instance (pk=None) -- Django raises before
-        # the through-rows exist -- so this check only runs once the design is
-        # persisted (i.e. on edits). For a brand-new design the racks are attached
-        # only after the initial save, so the form/serializer layer (a later phase)
-        # must re-run full_clean() post-save to enforce this on create.
-        if self.pk and self.site_id:
-            offending = self.racks.exclude(site_id=self.site_id)
+        # At least one site is required (M1). Same M2M-timing caveat as every
+        # other ``sites``-dependent check here: only checkable once persisted.
+        if self.pk and not self.sites.exists():
+            raise ValidationError({"sites": "A design must have at least one site."})
+
+        # Every scoped rack must belong to one of this design's sites (M3;
+        # consistent with the site-scoping of placements). M2M-timing caveat:
+        # a many-to-many relation cannot be read on an unsaved instance
+        # (pk=None) -- Django raises before the through-rows exist -- so this
+        # check only runs once the design is persisted (i.e. on edits). For a
+        # brand-new design the racks are attached only after the initial save,
+        # so the form/serializer layer (a later phase) must re-run
+        # full_clean() post-save to enforce this on create.
+        if self.pk:
+            offending = self.racks.exclude(site_id__in=self.sites.values_list("pk", flat=True))
             if offending.exists():
                 names = ", ".join(str(rack) for rack in offending)
                 raise ValidationError(
-                    {"racks": f"These racks are not in the design's site: {names}."}
+                    {"racks": f"These racks are not in one of the design's sites: {names}."}
                 )
 
         # Same rule for `planned_racks` (T1.3): a PlannedRack has no site FK of
         # its own -- its site is reached through `location` (PlannedRack.site)
         # -- so this filters on `location__site_id` rather than `site_id`
         # directly. Same M2M-timing caveat as the `racks` check just above.
-        if self.pk and self.site_id:
-            offending_planned = self.planned_racks.exclude(location__site_id=self.site_id)
+        if self.pk:
+            offending_planned = self.planned_racks.exclude(
+                location__site_id__in=self.sites.values_list("pk", flat=True)
+            )
             if offending_planned.exists():
                 names = ", ".join(str(rack) for rack in offending_planned)
                 raise ValidationError(
-                    {"planned_racks": f"These planned racks are not in the design's site: {names}."}
+                    {"planned_racks": f"These planned racks are not in one of the design's sites: {names}."}
                 )
 
 
@@ -923,6 +967,30 @@ class DesignPlacement(NetBoxModel):
         """
         return self.real_power_feed or self.planned_power_feed
 
+    @property
+    def site(self):
+        """
+        The site this placement actually targets (PLAN-multi-site.md M4): a
+        multi-site design has a separate name space per site, so naming and
+        collision checks scope by the PLACEMENT's site, never the design's.
+
+        Derived from whichever of ``target_rack`` / ``target_planned_rack`` /
+        the parent chassis's rack is set -- mirrors
+        ``naming.RenderContext.rack``. ``None`` when nothing is targeted yet
+        (a bare, freshly-built unsaved placement).
+        """
+        if self.target_bay_id:
+            return self.target_bay.device.rack.site
+        if self.target_rack_id:
+            return self.target_rack.site
+        if self.target_planned_rack_id:
+            return self.target_planned_rack.location.site
+        if self.parent_placement_id:
+            return self.parent_placement.site
+        if self.base_parent_placement_id:
+            return self.base_parent_placement.site
+        return None
+
     def resolved_role(self):
         """The role this placement's device will actually have.
 
@@ -1306,9 +1374,12 @@ class DesignPlacement(NetBoxModel):
                 raise ValidationError({
                     "target_rack": "Target rack must be the rack the chassis is in.",
                 })
-            if self.design_id and parent.rack_id and parent.rack.site_id != self.design.site_id:
+            if (
+                self.design_id and parent.rack_id
+                and not self.design.sites.filter(pk=parent.rack.site_id).exists()
+            ):
                 raise ValidationError({
-                    "target_bay": "The chassis is not in the design's site.",
+                    "target_bay": "The chassis is not in one of the design's sites.",
                 })
             # The bay must be free in the design's PROJECTED world: an occupant
             # this same design moves out or removes has already vacated it.
@@ -1419,13 +1490,16 @@ class DesignPlacement(NetBoxModel):
 
     def _validate_tray_target(self):
         """
-        A position-less (tray) target validates only same-site rack membership
-        (spec §9.5) -- there is no slot availability to check since a tray is
-        an unordered list, not a grid.
+        A position-less (tray) target validates only that the rack is in one
+        of the design's sites (spec §9.5, M3) -- there is no slot availability
+        to check since a tray is an unordered list, not a grid.
         """
-        if self.design_id and self.target_rack.site_id != self.design.site_id:
+        if (
+            self.design_id
+            and not self.design.sites.filter(pk=self.target_rack.site_id).exists()
+        ):
             raise ValidationError(
-                {"target_rack": "Target rack must be in the design's site."}
+                {"target_rack": "Target rack must be in one of the design's sites."}
             )
 
     def _validate_planned_rack_target(self):
@@ -1442,9 +1516,12 @@ class DesignPlacement(NetBoxModel):
         # PlannedRack has no site FK of its own -- ``site`` is a property that
         # derefs through ``location`` (see PlannedRack.site) -- so this reads
         # location_id/site_id rather than comparing a column directly.
-        if self.design_id and self.target_planned_rack.location.site_id != self.design.site_id:
+        if (
+            self.design_id
+            and not self.design.sites.filter(pk=self.target_planned_rack.location.site_id).exists()
+        ):
             raise ValidationError(
-                {"target_planned_rack": "Target planned rack must be in the design's site."}
+                {"target_planned_rack": "Target planned rack must be in one of the design's sites."}
             )
 
     def _validate_target_slot(self):
@@ -1957,10 +2034,10 @@ class DesignPowerFeed(NetBoxModel):
         # rather than comparing a column directly.
         if (
             self.planned_rack_id and self.design_id
-            and self.planned_rack.location.site_id != self.design.site_id
+            and not self.design.sites.filter(pk=self.planned_rack.location.site_id).exists()
         ):
             raise ValidationError({
-                "planned_rack": "Planned rack must be in the design's site.",
+                "planned_rack": "Planned rack must be in one of the design's sites.",
             })
 
     @property
@@ -2083,10 +2160,10 @@ class DesignRackPower(models.Model):
         # own -- ``site`` is a property that derefs through ``location``.
         if (
             self.planned_rack_id and self.design_id
-            and self.planned_rack.location.site_id != self.design.site_id
+            and not self.design.sites.filter(pk=self.planned_rack.location.site_id).exists()
         ):
             raise ValidationError({
-                "planned_rack": "Planned rack must be in the design's site.",
+                "planned_rack": "Planned rack must be in one of the design's sites.",
             })
 
     @classmethod

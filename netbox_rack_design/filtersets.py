@@ -49,8 +49,16 @@ class DesignGroupFilterSet(NetBoxModelFilterSet):
 
 
 class DesignFilterSet(NetBoxModelFilterSet):
+    # M9 (PLAN-multi-site.md): `Design.sites` is a M2M, so both the PK filter
+    # and the human-friendly slug filter resolve against it, not a single FK.
     site_id = django_filters.ModelMultipleChoiceFilter(
-        queryset=Site.objects.all(), label="Site (ID)"
+        field_name="sites", queryset=Site.objects.all(), label="Site (ID)"
+    )
+    site = django_filters.ModelMultipleChoiceFilter(
+        field_name="sites__slug",
+        queryset=Site.objects.all(),
+        to_field_name="slug",
+        label="Site (slug)",
     )
     group_id = django_filters.ModelMultipleChoiceFilter(
         queryset=DesignGroup.objects.all(), label="Group (ID)"

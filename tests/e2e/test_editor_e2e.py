@@ -500,7 +500,7 @@ class EditorE2ETestCase(unittest.TestCase):
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-{uuid.uuid4()}",
-            "site": site_id,
+            "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         cls._design_id = design["id"]
@@ -1422,13 +1422,13 @@ class EditorE2ETestCase(unittest.TestCase):
         # version_root with anything below) that plans a device at the SAME
         # free unit this test's own design will then also target.
         peer = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-peer-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         # THIS test's own design: starts with NO placements, so its rack
         # renders no peer conflict until the drop+save below creates one.
         mine = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-mine-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         try:
@@ -1514,11 +1514,11 @@ class EditorE2ETestCase(unittest.TestCase):
         dup_name = f"e2e-dup-<i>rename</i>-{uuid.uuid4()}"
 
         peer = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-peer-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         mine = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-mine-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         try:

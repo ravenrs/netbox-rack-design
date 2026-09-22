@@ -34,9 +34,29 @@ except ImportError:  # NetBox 4.4 - 4.6
 __all__ = (
     "create_dcim_environment",
     "api_token_header",
+    "make_design",
     "BaseFilterSetTestMixin",
     "ChangeLoggedFilterSetTestMixin",
 )
+
+
+def make_design(title, *, site=None, sites=(), **kw):
+    """
+    Create a ``Design`` with one or more sites (PLAN-multi-site.md M1:
+    ``Design.sites`` is a M2M, at least one required, so it cannot be set in
+    the ``Design.objects.create(...)`` kwargs the way the old ``site`` FK
+    could -- an M2M needs a pk before its through-rows can be written).
+
+    Pass ``site=<Site>`` for the common single-site case, or
+    ``sites=(<Site>, ...)`` for a multi-site design. Any other ``Design``
+    field goes through ``**kw``.
+    """
+    from ..models import Design
+
+    design = Design.objects.create(title=title, **kw)
+    chosen = list(sites) if sites else ([site] if site is not None else [])
+    design.sites.set(chosen)
+    return design
 
 
 def api_token_header(token):

@@ -21,8 +21,8 @@ from django.urls import reverse
 from rest_framework import status
 from utilities.testing import APITestCase, APIViewTestCases, create_tags
 
-from ..models import Design, DesignPlacement, DesignPowerFeed, PlannedRack
-from .utils import create_dcim_environment
+from ..models import DesignPlacement, DesignPowerFeed, PlannedRack
+from .utils import create_dcim_environment, make_design
 
 
 class PlannedRackAPITest(APIViewTestCases.APIViewTestCase):
@@ -92,7 +92,7 @@ class DesignPlacementTargetPlannedRackTest(APITestCase):
         cls.planned_rack = PlannedRack.objects.create(
             name="Greenfield 1", location=cls.location, u_height=42
         )
-        cls.design = Design.objects.create(title="Placement design", site=cls.site)
+        cls.design = make_design(title="Placement design", site=cls.site)
 
     def test_create_placement_with_target_planned_rack_by_pk(self):
         self.add_permissions(
@@ -138,7 +138,7 @@ class DesignPowerFeedPlannedRackTest(APITestCase):
         cls.planned_rack = PlannedRack.objects.create(
             name="Greenfield Feed Rack", location=cls.location, u_height=42
         )
-        cls.design = Design.objects.create(title="Feed design", site=cls.site)
+        cls.design = make_design(title="Feed design", site=cls.site)
         cls.design.planned_racks.set([cls.planned_rack])
 
     def test_create_feed_with_planned_rack_by_pk(self):
@@ -181,7 +181,7 @@ class DesignPlannedRacksRoundTripTest(APITestCase):
         cls.planned_rack_2 = PlannedRack.objects.create(
             name="Design PR 2", location=cls.location, u_height=42
         )
-        cls.design = Design.objects.create(title="Scoped planned racks", site=cls.site)
+        cls.design = make_design(title="Scoped planned racks", site=cls.site)
 
     def test_planned_racks_round_trip(self):
         self.add_permissions(
@@ -238,7 +238,7 @@ class PlannedRackPkCollisionAPITest(APITestCase):
             "setup did not actually force the pk collision this test needs"
         )
 
-        cls.design = Design.objects.create(title="Collision design", site=cls.site)
+        cls.design = make_design(title="Collision design", site=cls.site)
 
     def test_planned_rack_detail_returns_planned_rack_not_real_rack(self):
         self.add_permissions("netbox_rack_design.view_plannedrack")

@@ -492,7 +492,7 @@ class EditorAddSweepTestCase(unittest.TestCase):
         cls._dt_full3 = dt_full3
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"addsweep-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"addsweep-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")

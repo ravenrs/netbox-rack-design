@@ -128,7 +128,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-bays-{uuid.uuid4().hex[:8]}",
-            "site": chassis["site"]["id"],
+            "sites": [chassis["site"]["id"]],
             "status": "draft",
             "racks": [cls.rack_pk],
         })

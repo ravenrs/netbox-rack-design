@@ -256,6 +256,61 @@ def bay_occupants(bays):
 
 
 @register.filter()
+def slot_moved_from(slot):
+    """Where a moved device stands TODAY -- for the destination tile's card.
+
+    A ``move_in`` tile is already drawn at its destination, so "To <this
+    rack> - U<this unit>" only repeats what the tile's own position says.
+    The half a planner cannot see from the tile is the ORIGIN: the device's
+    real ``dcim`` rack and unit, which is exactly what the vacated ghost at
+    the other end says in reverse (user ruling 2026-09-22).
+
+    Returns ``"<rack> \u00b7 U<n>"``, or ``"<rack> \u00b7 tray"`` for a 0U
+    device, and "" when the device has no rack to name (nothing to say, so
+    the template omits the attribute).
+    """
+    device = slot.get("device")
+    rack = getattr(device, "rack", None)
+    if device is None or rack is None:
+        return ""
+    return _place_label(rack, getattr(device, "position", None))
+
+
+@register.filter()
+def slot_moved_to(slot):
+    """Where a moved device is GOING -- for the vacated ghost's card.
+
+    The mirror of :func:`slot_moved_from`: the ghost is drawn at the origin,
+    so the half it cannot show is the destination. Reads the placement's
+    target, real rack or planned (``PlannedRack`` has no site of its own --
+    it takes its location's).
+    """
+    placement = slot.get("placement")
+    if placement is None:
+        return ""
+    rack = getattr(placement, "target_rack", None) or getattr(
+        placement, "target_planned_rack", None)
+    if rack is None:
+        return ""
+    return _place_label(rack, getattr(placement, "target_position", None))
+
+
+def _place_label(rack, position):
+    """``"<site> \u00b7 <rack> \u00b7 U<n>"`` -- or ``\u00b7 tray`` for a 0U slot.
+
+    The SITE leads, because a design may span several sites and rack names
+    repeat across them: every hall has an R101, so a bare rack name names no
+    place at all (user ruling 2026-09-22). A rack with no site to report
+    (a planned rack whose location was cleared) simply omits that part.
+    """
+    site = getattr(rack, "site", None)
+    where = f"U{int(position)}" if position is not None else "tray"
+    if site is None:
+        return f"{rack.name} \u00b7 {where}"
+    return f"{site.name} \u00b7 {rack.name} \u00b7 {where}"
+
+
+@register.filter()
 def slot_planning(slot):
     """The deployment's config-declared planning fields for a slot's hover card.
 

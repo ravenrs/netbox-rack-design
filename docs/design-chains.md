@@ -15,13 +15,14 @@ Approval is what freezes it (see below), and freezing is what makes it safe
 for another design to build on.
 
 From an approved design's page, **Design chain → Derive design** creates a new
-draft design with `Based on` pointed at it, in the same site. You can also set
-`Based on` directly on the create/edit form (**Design chain → Derive design**
-is a convenience for the common path). Either way:
+draft design with `Based on` pointed at it, inheriting the parent's sites.
+You can also set `Based on` directly on the create/edit form (**Design chain
+→ Derive design** is a convenience for the common path). Either way:
 
 - the parent must be **approved**;
-- the parent and the child must be the **same site** — a chain never crosses
-  sites, because a parent's placements are scoped to its own site's racks;
+- the parent and the child must **share at least one site** — a chain can span
+  multiple sites, but parent and child must both cover at least one site in
+  common so a parent's placements can serve as the child's baseline;
 - a design may have **only one parent**, but a parent may have many children.
   The lineage is a tree, not a graph: each design's own baseline is a strict,
   linear stack of its ancestors.
@@ -171,6 +172,18 @@ Both surface as rows in the editor's persistent **Design conflicts** panel —
 never a toast, because an upstream conflict outlives the session it was
 noticed in. The legend's **Conflict** checkbox filters these tiles the same
 way **Inherited** does.
+
+### Chain Health
+
+**Rack Design → Chain Health** (`/plugins/rack-design/chain-health/`) is the
+cross-design version of the same report: every design you can view whose
+`based_on` chain is refused — an ancestor not yet approved, moved to
+`implemented`, or a broken lineage — or that carries stale placements, one
+row each, linking straight to the fix (**Re-base**, or the design's
+placements filtered to the stale rows) and to the design itself. A healthy
+install shows an empty state. Nothing here is new information — the design
+page's *Design chain* card and the editor's conflicts panel already say it
+per design — it is the "which of my designs need attention right now" view.
 
 ## Siblings do not inherit from each other
 

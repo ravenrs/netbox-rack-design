@@ -49,7 +49,9 @@ class DesignGroupTable(NetBoxTable):
 
 class DesignTable(NetBoxTable):
     title = tables.Column(linkify=True)
-    site = tables.Column(linkify=True)
+    # M9 (PLAN-multi-site.md): `Design.sites` is a M2M; ManyToManyColumn
+    # renders the comma-separated list with each Site linkified.
+    sites = columns.ManyToManyColumn(linkify_item=True)
     status = columns.ChoiceFieldColumn()
     group = tables.Column(linkify=True)
     placement_count = columns.LinkedCountColumn(
@@ -61,10 +63,10 @@ class DesignTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = Design
         fields = (
-            "pk", "id", "title", "site", "status", "version", "sequence",
+            "pk", "id", "title", "sites", "status", "version", "sequence",
             "group", "placement_count", "summary", "created", "last_updated", "actions",
         )
-        default_columns = ("title", "site", "status", "version", "sequence", "group", "placement_count")
+        default_columns = ("title", "sites", "status", "version", "sequence", "group", "placement_count")
 
 
 class ElevationTable(tables.Table):

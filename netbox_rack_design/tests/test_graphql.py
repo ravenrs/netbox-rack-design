@@ -16,7 +16,7 @@ from utilities.testing import APITestCase
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignGroup, DesignPlacement
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 class RackDesignGraphQLTestCase(APITestCase):
@@ -27,7 +27,7 @@ class RackDesignGraphQLTestCase(APITestCase):
         site = env["site"]
 
         cls.group = DesignGroup.objects.create(name="Group 1")
-        cls.design = Design.objects.create(title="Design 1", site=site, group=cls.group)
+        cls.design = make_design(title="Design 1", site=site, group=cls.group)
         cls.placement = DesignPlacement.objects.create(
             design=cls.design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -52,6 +52,18 @@ class RackDesignGraphQLTestCase(APITestCase):
         self.assertNotIn("errors", data)
         self.assertEqual(len(data["data"]["design_list"]), 1)
         self.assertEqual(data["data"]["design_list"][0]["title"], "Design 1")
+
+    @override_settings(LOGIN_REQUIRED=True)
+    def test_query_design_sites(self):
+        # M9 (PLAN-multi-site.md): `site` -> `sites` on the GraphQL type too.
+        self.add_permissions("netbox_rack_design.view_design", "dcim.view_site")
+        query = "query { design_list { id title sites { name } } }"
+        response = self._query(query)
+        self.assertHttpStatus(response, 200)
+        data = json.loads(response.content)
+        self.assertNotIn("errors", data)
+        sites = data["data"]["design_list"][0]["sites"]
+        self.assertEqual([s["name"] for s in sites], [self.design.sites.first().name])
 
     @override_settings(LOGIN_REQUIRED=True)
     def test_query_design_group_list(self):
@@ -92,14 +104,14 @@ class DesignChainGraphQLTestCase(APITestCase):
 
         # A -> B -> C, oldest first. A and B are approved (frozen, so each
         # may be a parent); C stays draft.
-        cls.design_a = Design.objects.create(
+        cls.design_a = make_design(
             title="A", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        cls.design_b = Design.objects.create(
+        cls.design_b = make_design(
             title="B", site=cls.site, based_on=cls.design_a,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.design_c = Design.objects.create(
+        cls.design_c = make_design(
             title="C", site=cls.site, based_on=cls.design_b,
         )
 

@@ -20,8 +20,8 @@ from dcim.models import Location, Rack, Site
 from django.urls import reverse
 from utilities.testing import TestCase
 
-from ..models import Design, PlannedRack
-from .utils import create_dcim_environment
+from ..models import PlannedRack
+from .utils import create_dcim_environment, make_design
 
 
 class RackBlockKeysTest(TestCase):
@@ -58,7 +58,7 @@ class RackBlockKeysTest(TestCase):
         )
         cls.planned_rack = colliding_planned
 
-        cls.design = Design.objects.create(
+        cls.design = make_design(
             title="Rack Block Keys Design", site=cls.other_site,
         )
         cls.design.racks.add(cls.real_rack)

@@ -203,6 +203,31 @@ is a **rack**-level custom field, not a PDU-level one — it is declared under
 path as `power_limitation`. It has nothing to do with `power_source_device` /
 `power_config`, which resolve a *PDU's* custom fields.
 
+## Bank zones, and choosing a feed per device
+
+Two editor controls sit on top of the distribution result.
+
+**Bank zones** (a switch next to *Power heatmap*) draws a narrow strip on the
+left edge of every face grid: one column per feed leg (`a`, `b`, …), showing
+which U range each PDU bank serves and how full it is, in the same colours as
+the bank chips. On a rack with several PDUs per leg the leg's PDUs stack in
+one column, each with its name written up the column at its floor, so it is
+unambiguous which U to drop a device on to land it on `a2` rather than `a1`.
+The chip block above the grids uses the same layout — one column per leg,
+paired PDUs level with each other. The strip is structural, not a colouring
+view, so it is independent of the heatmap switch.
+
+**Per-device feed choice.** A device the design adds or moves is attributed
+to legs automatically — one PSU goes to leg `a`, two or more to `a` + `b`
+(§2.2 of the [spec](pdu-distribution-spec.md)). To pin one device elsewhere,
+open its **Planning attributes** dialog (the tag button on the tile) and use
+the **Power** block: one select per PSU, `Automatic` or a specific leg. The
+choice is stored on the placement as `preferred_feed_legs` (a list, one
+lowercase letter per PSU in PSU order; empty means automatic) and the engine
+charges those legs instead of the first-N heuristic. Devices the design
+leaves in place keep their real cabling; the override only steers what is
+planned. Exposed on the REST/GraphQL placement as `preferred_feed_legs`.
+
 ## Planning fields — custom-field bridge (script tier only)
 
 Most sites keep power policy in **custom fields**: power limitations (rack

@@ -9,7 +9,7 @@ and Django's test loader silently collects NOTHING from it. This module ran
 ChangeLoggedFilterSetTestMixin)`` is core's own spelling; keep it.
 """
 
-from dcim.models import DeviceRole, Location
+from dcim.models import DeviceRole, Location, Site
 from django.test import TestCase
 from tenancy.models import Tenant
 from utilities.testing import create_test_device
@@ -26,7 +26,7 @@ from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed, Plan
 
 # Renamed in NetBox 4.7; .utils carries the alias so this module imports
 # on the whole supported range (see the comment there).
-from .utils import ChangeLoggedFilterSetTestMixin, create_dcim_environment
+from .utils import ChangeLoggedFilterSetTestMixin, create_dcim_environment, make_design
 
 
 class DesignGroupFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
@@ -71,14 +71,14 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
         cls.site = env["site"]
         cls.group = DesignGroup.objects.create(name="Group 1")
 
-        cls.design_1 = Design.objects.create(
+        cls.design_1 = make_design(
             title="Design 1", site=cls.site, group=cls.group,
             status=DesignStatusChoices.STATUS_DRAFT, summary="alpha",
         )
-        Design.objects.create(
+        make_design(
             title="Design 2", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        Design.objects.create(
+        make_design(
             title="Design 3", site=cls.site, status=DesignStatusChoices.STATUS_REJECTED,
         )
 
@@ -105,6 +105,22 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
         params = {"site_id": [self.site.pk]}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
 
+    def test_site_id_multi_site_design(self):
+        # M9 (PLAN-multi-site.md): `site_id` filters over the `sites` M2M, so a
+        # design covering TWO sites is matched by either one, and a design
+        # covering only the other site is excluded.
+        other_site = Site.objects.create(name="Other Site", slug="other-site")
+        two_site_design = make_design(
+            title="Two-site design", sites=(self.site, other_site),
+        )
+        params = {"site_id": [other_site.pk]}
+        self.assertEqual(list(self.filterset(params, self.queryset).qs), [two_site_design])
+
+    def test_site_slug(self):
+        # The human-friendly slug variant of `site_id`.
+        params = {"site": [self.site.slug]}
+        self.assertEqual(self.filterset(params, self.queryset).qs.count(), 3)
+
     def test_group_id(self):
         params = {"group_id": [self.group.pk]}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
@@ -119,7 +135,7 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
 
     def test_based_on_id(self):
         # "designs derived from X" (PLAN-design-chains.md G9).
-        child = Design.objects.create(
+        child = make_design(
             title="Design 1 child", site=self.site, based_on=self.design_1,
         )
         params = {"based_on_id": [self.design_1.pk]}
@@ -129,7 +145,7 @@ class DesignFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
         # "designs with no parent" (PLAN-design-chains.md G9). All three
         # setUpTestData designs have no based_on; add one that does, and
         # confirm no_parent=true excludes it while no_parent=false keeps only it.
-        child = Design.objects.create(
+        child = make_design(
             title="Design 1 child", site=self.site, based_on=self.design_1,
         )
         rootless = self.filterset({"no_parent": True}, self.queryset).qs
@@ -159,7 +175,7 @@ class DesignPlacementFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][1]
         cls.device = env["devices"][0]
-        cls.design = Design.objects.create(title="Design 1", site=site)
+        cls.design = make_design(title="Design 1", site=site)
 
         DesignPlacement.objects.create(
             design=cls.design,
@@ -342,7 +358,7 @@ class DesignPowerFeedFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
         env = create_dcim_environment()
         cls.rack = env["racks"][0]
         other_rack = env["racks"][1]
-        cls.design = Design.objects.create(title="Design 1", site=env["site"])
+        cls.design = make_design(title="Design 1", site=env["site"])
 
         DesignPowerFeed.objects.create(
             design=cls.design, rack=cls.rack, name="Feed A", amperage=16
