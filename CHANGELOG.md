@@ -89,6 +89,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A planned rack could be drawn on but never saved into.** Dropping a
+  device into a rack the design had planned (**Create rack**) and pressing
+  Save answered *"Rack does not exist."* and persisted nothing: the save
+  path resolved every rack it was handed in `dcim.Rack` only. The tile also
+  landed unnamed, because the naming preview refused the same key and
+  failed silently behind it. Both now accept either kind of rack and write
+  the placement's planned-rack target, keeping the two pk sequences (a real
+  rack and a planned one can share a pk) strictly apart. A chassis planned
+  into such a rack is handled on the same path.
+- **A PDU planned into a planned rack could not be bound to a feed.** The
+  bind dialog opened, reported "no feeds yet on this rack" and offered to
+  define one — and then refused to save it, because all five power actions
+  (`feeds`, `planned-feed`, `rack-power`, `power-source`, `copy-feeds`)
+  resolved the rack in `dcim.Rack` only. The reads were the worse half:
+  they answered an empty result rather than an error, so nothing suggested
+  the rack was the problem. All five now read and write the planned-rack
+  side of `DesignPowerFeed` / `DesignRackPower` (fields that already
+  existed), so a greenfield planned rack gets its capacity, bank chips,
+  zones and heatmap like any other. **Copy from rack** works in both
+  directions, matching the picker, which always listed planned racks.
+- **A planned rack could not be taken out of a design.** Deleting one is
+  refused while any design still plans across it, and says to remove it
+  from each design's scope first — which nothing could do: the remove
+  action took real racks only and the editor's Racks panel listed only
+  real racks. The panel now lists planned racks (remove control, no
+  show/hide toggle — there is nothing to hide yet) and the action takes
+  either kind, detaching the shared rack rather than deleting it.
+- **The per-user rack visibility toggle did nothing.** `rack_block.html`
+  writes a real rack's bare pk into `data-rack-id` and prefixes only a
+  planned one, while the panel looked the block up with an `r-` prefix. The
+  query matched nothing, so the eye updated the panel row and the database
+  but never the rack: hiding appeared to do nothing, and once a reload
+  rendered the rack hidden server-side, clicking the eye could not bring it
+  back at all.
+- **Adding, creating or removing a rack could discard unsaved edits.** Those
+  three reload the editor so the server can render the new block, which with
+  unsaved work pending tripped the browser's own *"Reload site? Changes you
+  made may not be saved."* — whose Reload button throws the work away. The
+  editor now asks its own question first (Cancel / Discard / **Save and
+  add**), and does the request only once the answer is in, so cancelling
+  never leaves a rack added that the page cannot show.
+- **Bulk actions on four lists posted to a URL that did not exist.** Planned
+  Racks, Templates, Template Groups and Template Placements rendered
+  NetBox's **Edit Selected** / **Delete Selected** / **Import** buttons —
+  every list whose table has a checkbox column does — but no bulk views were
+  registered, so the form's action resolved to `None` and the POST 404'd.
+  The three bulk views are registered for each, and the planned-rack bulk
+  delete restates the single delete's guards: a batch containing a realized
+  or still-referenced rack is refused whole.
+- **A move's hover card named the tile's own position.** The destination
+  tile said "To \<this rack\> · U\<this unit\>", which is what the tile
+  already shows. Each end now names the OTHER end — the destination says
+  where the device comes **From**, the vacated ghost where it goes **To** —
+  and both lead with the site, since rack names repeat across sites.
+
 - **A per-rack power override could silently fail to reach a distribution
   script, on real racks, in production.** `DesignRackPower` records a
   per-design override of a rack's power custom fields, merged over the

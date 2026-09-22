@@ -55,16 +55,38 @@ plan is not lost.
   from devices, and a planned rack has none by definition — there is nothing
   to extract yet.
 
+## Taking it out of a design
+
+A planned rack is listed in the editor's **Racks** panel alongside the real
+ones, with a **Planned** badge and the same remove control (but no
+show/hide toggle — there is nothing to hide yet). Removing it detaches it
+from *this* design and deletes that design's placements, planned feeds and
+rack-power rows for it, after the usual confirmation naming what will go.
+The rack itself survives: it is shared, so another design planning the same
+future rack is untouched.
+
+Deleting the rack outright, from **Rack Design → Planned Racks**, is
+refused while any design still plans across it — detach it from each of
+them first. A rack that has already been realized is never deletable
+(see above).
+
 ## Power on a planned rack
 
 A planned rack has no real power feeds and no rack-level custom fields of
 its own — there is no `dcim.PowerFeed` row to bind to, because there is no
 `dcim.Rack` row yet. The editor's PDU and rack-power dialogs work anyway:
-a planned PDU can bind to a **planned power feed**, and a rack-power
-override recorded against the planned rack is what the distribution engine
-reads, since there is nothing else to read. Once the rack is realized on
-Apply, that override keeps working exactly the same way against the real
-rack.
+drop a PDU into the rack and the bind dialog offers **Define planned
+feed**; the feed is a `DesignPowerFeed` on the planned rack, and the PDU
+binds to it exactly as it would to a real one. **Copy from rack** works
+too, in both directions — copying a neighbouring real rack's supply into a
+greenfield planned rack is the common case. A rack-power override recorded
+against the planned rack is what the distribution engine reads, since
+there is nothing else to read.
+
+From there the rack behaves like any other: its capacity comes from its
+planned feeds (derated by NetBox's max-utilization rule), and the per-bank
+chips, bank zones and heatmap all work. Once the rack is realized on Apply,
+that override keeps working exactly the same way against the real rack.
 
 ## REST and GraphQL
 

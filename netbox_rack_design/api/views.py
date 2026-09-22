@@ -1973,35 +1973,42 @@ class DesignViewSet(NetBoxModelViewSet):
             body = RackPowerSerializer(data=request.data)
             body.is_valid(raise_exception=True)
             power_config = body.validated_data.get("power_config")
-            # Accepts a legacy bare int or "r:<pk>" (T1.4d); DesignRackPower
-            # has no planned_rack column yet (D25 is a separate task), so a
-            # well-formed "p:<pk>" resolves to no rack, same as an unknown pk.
+            # Accepts a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+            # (planned rack, D25/T1.8b) -- DesignRackPower.planned_rack is the
+            # ONLY source of a planned rack's power custom fields (no
+            # dcim.Rack row to hold rack.cf at all).
             try:
-                rack_id = parse_real_rack_id(body.validated_data["rack_id"])
+                kind, rack_pk, rack_obj = resolve_rack_from_id(body.validated_data["rack_id"])
             except ValueError as exc:
                 return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-            rack = Rack.objects.filter(pk=rack_id).first() if rack_id is not None else None
-            if rack is None:
+            if rack_obj is None:
                 return Response(
                     {"rack_id": ["Rack does not exist."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            lookup = {"rack": rack_obj} if kind == "r" else {"planned_rack": rack_obj}
             rack_power, _created = DesignRackPower.objects.get_or_create(
-                design=design, rack=rack
+                design=design, **lookup
             )
             rack_power.power_config = power_config
             rack_power.save()
             logger.debug(
-                "api.rack_power: design=%s rack_id=%s %s",
-                design.pk, rack_id, "created" if _created else "updated",
+                "api.rack_power: design=%s rack_id=%s:%s %s",
+                design.pk, kind, rack_pk, "created" if _created else "updated",
             )
             return Response(
                 {"power_config": rack_power.power_config}, status=status.HTTP_200_OK
             )
 
         # GET: reopen the rack-power dialog pre-filled with the stored config.
+        # Mirrors the pre-D25 real-rack behaviour exactly (T1.4d): this is a
+        # plain filter, never a "does the rack exist" check -- a rack_id
+        # naming no stored override (real, planned, or simply unknown) is
+        # indistinguishable from one with an override of {} and returns
+        # power_config=null either way. Only the POST branch above insists
+        # the rack itself exists, because it is about to create a row for it.
         raw_rack_id = request.query_params.get("rack_id")
         if not raw_rack_id:
             return Response(
@@ -2009,12 +2016,11 @@ class DesignViewSet(NetBoxModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            rack_id = parse_real_rack_id(raw_rack_id)
+            kind, rack_pk = parse_rack_id(raw_rack_id)
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-        rack_power = DesignRackPower.objects.filter(
-            design=design, rack_id=rack_id
-        ).first() if rack_id is not None else None
+        lookup = {"rack_id": rack_pk} if kind == "r" else {"planned_rack_id": rack_pk}
+        rack_power = DesignRackPower.objects.filter(design=design, **lookup).first()
         return Response(
             {"power_config": rack_power.power_config if rack_power else None},
             status=status.HTTP_200_OK,
@@ -2108,39 +2114,61 @@ class DesignViewSet(NetBoxModelViewSet):
         # rack when that rack has no real ones.
         design = self.get_object()
 
-        kind = request.query_params.get("kind")
-        if kind != "rack":
+        query_kind = request.query_params.get("kind")
+        if query_kind != "rack":
             return Response(
                 {"kind": ["kind must be 'rack'."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # The rack picker in the "copy from rack" dialog lists every rack in
+        # the design -- real AND planned (racksInDom() in power.js) -- so a
+        # planned rack earlier in the same design is a legitimate copy
+        # SOURCE too (D25/T1.8b). Resolves via resolve_rack_from_id rather
+        # than parse_real_rack_id so a "p:<pk>" no longer looks like an
+        # unknown rack.
         raw_rack_id = request.query_params.get("rack_id")
         try:
-            rack_id = parse_real_rack_id(raw_rack_id) if raw_rack_id else None
+            rack_kind, rack_pk, rack = (
+                resolve_rack_from_id(raw_rack_id) if raw_rack_id else (None, None, None)
+            )
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-        rack = Rack.objects.filter(pk=rack_id).first() if rack_id else None
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        feeds = [
-            _feed_dict(feed, "real")
-            for feed in PowerFeed.objects.filter(rack=rack).order_by("name")
-        ]
-        if not feeds:
+        if rack_kind == "r":
+            feeds = [
+                _feed_dict(feed, "real")
+                for feed in PowerFeed.objects.filter(rack=rack).order_by("name")
+            ]
+            if not feeds:
+                feeds = [
+                    _feed_dict(feed, "planned")
+                    for feed in DesignPowerFeed.objects.filter(
+                        design=design, rack=rack).order_by("name")
+                ]
+            custom_fields = dict(rack.cf)
+        else:
+            # A planned rack has no dcim.Rack row at all: no real feeds are
+            # possible, and its custom fields live ONLY in DesignRackPower
+            # (merged across the same baseline chain the distribution engine
+            # itself reads -- effective_custom_fields).
             feeds = [
                 _feed_dict(feed, "planned")
                 for feed in DesignPowerFeed.objects.filter(
-                    design=design, rack=rack).order_by("name")
+                    design=design, planned_rack=rack).order_by("name")
             ]
+            custom_fields, _conflict = DesignRackPower.effective_custom_fields(design, rack)
+
         logger.debug(
-            "api.power_source: kind=rack rack_id=%s feeds=%d", rack_id, len(feeds))
+            "api.power_source: kind=rack rack_id=%s:%s feeds=%d",
+            rack_kind, rack_pk, len(feeds))
         return Response(
-            {"custom_fields": dict(rack.cf), "feeds": feeds},
+            {"custom_fields": custom_fields, "feeds": feeds},
             status=status.HTTP_200_OK,
         )
 
@@ -2192,36 +2220,52 @@ class DesignViewSet(NetBoxModelViewSet):
         body.is_valid(raise_exception=True)
         data = body.validated_data
 
-        # Both ids accept a legacy bare int or "r:<pk>" (T1.4d); DesignPowerFeed
-        # has no planned_rack column yet (D25), so a well-formed "p:<pk>"
-        # resolves to no rack, same as an unknown pk.
+        # Both ids accept a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+        # (planned rack, D25/T1.8b) -- the TARGET is normally the greenfield
+        # rack, but the SOURCE may be planned too: a rack planned earlier in
+        # the same design is a legitimate donor for one planned later
+        # (mirrors the existing "no real feeds -> fall back to this design's
+        # planned feeds" case below, just for a source that never has real
+        # feeds to begin with).
         try:
-            target_id = parse_real_rack_id(data["rack_id"])
-            source_id = parse_real_rack_id(data["source_rack_id"])
+            target_kind, target_pk, target = resolve_rack_from_id(data["rack_id"])
+            source_kind, source_pk, source = resolve_rack_from_id(data["source_rack_id"])
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-        target = Rack.objects.filter(pk=target_id).first() if target_id is not None else None
         if target is None:
             return Response({"rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
         # Same-site rule, mirroring add-rack / rack-power / planned-feed (M3).
-        if not design.sites.filter(pk=target.site_id).exists():
+        # PlannedRack has no site FK of its own -- ``site`` is a property that
+        # derefs through ``location`` (mirrors DesignPowerFeed.clean()).
+        target_site_id = target.site_id if target_kind == "r" else target.location.site_id
+        if not design.sites.filter(pk=target_site_id).exists():
             return Response({"rack_id": ["This rack is not in one of the design's sites."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        source = Rack.objects.filter(pk=source_id).first() if source_id is not None else None
         if source is None:
             return Response({"source_rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        if source.pk == target.pk:
+        # pk alone is not enough (D28): a real rack and a planned rack keep
+        # SEPARATE pk sequences, so pk 5 of each is a different rack.
+        if source_kind == target_kind and source.pk == target.pk:
             return Response(
                 {"source_rack_id": ["Source and target rack must differ."]},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        sources = list(PowerFeed.objects.filter(rack=source).order_by("name"))
-        if not sources:
+        if source_kind == "r":
+            sources = list(PowerFeed.objects.filter(rack=source).order_by("name"))
+            if not sources:
+                sources = list(DesignPowerFeed.objects.filter(
+                    design=design, rack=source).order_by("name"))
+        else:
+            # A planned rack has no dcim.Rack row, so no real PowerFeed can
+            # ever exist for it -- its only feeds are this design's own
+            # planned ones.
             sources = list(DesignPowerFeed.objects.filter(
-                design=design, rack=source).order_by("name"))
+                design=design, planned_rack=source).order_by("name"))
+
+        target_lookup = {"rack": target} if target_kind == "r" else {"planned_rack": target}
 
         copied, created_count, updated_count = [], 0, 0
         with transaction.atomic():
@@ -2234,7 +2278,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     "supply": getattr(feed.supply, "value", feed.supply),
                 }
                 planned, created = DesignPowerFeed.objects.get_or_create(
-                    design=design, rack=target, name=name, defaults=electricals)
+                    design=design, name=name, defaults=electricals, **target_lookup)
                 if created:
                     created_count += 1
                 else:
@@ -2253,7 +2297,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # picker than an instruction to strip this rack of its supply, and
             # the destructive reading has no undo.
             stale = DesignPowerFeed.objects.filter(
-                design=design, rack=target
+                design=design, **target_lookup
             ).exclude(pk__in=[f.pk for f in copied]) if copied else (
                 DesignPowerFeed.objects.none())
             unbound = DesignPlacement.objects.filter(
@@ -2328,31 +2372,33 @@ class DesignViewSet(NetBoxModelViewSet):
                 {"rack_id": ["This query parameter is required."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Accepts a legacy bare int or "r:<pk>" (T1.4d). A well-formed
-        # "p:<pk>" simply has no real feeds to find (PowerFeed/DesignPowerFeed
-        # only ever key by a real dcim.Rack), so it resolves to an empty
-        # result below rather than an error -- consistent with "rack does not
-        # exist" everywhere else in this file.
+        # Accepts a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+        # (planned rack, D25/T1.8b). A real dcim.PowerFeed genuinely cannot
+        # exist for a planned rack (no dcim.Rack row to hang it on), so
+        # ``real`` stays [] for one -- but ``planned`` now reads this
+        # design's (and its approved ancestors') DesignPowerFeed rows keyed
+        # by ``planned_rack`` instead of being unconditionally empty.
         try:
-            rack_id = parse_real_rack_id(raw_rack_id)
+            rack_kind, rack_pk = parse_rack_id(raw_rack_id)
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-        logger.debug("api.feeds: design=%s rack_id=%s", design.pk, rack_id)
+        logger.debug("api.feeds: design=%s rack_id=%s:%s", design.pk, rack_kind, rack_pk)
 
-        # A "p:<pk>" key parses to rack_id=None: never pass that to a
-        # rack_id=<value> filter below (rack_id=None means "IS NULL", which
-        # is a different, wrong query) -- treat it as "no feeds" instead.
+        # Never pass a real-rack-only rack_id=<value> filter for a planned
+        # rack, nor vice versa (D28: the two tables keep separate pk
+        # sequences) -- own_lookup picks the column that matches rack_kind.
+        own_lookup = {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
         real_feeds = [
-            _feed_dict(f, "real") for f in PowerFeed.objects.filter(rack_id=rack_id)
-        ] if rack_id is not None else []
+            _feed_dict(f, "real") for f in PowerFeed.objects.filter(rack_id=rack_pk)
+        ] if rack_kind == "r" else []
         planned_feeds = [
             _feed_dict(f, "planned")
-            for f in DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
-        ] if rack_id is not None else []
-        chain, _refusal = projection.resolve_baseline_chain(design) if rack_id is not None else ([], None)
+            for f in DesignPowerFeed.objects.filter(design=design, **own_lookup)
+        ]
+        chain, _refusal = projection.resolve_baseline_chain(design)
         for ancestor in chain:
             for f in DesignPowerFeed.objects.filter(
-                design=ancestor, rack_id=rack_id
+                design=ancestor, **own_lookup
             ):
                 entry = _feed_dict(f, "planned")
                 entry["inherited"] = True
@@ -2360,8 +2406,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 entry["design_name"] = str(ancestor)
                 planned_feeds.append(entry)
         logger.debug(
-            "api.feeds: design=%s rack_id=%s real=%d planned=%d",
-            design.pk, rack_id, len(real_feeds), len(planned_feeds),
+            "api.feeds: design=%s rack_id=%s:%s real=%d planned=%d",
+            design.pk, rack_kind, rack_pk, len(real_feeds), len(planned_feeds),
         )
         return Response(
             {"real": real_feeds, "planned": planned_feeds}, status=status.HTTP_200_OK
@@ -2404,23 +2450,25 @@ class DesignViewSet(NetBoxModelViewSet):
             body = PlannedFeedUpsertSerializer(data=request.data)
             body.is_valid(raise_exception=True)
             data = body.validated_data
-            # Accepts a legacy bare int or "r:<pk>" (T1.4d); a well-formed
-            # "p:<pk>" resolves to no rack, same as an unknown pk --
-            # DesignPowerFeed has no planned_rack column yet (D25).
+            # Accepts a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+            # (planned rack, D25/T1.8b): DesignPowerFeed.planned_rack is
+            # exactly the greenfield case this dialog flow exists for.
             try:
-                rack_id = parse_real_rack_id(data["rack_id"])
+                rack_kind, rack_pk, rack = resolve_rack_from_id(data["rack_id"])
             except ValueError as exc:
                 return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-            rack = Rack.objects.filter(pk=rack_id).first() if rack_id is not None else None
             if rack is None:
                 return Response(
                     {"rack_id": ["Rack does not exist."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             # Same-site rule, mirroring add-rack/rack_power (M3): a planned
-            # feed can only be defined for a rack in one of the design's sites.
-            if not design.sites.filter(pk=rack.site_id).exists():
+            # feed can only be defined for a rack in one of the design's
+            # sites. PlannedRack has no site FK of its own -- ``site`` is a
+            # property that derefs through ``location``.
+            rack_site_id = rack.site_id if rack_kind == "r" else rack.location.site_id
+            if not design.sites.filter(pk=rack_site_id).exists():
                 return Response(
                     {"rack_id": ["This rack is not in one of the design's sites."]},
                     status=status.HTTP_400_BAD_REQUEST,
@@ -2429,16 +2477,17 @@ class DesignViewSet(NetBoxModelViewSet):
             electricals = {
                 k: data[k] for k in ("voltage", "amperage", "phase", "supply") if k in data
             }
+            target_lookup = {"rack": rack} if rack_kind == "r" else {"planned_rack": rack}
             feed, created = DesignPowerFeed.objects.get_or_create(
-                design=design, rack=rack, name=data["name"], defaults=electricals
+                design=design, name=data["name"], defaults=electricals, **target_lookup
             )
             if not created and electricals:
                 for field_name, value in electricals.items():
                     setattr(feed, field_name, value)
                 feed.save()
             logger.debug(
-                "api.planned_feed: design=%s rack_id=%s name=%s %s",
-                design.pk, rack_id, data["name"], "created" if created else "updated",
+                "api.planned_feed: design=%s rack_id=%s:%s name=%s %s",
+                design.pk, rack_kind, rack_pk, data["name"], "created" if created else "updated",
             )
             return Response(PlannedFeedSerializer(feed).data, status=status.HTTP_200_OK)
 
@@ -2450,19 +2499,15 @@ class DesignViewSet(NetBoxModelViewSet):
             if data.get("feed_id") is not None:
                 feeds_qs = feeds_qs.filter(pk=data["feed_id"])
             else:
-                # Accepts a legacy bare int or "r:<pk>" (T1.4d); a well-formed
-                # "p:<pk>" can never match a DesignPowerFeed (no planned_rack
-                # column yet -- D25), so it is routed to the same "no such
-                # feed" 404 below rather than a rack_id=None ("IS NULL")
-                # filter, which would be a different, wrong query.
+                # Accepts a legacy bare int, "r:<pk>" or "p:<pk>" (D25/T1.8b).
                 try:
-                    rack_id = parse_real_rack_id(data["rack_id"])
+                    rack_kind, rack_pk = parse_rack_id(data["rack_id"])
                 except ValueError as exc:
                     return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-                feeds_qs = (
-                    feeds_qs.filter(rack_id=rack_id, name=data["name"])
-                    if rack_id is not None else DesignPowerFeed.objects.none()
+                own_lookup = (
+                    {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
                 )
+                feeds_qs = feeds_qs.filter(name=data["name"], **own_lookup)
             if not feeds_qs.exists():
                 return Response(
                     {"detail": "No such planned feed in this design."},
@@ -2490,18 +2535,14 @@ class DesignViewSet(NetBoxModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
-            rack_id = parse_real_rack_id(raw_rack_id)
+            rack_kind, rack_pk = parse_rack_id(raw_rack_id)
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
-        # A well-formed "p:<pk>" (rack_id is None) simply has no planned
-        # feeds to list -- never a rack_id=None ("IS NULL") filter.
-        feeds_qs = (
-            DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
-            if rack_id is not None else DesignPowerFeed.objects.none()
-        )
+        own_lookup = {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
+        feeds_qs = DesignPowerFeed.objects.filter(design=design, **own_lookup)
         logger.debug(
-            "api.planned_feed: design=%s rack_id=%s list count=%d",
-            design.pk, rack_id, feeds_qs.count(),
+            "api.planned_feed: design=%s rack_id=%s:%s list count=%d",
+            design.pk, rack_kind, rack_pk, feeds_qs.count(),
         )
         return Response(
             PlannedFeedSerializer(feeds_qs, many=True).data, status=status.HTTP_200_OK
