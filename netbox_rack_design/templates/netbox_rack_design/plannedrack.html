@@ -53,6 +53,32 @@
     {% plugin_left_page object %}
   </div>
   <div class="col col-12 col-md-6">
+    {# Who is standing in the way of a delete -- and where to go to fix it. #}
+    <div class="card">
+      <h2 class="card-header">{% trans "Used by designs" %}</h2>
+      {% if referencing_designs %}
+      <table class="table table-hover attr-table">
+        {% for design in referencing_designs %}
+        <tr>
+          <td>{{ design|linkify }}</td>
+          <td class="text-end">
+            <a href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=design.pk %}"
+               class="btn btn-sm btn-outline-primary">
+              <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Open editor" %}
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      <div class="card-footer small text-muted">
+        {% trans "This rack cannot be deleted while a design plans across it. Remove it from each design's Racks panel first." %}
+      </div>
+      {% else %}
+      <div class="card-body text-muted">
+        {% trans "No design plans across this rack, so it can be deleted." %}
+      </div>
+      {% endif %}
+    </div>
     {% include 'inc/panels/tags.html' %}
     {% plugin_right_page object %}
   </div>

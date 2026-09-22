@@ -1605,6 +1605,24 @@ class DesignPowerFeedBulkDeleteView(generic.BulkDeleteView):
 class PlannedRackView(generic.ObjectView):
     queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
 
+    def get_extra_context(self, request, instance):
+        # Deleting a planned rack is refused while any design still plans
+        # across it, and the refusal tells the planner to remove it from
+        # each design's planning scope first -- so name them here, with a
+        # link into each editor, where the Racks panel's remove control is
+        # (user report 2026-09-22). Ordered by title so a long list reads
+        # predictably; `restrict` so a design the user may not see is not
+        # disclosed by this page (the refusal message itself is a different
+        # question, deliberately answered there -- an obstacle with no name
+        # is not actionable).
+        return {
+            "referencing_designs": (
+                instance.referencing_designs()
+                .restrict(request.user, "view")
+                .order_by("title", "version", "pk")
+            ),
+        }
+
 
 @register_model_view(models.PlannedRack, "list", path="", detail=False)
 class PlannedRackListView(generic.ObjectListView):

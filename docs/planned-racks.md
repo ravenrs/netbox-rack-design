@@ -67,7 +67,9 @@ future rack is untouched.
 
 Deleting the rack outright, from **Rack Design → Planned Racks**, is
 refused while any design still plans across it — detach it from each of
-them first. A rack that has already been realized is never deletable
+them first. The rack's own page lists those designs under **Used by
+designs**, each with a link straight into its editor, so there is no
+hunting for who is holding it. A rack that has already been realized is never deletable
 (see above).
 
 ## Power on a planned rack

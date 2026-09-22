@@ -109,6 +109,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existed), so a greenfield planned rack gets its capacity, bank chips,
   zones and heatmap like any other. **Copy from rack** works in both
   directions, matching the picker, which always listed planned racks.
+- **A planned rack's page never said which designs were holding it.**
+  Deleting one is refused while any design still plans across it, and the
+  refusal says to remove it from each design's planning scope first —
+  without naming them, which left a planner opening designs one by one. The
+  page now has a **Used by designs** panel listing each of them with a link
+  into its editor, where the Racks panel's remove control is. The listing
+  obeys ordinary object permissions; the refusal message still names the
+  design either way, since an obstacle with no name is not actionable.
 - **A planned rack could not be taken out of a design.** Deleting one is
   refused while any design still plans across it, and says to remove it
   from each design's scope first — which nothing could do: the remove

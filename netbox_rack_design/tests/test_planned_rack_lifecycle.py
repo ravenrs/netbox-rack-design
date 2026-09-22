@@ -24,11 +24,13 @@ Covers the four decisions from the task brief:
    deleting design's own placements/feeds/rack-power cascade away).
 """
 
+from core.models import ObjectType
 from dcim.models import Location, Rack
 from django.contrib.messages import get_messages
 from django.test import TestCase as DjangoTestCase
 from django.urls import reverse
 from rest_framework import status
+from users.models import User
 from utilities.testing import APITestCase, TestCase
 
 from ..choices import DesignPlacementKindChoices
@@ -236,6 +238,83 @@ class PlannedRackHTMLDeleteGuardTest(TestCase):
         self.assertTrue(PlannedRack.objects.filter(pk=pr.pk).exists())
         shown = [str(m) for m in get_messages(response.wsgi_request)]
         self.assertTrue(any("realized" in m.lower() for m in shown))
+
+
+class PlannedRackDetailReferencingDesignsTest(TestCase):
+    """The detail page names the designs standing in the way of a delete.
+
+    Deleting a planned rack is refused while any design still plans across
+    it, and the refusal says to remove it from each design's planning scope
+    first -- but the page never said WHICH designs, so a planner had to go
+    hunting (user report 2026-09-22). Each one is listed with a link to its
+    editor, where the Racks panel's remove control lives.
+    """
+
+    user_permissions = (
+        "netbox_rack_design.view_plannedrack",
+        "netbox_rack_design.view_design",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.location = Location.objects.create(
+            name="Detail Location", slug="detail-location", site=cls.site
+        )
+
+    def _url(self, pr):
+        return reverse("plugins:netbox_rack_design:plannedrack", kwargs={"pk": pr.pk})
+
+    def test_referencing_designs_are_listed_with_editor_links(self):
+        pr = PlannedRack.objects.create(name="Held", location=self.location, u_height=10)
+        design = make_design(title="Holding design", site=self.site)
+        design.planned_racks.add(pr)
+
+        response = self.client.get(self._url(pr))
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn("Holding design", content)
+        self.assertIn(
+            reverse("plugins:netbox_rack_design:design_editor_default",
+                    kwargs={"pk": design.pk}),
+            content,
+            "each design links to its editor, where the rack can be detached")
+
+    def test_a_design_the_user_cannot_view_is_not_disclosed(self):
+        """The list is restricted, like every other object list.
+
+        The delete REFUSAL names the design regardless -- an obstacle with
+        no name is not actionable -- but this panel is an ordinary listing
+        and obeys ordinary object permissions.
+        """
+        pr = PlannedRack.objects.create(name="Hidden", location=self.location, u_height=10)
+        design = make_design(title="Invisible design", site=self.site)
+        design.planned_racks.add(pr)
+
+        # A SEPARATE user who may view planned racks but no design: NetBox
+        # grants through ObjectPermission, so clearing `user_permissions` on
+        # the suite's own user would not model this.
+        from django.test import Client as DjangoClient
+        from users.models import ObjectPermission
+
+        other = User.objects.create_user(username="planned-rack-only")
+        perm = ObjectPermission.objects.create(name="pr-only", actions=["view"])
+        perm.object_types.set([ObjectType.objects.get_for_model(PlannedRack)])
+        perm.users.add(other)
+        client = DjangoClient()
+        client.force_login(other)
+
+        response = client.get(self._url(pr))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Invisible design", response.content.decode())
+
+    def test_orphan_says_it_can_be_deleted(self):
+        pr = PlannedRack.objects.create(name="Free", location=self.location, u_height=10)
+        response = self.client.get(self._url(pr))
+        self.assertHttpStatus(response, 200)
+        self.assertIn("referencing_designs", response.context)
+        self.assertEqual(list(response.context["referencing_designs"]), [])
 
 
 class PlannedRackBulkDeleteGuardTest(TestCase):
