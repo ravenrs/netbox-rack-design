@@ -41,6 +41,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DCIM — and each extraction reports, rather than silently drops, any
   "island" device (dead air on both sides) that a template's anchor+order
   shape cannot represent. See [docs/templates.md](docs/templates.md).
+- **Bank zones in the editor.** Each face grid now carries a narrow strip on
+  its left edge, one column per feed leg, showing which U range every PDU
+  bank serves and how full it is (same colours as the bank chips). A 4-PDU
+  rack stacks the leg's PDUs in one column with the PDU's name written up
+  the column at its floor, so it is clear which U to drop a device on to
+  land it on `a2` rather than `a1`. Toggled by **Bank zones** next to the
+  power heatmap switch. The bank chip block above the grids follows the same
+  layout — one column per leg, paired PDUs level with each other.
+- **Per-device feed choice.** A device the design adds or moves can be
+  pinned to specific feed legs (one per PSU) from its *Planning attributes*
+  dialog; the choice is stored on the placement (`preferred_feed_legs`) and
+  the distribution engine charges those legs instead of the automatic
+  first-N heuristic. Devices the design leaves in place keep their real
+  cabling.
+
+### Changed
+
+- **One live power recompute per drag.** The editor used to ask the server
+  to recompute the per-bank distribution on every row a dragged tile
+  crossed. The request is now withheld until the tile is dropped (or the
+  drag is cancelled) and fires exactly once; the local power bar and
+  heatmap still update live during the drag.
+- **Layout save and live recompute issue fewer queries.** The per-item
+  device / device-type / placement lookups in layout reconciliation are
+  loaded once per request instead of once per item.
 
 ### Fixed
 
