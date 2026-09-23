@@ -13,6 +13,7 @@ from dcim.models import (
     Manufacturer,
     PowerFeed,
     PowerOutlet,
+    PowerOutletTemplate,
     PowerPanel,
     PowerPort,
     Rack,
@@ -2871,6 +2872,137 @@ class RecomputeDistributionTest(APITestCase):
             format="json", **self.header,
         )
         self.assertHttpStatus(resp, status.HTTP_403_FORBIDDEN)
+
+
+@override_settings(PLUGINS_CONFIG=_plugins_config(distribution_mode="builtin"))
+class RecomputeDistributionPlannedRackTest(APITestCase):
+    """
+    recompute-distribution for a ``PlannedRack`` (2026-09-23 bug report): the
+    action's per-rack loop filed every planned rack under ``None`` (see the
+    now-stale comment it carried -- "this action does not project a planned
+    rack yet"), so the editor's power bar and per-bank chips only ever
+    refreshed on a full page reload for a planned rack, never live like a
+    real rack. ``save-layout`` and the five power actions already learned to
+    handle a planned rack (commits 1d129b6/c62a81f); this action must project
+    one exactly like a real rack.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = Site.objects.create(name="Dist Site P", slug="dist-site-p")
+        cls.mfr = Manufacturer.objects.create(name="Mfr DP", slug="mfr-dp")
+        cls.location = Location.objects.create(
+            name="Loc DP", slug="loc-dp", site=cls.site,
+        )
+        cls.planned_rack = PlannedRack.objects.create(
+            name="Planned R DP", location=cls.location, u_height=12,
+        )
+        # A second, REAL rack for the mixed-payload test.
+        cls.rack = Rack.objects.create(name="Rack DP", site=cls.site, u_height=10)
+
+        cls.pdu_role = DeviceRole.objects.create(name="PDU DP", slug="pdu")
+        cls.pdu_type = DeviceType.objects.create(
+            manufacturer=cls.mfr, model="Planned PDU DP", slug="planned-pdu-dp",
+            u_height=0,
+        )
+        PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="1/1")
+        PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="2/1")
+
+        cls.design = make_design(title="Dist design P", site=cls.site)
+
+        # A planned feed bound to the PLANNED rack (230V/16A single-phase),
+        # and a planned PDU add bound to it -- the "Copy from rack" ->
+        # bind-PDU-to-feed -> Save path the bug report walks through.
+        cls.feed = DesignPowerFeed.objects.create(
+            design=cls.design, planned_rack=cls.planned_rack, name="Feed DP",
+            voltage=230, amperage=16, phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        cls.pdu_placement = DesignPlacement.objects.create(
+            design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.pdu_type, device_role=cls.pdu_role,
+            target_planned_rack=cls.planned_rack, target_position=None,
+            proposed_name="pdu-dp-1", planned_power_feed=cls.feed,
+        )
+
+    def _url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-recompute-distribution",
+            kwargs={"pk": self.design.pk},
+        )
+
+    def test_planned_rack_returns_non_null_distribution_and_power(self):
+        """A planned rack with a bound PDU must come back with a non-null
+        ``power``/``distributions`` entry under its ``"p:<pk>"`` key -- before
+        the fix these were both ``None`` (the bug's exact signature)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        key = f"p:{self.planned_rack.pk}"
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk,
+             "racks": [{"rack_id": key, "front": [], "rear": [], "other": []}]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+
+        self.assertIsNotNone(resp.data["power"][key])
+        self.assertGreater(resp.data["power"][key]["capacity_w"], 0)
+
+        self.assertIsNotNone(
+            resp.data["distributions"][key],
+            resp.data["distribution_status"][key],
+        )
+        self.assertIn("pdu-dp-1", resp.data["distributions"][key]["pdus"])
+
+        # Read-only: nothing persisted.
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
+
+    def test_mixed_real_and_planned_racks_each_keyed_separately(self):
+        """One real rack + one planned rack in the same request: each comes
+        back non-null under its OWN key, and the real rack's legacy bare-pk
+        alias is still present alongside its namespaced form."""
+        self.add_permissions("netbox_rack_design.view_design")
+        planned_key = f"p:{self.planned_rack.pk}"
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk, "racks": [
+                {"rack_id": planned_key, "front": [], "rear": [], "other": []},
+                {"rack_id": self.rack.pk, "front": [], "rear": [], "other": []},
+            ]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+
+        self.assertIsNotNone(resp.data["power"][planned_key])
+        self.assertIsNotNone(resp.data["distributions"][planned_key])
+
+        # Real rack: both the namespaced AND the legacy bare-pk key, both
+        # non-null -- real-rack behaviour is unchanged by this fix.
+        real_key = f"r:{self.rack.pk}"
+        self.assertIsNotNone(resp.data["power"][real_key])
+        self.assertIsNotNone(resp.data["power"][str(self.rack.pk)])
+        self.assertEqual(resp.data["power"][real_key], resp.data["power"][str(self.rack.pk)])
+
+        # Only the real rack gets a bare-pk alias -- a planned rack has none
+        # (D28: separate pk sequences, no bare-int form to begin with).
+        self.assertNotIn(str(self.planned_rack.pk), resp.data["power"])
+
+    def test_unknown_planned_rack_key_returns_nulls_not_an_error(self):
+        """A stale/unknown ``"p:<pk>"`` key is reported as null, exactly like
+        an unknown real-rack pk -- never a 500 or a 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        unknown_key = "p:999999"
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk,
+             "racks": [{"rack_id": unknown_key, "front": [], "rear": [], "other": []}]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["power"][unknown_key])
+        self.assertIsNone(resp.data["distributions"][unknown_key])
+        self.assertIsNone(resp.data["distribution_status"][unknown_key])
 
 
 class PreviewNameTest(APITestCase):

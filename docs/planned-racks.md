@@ -87,7 +87,8 @@ there is nothing else to read.
 
 From there the rack behaves like any other: its capacity comes from its
 planned feeds (derated by NetBox's max-utilization rule), and the per-bank
-chips, bank zones and heatmap all work. Once the rack is realized on Apply,
+chips, bank zones and heatmap all work — live, as you edit, with no reload
+and no layout Save. Once the rack is realized on Apply,
 that override keeps working exactly the same way against the real rack.
 
 ## REST and GraphQL

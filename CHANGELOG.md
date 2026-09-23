@@ -98,6 +98,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the placement's planned-rack target, keeping the two pk sequences (a real
   rack and a planned one can share a pk) strictly apart. A chassis planned
   into such a rack is handled on the same path.
+- **A planned rack's power numbers only ever arrived on a reload.** The
+  rack-power dialog's Save flips a real greenfield rack's capacity bar on
+  the spot; on a planned rack the bar sat on the pre-feed fallback until
+  the page was reloaded, and the per-bank chips never refreshed live at
+  all. Two halves: `recompute-distribution` resolved only `dcim.Rack` and
+  filed every planned rack as null, and the client then looked the answer
+  up by the server's namespaced key (`"p:<pk>"`) against a DOM that spells
+  it colon-free (`"p-<pk>"`) — a real rack survived that mismatch only
+  because the response files it under its bare pk as well. Both fixed, so
+  a planned rack's bar, chips and distribution status refresh live like
+  any other rack's. The rack-power button, gated out while those endpoints
+  were real-rack-only, is drawn for a planned rack again.
 - **A PDU planned into a planned rack could not be bound to a feed.** The
   bind dialog opened, reported "no feeds yet on this rack" and offered to
   define one — and then refused to save it, because all five power actions

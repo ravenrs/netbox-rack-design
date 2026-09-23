@@ -65,16 +65,14 @@
     {# pdu_location override, models.DesignRackPower) -- GATED to racks with   #}
     {# NO real PowerFeeds yet. A provisioned rack's PDUs bind straight to its  #}
     {# real feeds via the per-PDU bind-to-feed dialog instead. Editor only.    #}
-    {# T1.5c (PLAN-templates.md D31): the rack-power/feeds endpoints          #}
-    {# (power.js postRackPower/postPlannedFeed/postCopyFeeds) are real-rack-  #}
-    {# only by design (D26) -- there is no PlannedRack-side API to extend to  #}
-    {# yet. Gate the button out for a planned rack rather than let it send a  #}
-    {# bare pk the server would silently treat as a same-pk'd real rack's id. #}
-    {# Least-surprising choice: hide, don't disable-with-tooltip -- there is  #}
-    {# no planning input this button could collect for a planned rack today  #}
-    {# (no rack-power flow exists for one), so a disabled button with nothing #}
-    {# it will ever do would just be a dead affordance. #}
-    {% if editable and not b.has_real_feeds and not b.is_planned %}
+    {# A PLANNED rack gets this button too. It was gated out while the       #}
+    {# rack-power/feeds endpoints were real-rack-only, which is no longer    #}
+    {# true -- all five read and write the planned-rack side now -- and a    #}
+    {# planned rack is the greenfield case by definition (no dcim.Rack row,  #}
+    {# so never a real PowerFeed), which is exactly what this flow is for.   #}
+    {# power.js sends the namespaced rack key, so there is no bare-pk        #}
+    {# ambiguity between a rack and a planned rack sharing a pk (D28).       #}
+    {% if editable and not b.has_real_feeds %}
     <button type="button" class="btn btn-outline-warning btn-sm ms-2"
             data-rd-rack-power-btn
             title="{% trans 'Rack power (planning input)' %}"

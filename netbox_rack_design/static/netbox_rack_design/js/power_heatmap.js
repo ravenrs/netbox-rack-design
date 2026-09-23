@@ -118,6 +118,22 @@
     // edit -- the initial paint uses the server-rendered static blob below.
     var liveDist = {};
 
+    // The server keys every rack by its NAMESPACED rack_key() ("r:<pk>" /
+    // "p:<pk>", D27), while the DOM spells the same key colon-free
+    // ("r-<pk>"/"p-<pk>", rack_dom_id) -- and a REAL rack's block uses its
+    // bare pk. A real rack survived that mismatch by accident: the response
+    // files it under the bare pk too, which is exactly what its block
+    // carries. A PLANNED rack has no bare form, so "p:7" never matched the
+    // "p-7" in the DOM and its live capacity/chips silently never landed
+    // (user report 2026-09-23). Translate once, on the way in.
+    function domKeyForServerKey(serverKey) {
+        var s = String(serverKey);
+        if (s.slice(0, 2) === "r:" || s.slice(0, 2) === "p:") {
+            return s[0] + "-" + s.slice(2);
+        }
+        return s;
+    }
+
     // The Distribution for a rack, by its opaque data-rack-id string: the
     // live-recomputed one if we have it (any edit has happened), else the
     // static JSON the server emitted at render time (`#rd-distribution-
@@ -715,7 +731,7 @@
                 var dists = res.distributions || {};
                 Object.keys(dists).forEach(function (rackId) {
                     var d = dists[rackId];
-                    liveDist[rackId] = (d && d.pdus) ? d : null;
+                    liveDist[domKeyForServerKey(rackId)] = (d && d.pdus) ? d : null;
                 });
                 // An edit can BREAK the engine (a script that trips over the new
                 // layout), so the reason travels with every recompute -- the
@@ -723,7 +739,7 @@
                 // the next page load.
                 var statuses = res.distribution_status || {};
                 Object.keys(statuses).forEach(function (rackId) {
-                    liveDistStatus[rackId] = statuses[rackId] || null;
+                    liveDistStatus[domKeyForServerKey(rackId)] = statuses[rackId] || null;
                 });
                 // Capacity/thresholds come from the server (feed derating maths
                 // over real AND planned feeds, which the browser must not
@@ -735,7 +751,8 @@
                     var p = powers[rackId];
                     if (!p || p.capacity_w == null) { return; }
                     var block = document.querySelector(
-                        '.nbx-rd-rack-block[data-rack-id="' + rackId + '"]');
+                        '.nbx-rd-rack-block[data-rack-id="'
+                        + domKeyForServerKey(rackId) + '"]');
                     var bar = block && block.querySelector(".nbx-rd-power-bar");
                     if (!bar) { return; }
                     bar.setAttribute("data-rd-power-capacity", Math.round(p.capacity_w));

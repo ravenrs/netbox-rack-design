@@ -53,6 +53,70 @@ class DesignEditorPlannedRackContextTest(TestCase):
             kwargs={"pk": design.pk},
         )
 
+    def _block_html(self, content, key):
+        """The markup of ONE rack block: id="rd-rack-<key>" up to the next.
+
+        Sliced on the id, not the class: `nbx-rd-rack-block` is a prefix of
+        `nbx-rd-rack-block-header`, so slicing on the class cuts the block
+        off before its own header buttons.
+        """
+        marker = f'id="rd-rack-{key}"'
+        self.assertIn(marker, content, f"no block rendered for {key}")
+        after = content.split(marker, 1)[1]
+        return after.split('id="rd-rack-', 1)[0]
+
+    def test_planned_rack_offers_the_rack_power_button(self):
+        """A greenfield planned rack needs the power planning input too.
+
+        The orange power button opens the rack-power dialog, which is where
+        "Copy from rack" and the planned-feed flow live. It was gated out
+        for a planned rack because the rack-power/feeds endpoints were
+        real-rack-only -- true when the gate was written, not since those
+        five actions learned to read and write the planned-rack side. A
+        planner who creates a rack in the editor and then wants to copy a
+        neighbour's supply into it had no button to press (user report
+        2026-09-23).
+        """
+        response = self.client.get(self._editor_url(self.design))
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn(
+            "data-rd-rack-power-btn",
+            self._block_html(content, f"p-{self.planned_rack.pk}"),
+            "a planned rack with no feeds must offer the power dialog")
+
+    def test_power_button_gate_matches_a_real_rack(self):
+        """Planned and real racks obey ONE rule: no REAL feeds, button shown.
+
+        A planned rack can never have a ``dcim.PowerFeed`` (there is no
+        ``dcim.Rack`` row for the FK to point at), so it is always the
+        greenfield case -- exactly like a real rack that has none yet. The
+        button stays after planned feeds are defined in both cases: it is
+        also the way to "Copy from rack" and to record a rack-power
+        override.
+        """
+        from dcim.models import PowerFeed, PowerPanel
+
+        response = self.client.get(self._editor_url(self.design))
+        content = response.content.decode()
+
+        def block_for(key):
+            return self._block_html(content, key)
+
+        # The real rack has no feeds yet either -> both offer the button.
+        self.assertIn("data-rd-rack-power-btn", block_for(str(self.rack1.pk)))
+        self.assertIn("data-rd-rack-power-btn", block_for(f"p-{self.planned_rack.pk}"))
+
+        # Give the REAL rack real feeds: its button goes, the planned rack's stays.
+        panel = PowerPanel.objects.create(site=self.site, name="Gate panel")
+        PowerFeed.objects.create(
+            power_panel=panel, rack=self.rack1, name="Gate-A",
+            voltage=230, amperage=32, phase="single-phase", supply="ac",
+        )
+        content = self.client.get(self._editor_url(self.design)).content.decode()
+        self.assertNotIn("data-rd-rack-power-btn", block_for(str(self.rack1.pk)))
+        self.assertIn("data-rd-rack-power-btn", block_for(f"p-{self.planned_rack.pk}"))
+
     def test_planned_rack_appears_alongside_real_rack(self):
         response = self.client.get(self._editor_url(self.design))
         self.assertEqual(response.status_code, 200)

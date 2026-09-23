@@ -1032,9 +1032,9 @@ class DesignViewSet(NetBoxModelViewSet):
         NOT part of the editor's own ES-module set and therefore out of this
         change's touch scope) working unchanged, while a namespaced-aware
         caller can already rely on the ``"r:<pk>"``/``"p:<pk>"`` form. A
-        planned rack (this action does not project one yet -- D25/T1.4d) is
-        only ever reported under its ``"p:<pk>"`` key, since it never had a
-        bare-int form to begin with.
+        planned rack is projected exactly like a real one, and is reported
+        only under its ``"p:<pk>"`` key, since it never had a bare-int form
+        to begin with.
         The per-rack bucket's own ``rack_id`` accepts EITHER a legacy bare
         integer or ``"r:<pk>"`` on the way IN, for one release, so an
         in-flight request from an older editor tab keeps working.
@@ -1103,10 +1103,15 @@ class DesignViewSet(NetBoxModelViewSet):
         with transaction.atomic():
             for rack_data, kind, pk in parsed_racks:
                 keys = _keys_for(kind, pk)
-                # kind != "r": a well-formed "p:<pk>" key, but this action
-                # does not project a planned rack yet (D25/T1.4d) -- treated
-                # exactly like an unknown real pk, never a crash.
-                rack = Rack.objects.filter(pk=pk).first() if kind == "r" else None
+                # A well-formed "p:<pk>" key is looked up in the PlannedRack
+                # table only (D28: dcim.Rack and PlannedRack keep separate pk
+                # sequences, so a bare Rack lookup could silently resolve to
+                # an unrelated real rack sharing the pk). Either way, a
+                # lookup miss is reported as null -- never a crash.
+                rack = (
+                    Rack.objects.filter(pk=pk).first() if kind == "r"
+                    else PlannedRack.objects.filter(pk=pk).first()
+                )
                 if rack is None:
                     for key in keys:
                         distributions[key] = None
@@ -1147,7 +1152,10 @@ class DesignViewSet(NetBoxModelViewSet):
                     # asked for see a complete layout), but not projected. The
                     # caller keeps whatever numbers it already had for it.
                     continue
-                rack = Rack.objects.get(pk=pk)
+                rack = (
+                    Rack.objects.get(pk=pk) if kind == "r"
+                    else PlannedRack.objects.get(pk=pk)
+                )
                 elevation = projection.project_rack(design, rack)
                 # The rack-level summary rides along so the editor's power BAR is
                 # live too, not just the per-bank chips. Capacity is the reason:
