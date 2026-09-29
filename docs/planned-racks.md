@@ -1,5 +1,7 @@
 # Planned racks
 
+▶ Video: [Part 9 — Planned racks](https://youtu.be/By6q8FNIDJ0)
+
 A design can only place devices into racks that already exist in NetBox — so
 until now there was no way to plan a rack that does not exist yet: a new row
 in a hall you're about to build out, or a rack you simply haven't racked. A
@@ -15,6 +17,30 @@ hierarchy). It appears in the editor immediately, and from that point on you
 plan into it exactly as you would a real rack: drag devices in, wire up power,
 run naming.
 
+### Creating a row at once
+
+The name field takes the same range patterns NetBox uses elsewhere (the syntax
+behind `Et1/[1-48]` when you add interfaces): `R[1-4]` creates R1, R2, R3 and
+R4 in one press, `R[a-c]` creates Ra, Rb and Rc, and a comma list like
+`R[1,3,7]` creates exactly those. Every rack gets the same U height and
+location. A collision anywhere in the expansion creates nothing and names the
+offender, so a half-made row is never left behind.
+
+### Seeding power at creation
+
+▶ Video: [Part 11 — Copying power, PDUs that bind themselves](https://youtu.be/X-16j1W0NmM)
+
+**Copy feeds from** (optional) points at a rack already in the design and seeds
+each new rack's planned power supply from that rack's feeds — the same write
+the rack power dialog's *Copy from rack* performs. Every rack the form creates
+gets **its own** copy, named for itself: creating `R[1-3]` off a source with
+`A`/`B` feeds leaves R1 with `R1-A`/`R1-B`, R2 with `R2-A`/`R2-B`, and so on.
+
+Feeds are what give a rack its capacity, and a PDU planned into the rack
+afterwards [binds to one of them by
+itself](power-distribution.md#automatic-binding) — so a row created this way is
+ready for a template stamp with no further power clicks.
+
 ## It is shared, like a real rack
 
 A planned rack is not owned by the design that created it. If a second
@@ -26,6 +52,8 @@ single owner who gets to remove it out from under someone else's plan.
 
 ## Applying it: adopt if it exists, otherwise create
 
+▶ Video: [Part 18 — Apply: a rack and its power from nothing](https://youtu.be/QWR9C5GDJ6M)
+
 Apply resolves a planned rack by **`(location, name)`** — exactly the
 uniqueness NetBox itself enforces on `dcim.Rack`. Before creating anything,
 it checks whether a real rack already exists at that location with that
@@ -33,7 +61,10 @@ name:
 
 - if one does, it is **adopted** — the planned rack is matched to it, not
   duplicated
-- if not, a new `dcim.Rack` is created
+- if not, a new `dcim.Rack` is created, with status **Planned** — it isn't
+  standing in the hall yet. The rack's [planned power feeds](#power-on-a-planned-rack)
+  are created as real (planned) feeds on their power panel and the PDUs bound
+  to them are cabled, in the same apply (see [Applying a design](apply.md)).
 
 Either way, the planned rack's `realized_rack` field is set to record which
 rack it resolved to, and the planned rack itself is never deleted — it stays
@@ -51,15 +82,14 @@ plan is not lost.
   the same name in *different* locations are unrelated racks and both apply
   independently. Get the location wrong and you will either adopt the wrong
   rack or create a duplicate under a name you didn't intend to reuse.
-- **A planned rack cannot be saved as a template.** Templates are extracted
-  from devices, and a planned rack has none by definition — there is nothing
-  to extract yet.
+- **A planned rack can be saved as a template** from what the design plans in
+  it — **Save as template** on its header, the same as a real rack.
 
 ## Taking it out of a design
 
 A planned rack is listed in the editor's **Racks** panel alongside the real
-ones, with a **Planned** badge and the same remove control (but no
-show/hide toggle — there is nothing to hide yet). Removing it detaches it
+ones, with a **Planned** badge and the same controls: the eye hides it
+from your own view (like a real rack's), the trash removes it. Removing it detaches it
 from *this* design and deletes that design's placements, planned feeds and
 rack-power rows for it, after the usual confirmation naming what will go.
 The rack itself survives: it is shared, so another design planning the same

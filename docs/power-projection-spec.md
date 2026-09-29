@@ -1,5 +1,13 @@
 # Power projection — specification
 
+> **As built (2026-09-25):** this is the original design note. Where it
+> differs, the code and the user guides win: the heatmap scale is each tile's
+> share of the rack's **biggest consumer** (not of the rack total), and
+> distribution is configured by `distribution_mode` / `distribution_script`
+> (see [Power distribution](power-distribution.md)) — the `power_distribution`
+> / `power_script` sketches below were never built. The user-facing
+> description is [Power projection](power-projection.md).
+
 Status: **draft / active cycle** (started 2026-07-13). Authoritative spec for the
 power feature, in the same spirit as `docs/editor-behavior-spec.md`. Definition
 of done = this spec's contracts covered by tests (backend) and the conformance
@@ -113,7 +121,8 @@ When **ON**:
   move / remove / shadow tints) are suppressed so they don't compete with the
   heat colors.
 - **Every device tile is colored on a green→red gradient** by its **share of the
-  rack's total draw**: `share = device_draw / rack_total_draw`. Low consumers →
+  rack's biggest consumer**: `share = device_draw / max(device_draw in rack)`
+  (as built; the draft said rack total). Low consumers →
   green, high consumers → red. (Share is of the rack's total consumption, per the
   requirement — "от общего кол-ва стойки".)
 - Devices with **unknown draw** get a distinct neutral shade (e.g. hatched grey),

@@ -1,5 +1,7 @@
 # Templates
 
+▶ Video: [Part 13 — Rack templates](https://youtu.be/joqDaBdxYbg)
+
 A **template** is a reusable rack layout with no site: "our standard ToR",
 "our standard product rack". You build it once, then stamp it onto one or
 more racks in a real design instead of dragging in the same dozen devices
@@ -20,27 +22,51 @@ placement carries in a real design. It does **not** carry:
 - a device name — names are generated at the point the template is stamped,
   from the target design/site/rack, none of which the template itself has
 
-## Anchors and ordering — no positions, no gaps
+A **zero-U device in the non-racked tray** — a vertical PDU — is part of the
+template like any other: it is anchored to the tray, and stamping puts it back
+into the target rack's tray — as it does a server parked unmounted there.
 
-Instead of an absolute U position, each placement stores an **anchor**
-(`top` or `bottom`) and an **order** within that anchor. Stamping walks the
-template's placements in order and drops each one into the first free slot
-nearest its anchor in the *target* rack — scanning down from the top for a
-`top`-anchored device, up from the bottom for a `bottom`-anchored one. There
-is no `middle` anchor.
+Power is not stored, but it isn't lost either: when a template is stamped
+onto a rack that has feeds (real or planned), the PDUs it carries — in the
+tray or rack-mounted — **bind themselves** to them: a PDU whose name ends in an
+A or B leg letter takes the matching feed, any other takes the first free one,
+so the bank chips appear without opening a power dialog.
 
-This means a template never stores a gap. If the target rack already has
-something sitting where your template would otherwise land, that one device
-drifts by a unit and everything past it keeps compacting toward the anchor
-— you don't get a five-device shift for one collision, but you also don't
-get to reserve a blank space "just in case". **If you actually want a gap
-preserved, put a real blanking-panel device type in the template at that
-spot.** That's the only way to express reserved space.
+## Planning fields
 
-A collision with the target rack's own free space is the only thing that
-can stop a stamp: if the template's devices simply do not fit, nothing is
-placed there, and it's reported as not fitting rather than partially
-applied.
+A template placement carries the deployment's [planning fields](planning-fields.md)
+like a design's add does, and hands them on:
+
+- **Saving a rack as a template** takes them from what stands there — a design's
+  own adds keep their values, and every real device (untouched, or moved with
+  planned values) gives its own custom fields, read back through each field's
+  `target`. A device value the field would refuse is left out.
+- **By hand**, the template placement's form has one input per field, typed
+  from its custom field — a number box, the choice set, a site picker — and
+  its page lists them by label.
+- **Stamping** puts them on the new placements, and **apply** writes them onto
+  the devices' custom fields.
+
+## Anchors, offsets and order — no absolute positions
+
+Instead of an absolute U position, each placement stores an **anchor** — `top`,
+`bottom`, or `tray` — an **offset**, and an **order**:
+
+- `top` / `bottom`: the device is measured from that end of the *target* rack.
+  Its **offset** is the number of empty units kept between that end and the
+  device; stamping starts looking for a free slot that far in and walks
+  inward. **Order** decides which device is placed first.
+- `tray`: the device goes into the target rack's non-racked tray — a zero-U PDU,
+  or a server parked unmounted — whatever its height.
+
+Because a device is measured from an end, not from U1, the same template
+fits racks of any height: a switch at `top`, offset 0 lands on U42 in a 42U
+rack and on U47 in a 47U one; servers at `bottom` stay at the bottom; and a
+device with free units around it keeps exactly that distance from its end.
+
+If the target rack already has something where a device would land, that
+device moves on to the next free unit toward the middle. A device that fits
+nowhere is reported as not fitting rather than partially applied.
 
 ## Chassis and blades
 
@@ -93,20 +119,15 @@ You don't have to build a template placement-by-placement. Two sources:
   `POST …/templates/from-design/` with `design` and `rack` (a real rack pk or a
   `planned:<pk>` key), which is what **Save as template** calls.
 
-Either way, extraction has to decide anchor and order for you, and it does
-this by peeling contiguous runs of devices from the physical top and the
-physical bottom of the rack.
+Either way, extraction decides anchor, offset and order for you. Devices in
+a contiguous run from the physical top or bottom are packed against that end
+(offset 0, in order). Any other device — with free units on both sides — is
+anchored to the end of the half it sits in, at its real distance from that
+end, so its gap comes back when the template is stamped. A device standing
+in the non-racked tray is anchored to the tray.
 
-**One thing extraction cannot do anything about: an "island."** A device
-with real empty space on *both* sides of it — touching neither the top nor
-the bottom of the occupied run — has no `(anchor, order)` that can
-reproduce its position; a template genuinely cannot express it. Rather than
-silently dropping such a device from the template, extraction reports it as
-a warning naming the device and its position, so you know to go add it back
-by hand if you want it in the template at all.
-
-**A planned rack cannot be saved as a template.** It has no devices by
-definition — there is nothing yet to extract.
+A **planned rack** is saved the same way, from the devices the design plans
+in it.
 
 ## Permissions
 

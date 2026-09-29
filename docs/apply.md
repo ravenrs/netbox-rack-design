@@ -1,5 +1,7 @@
 # Applying a design
 
+▶ Video: [Part 17 — Apply: planned devices in real racks](https://youtu.be/xUeZtZSSjoQ)
+
 A design is a plan. **Applying** it writes that plan into NetBox as *planned*
 devices, so the space it needs is reserved and its cabling can be prepared
 before any hardware is touched.
@@ -71,6 +73,22 @@ A refused `POST` returns `409` with the problems in the body.
 | `move` (keeping the name) | Creates a device named `<design title>-<device name>` |
 | `remove` | Creates nothing; flags the real device's status |
 
+Alongside the devices:
+
+| In the design | What apply does |
+|---|---|
+| A planned rack (**Create rack**) | Adopts the real rack with that name in that location, or creates it — in **planned** status, like the devices going into it. An adopted rack keeps its own status. |
+| A planned feed | Creates it as a real power feed in **planned** status on its rack, and cables each PDU bound to it (the cable is planned too). |
+
+A power feed cannot exist in NetBox without a power panel, so each planned feed
+needs one. **Copy feeds from** and **Copy from rack** take it from the source
+feed; one created by hand can have it set under *Rack Design → Planned Power
+Feeds*. If it is left empty, apply uses the site's panel when the site has
+exactly one, and otherwise refuses with a message naming the feed. A feed on a
+planned rack that nothing in the design places anything into is skipped — that
+rack is not being built. A feed takes exactly one cable, so when two PDUs are
+bound to the same feed, only the first is cabled.
+
 The decorated name for a keep-name move exists because two devices cannot share
 a name while the original still holds it. It is the same string the elevation
 shows for that tile.
@@ -105,6 +123,11 @@ This works because the plugin records which device it created for which
 placement, rather than searching by name — a name search breaks the moment
 someone edits a name, and would then create a second device.
 
+Feeds and racks are reconciled the same way: a feed already standing on its
+panel under its name is reused, and a PDU that is already cabled is left alone.
+Neither a created rack nor a created feed is ever deleted by apply — by the time
+anything could reconsider, it may already carry real hardware.
+
 ## When it refuses
 
 Apply checks everything **before** writing anything, and reports every problem
@@ -114,6 +137,17 @@ together rather than failing on the first one:
 - *"The name IDS-1234-srv-01 is already used by another device in this site."*
 - *"Design IDS-1000 has unapplied placements; apply it first."*
 - *"You do not have permission to create devices in site AMS1."*
+- *"srv-12 has no role, and NetBox requires one on every device."*
+- *"srv-110 cannot be saved as it stands in DCIM — custom field
+  'warranty_type': Value must be a string. Fix it on the device itself, then
+  apply again."* NetBox validates every custom field whenever a device is saved,
+  even when apply only flags its status, so a value that was already invalid in
+  DCIM stops the run. Apply names the device instead of guessing a fix.
+- *"The planned feed R5-A has no power panel to hang on, and site AMS1 has more
+  than one."*
+
+If NetBox still refuses something while writing, the whole run is rolled back
+and the reason appears on the page like any other problem.
 
 Fix them and press again. A run either completes in full or changes nothing at
 all — it is a single transaction, so NetBox is never left half-applied.
@@ -130,7 +164,9 @@ entire point of [design chains](design-chains.md).
 ## Permissions
 
 Apply runs with **your** permissions: `dcim.add_device`, `change_device` and
-`delete_device`, as the run actually needs them, checked through NetBox's
+`delete_device`, plus `dcim.add_powerfeed` and `dcim.add_cable` when the design
+carries planned feeds and `dcim.change_devicebay` when it installs blades, as
+the run actually needs them, checked through NetBox's
 object permissions, so per-site and per-tenant constraints apply. Each planned
 device is checked against the site of its own target rack; on a multi-site
 design you therefore need write rights in every site the design touches — a
@@ -195,8 +231,24 @@ Any *other* design covering that rack shows it as **reserved** by the design
 that holds it. Both markers are filterable in the legend and appear in the
 hover card, so it is always visible whose plan owns a slot.
 
-## Not yet supported
+## Blades
 
-A blade destined for a chassis bay cannot be applied. Apply reports it as
-unsupported rather than skipping it — a silent skip would read as "applied
-everything".
+▶ Video: [Part 6 — Chassis & blades](https://youtu.be/6mCIUimNaq8)
+
+A blade is applied like any other add or move, into a **device bay** instead of
+a rack slot. It becomes a planned child device, installed in its bay, with no
+rack position of its own (NetBox puts it in its chassis's rack). The bay can
+belong to:
+
+- a **real** chassis already in DCIM;
+- a chassis **planned in the same design** — apply creates the chassis first,
+  NetBox builds its bays from the device type, and the blades go in after;
+- a chassis an **ancestor** design planned — that design must be applied
+  first, since until then the chassis has no bays in DCIM.
+
+The confirmation page names the chassis and bay for each blade
+(`ams1-server-enclosure-1 · slot1`). A bay another device already occupies, or a
+bay name the chassis does not have, is listed as a problem before anything is
+written. Pressing Apply again finds each blade in its bay; a blade whose planned
+bay changed is moved to the new one, and a blade dropped from the design is
+deleted with the other planned devices.

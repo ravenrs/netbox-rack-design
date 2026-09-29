@@ -1,5 +1,7 @@
 # Device naming
 
+▶ Video: [Part 4 — The naming engine](https://youtu.be/qH-ljS-W1uw)
+
 The plugin proposes a name for every planned device (palette adds and moved
 devices) through a configurable **naming engine**. The proposal appears in the
 editor's rename dialog and is stored on the placement as `proposed_name` — your
@@ -52,6 +54,11 @@ unchanged.
 "naming_template": "{design.name}-{device.site.name}-{device.role.name}-{n}"
 # -> "Migration-AMS1-Server-3"
 ```
+
+`{n}` is **one counter for the whole design**, not one per role or rack: a
+server, then a switch, then a server in another rack read `-01`, `-02`, `-03`.
+A per-family counter (every role starting at 1) is what the `script` mode is
+for.
 
 ## Mode: `script`
 
@@ -216,10 +223,10 @@ def build_name(placement):
         prefix = f"PRJ-{project}-"
         return prefix + _next_number(placement, prefix)
 
-    # Rule 2 — PDUs embed the rack: <site>-pdu-r<rack, cleaned>-<n>.
+    # Rule 2 — PDUs embed the rack: <site>-pdu-<rack, cleaned>-<n>.
     if role in ("pdu", "unmanageable-pdu"):
         cleaned = re.sub(r"[./\-_:]", "", rack_name).lower()
-        prefix = f"{site}-pdu-r{cleaned}-"
+        prefix = f"{site}-pdu-{cleaned}-"
         return prefix + _next_number(placement, prefix)
 
     # Rule 3 — network gear: <site>-<type code>-<role code>-<n>,
@@ -241,6 +248,15 @@ def build_name(placement):
   engine suggests, the user decides.
 - `placement.pk` is `None` for previews; never rely on the placement being
   saved.
+
+## Naming a move
+
+Every move in the editor asks what the device should be called in its new
+home: keep its name, or set a new one. *Set a new name* is pre-filled by this
+engine, computed for the destination rack and counting the names already
+handed out in the session, so it never repeats an unsaved add's name. The
+choice is stored on the placement; on apply, a renamed move creates the
+planned device under the new name.
 
 ## Verify on your test instance
 

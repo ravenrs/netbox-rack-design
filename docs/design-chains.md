@@ -10,6 +10,8 @@ moves, removals — becomes part of the world your design starts from.
 
 ## Deriving a design
 
+▶ Video: [Part 14 — Design chains](https://youtu.be/mJNOlpu2H30)
+
 A design becomes eligible to be a parent the moment it is **approved**.
 Approval is what freezes it (see below), and freezing is what makes it safe
 for another design to build on.
@@ -38,6 +40,8 @@ design** and **Re-base** actions.
 
 ## What the freeze means, and how to get out of it
 
+▶ Video: [Part 15 — Chain conflicts and the ways out](https://youtu.be/u9MlQwXchvA)
+
 Approving a design commits it. From that point its placements, planned power
 feeds, rack power overrides and rack scope stop moving — because the moment a
 design can be a parent, every child that baselines on it needs to trust that
@@ -60,7 +64,7 @@ design, with the same plan ancestry and all of its content — placements,
 planned power feeds, rack power overrides, rack scope, custom fields, and tags
 — carried into the clone. The key distinction: a version is the **same plan,
 revised**; if you need a different plan standing on top of this one, use
-**Derive design** instead (see [Deriving a design](#Deriving-a-design)), which
+**Derive design** instead (see [Deriving a design](#deriving-a-design)), which
 creates a child that only copies rack scope and inherits everything else live
 through the baseline chain.
 
@@ -76,8 +80,11 @@ dependents).
    (omitting one keeps the source's own title). The new version is a draft.
 2. Open the new version's editor and make your changes freely — nothing
    depends on it yet.
-3. For each design based on the old version, edit its `Based on` field or
-   click **Re-base** to point it at the new version instead.
+3. On each design based on the old version, click **Re-base** and pick the
+   new version. Re-base accepts any approved design **or another version of
+   the design's current parent**, whatever its status — that is what lets the
+   children move before the new version is approved. (The edit form's
+   *Based on* picker still offers approved designs only.)
 4. Set the old version back to **draft** — this is now allowed, since it has
    no dependents.
 5. Approve the new version. Only one version of a plan may be approved at a
@@ -105,9 +112,11 @@ deliberately, check the new version's position.
 **Re-base** is also the escape hatch for two other situations: a parent that
 has since moved to **implemented** (see below), and two designs that both
 baselined on the same parent — whichever is approved first keeps that baseline;
-the other re-bases onto it (see [Siblings do not inherit from each other](#Siblings-do-not-inherit-from-each-other)).
+the other re-bases onto it (see [Siblings do not inherit from each other](#siblings-do-not-inherit-from-each-other)).
 
 ## Inherited tiles
+
+▶ Video: [Part 14 — Design chains](https://youtu.be/mJNOlpu2H30)
 
 A tile that came from an approved ancestor's layer — not from reality, and
 not from your own design — is marked **Inherited**. Hovering it names the
@@ -126,6 +135,8 @@ placement goes **stale** rather than silently disappearing — the design page
 reports every stale placement so nothing is lost without a trace.
 
 ## What a refused chain looks like, and how to fix it
+
+▶ Video: [Part 15 — Chain conflicts and the ways out](https://youtu.be/u9MlQwXchvA)
 
 A parent contributes its layer **whole, or not at all**. The rule is driven
 by the parent's status:
@@ -186,6 +197,8 @@ page's *Design chain* card and the editor's conflicts panel already say it
 per design — it is the "which of my designs need attention right now" view.
 
 ## Siblings do not inherit from each other
+
+▶ Video: [Part 14 — Design chains](https://youtu.be/mJNOlpu2H30)
 
 Two designs based on the **same** approved parent do not inherit each other's
 placements: neither is an ancestor of the other, so nothing one sibling plans
@@ -269,7 +282,7 @@ was physically installed in the meantime.
 
 The one status change that matters is marking the parent **implemented**.
 The moment you do, every child stops inheriting from it (see
-[What a refused chain looks like](#What-a-refused-chain-looks-like-and-how-to-fix-it))
+[What a refused chain looks like](#what-a-refused-chain-looks-like-and-how-to-fix-it))
 until it is re-based — deliberately: once a design is implemented, its
 result belongs to real DCIM data, and a child should baseline on *that*
 directly rather than on a second copy of the same plan replayed on top of

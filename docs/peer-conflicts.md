@@ -1,5 +1,7 @@
 # Peer conflicts
 
+▶ Video: [Part 16 — Peer conflicts](https://youtu.be/7pVdqWlnPB8)
+
 Two teams often plan the *same* rack without either baselining on the other —
 neither is an ancestor or descendant of the other, so [Design chains](design-chains.md)'s
 inheritance never puts one in front of the other. Without a chain relating
@@ -16,9 +18,9 @@ A **peer** is another design that scopes the rack being projected, is not
 
 - **in this design's lineage** — an ancestor or a descendant. An ancestor's
   claim on a unit is inheritance, already drawn as an [inherited
-  tile](design-chains.md#Inherited-tiles); it is not a peer conflict.
+  tile](design-chains.md#inherited-tiles); it is not a peer conflict.
 - **another version of the same plan** — versions of one plan claim the same
-  units by construction, and at most one version may ever be [approved](design-chains.md#What-the-freeze-means-and-how-to-get-out-of-it),
+  units by construction, and at most one version may ever be [approved](design-chains.md#what-the-freeze-means-and-how-to-get-out-of-it),
   so comparing them would only ever report the plan against itself.
 
 An `implemented` design is excluded too, for a different reason: its
@@ -89,7 +91,7 @@ outside the plugin.
 
 A peer conflict is a third row in the editor's **Design conflicts** panel,
 next to the stale-placement and upstream (chain) rows, with its own wording:
-[re-basing](design-chains.md#What-a-refused-chain-looks-like-and-how-to-fix-it)
+[re-basing](design-chains.md#what-a-refused-chain-looks-like-and-how-to-fix-it)
 does **nothing** about a peer, because a peer is not upstream of this design
 — there is no ancestor to point at instead.
 
@@ -122,7 +124,7 @@ to this dialog.
 
 ### Why the family counter never reserves against a peer's draft
 
-[Family counters](design-chains.md#Naming-across-a-chain) count reality and
+[Family counters](design-chains.md#naming-across-a-chain) count reality and
 this design's own chain — never a peer's plan, and deliberately not even a
 peer's *draft*. A draft may stay a draft forever, and a number the counter
 skipped to avoid an abandoned draft would be burned permanently for no
@@ -164,7 +166,7 @@ promised to write.
 
 `peer_conflicts_enabled` in `PLUGINS_CONFIG` (default `True`) controls
 whether peer detection runs at all. See the [configuration
-table](index.md#Configuration) for where it sits alongside the plugin's
+table](index.md#configuration) for where it sits alongside the plugin's
 other keys.
 
 **Why a flag exists at all.** A peer design's **title** is shown in a

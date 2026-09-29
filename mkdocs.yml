@@ -6,8 +6,10 @@ repo_name: ravenrs/netbox-rack-design
 nav:
   - Home: index.md
   - Guides:
+      - Designs & the data model: designs.md
       - The editor: editor.md
       - Device naming: device-naming.md
+      - Power projection: power-projection.md
       - Power distribution: power-distribution.md
       - Planning fields: planning-fields.md
       - Design chains: design-chains.md
@@ -15,6 +17,8 @@ nav:
       - Applying a design: apply.md
       - Planned racks: planned-racks.md
       - Templates: templates.md
+      - API & integrations: api.md
+      - Permissions: permissions.md
   - Reference:
       - Power projection spec: power-projection-spec.md
       - PDU distribution spec: pdu-distribution-spec.md
@@ -70,7 +74,7 @@ markdown_extensions:
   - toc:
       baselevel: 2
       permalink: true
-      slugify: !!python/object/apply:pymdownx.slugs.slugify {}
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
   - meta
 plugins:
   - include-markdown
@@ -80,14 +84,6 @@ watch:
   - netbox_rack_design
 extra:
   social:
-    - icon: fontawesome/brands/twitter
-      # replace with your own tweet link below
-      link: https://github.com/netbox-community/cookiecutter-netbox-plugin
-      name: Tweet
-    - icon: fontawesome/brands/facebook
-      # replace with your own facebook link below
-      link: https://github.com/netbox-community/cookiecutter-netbox-plugin
-      name: Facebook
     - icon: fontawesome/brands/github
       link: https://github.com/ravenrs/netbox-rack-design
       name: Github

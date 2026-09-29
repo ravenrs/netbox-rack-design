@@ -27,11 +27,15 @@ PLUGINS_CONFIG = {
 
 ## Mode: `none` (default)
 
+▶ Video: [Part 12 — Bank distribution: none, builtin, script](https://youtu.be/WkJjhm3IoXA)
+
 Per-device rack-share gradient — the current behavior. PDUs are excluded
 infrastructure. The heatmap colors each tile by the device's share of total
 rack power.
 
 ## Mode: `builtin`
+
+▶ Video: [Part 12 — Bank distribution: none, builtin, script](https://youtu.be/WkJjhm3IoXA)
 
 Zero-configuration distribution across PDUs and banks, built on two
 **universal naming conventions** that work on any NetBox instance:
@@ -77,6 +81,8 @@ fixed direction. Sites that need either of those need `distribution_mode =
 "script"` (below).
 
 ## Mode: `script`
+
+▶ Video: [Part 12 — Bank distribution: none, builtin, script](https://youtu.be/WkJjhm3IoXA)
 
 For distribution behavior a configuration cannot express, point `distribution_script` at any
 importable callable with the signature `fn(rack, devices) -> Distribution | None`.
@@ -162,6 +168,8 @@ config bridge. Start from `distribution_example.py` and adapt it to your needs.
 
 ## Feed binding & planned PDUs
 
+▶ Video: [Part 10 — Greenfield planned power](https://youtu.be/iPRLaY1kVF0) · [Part 11 — Copying power, PDUs that bind themselves](https://youtu.be/X-16j1W0NmM)
+
 A real PDU cabled to a real `dcim.PowerFeed` sizes its breaker from that feed
 electricals (voltage × amperage × phase, the native path). A **planned PDU** (a
 placement add, not yet realized in `dcim`) has no real feed yet, so the plugin
@@ -169,16 +177,45 @@ models planned feeds the same way: a **`DesignPowerFeed`** row carries the same
 electrical fields (voltage, amperage, phase, supply), and a planned PDU **binds**
 to it just like a real PDU binds to a real feed.
 
+### Automatic binding
+
+**A PDU added to a rack that already has feeds binds itself** — no dialog, no
+clicking. The rack usually leaves no real choice to make, and a template stamped
+across ten racks would otherwise mean twenty trips through the picker.
+
+The feed is chosen by:
+
+1. **The leg letter in the PDU's name.** A PDU named `ams1-pdu-r3-a1` takes the
+   feed whose name ends in `-A`; `…-b1` takes `-B`. The separator matters — a
+   name that merely happens to end in a letter is not read as a leg.
+2. **The first feed no other PDU in that rack has taken**, when the name carries
+   no leg letter. Two PDUs dropped in a row therefore land on two different
+   feeds rather than doubling up on one.
+
+Real feeds rank above the design's own planned feeds, which rank above feeds
+inherited from an ancestor design. A leg-letter match beats that ranking: a
+redundant second PDU on leg A is a deliberate choice, not a mistake.
+
+The ⚡ button on the tile lights up and its tooltip names the feed
+("PDU power — bound to R1-A (click to change)"), so any automatic choice is one
+click from being overridden.
+
 ### Dialog flows
 
-When you add a PDU to a rack:
+When automatic binding has nothing to pick, you get the manual flows:
 
 - **If the rack has real feeds** (a provisioned rack with `dcim.PowerFeed`
-  records) — a **bind-to-feed picker** appears, listing the rack's feeds (real
-  first, then any planned feeds you've defined). Pick one to bind the PDU.
+  records) — the **bind-to-feed picker** lists the rack's feeds (real first,
+  then any planned feeds you've defined). Pick one to bind the PDU. This is also
+  what the ⚡ button reopens for any PDU, bound or not.
 - **If the rack has no real feeds** (greenfield planning) — a per-rack **Power**
   button opens the planned-power flow where you define feeds manually (name,
-  voltage, amperage, phase) or copy them from another rack's real feeds.
+  voltage, amperage, phase) or copy them from another rack's real feeds. The
+  picker opens by itself right after the drop, since there is nothing to bind to
+  yet.
+
+A template stamp never opens a dialog at all: every PDU it carries either binds
+automatically or stays unbound for you to settle with the ⚡ button.
 
 After feeds are defined, each PDU binding travels with the design and is
 restored on load. A PDU with no binding is omitted from the distribution (logged,
@@ -196,6 +233,17 @@ source:
 
 The two are mutually exclusive per placement.
 
+**What PDU location means.** It is where the power feed enters the rack. A
+vertical PDU is mounted with its input end towards the feed: with the feed
+coming up from the floor, the PDU stands with its input at the bottom and bank 1
+serves the lower half of the rack; with the feed coming from overhead, the same
+PDU is mounted upside down, input at the top, and bank 1 serves the **upper**
+half. `bottom` is the default. The builtin mode always assumes `bottom`; a
+distribution script such as `distribution_example.py` reads the value and flips
+the unit-to-bank mapping for `top`. Setting it in a design's rack Power dialog
+stores an override for that design only — the rack's own custom field in DCIM
+is never changed.
+
 Note `pdu_location` (top/bottom, for directing which bank claims which units)
 is a **rack**-level custom field, not a PDU-level one — it is declared under
 `planning_fields["rack"]` (see the example above) and reaches a
@@ -204,6 +252,8 @@ path as `power_limitation`. It has nothing to do with `power_source_device` /
 `power_config`, which resolve a *PDU's* custom fields.
 
 ## Bank zones, and choosing a feed per device
+
+▶ Video: [Part 8 — Bank zones & choosing a feed](https://youtu.be/u3_mIB0MiQ0)
 
 Two editor controls sit on top of the distribution result.
 

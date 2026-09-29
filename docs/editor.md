@@ -5,12 +5,15 @@ side by side, on top of the live DCIM data, with adds, moves and removals
 drawn as tiles. Nothing you do here touches a real device — **Save** writes
 `DesignPlacement` rows on the design and nothing else.
 
-Open it from a design's page (**Editor**), from the Designs list, or from the
-panel on a core rack page. The URL is
+Open it from a design's page — **Open editor** in the header, or in the Racks
+card (**Edit layout** on each rack row) — or from the panel on a core rack
+page. The URL is
 `/plugins/rack-design/designs/<pk>/editor/<rack pk>/`; the rack pk only picks
 which rack is scrolled into view.
 
 ## The workspace
+
+▶ Video: [Part 2 — The editor workspace](https://youtu.be/NXj5lqCR5RI)
 
 - **One block per rack**, in scope order. Each block shows the rack's name
   and site in its header and has its own **Front / Rear** toggle, so one rack
@@ -20,19 +23,27 @@ which rack is scrolled into view.
   across the row.
 - **The non-racked tray** under each rack holds zero-U gear — PDUs, and
   anything else that belongs to the rack without taking a unit. Tray devices
-  can be dragged into the rack and back, and a planned PDU dropped into the
-  tray starts the [feed-binding dialog](power-distribution.md#feed-binding-planned-pdus).
+  can be dragged into the rack and back. A planned PDU dropped into the tray
+  [binds itself](power-distribution.md#automatic-binding) to the rack's matching
+  feed — the ⚡ button on the tile names the feed it took and reopens the
+  picker if you want a different one. The picker only opens by itself when
+  there was nothing to bind to.
 - **The power bar** under a rack's name shows projected draw vs. capacity,
   utilisation and a ⚠ count of devices with an unconnected power port; hover
   the ⚠ for their names. Below it, in `builtin` or `script` distribution
   mode, the **bank chips** — one block per PDU, one chip per breaker bank. See
   [Power distribution](power-distribution.md).
-- **The hover card** — hover any tile for its type, role, tenant, position,
-  every power port with its draw and cabling state, any
-  [planning fields](planning-fields.md) it carries, and, for a chassis,
-  `N of M bays used` plus the occupants.
+- **The hover card** — hover any tile for its type, role and tenant, every
+  power port with its draw (`(nc)` marks one not cabled to power) and the
+  total allocated, any [planning fields](planning-fields.md) it carries, and,
+  for a chassis, `N of M bays used` plus the occupants. A moved device also
+  shows **From** and **To** — on the device *and* on the ghost it left — plus
+  its old name, role or tenant when the move changes them; an inherited,
+  conflicting or reserved tile names the design responsible.
 
 ## The drawer
+
+▶ Video: [Part 2 — The editor workspace](https://youtu.be/NXj5lqCR5RI)
 
 Four buttons on the right edge open panels:
 
@@ -45,6 +56,8 @@ Four buttons on the right edge open panels:
 
 ## The legend is a filter
 
+▶ Video: [Part 2 — The editor workspace](https://youtu.be/NXj5lqCR5RI)
+
 The row of chips above the racks is both a legend and a set of live filters.
 Untick one and that class of tile disappears until you tick it again.
 
@@ -56,7 +69,7 @@ Untick one and that class of tile disappears until you tick it again.
 | **Move out (ghost)** | The slot a moved device leaves behind |
 | **Remove** | A device flagged for removal (red hatch) |
 | **Inherited** | Rendered from an approved ancestor design — see [Design chains](design-chains.md) |
-| **Conflict** | An inherited placement that no longer resolves cleanly |
+| **Conflict** | An inherited placement that no longer resolves cleanly, or your tile on a unit an ancestor now occupies |
 | **Peer conflict** | Contested by an unrelated draft — see [Peer conflicts](peer-conflicts.md) |
 | **Applied** | This design already wrote it into DCIM — see [Applying a design](apply.md) |
 | **Reserved** | Another design applied it; this slot is spoken for |
@@ -71,15 +84,22 @@ device picks up as you drop or move it.
 
 ## Editing
 
-**Add.** Drag a device type from the catalog or Favorites onto a free unit. A
-green preview shows exactly where it will land; the tile appears with a name
-from the [naming engine](device-naming.md) and the current toolbar role,
-tenant and rail values. Hover the tile and click the pencil to type a
-different name.
+▶ Video: [Part 3 — Everyday editing](https://youtu.be/tTbLeEwYIUQ)
+
+**Add.** Set the toolbar **Role** first — NetBox requires a role on every
+device, so a drop with no role is refused: the tile goes back, a warning says
+why, and the Role select is highlighted. Then drag a device type from the
+catalog or Favorites onto a free unit. A green preview shows exactly where it
+will land; the tile appears with a name from the
+[naming engine](device-naming.md) and the current toolbar role, tenant and
+rail values. Hover the tile and click the pencil to type a different name.
 
 **Move.** Drag an existing device to another unit — in the same rack, to the
-other face, or into another rack. The origin keeps a **ghost** so the move
-stays visible; drag the device back to where it started ("homecoming") and
+other face, or into another rack. Every move asks **Name this move**: *Keep
+the old name* (shown in the design as `<design title>-<old name>` until it is
+applied) or *Set a new name*, pre-filled with the naming engine's suggestion
+for the new home. **Apply** confirms; **Cancel** (or closing the dialog)
+undoes the move. The origin keeps a **ghost** so the move stays visible; drag the device back to where it started ("homecoming") and
 both the ghost and the move disappear. Dropping onto a unit that is being
 vacated (a ghost, or a flagged removal) is allowed and **displaces** it; the
 striped unit marks what just changed. A move can carry a rename suggestion
@@ -101,6 +121,8 @@ else is lost. Leaving the page with unsaved work asks first; switching to the
 chassis layer offers **Cancel / Discard / Save and switch**.
 
 ## Chassis & blades
+
+▶ Video: [Part 6 — Chassis & blades](https://youtu.be/6mCIUimNaq8)
 
 A device whose type has device bays — a blade chassis, a patch-panel frame,
 anything that holds children — is a normal tile in the rack view. Its bays
@@ -124,11 +146,13 @@ device (real or planned).
 - The read-only **chassis elevation** (`/designs/<pk>/chassis-elevation/`)
   renders the same columns without the editor.
 
-Not yet: applying a blade into a bay ([Apply](apply.md#not-yet-supported)
-reports it rather than skipping it), and moving a *real* blade between
-chassis.
+Applying installs every planned blade into its bay — see
+[Apply](apply.md#blades). Not yet: moving a *real* blade between chassis in the
+editor.
 
 ## Read-only views
+
+▶ Video: [Part 19 — Read-only views](https://youtu.be/90WoG9IRy-Q)
 
 - **Projected elevation** — the design's racks as they would look once
   applied, both faces, with the heatmap and every legend marker, but no
