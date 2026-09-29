@@ -6,7 +6,57 @@ from utilities.testing import create_test_device
 
 from ..compat import API_TOKEN_PREFIX, HAS_V2_API_TOKENS
 
-__all__ = ("create_dcim_environment", "api_token_header")
+# NetBox 4.7 renamed its filterset test helpers -- ``BaseFilterSetTests`` ->
+# ``BaseFilterSetTestMixin`` and ``ChangeLoggedFilterSetTests`` ->
+# ``ChangeLoggedFilterSetTestMixin`` -- with no alias left behind for the old
+# spelling. A plain import of either name therefore fails on exactly one half of
+# the supported range, and because the failure happens at IMPORT time it takes
+# the whole test module with it: none of its cases are collected at all, so the
+# suite reports a smaller total and still says the rest passed. That is a much
+# quieter failure than a red test, which is why the alias lives here rather than
+# being repeated at each use site.
+#
+# Test-only drift belongs in this module by the same rule that sends runtime
+# drift to ``compat.py``: one place knows which NetBox is running.
+try:  # NetBox >= 4.7
+    from utilities.testing import (
+        BaseFilterSetTestMixin,
+        ChangeLoggedFilterSetTestMixin,
+    )
+except ImportError:  # NetBox 4.4 - 4.6
+    from utilities.testing import (
+        BaseFilterSetTests as BaseFilterSetTestMixin,
+    )
+    from utilities.testing import (
+        ChangeLoggedFilterSetTests as ChangeLoggedFilterSetTestMixin,
+    )
+
+__all__ = (
+    "create_dcim_environment",
+    "api_token_header",
+    "make_design",
+    "BaseFilterSetTestMixin",
+    "ChangeLoggedFilterSetTestMixin",
+)
+
+
+def make_design(title, *, site=None, sites=(), **kw):
+    """
+    Create a ``Design`` with one or more sites (PLAN-multi-site.md M1:
+    ``Design.sites`` is a M2M, at least one required, so it cannot be set in
+    the ``Design.objects.create(...)`` kwargs the way the old ``site`` FK
+    could -- an M2M needs a pk before its through-rows can be written).
+
+    Pass ``site=<Site>`` for the common single-site case, or
+    ``sites=(<Site>, ...)`` for a multi-site design. Any other ``Design``
+    field goes through ``**kw``.
+    """
+    from ..models import Design
+
+    design = Design.objects.create(title=title, **kw)
+    chosen = list(sites) if sites else ([site] if site is not None else [])
+    design.sites.set(chosen)
+    return design
 
 
 def api_token_header(token):

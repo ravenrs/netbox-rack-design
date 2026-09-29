@@ -26,6 +26,7 @@ import {
     applyRailToMove,
     clearRailFromMove,
     looksLikePdu,
+    autoBindPduFeed,
     showPduPowerDialog,
     stampPlanningAttr,
     attachPlacementFieldsButton,
@@ -36,9 +37,12 @@ import {
     rdBeginCursorGesture,
     rdEndCursorGesture,
     rdBayItemsForRack,
+    rdAddBayItem,
+    rdRemoveBayItem,
     rdCursorGesture,
 } from "rd/cursor.js";
 import { rdBeginPushSuppression, rdEndPushSuppression } from "rd/push.js";
+import { createToast } from "rd/core.js";
 import { withDirtySuppressed } from "rd/dirty.js";
 import { syncRackHeight, commonOptions, makeFrame } from "rd/frame.js";
 import {
@@ -60,6 +64,22 @@ let previewName = function () { return Promise.resolve(null); };
 let nextAddIndex = function () { return 0; };
 let root = null;
 
+// Cross-module drag gate (see power_heatmap.js's "drag gate" section): a
+// GridStack drag rewrites gs-y on the dragged tile once per row crossed, and
+// each such mutation used to ask the server to recompute a layout the user
+// had already moved past. rack.js owns "is a drag in progress" (it wires
+// GridStack's dragstart/dragstop and the cross-grid convergence where
+// dragstop never fires); power_heatmap.js owns the recompute scheduling. This
+// is the same window.NbxRdPowerHeatmap convention power.js's getLegs() uses,
+// not a new global. Guarded + a no-op on a read-only elevation (no editor
+// present, so the hook is never installed).
+function rdSetDragActive(active) {
+    var hm = window.NbxRdPowerHeatmap;
+    if (hm && typeof hm.setDragActive === "function") {
+        hm.setDragActive(active);
+    }
+}
+
 // A setter rather than a widened `initRack(block, deps)` signature, because the
 // call site in editor.js is
 //     Array.prototype.map.call(nodes, initRack)
@@ -77,9 +97,161 @@ function setRackHooks(hooks) {
     if (hooks.root) { root = hooks.root; }
 }
 
+// ---- A palette add needs a role ------------------------------------------
+//
+// dcim.Device.role is required, so an add planned without one can never be
+// applied (Apply refuses it; it used to 500). The toolbar's Role select is
+// empty until the planner picks something, and a drop is exactly the moment
+// they have forgotten it -- so the drop is refused, the reason is said in a
+// toast, and the select itself is lit up so there is no hunting for it.
+var RD_NEEDS_ROLE_MS = 2600;
+
+function rdRoleSelectPicked() {
+    var sel = document.getElementById("id_device_role");
+    return !!(sel && sel.value);
+}
+
+function rdFlagRoleSelect() {
+    var sel = document.getElementById("id_device_role");
+    if (!sel) { return; }
+    // NetBox renders the select through TomSelect: the <select> itself is
+    // hidden, the thing on screen is its .ts-wrapper sibling.
+    var shown = (sel.parentElement && sel.parentElement.querySelector(".ts-wrapper")) || sel;
+    shown.classList.add("nbx-rd-needs-role");
+    window.setTimeout(function () { shown.classList.remove("nbx-rd-needs-role"); },
+                      RD_NEEDS_ROLE_MS);
+    var input = shown.querySelector ? shown.querySelector("input") : null;
+    try { (input || sel).focus({ preventScroll: true }); } catch (e) { /* not focusable */ }
+}
+
+function rdWarnRoleRequired(label) {
+    createToast(
+        "warning", "Pick a role first",
+        "Every device in NetBox needs a role, so " + (label || "this device")
+            + " was not added. Choose one in the Role dropdown on the left, "
+            + "then drop it again."
+    );
+    rdFlagRoleSelect();
+}
+
+// ---- What a move-out ghost knows about the destination -----------------
+//
+// The ghost is the only tile that can answer "where did it go?", and the
+// hover card reads that answer off `data-moved-to` (templatetags
+// slot_moved_to stamps it on a ghost the SERVER rendered). A ghost created
+// in-session has no such attribute -- the move is not saved, and the device
+// is still being dragged around -- so it reads the answer off the device's
+// body tile wherever that body currently sits. Re-read on every refresh,
+// which is what keeps it honest when the planner moves the device a second
+// time.
+
+// The identity a ghost shows: the device's own, copied from its body tile.
+// Deliberately NOT the move's own attributes (`data-old-name`,
+// `data-moved-from`): those are the destination tile's half of the story,
+// and repeating them on the origin would tell the reader where they already
+// are.
+var RD_GHOST_IDENTITY_ATTRS = [
+    "data-name", "data-device-type-name", "data-role-name", "data-tenant-name",
+    "data-power", "data-planning", "data-bays-used", "data-bays-total",
+    "data-bay-occupants",
+];
+
+// ``"<site> · <rack> · U<n>"`` for wherever `itemEl` currently sits -- the
+// same shape templatetags/rack_design.py `_place_label` produces, so a
+// ghost's card reads identically whether the move was saved or not. "" when
+// the tile's place cannot be resolved (nothing to say, so nothing is set).
+function rdPlaceLabelFor(itemEl) {
+    var block = itemEl.closest(".nbx-rd-rack-block");
+    if (!block) { return ""; }
+    var rackName = block.getAttribute("data-rack-name") || "";
+    if (!rackName) { return ""; }
+    var siteName = block.getAttribute("data-site-name") || "";
+    var host = itemEl.closest(".grid-stack");
+    var face = host ? (host.getAttribute("data-face") || "") : "";
+    var where = "tray";
+    if (face === "front" || face === "rear") {
+        var node = itemEl.gridstackNode;
+        var y = (node && node.y != null) ? node.y : parseInt(itemEl.getAttribute("gs-y"), 10);
+        var h = (node && node.h != null) ? node.h : parseInt(itemEl.getAttribute("gs-h"), 10);
+        if (isNaN(y) || isNaN(h)) { return ""; }
+        var u = makeFrame(block).slotFromGeometry(y, h);
+        if (u == null || isNaN(u)) { return ""; }
+        where = "U" + Math.round(u);
+    }
+    return (siteName ? siteName + " · " : "") + rackName + " · " + where;
+}
+
+// The live body tile of the device `ghostEl` is the ghost of: the one tile
+// carrying the same device id that is neither a ghost itself nor a derived
+// opposite-face hatch (hatches carry no device id, but be explicit).
+function rdBodyForGhost(ghostEl) {
+    var did = ghostEl.getAttribute("data-rd-device-id");
+    if (!did) { return null; }
+    var found = null;
+    document.querySelectorAll(
+        '.grid-stack-item[data-rd-device-id="' + did + '"]'
+    ).forEach(function (cand) {
+        if (found || cand === ghostEl) { return; }
+        if (cand.getAttribute("data-rd-derived-opp")) { return; }
+        if (cand.classList.contains("nbx-rd-state-move_out_ghost")) { return; }
+        found = cand;
+    });
+    return found;
+}
+
+// Give `ghostEl` the device's identity and its current destination, so the
+// hover card has something to say. A ghost whose body is not on screen (a
+// move into a rack this editor is not showing) keeps whatever the server
+// gave it -- stale is better than blank, and blank is what it had before.
+function rdSyncGhostFromBody(ghostEl) {
+    var content = ghostEl.querySelector(".grid-stack-item-content");
+    var body = rdBodyForGhost(ghostEl);
+    if (!content || !body) { return; }
+    var bodyContent = body.querySelector(".grid-stack-item-content");
+    if (bodyContent) {
+        RD_GHOST_IDENTITY_ATTRS.forEach(function (attr) {
+            var v = bodyContent.getAttribute(attr);
+            if (v != null && v !== "") { content.setAttribute(attr, v); }
+        });
+    }
+    var label = rdPlaceLabelFor(body);
+    if (label) { content.setAttribute("data-moved-to", label); }
+    // ...and the other end of the story: the device at its new slot says
+    // where it came FROM -- the ghost's own place. Only a move reloaded from
+    // the server carried that (templatetags slot_moved_from); a move made in
+    // this session showed "Was" but no "From" (tutorial video, 2026-09-26).
+    // Marked as live so rdClearStaleMovedFrom can drop it on a homecoming.
+    if (bodyContent && body.classList.contains("nbx-rd-state-move_in")) {
+        var origin = rdPlaceLabelFor(ghostEl);
+        if (origin) {
+            bodyContent.setAttribute("data-moved-from", origin);
+            bodyContent.setAttribute("data-rd-live-moved-from", "1");
+        }
+    }
+}
+
+// A device that went back home is no longer a move: a "From" this session
+// stamped on it must go, or its card keeps naming a place it never left.
+function rdClearStaleMovedFrom() {
+    document.querySelectorAll(
+        ".grid-stack-item-content[data-rd-live-moved-from]"
+    ).forEach(function (content) {
+        var item = content.closest(".grid-stack-item");
+        if (item && item.classList.contains("nbx-rd-state-move_in")) { return; }
+        content.removeAttribute("data-moved-from");
+        content.removeAttribute("data-rd-live-moved-from");
+    });
+}
+
 
     function initRack(block) {
-        var rackId = parseInt(block.getAttribute("data-rack-id"), 10);
+        // T1.5c (PLAN-templates.md D31): data-rack-id is now the colon-free
+        // DOM form of rack_key() ("r-<pk>"/"p-<pk>", templatetags/rack_design.py
+        // rack_dom_id) -- dcim.Rack and PlannedRack have separate pk sequences
+        // (D28), so a bare-int parseInt here would collapse two different
+        // racks' ids to the same number. Keep it as an opaque string; every use
+        // below is a getElementById/object-key/=== comparison, never arithmetic.
+        var rackId = block.getAttribute("data-rack-id");
         // The one object that knows how THIS enclosure differs from another:
         // slot geometry, what it accepts, and how a slot is addressed on save.
         var frame = makeFrame(block);
@@ -572,6 +744,11 @@ function setRackHooks(hooks) {
             } finally {
                 rdEndPushSuppression();
             }
+            // The ghost's whole job is to say where the device went, so give
+            // it the device's identity and its current destination now --
+            // otherwise its hover card has no data-* to read and simply does
+            // not appear (rdSyncGhostFromBody).
+            rdSyncGhostFromBody(tempGhosts[idx]);
             // Phase 3: the ghost owns its opposite-face mirror hatch (created
             // in the SAME call that creates the ghost, not by a later scan).
             syncGhostShadow(idx);
@@ -603,6 +780,15 @@ function setRackHooks(hooks) {
         // Scoped to THIS rack block so racks never affect each other.
         function refreshGhosts() {
             if (refreshing) { return; }
+            // Every ghost in this block re-reads where its device now sits:
+            // a device moved twice must not leave the first destination
+            // standing on the ghost's card. Persistent (server-rendered)
+            // ghosts included -- their data-moved-to is only right until the
+            // planner drags that device again in this session.
+            block.querySelectorAll(
+                ".grid-stack-item.nbx-rd-state-move_out_ghost"
+            ).forEach(rdSyncGhostFromBody);
+            rdClearStaleMovedFrom();
             rdTrace("refresh", { rackId: rackId, tiles: block.querySelectorAll(".grid-stack-item").length });
             refreshing = true;
             // Phase 2: the WHOLE grid-mutation phase of the refresh cycle
@@ -876,10 +1062,21 @@ function setRackHooks(hooks) {
                         else if (el.parentNode) { el.parentNode.removeChild(el); }
                     }
                     el = makeOppositeElement(label);
+                    // A new hatch is born at top 0 and grid-stack-animate would
+                    // slide it down to its row -- on every page load it visibly
+                    // flew in from the top of the rack. Place it without the
+                    // transition; later moves of it still animate.
+                    el.style.transition = "none";
                     var added = target.grid.addWidget(el, {
                         x: 0, y: gsY, w: 1, h: gsH, noMove: true, noResize: true, locked: true,
                     });
                     el = added || el;
+                    var born = el;
+                    window.requestAnimationFrame(function () {
+                        window.requestAnimationFrame(function () {
+                            born.style.removeProperty("transition");
+                        });
+                    });
                 }
                 SHADOW_ALL_CLASSES.forEach(function (c) { el.classList.remove(c); });
                 el.classList.add("grid-stack-item", "nbx-rd-opposite");
@@ -1649,6 +1846,10 @@ function setRackHooks(hooks) {
             if (!el) { return; }
             var idx = parseInt(el.getAttribute("data-widget-index"), 10);
             rdNextGesture();
+            // Open the drag gate for the WHOLE gesture, however it ends
+            // (same-grid dragstop, or the cross-grid dropped/added convergence
+            // below where dragstop never fires) -- see rdSetDragActive.
+            rdSetDragActive(true);
             rdTrace("dragstart", {
                 rackId: rackId, idx: idx,
                 label: (state[idx] && state[idx].widget && state[idx].widget.label) || null,
@@ -1755,6 +1956,7 @@ function setRackHooks(hooks) {
                     device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
                     tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
                     planning_data: w.planning_data || null,
+                    preferred_feed_legs: w.preferred_feed_legs || null,
                     origUPosition: st.origUPosition,
                     origFace: st.origFace,
                     originRackId: originRackId,
@@ -1806,6 +2008,13 @@ function setRackHooks(hooks) {
                 maybePromptMove(el);
                 thawAllTiles();
                 scheduleRefresh();
+                // Same-grid gesture end (the common case: a within-grid move,
+                // or a drop rejected/reverted by maybePromptMove/snapBack --
+                // both still fire dragstop on the grid the drag started in).
+                // The final position is already on the DOM by now;
+                // requestLiveDistribution reads it fresh when it actually
+                // fires.
+                rdSetDragActive(false);
             });
             grid.on("dropped", function (event, previousNode, newNode) {
                 curDragIdx = null;
@@ -2067,6 +2276,7 @@ function setRackHooks(hooks) {
                 device_role_id: (d.device_role_id != null) ? d.device_role_id : null,
                 tenant_id: (d.tenant_id != null) ? d.tenant_id : null,
                 planning_data: d.planning_data || null,
+                preferred_feed_legs: d.preferred_feed_legs || null,
             };
             applyRailToMove(widget);
             var adoptContent = el.querySelector(".grid-stack-item-content");
@@ -2502,6 +2712,7 @@ function setRackHooks(hooks) {
                     device_role_id: (info.device_role_id != null) ? info.device_role_id : null,
                     tenant_id: (info.tenant_id != null) ? info.tenant_id : null,
                     planning_data: info.planning_data || null,
+                    preferred_feed_legs: info.preferred_feed_legs || null,
                 },
                 origUPosition: info.origUPosition, origFace: info.origFace,
                 removed: false, shadowEl: null, crossRack: true, needsRename: false,
@@ -2571,6 +2782,7 @@ function setRackHooks(hooks) {
                     device_role_id: (w.device_role_id != null) ? w.device_role_id : null,
                     tenant_id: (w.tenant_id != null) ? w.tenant_id : null,
                     planning_data: w.planning_data || null,
+                    preferred_feed_legs: w.preferred_feed_legs || null,
                     origUPosition: st.origUPosition, origFace: st.origFace,
                     originRackId: st.originRackId, originWidgetIndex: st.originWidgetIndex,
                 };
@@ -3028,6 +3240,27 @@ function setRackHooks(hooks) {
                     if (PLACEMENT_FIELDS.length) {
                         item.planning_data = w.planning_data || {};
                     }
+                    // Manual per-PSU feed-leg override (editor/power.js's
+                    // Power section, built-in -- not a placement_fields
+                    // config entry). Sent only when this tile actually set
+                    // it; an absent key leaves the model field untouched.
+                    if (w.preferred_feed_legs && w.preferred_feed_legs.length) {
+                        item.preferred_feed_legs = w.preferred_feed_legs;
+                    }
+                    // D20 provenance, set on a brand-new add only (the
+                    // serializer rejects it on any other kind). Deliberately
+                    // OUTSIDE the PLACEMENT_FIELDS guard above: provenance has
+                    // nothing to do with the deployment's config-declared
+                    // planning fields, and nesting it there made it fire only
+                    // where `placement_fields` happened to be configured --
+                    // which looked exactly like a NetBox-version bug (green on
+                    // one dev env, silently dropped on the other two).
+                    if (w.from_template_id != null) {
+                        item.from_template_id = w.from_template_id;
+                        if (w.from_template_version != null) {
+                            item.from_template_version = w.from_template_version;
+                        }
+                    }
                     // Reference a real PDU for live cf (§6, mutually exclusive with
                     // power_config -- showPduPowerDialog's confirm handler clears
                     // whichever mode isn't active).
@@ -3077,6 +3310,9 @@ function setRackHooks(hooks) {
                     if (PLACEMENT_FIELDS.length && w.planning_data
                             && Object.keys(w.planning_data).length) {
                         item.planning_data = w.planning_data;
+                    }
+                    if (w.preferred_feed_legs && w.preferred_feed_legs.length) {
+                        item.preferred_feed_legs = w.preferred_feed_legs;
                     }
                 }
 
@@ -3299,6 +3535,15 @@ function setRackHooks(hooks) {
             if (!el) { return; }
             var dtId = el.getAttribute("data-device-type-id");
             if (dtId == null) {
+                // Close the drag gate here too: this branch is the cross-grid
+                // gesture end (within-rack face change or a cross-rack move),
+                // and dragstop -- the OTHER place the gate closes -- never
+                // fires for it (see the comment below). A palette add (the
+                // other branch, dtId != null) never opened the gate in the
+                // first place, since onDragStart only fires for a tile that
+                // is already a widget in some grid -- so no matching close is
+                // needed there.
+                rdSetDragActive(false);
                 // Not a palette add: a real device tile was dropped here after
                 // crossing GridStack instances -- a within-rack front<->rear face
                 // change, or a cross-rack move. GridStack does NOT fire `dragstop`
@@ -3354,6 +3599,24 @@ function setRackHooks(hooks) {
             var label = el.getAttribute("data-label") || ("Device type " + dtId);
             var model = el.getAttribute("data-model") || label;
             var gsH = Math.max(1, Math.round(uHeight * 2));
+
+            // No role picked: refuse before anything else happens -- ahead of
+            // the tray branch too, since a PDU dropped into the tray is just
+            // as much a device. The same clean discard an illegal drop gets
+            // below (no add, no dirty residue), plus the reason, and the
+            // Role select lit up.
+            if (!rdRoleSelectPicked()) {
+                rdEndCursorGesture();
+                rdBeginPushSuppression();
+                try {
+                    grid.removeWidget(el, true);
+                } finally {
+                    rdEndPushSuppression();
+                }
+                rdTrace("paletteDrop.refused.noRole", { rackId: rackId, label: label });
+                rdWarnRoleRequired(label);
+                return;
+            }
 
             // Palette -> tray (spec §9.3): a new off-rack device has no U/face
             // to validate, no shadow, and never displaces anything (a tray is
@@ -3630,6 +3893,7 @@ function setRackHooks(hooks) {
                 // stashed on the widget for the design Save to carry (see
                 // buildRackPayload's power_config item field below). Detected from
                 // the signals available at drop time -- see looksLikePdu above.
+                var settlePduBinding = null;
                 if (looksLikePdu(null, roleName, "", model)) {
                     var pduBtn = document.createElement("button");
                     pduBtn.type = "button";
@@ -3643,10 +3907,28 @@ function setRackHooks(hooks) {
                         e.stopPropagation();
                         showPduPowerDialog(widget, content, { rackId: rackId });
                     });
-                    // Open once, right after placement, so the breaker is
-                    // captured before the user moves on. Non-blocking: a Cancel
-                    // just leaves power_config unset, same as never opening it.
-                    showPduPowerDialog(widget, content, { rackId: rackId });
+                    // The rack usually leaves no real choice to make: bind to
+                    // the feed this PDU's leg letter names (or the first one no
+                    // peer PDU has taken) and say so on the ⚡ button, which is
+                    // still one click away for an override. The dialog only
+                    // opens when nothing could be picked -- a greenfield rack
+                    // whose planned feeds don't exist yet. Deferred until the
+                    // naming engine has answered, because the leg letter lives
+                    // in the name it assigns.
+                    settlePduBinding = function () {
+                        autoBindPduFeed(widget, content, {
+                            rackId: rackId,
+                            peers: state.map(function (s) {
+                                return (s && !s.removed) ? s.widget : null;
+                            }),
+                        }).then(function (picked) {
+                            if (!picked) {
+                                showPduPowerDialog(widget, content, { rackId: rackId });
+                            } else {
+                                markDirty();
+                            }
+                        });
+                    };
                 }
 
                 // Auto-fill the prospective name (best-effort; never blocks the add).
@@ -3659,6 +3941,7 @@ function setRackHooks(hooks) {
                     target_position: uPosition,
                     target_face: face,
                     index: nextAddIndex(),
+                    planning_data: widget.planning_data || {},
                 }).then(function (data) {
                     if (!data) { return; }
                     if (!widget.nameUserSet) {
@@ -3670,7 +3953,10 @@ function setRackHooks(hooks) {
                         setTileDisplayName(content, data.name || "");
                     }
                     applyWarn(!!data.exists_in_site);
-                });
+                }).catch(function () { /* naming is best-effort */ })
+                    .then(function () {
+                        if (settlePduBinding) { settlePduBinding(); }
+                    });
 
                 markDirty();
                 // Derive the full-depth opposite-face hatch for this add now. A
@@ -3836,9 +4122,347 @@ function setRackHooks(hooks) {
             return names;
         }
 
+        // ---- Template stamping (PLAN-templates.md §3, T3.3) ----------------
+        // Materialize the SERVER-COMPUTED result of preview-template as
+        // ordinary unsaved `add` tiles -- exactly the state finishAdd's
+        // "displaced.length === 0" branch produces, minus the drag-specific
+        // bits (cursor governance, the displace-confirm dialog) that make no
+        // sense for a position the server already validated against THIS
+        // rack's current occupancy (real devices + this design's own
+        // placements, D12). D19 is the whole point: the server computed
+        // where these land, so the client's job here is to PLACE them, not
+        // re-derive whether it may.
+        //
+        // `items` -- built by editor/templates.js from preview-template's
+        // response entries plus a bulk /api/dcim/device-types/ lookup for
+        // u_height/is_full_depth (the response itself carries neither, only
+        // the device type's pk) -- one per TOP-LEVEL template placement:
+        //   {device_type_id, u_height, is_full_depth, device_role_id,
+        //    tenant_id, position, face, label_text, model, name,
+        //    name_collision, blades}
+        // Blades (a chassis's nested `blades` entries in the response,
+        // already filtered by editor/templates.js against the chassis
+        // device type's ACTUAL bays -- a name that does not exist there is
+        // reported to the planner, never silently placed or dropped) go
+        // through the SAME pending-bay-add representation a hand-added
+        // blade into a same-submit chassis uses (editor/cursor.js
+        // rdAddBayItem/rdBayItemsForRack, spec §10.6): a blade never takes a
+        // unit of its own, so it is addressed by target_bay_name against
+        // this chassis tile's OWN widget index rather than placed on a grid.
+        // A stamped tile's projected draw, fetched the way the palette does
+        // (/device-type-power/, role-aware: a PDU role is a known 0 W), so the
+        // power bar and heatmap count a stamp LIVE -- the tiles used to carry
+        // a hard 0 W, and the bar read "0 W" under a stamped rack whose bank
+        // chips (computed server-side) were already full. A chassis also
+        // counts its stamped blades, the way a chassis rolls its blades up.
+        function stampDrawForTiles(targets) {
+            if (!targets.length) { return; }
+            var byRole = {};
+            targets.forEach(function (t) {
+                [{ dt: t.dt, role: t.role }].concat(t.blades).forEach(function (x) {
+                    var key = x.role != null ? String(x.role) : "";
+                    (byRole[key] = byRole[key] || {})[x.dt] = true;
+                });
+            });
+            var draws = {};         // "role|dt" -> {draw_w, draw_known, power_ports}
+            Promise.all(Object.keys(byRole).map(function (roleKey) {
+                var url = "/api/plugins/rack-design/device-type-power/?"
+                    + Object.keys(byRole[roleKey]).map(function (dt) {
+                        return "id=" + encodeURIComponent(dt);
+                    }).join("&") + (roleKey ? "&role_id=" + encodeURIComponent(roleKey) : "");
+                return fetch(url, { credentials: "same-origin", headers: { "Accept": "application/json" } })
+                    .then(function (resp) { return resp.ok ? resp.json() : null; })
+                    .then(function (data) {
+                        Object.keys((data && data.results) || {}).forEach(function (dt) {
+                            draws[roleKey + "|" + dt] = data.results[dt];
+                        });
+                    }).catch(function () { /* best-effort: the tile keeps 0 W */ });
+            })).then(function () {
+                function info(dt, role) {
+                    return draws[(role != null ? String(role) : "") + "|" + dt] || null;
+                }
+                targets.forEach(function (t) {
+                    var own = info(t.dt, t.role);
+                    if (!own) { return; }
+                    var total = own.draw_w || 0;
+                    var known = !!own.draw_known;
+                    t.blades.forEach(function (b) {
+                        var bi = info(b.dt, b.role);
+                        if (bi) { total += bi.draw_w || 0; known = known && !!bi.draw_known; }
+                    });
+                    t.content.setAttribute("data-draw-w", String(Math.round(total)));
+                    t.content.setAttribute("data-draw-known", known ? "1" : "0");
+                    var pp = (own.power_ports || []).map(function (port) {
+                        return port.name + ":" + Math.round(port.draw || 0) + ":";
+                    }).join("|");
+                    if (pp) { t.content.setAttribute("data-power", pp); }
+                });
+                scheduleRefresh();
+            });
+        }
+
+        function stampTemplateItems(items) {
+            var drawTargets = [];
+            (items || []).forEach(function (item) {
+                // A 0U device type (a PDU) belongs in the tray, never a
+                // numbered unit (spec §9): the server already tells us so --
+                // preview-template returns such an entry as
+                // {"position": null, "face": ""} -- so a null position here
+                // is the ONLY signal to trust, mirroring the ordinary
+                // palette->tray add path (onPaletteDrop's `face === ""`
+                // branch above) rather than re-deriving it from u_height.
+                var isTray = (item.position == null);
+                var uHeight = item.u_height || 1;
+                var gsH = isTray ? 2 : Math.max(1, Math.round(uHeight * 2));
+                var face = isTray ? "" : (item.face === "rear" ? "rear" : "front");
+                var grid = isTray ? trayGrid : ((face === "rear") ? rearGrid : frontGrid);
+                if (!grid) { return; }
+                // The tray is a list, not a grid (spec §9.2/§9.4): APPEND
+                // after whatever is already there (trayAppendRow), same as
+                // restoreTile/restoreFromGhost above -- never the U-derived
+                // uPositionToGsY, which is meaningless off-rack and would
+                // stack every stamped tray item on row 0.
+                var gsY = isTray ? trayAppendRow(null) : uPositionToGsY(item.position, gsH);
+
+                var el = document.createElement("div");
+                el.className = "grid-stack-item nbx-rd-state-add";
+                el.setAttribute("gs-w", "1");
+                el.setAttribute("gs-h", String(gsH));
+
+                // Same bracket finishAdd/ensureTempGhost use: addWidget ->
+                // Engine.addNode -> _fixCollisions can otherwise cascade a
+                // push onto a neighbour instead of landing exactly where the
+                // server said to.
+                rdBeginPushSuppression();
+                try {
+                    grid.addWidget(el, { x: 0, y: gsY, w: 1, h: gsH });
+                } finally {
+                    rdEndPushSuppression();
+                }
+
+                var newIdx = state.length;
+                // The hardware, like a hand-dropped add: the template's
+                // label_text is the SOURCE rack's device name, and an unsaved
+                // stamp's rear hatch showed it (R7's hatch read R3's
+                // ams1-disk-enclosure-1). The stamped name is data-name.
+                var label = item.model || item.label_text || ("Device type " + item.device_type_id);
+                var widget = {
+                    kind: "add",
+                    device_type_id: item.device_type_id,
+                    device_id: null,
+                    placement_id: null,
+                    device_role_id: (item.device_role_id != null) ? item.device_role_id : null,
+                    tenant_id: (item.tenant_id != null) ? item.tenant_id : null,
+                    u_height: uHeight,
+                    label: label,
+                    face: face,
+                    is_full_depth: !!item.is_full_depth,
+                    // Carries the template placement's config-declared
+                    // planning fields (D8) through to save-layout exactly
+                    // like a manual add's attachPlacementFieldsButton does
+                    // (buildRackPayload reads w.planning_data verbatim for
+                    // an "add" widget) -- previously always {} here, so a
+                    // stamped tile silently dropped this data.
+                    planning_data: item.planning_data || {},
+                    // D20 provenance. preview-template returns which template
+                    // (and which Template.version) produced this item; save-layout
+                    // persists both onto the DesignPlacement. Without these two
+                    // lines the whole provenance feature is dead for an ordinary
+                    // stamp -- only blades carried it, so "which racks use the
+                    // standard ToR?" answered "none" however many were stamped,
+                    // and T3.6's re-stamp warning could never fire.
+                    from_template_id: (item.from_template != null) ? item.from_template : null,
+                    from_template_version: (item.from_template_version != null)
+                        ? item.from_template_version : null,
+                    proposed_name: item.name || "",
+                };
+                state.push({
+                    widget: widget, origUPosition: item.position, origFace: face,
+                    removed: false, shadowEl: null, displaces: [],
+                });
+                el.setAttribute("data-widget-index", newIdx);
+
+                var content = document.createElement("div");
+                content.className = "grid-stack-item-content";
+                el.appendChild(content);
+                content.setAttribute(
+                    "title",
+                    isTray
+                        ? (label + " (tray, add, from template)")
+                        : (label + " (U" + Math.round(item.position) + ", add, from template)")
+                );
+                // The stamped NAME, not the template's label: the opposite-face
+                // shadow, the hover card and the power tooltips all read
+                // data-name, and they showed the source rack's device names on
+                // a freshly stamped rack.
+                content.setAttribute("data-name", widget.proposed_name || label);
+                if (item.model) { content.setAttribute("data-device-type-name", item.model); }
+                content.setAttribute("data-draw-w", "0");
+                content.setAttribute("data-draw-known", "1");
+                drawTargets.push({
+                    content: content, dt: item.device_type_id, role: item.device_role_id,
+                    blades: (item.blades || []).map(function (b) {
+                        return { dt: b.device_type_id, role: b.device_role_id };
+                    }),
+                });
+
+                var btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "nbx-rd-remove-btn";
+                btn.setAttribute("title", "Cancel this planned add");
+                btn.setAttribute("aria-label", "Cancel this planned add");
+                btn.innerHTML = "&times;";
+                var span = document.createElement("span");
+                span.className = "nbx-rd-label";
+                span.textContent = label;
+                content.appendChild(btn);
+                content.appendChild(span);
+
+                // Same editable-name + collision-warning affordance every add
+                // tile gets (finishAdd's own copy, above) -- pre-filled from
+                // the naming pass preview-template already ran, not a fresh
+                // auto-fill call: that pass is what batches naming across
+                // every rack the stamp touches (D19), and re-deriving it here
+                // per tile could hand back a DIFFERENT name than the one the
+                // apply dialog just showed the planner.
+                var nameInput = document.createElement("input");
+                nameInput.type = "text";
+                nameInput.className = "form-control form-control-sm nbx-rd-name-input";
+                nameInput.setAttribute("placeholder", "name…");
+                nameInput.setAttribute("aria-label", "Proposed name");
+                nameInput.value = widget.proposed_name;
+                var warn = document.createElement("span");
+                warn.className = "nbx-rd-name-warning";
+                warn.setAttribute("title", "A device with this name already exists in the site.");
+                warn.innerHTML = '<i class="mdi mdi-alert" aria-hidden="true"></i>';
+                warn.style.display = item.name_collision ? "" : "none";
+                content.classList.toggle("nbx-rd-name-collision", !!item.name_collision);
+                content.appendChild(nameInput);
+                content.appendChild(warn);
+                setTileDisplayName(content, widget.proposed_name);
+
+                var editBtn = document.createElement("button");
+                editBtn.type = "button";
+                editBtn.className = "nbx-rd-name-edit-btn";
+                editBtn.title = "Edit name";
+                editBtn.setAttribute("aria-label", "Edit name");
+                editBtn.innerHTML = '<i class="mdi mdi-pencil" aria-hidden="true"></i>';
+                content.appendChild(editBtn);
+                var gridItem = content.closest(".grid-stack-item");
+                function openNameEdit() {
+                    content.classList.add("nbx-rd-editing");
+                    if (gridItem) { gridItem.classList.add("nbx-rd-editing-item"); }
+                    nameInput.focus();
+                    nameInput.select();
+                }
+                function closeNameEdit() {
+                    content.classList.remove("nbx-rd-editing");
+                    if (gridItem) { gridItem.classList.remove("nbx-rd-editing-item"); }
+                }
+                editBtn.addEventListener("click", function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openNameEdit();
+                });
+                nameInput.addEventListener("blur", closeNameEdit);
+                nameInput.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" || e.key === "Escape") {
+                        e.preventDefault();
+                        nameInput.blur();
+                    }
+                });
+                nameInput.addEventListener("input", function () {
+                    widget.nameUserSet = true;
+                    widget.proposed_name = nameInput.value;
+                    content.setAttribute("data-name", nameInput.value || label);
+                    setTileDisplayName(content, nameInput.value);
+                    markDirty();
+                });
+
+                attachPlacementFieldsButton(widget, content);
+
+                // Role/tenant are ids, not the name string looksLikePdu also
+                // matches on -- the template's own device type/proposed name
+                // are the signals available here (finishAdd's roleName comes
+                // from the palette rail's live <select>, which a template
+                // stamp never touches).
+                if (looksLikePdu(null, "", widget.proposed_name, item.model || "")) {
+                    var pduBtn = document.createElement("button");
+                    pduBtn.type = "button";
+                    pduBtn.className = "nbx-rd-power-btn";
+                    pduBtn.title = "PDU power (planning input)";
+                    pduBtn.setAttribute("aria-label", "PDU power");
+                    pduBtn.innerHTML = '<i class="mdi mdi-flash" aria-hidden="true"></i>';
+                    content.appendChild(pduBtn);
+                    pduBtn.addEventListener("click", function (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showPduPowerDialog(widget, content, { rackId: rackId });
+                    });
+                    // A stamp lands every PDU the template carries at once, so
+                    // this is where the per-PDU clicking really added up: bind
+                    // each one to the feed its name's leg letter points at (see
+                    // autoBindPduFeed). No dialog here -- a stamp must never
+                    // interrupt itself -- the ⚡ button carries the override.
+                    autoBindPduFeed(widget, content, {
+                        rackId: rackId,
+                        peers: state.map(function (s) {
+                            return (s && !s.removed) ? s.widget : null;
+                        }),
+                    }).then(function (picked) { if (picked) { markDirty(); } });
+                }
+
+                // Blades (D10): a stamped chassis's nested `blades` land in
+                // their bays via the SAME pending-bay-add path a hand-added
+                // blade uses (rdAddBayItem -> rdBayItemsForRack, spec
+                // §10.6) -- `newIdx` is this chassis tile's OWN widget
+                // index, which is exactly what refForWidgetIndex (above,
+                // buildRackPayload) resolves to a client `ref` once this
+                // chassis add is itself in the payload. editor/templates.js
+                // has already dropped any blade whose bay name does not
+                // exist on this device type, so every entry here is placeable.
+                (item.blades || []).forEach(function (blade) {
+                    var bayRef = rdAddBayItem({
+                        rackId: rackId,
+                        deviceTypeId: blade.device_type_id,
+                        bayName: blade.target_bay_name,
+                        parentWidgetIndex: newIdx,
+                        deviceRoleId: blade.device_role_id,
+                        tenantId: blade.tenant_id,
+                        proposedName: blade.name || "",
+                        planningData: blade.planning_data,
+                        fromTemplateId: blade.from_template,
+                        fromTemplateVersion: blade.from_template_version,
+                    });
+
+                    // No list inside the tile: a stamped chassis looks like a
+                    // hand-placed one (just its name). Its blades are pending
+                    // bay adds like any other -- on the Chassis layer and in
+                    // the hover card, where they can be removed.
+                    void bayRef;
+                });
+                // The same bay rows a saved chassis's hover card shows
+                // (rack_block.html: data-bays-used/-total/-bay-occupants).
+                if ((item.blades || []).length) {
+                    content.setAttribute("data-bays-used", String(item.blades.length));
+                    if (item.bays_total) {
+                        content.setAttribute("data-bays-total", String(item.bays_total));
+                    }
+                    content.setAttribute("data-bay-occupants", item.blades.map(function (b) {
+                        return b.target_bay_name + ": " + (b.name || b.label || b.model || "");
+                    }).join(", "));
+                }
+            });
+
+            markDirty();
+            scheduleRefresh();
+            stampDrawForTiles(drawTargets);
+        }
+
         var controller = {
             rackId: rackId,
             buildRackPayload: buildRackPayload,
+            stampTemplateItems: stampTemplateItems,
             highlightError: highlightError,
             freezeOthers: freezeOthers,
             thaw: thaw,

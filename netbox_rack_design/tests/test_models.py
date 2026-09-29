@@ -21,7 +21,7 @@ from ..models import (
     DesignPowerFeed,
     DesignRackPower,
 )
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 class DesignGroupTestCase(TestCase):
@@ -53,28 +53,30 @@ class DesignTestCase(TestCase):
         cls.device_type = env["device_type"]
 
     def test_str_includes_version(self):
-        design = Design.objects.create(title="Plan", site=self.site, version=2)
+        design = make_design(title="Plan", site=self.site, version=2)
         self.assertEqual(str(design), "Plan (v2)")
 
     def test_sequence_auto_assigned(self):
-        d1 = Design.objects.create(title="A", site=self.site)
-        d2 = Design.objects.create(title="B", site=self.site)
+        d1 = make_design(title="A", site=self.site)
+        d2 = make_design(title="B", site=self.site)
         self.assertEqual(d1.sequence, 10)
         self.assertEqual(d2.sequence, 20)
 
     def test_cannot_be_based_on_self(self):
-        design = Design.objects.create(title="A", site=self.site)
+        design = make_design(title="A", site=self.site)
         design.based_on = design
         with self.assertRaises(ValidationError):
             design.full_clean()
 
     def test_single_approved_version_per_plan(self):
-        root = Design.objects.create(
+        root = make_design(
             title="Root", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
+        # Unsaved instance: `sites` (M2M) is unreadable/unwritable pre-save,
+        # so it is deliberately left unset here -- irrelevant to what this
+        # test checks (the single-approved-version-per-plan conflict).
         sibling = Design(
             title="V2",
-            site=self.site,
             version=2,
             root=root,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -86,13 +88,14 @@ class DesignTestCase(TestCase):
         # A brand-new, unsaved standalone design created directly as Approved must
         # validate cleanly -- it has no persisted version group to conflict with.
         # Regression: clean() previously raised ValueError on the unsaved root.
+        # Unsaved instance: `sites` left unset (see test above).
         design = Design(
-            title="First", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
+            title="First", status=DesignStatusChoices.STATUS_APPROVED
         )
         design.full_clean()  # must not raise
 
     def test_racks_can_be_added(self):
-        design = Design.objects.create(title="Scoped", site=self.site)
+        design = make_design(title="Scoped", site=self.site)
         design.racks.add(*self.racks)
         self.assertEqual(
             set(design.racks.all()),
@@ -101,14 +104,14 @@ class DesignTestCase(TestCase):
 
     def test_same_site_racks_validate(self):
         # Racks in the design's own site pass validation.
-        design = Design.objects.create(title="Scoped", site=self.site)
+        design = make_design(title="Scoped", site=self.site)
         design.racks.add(*self.racks)
         design.full_clean()  # must not raise
 
     def test_rack_from_other_site_rejected(self):
         other_site = Site.objects.create(name="Other Site", slug="other-site")
         foreign_rack = Rack.objects.create(name="Foreign Rack", site=other_site)
-        design = Design.objects.create(title="Scoped", site=self.site)
+        design = make_design(title="Scoped", site=self.site)
         design.racks.add(foreign_rack)
         with self.assertRaises(ValidationError) as ctx:
             design.full_clean()
@@ -121,47 +124,51 @@ class DesignTestCase(TestCase):
         # The form already rejects this (forms.py); the model must too, since
         # the REST API / GraphQL / bulk import / a shell script all bypass the
         # form.
+        # The "shares at least one site" check (M5, PLAN-multi-site.md) is
+        # only checkable on a PERSISTED child (`sites` is a M2M -- same
+        # timing caveat as `racks`, see models.py), so this uses a SAVED
+        # child rather than an unsaved instance.
         other_site = Site.objects.create(name="Other Site 2", slug="other-site-2")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent", site=other_site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        child = Design(title="Child", site=self.site, based_on=parent)
+        child = make_design(title="Child", site=self.site, based_on=parent)
         with self.assertRaises(ValidationError) as ctx:
             child.full_clean()
         self.assertIn("based_on", ctx.exception.message_dict)
 
     def test_based_on_same_site_validates(self):
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        child = Design(title="Child", site=self.site, based_on=parent)
+        child = make_design(title="Child", site=self.site, based_on=parent)
         child.full_clean()  # must not raise
 
     # --- baseline_chain() ----------------------------------------------------
 
     def test_baseline_chain_empty_with_no_parent(self):
-        design = Design.objects.create(title="Orphan", site=self.site)
+        design = make_design(title="Orphan", site=self.site)
         self.assertEqual(design.baseline_chain(), [])
 
     def test_baseline_chain_single_parent(self):
-        a = Design.objects.create(title="A", site=self.site)
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
+        a = make_design(title="A", site=self.site)
+        b = make_design(title="B", site=self.site, based_on=a)
         self.assertEqual(b.baseline_chain(), [a])
 
     def test_baseline_chain_excludes_self(self):
-        a = Design.objects.create(title="A", site=self.site)
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
+        a = make_design(title="A", site=self.site)
+        b = make_design(title="B", site=self.site, based_on=a)
         self.assertNotIn(b, b.baseline_chain())
 
     def test_baseline_chain_three_deep_oldest_first(self):
-        a = Design.objects.create(title="A", site=self.site)
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
-        c = Design.objects.create(title="C", site=self.site, based_on=b)
+        a = make_design(title="A", site=self.site)
+        b = make_design(title="B", site=self.site, based_on=a)
+        c = make_design(title="C", site=self.site, based_on=b)
         self.assertEqual(c.baseline_chain(), [a, b])
 
     def test_baseline_chain_detects_cycle(self):
-        a = Design.objects.create(title="A", site=self.site)
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
+        a = make_design(title="A", site=self.site)
+        b = make_design(title="B", site=self.site, based_on=a)
         # Force a cycle directly at the DB level (bypassing clean()), the way
         # a pre-existing row (saved before the guard existed) could already
         # be broken.
@@ -173,21 +180,21 @@ class DesignTestCase(TestCase):
     # --- based_on / depends_on cycle guards in clean() (G7) ------------------
 
     def test_cannot_be_based_on_indirect_ancestor(self):
-        a = Design.objects.create(title="A", site=self.site)
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
+        a = make_design(title="A", site=self.site)
+        b = make_design(title="B", site=self.site, based_on=a)
         a.based_on = b
         with self.assertRaises(ValidationError):
             a.full_clean()
 
     def test_depends_on_self_rejected(self):
-        design = Design.objects.create(title="A", site=self.site)
+        design = make_design(title="A", site=self.site)
         design.depends_on.add(design)
         with self.assertRaises(ValidationError):
             design.full_clean()
 
     def test_depends_on_indirect_cycle_rejected(self):
-        a = Design.objects.create(title="A", site=self.site)
-        b = Design.objects.create(title="B", site=self.site)
+        a = make_design(title="A", site=self.site)
+        b = make_design(title="B", site=self.site)
         a.depends_on.add(b)
         b.depends_on.add(a)
         with self.assertRaises(ValidationError):
@@ -195,36 +202,37 @@ class DesignTestCase(TestCase):
 
     def test_depends_on_cycle_check_skipped_when_unsaved(self):
         # M2M cannot be read on an unsaved instance -- clean() must not blow up
-        # on a brand-new design just because depends_on can't be queried yet.
-        design = Design(title="New", site=self.site)
+        # on a brand-new design just because depends_on (or `sites`, same
+        # timing caveat, M1) can't be queried yet.
+        design = Design(title="New")
         design.full_clean()  # must not raise
 
     # --- is_frozen (§2.2) -----------------------------------------------------
 
     def test_is_frozen_true_when_approved(self):
-        design = Design.objects.create(
+        design = make_design(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
         self.assertTrue(design.is_frozen)
 
     def test_is_frozen_false_when_draft(self):
-        design = Design.objects.create(title="A", site=self.site)
+        design = make_design(title="A", site=self.site)
         self.assertFalse(design.is_frozen)
 
     # --- children (§2.2 / un-approve guard) -----------------------------------
 
     def test_children_lists_designs_based_on_this_one(self):
-        a = Design.objects.create(
+        a = make_design(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
+        b = make_design(title="B", site=self.site, based_on=a)
         self.assertEqual(list(a.children), [b])
 
     def test_unapproving_blocked_with_children(self):
-        a = Design.objects.create(
+        a = make_design(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        Design.objects.create(title="B", site=self.site, based_on=a)
+        make_design(title="B", site=self.site, based_on=a)
         a.status = DesignStatusChoices.STATUS_DRAFT
         with self.assertRaises(ValidationError):
             a.full_clean()
@@ -235,10 +243,10 @@ class DesignTestCase(TestCase):
         # generic "create a new version" phrase it used before the route
         # existed. Named as the UI action ("New version button"), not a URL --
         # a model has no request context to reverse one.
-        a = Design.objects.create(
+        a = make_design(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        Design.objects.create(title="B", site=self.site, based_on=a)
+        make_design(title="B", site=self.site, based_on=a)
         a.status = DesignStatusChoices.STATUS_DRAFT
         with self.assertRaises(ValidationError) as ctx:
             a.full_clean()
@@ -246,7 +254,7 @@ class DesignTestCase(TestCase):
         self.assertIn("New version button", message)
 
     def test_unapproving_allowed_without_children(self):
-        a = Design.objects.create(
+        a = make_design(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
         a.status = DesignStatusChoices.STATUS_DRAFT
@@ -271,7 +279,7 @@ class DesignTestCase(TestCase):
     # equivalent form-layer check, mirroring the existing same-site split.
 
     def test_racks_change_rejected_on_approved_design(self):
-        design = Design.objects.create(
+        design = make_design(
             title="Approved scope", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -287,7 +295,7 @@ class DesignTestCase(TestCase):
         # Re-submitting the SAME scope (e.g. a PATCH that touches other
         # fields but echoes racks back unchanged) must not be treated as a
         # scope change.
-        design = Design.objects.create(
+        design = make_design(
             title="Approved scope, no-op", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -296,7 +304,7 @@ class DesignTestCase(TestCase):
         design.full_clean()  # must not raise
 
     def test_racks_change_allowed_on_draft_design(self):
-        design = Design.objects.create(title="Draft scope", site=self.site)
+        design = make_design(title="Draft scope", site=self.site)
         design.racks.set([self.racks[0]])
         design._m2m_values = {"racks": [self.racks[1]]}
         design.full_clean()  # must not raise
@@ -304,7 +312,7 @@ class DesignTestCase(TestCase):
     def test_racks_omitted_from_m2m_values_skips_check(self):
         # A write that never mentions `racks` at all (e.g. a PATCH touching
         # only `summary`) must not be mistaken for a scope change.
-        design = Design.objects.create(
+        design = make_design(
             title="Approved, racks untouched", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -317,7 +325,7 @@ class DesignTestCase(TestCase):
         # script, a data migration) has no `_m2m_values` to compare against --
         # this documents that gap rather than pretending it's closed. It is a
         # KNOWN gap (mirrors the racks/site check's own documented CREATE gap).
-        design = Design.objects.create(
+        design = make_design(
             title="Approved, direct M2M write", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -328,7 +336,7 @@ class DesignTestCase(TestCase):
         # The escape hatch itself must stay open: un-approving (with no
         # children) must not be blocked by the new racks check just because
         # `racks` is untouched.
-        design = Design.objects.create(
+        design = make_design(
             title="Un-approve me", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -336,7 +344,7 @@ class DesignTestCase(TestCase):
         design.full_clean()  # must not raise
 
     def test_summary_and_link_editable_on_approved_design(self):
-        design = Design.objects.create(
+        design = make_design(
             title="Metadata still editable", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -348,8 +356,11 @@ class DesignTestCase(TestCase):
         # The CREATE path must not be broken by the frozen-racks check: a
         # brand-new design has no persisted row yet (no `pk`), so there is no
         # "approved scope" to protect against changing.
+        # Unsaved instance: `sites` left unset (see the earlier "unsaved
+        # instance" tests above) -- irrelevant to what this checks (the
+        # frozen-racks-on-approved-CREATE exemption).
         design = Design(
-            title="New and approved", site=self.site,
+            title="New and approved",
             status=DesignStatusChoices.STATUS_APPROVED,
         )
         design._m2m_values = {"racks": [self.racks[0]]}
@@ -358,7 +369,7 @@ class DesignTestCase(TestCase):
     def test_seed_logic_pre_seeds_from_placements(self):
         # Mirrors the 0005 data migration's seed query: a design with placements
         # targeting in-site racks should end up scoping exactly those racks.
-        design = Design.objects.create(title="Seed me", site=self.site)
+        design = make_design(title="Seed me", site=self.site)
         DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -373,7 +384,7 @@ class DesignTestCase(TestCase):
                 )
                 .values_list("target_rack_id", flat=True)
                 .distinct(),
-                site_id=design.site_id,
+                site_id=design.site.pk,
             ).values_list("pk", flat=True)
         )
         design.racks.add(*rack_ids)
@@ -388,7 +399,7 @@ class DesignPlacementTestCase(TestCase):
         cls.device_type = env["device_type"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
 
     def test_add_requires_device_type(self):
         placement = DesignPlacement(
@@ -619,10 +630,47 @@ class DesignPlacementTestCase(TestCase):
         placement = self._pdu_add(power_source_device=self.devices[0])
         placement.full_clean()  # no manual cf -> fine
 
+    # --- preferred_feed_legs (power projection override) ----------------------
+
+    def test_preferred_feed_legs_defaults_to_none(self):
+        self.assertIsNone(self._pdu_add().preferred_feed_legs)
+
+    def test_preferred_feed_legs_none_and_empty_list_are_valid(self):
+        self._pdu_add(preferred_feed_legs=None).full_clean()
+        self._pdu_add(preferred_feed_legs=[]).full_clean()
+
+    def test_preferred_feed_legs_single_leg_valid(self):
+        placement = self._pdu_add(preferred_feed_legs=["b"])
+        placement.full_clean()
+        placement.save()
+        placement.refresh_from_db()
+        self.assertEqual(placement.preferred_feed_legs, ["b"])
+
+    def test_preferred_feed_legs_multiple_legs_valid(self):
+        placement = self._pdu_add(preferred_feed_legs=["c", "d"])
+        placement.full_clean()
+
+    def test_preferred_feed_legs_rejects_non_list(self):
+        placement = self._pdu_add(preferred_feed_legs="b")
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
+    def test_preferred_feed_legs_rejects_bad_letter(self):
+        for bad in (["1"], ["ab"], ["A"], [""], [1], [None]):
+            with self.subTest(bad=bad):
+                placement = self._pdu_add(preferred_feed_legs=bad)
+                with self.assertRaises(ValidationError):
+                    placement.full_clean()
+
+    def test_preferred_feed_legs_rejects_duplicates(self):
+        placement = self._pdu_add(preferred_feed_legs=["a", "a"])
+        with self.assertRaises(ValidationError):
+            placement.full_clean()
+
     # --- frozen design (§2.2) --------------------------------------------------
 
     def test_create_placement_rejected_on_approved_design(self):
-        approved = Design.objects.create(
+        approved = make_design(
             title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
         placement = DesignPlacement(
@@ -639,7 +687,7 @@ class DesignPlacementTestCase(TestCase):
         # The New version route now exists, so the frozen-write message must
         # name it as the escape hatch instead of the pre-route wording. Named
         # as the UI action, not a URL -- a model has no request context.
-        approved = Design.objects.create(
+        approved = make_design(
             title="Approved, message check", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -660,7 +708,7 @@ class DesignPlacementTestCase(TestCase):
         # setUpTestData object's attributes leaks across test methods within
         # the class (only the DB rolls back between tests, not the in-memory
         # Python object), so this test builds its own design to flip.
-        design = Design.objects.create(title="Flip me", site=self.site)
+        design = make_design(title="Flip me", site=self.site)
         placement = DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -675,7 +723,7 @@ class DesignPlacementTestCase(TestCase):
             placement.full_clean()
 
     def test_edit_placement_allowed_after_design_returns_to_draft(self):
-        design = Design.objects.create(title="Flip me back", site=self.site)
+        design = make_design(title="Flip me back", site=self.site)
         placement = DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -716,7 +764,7 @@ class StalePlacementTestCase(TestCase):
         cls.device_type = env["device_type"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]  # Device 1 @ Rack1/U1/front, Device 2 @ Rack1/U2/front
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
 
     def test_device_delete_flags_move_and_remove_as_stale_not_cascade(self):
         # Regression: DesignPlacement.device used to be on_delete=CASCADE, so
@@ -746,8 +794,26 @@ class StalePlacementTestCase(TestCase):
         self.assertTrue(remove.stale)
         self.assertEqual(remove.stale_device_name, device_name)
 
+    def test_nulling_the_device_while_it_still_exists_flags_stale(self):
+        """NetBox core's own pre_delete handler (core/signals.py
+        handle_deleted_object) nulls every SET_NULL reference and saves it,
+        during a web request and BEFORE this plugin's receiver runs -- which
+        then found nothing to flag. Nulling the device of a move/remove while
+        that device still exists is exactly that step, and must flag it
+        (found recording the tutorial, Part 15)."""
+        move = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[1], target_rack=self.racks[1], target_position=6,
+        )
+        name = self.devices[1].name
+        move.device = None
+        move.save()
+        move.refresh_from_db()
+        self.assertTrue(move.stale)
+        self.assertEqual(move.stale_device_name, name)
+
     def test_unrelated_designs_and_add_placements_are_unaffected(self):
-        other_design = Design.objects.create(title="Other plan", site=self.site)
+        other_design = make_design(title="Other plan", site=self.site)
         other_move = DesignPlacement.objects.create(
             design=other_design,
             kind=DesignPlacementKindChoices.KIND_MOVE,
@@ -890,7 +956,7 @@ class BasePlacementTestCase(TestCase):
 
         # Parent design: drafted, populated, THEN approved -- approving first
         # would freeze it before these fixture placements could be created.
-        cls.parent_design = Design.objects.create(title="Parent", site=cls.site)
+        cls.parent_design = make_design(title="Parent", site=cls.site)
         cls.upstream_add = DesignPlacement.objects.create(
             design=cls.parent_design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -909,7 +975,7 @@ class BasePlacementTestCase(TestCase):
         cls.parent_design.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent_design.save()
 
-        cls.child_design = Design.objects.create(
+        cls.child_design = make_design(
             title="Child", site=cls.site, based_on=cls.parent_design
         )
 
@@ -945,7 +1011,7 @@ class BasePlacementTestCase(TestCase):
         self.assertIn("base_placement", ctx.exception.message_dict)
 
     def test_base_placement_outside_ancestor_chain_is_rejected(self):
-        unrelated_design = Design.objects.create(title="Unrelated", site=self.site)
+        unrelated_design = make_design(title="Unrelated", site=self.site)
         unrelated_add = DesignPlacement.objects.create(
             design=unrelated_design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1065,14 +1131,14 @@ class PlannedPowerFeedChainTestCase(TestCase):
         cls.device_type = env["device_type"]
         cls.racks = env["racks"]
 
-        cls.parent_design = Design.objects.create(title="Parent", site=cls.site)
+        cls.parent_design = make_design(title="Parent", site=cls.site)
         cls.parent_feed = DesignPowerFeed.objects.create(
             design=cls.parent_design, rack=cls.racks[0], name="Feed A",
         )
         cls.parent_design.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent_design.save()
 
-        cls.child_design = Design.objects.create(
+        cls.child_design = make_design(
             title="Child", site=cls.site, based_on=cls.parent_design
         )
 
@@ -1098,7 +1164,7 @@ class PlannedPowerFeedChainTestCase(TestCase):
         placement.full_clean()  # must not raise
 
     def test_binding_an_unrelated_designs_feed_is_rejected(self):
-        unrelated = Design.objects.create(title="Unrelated", site=self.site)
+        unrelated = make_design(title="Unrelated", site=self.site)
         unrelated_feed = DesignPowerFeed.objects.create(
             design=unrelated, rack=self.racks[0], name="Feed U",
         )
@@ -1114,10 +1180,10 @@ class PlannedPowerFeedChainTestCase(TestCase):
         # child hasn't happened yet. Uses a three-level chain because the
         # class-level parent is frozen (approved) and could never accept a
         # new placement at all, which would test the freeze guard instead.
-        middle = Design.objects.create(
+        middle = make_design(
             title="Middle", site=self.site, based_on=self.parent_design
         )
-        grandchild = Design.objects.create(
+        grandchild = make_design(
             title="Grandchild", site=self.site, based_on=middle
         )
         descendant_feed = DesignPowerFeed.objects.create(
@@ -1159,7 +1225,7 @@ class DesignRackPowerChainTestCase(TestCase):
         cls.racks = env["racks"]
 
     def _design(self, title, *, based_on=None):
-        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+        return make_design(title=title, site=self.site, based_on=based_on)
 
     def _approve(self, design):
         design.status = DesignStatusChoices.STATUS_APPROVED
@@ -1258,7 +1324,7 @@ class BayPlacementTestCase(TestCase):
             u_height=0, subdevice_role=SubdeviceRoleChoices.ROLE_CHILD,
         )
 
-        cls.design = Design.objects.create(title="Bay plan", site=cls.site)
+        cls.design = make_design(title="Bay plan", site=cls.site)
         cls.chassis = Device.objects.create(
             name="Real-Chassis", site=cls.site, rack=cls.racks[0], position=40,
             face="front", device_type=cls.chassis_type, role=cls.role,
@@ -1456,7 +1522,7 @@ class BaseParentPlacementTestCase(TestCase):
         cls.real_bay = cls.real_chassis.devicebays.get(name="bay-a")
 
         # Ancestor: drafted, populated, THEN approved -- approval freezes it.
-        cls.parent_design = Design.objects.create(title="Network parent", site=cls.site)
+        cls.parent_design = make_design(title="Network parent", site=cls.site)
         cls.upstream_chassis = DesignPlacement.objects.create(
             design=cls.parent_design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1486,7 +1552,7 @@ class BaseParentPlacementTestCase(TestCase):
         cls.parent_design.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent_design.save()
 
-        cls.child_design = Design.objects.create(
+        cls.child_design = make_design(
             title="Server child", site=cls.site, based_on=cls.parent_design
         )
 
@@ -1585,7 +1651,7 @@ class BaseParentPlacementTestCase(TestCase):
     # --- the parent must be a TRUE ancestor's add of a chassis type -----------
 
     def test_base_parent_placement_outside_the_ancestor_chain_is_rejected(self):
-        unrelated = Design.objects.create(title="Unrelated", site=self.site)
+        unrelated = make_design(title="Unrelated", site=self.site)
         unrelated_chassis = DesignPlacement.objects.create(
             design=unrelated,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1698,7 +1764,7 @@ class BaseParentPlacementTestCase(TestCase):
     def test_another_design_may_claim_the_same_inherited_bay(self):
         # Scoped to the design, exactly like the other two bay constraints: two
         # designs claiming one bay are competing proposals, not a contradiction.
-        sibling = Design.objects.create(
+        sibling = make_design(
             title="Sibling child", site=self.site, based_on=self.parent_design
         )
         for design in (self.child_design, sibling):
@@ -1775,7 +1841,7 @@ class DesignPowerFeedTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
 
     def test_defaults_mirror_dcim_powerfeed(self):
         feed = DesignPowerFeed.objects.create(
@@ -1821,7 +1887,7 @@ class DesignPowerFeedTestCase(TestCase):
     # exactly like the `DesignPlacement` frozen-design tests above.
 
     def test_create_rejected_on_approved_design(self):
-        approved = Design.objects.create(
+        approved = make_design(
             title="Approved Feed Owner", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -1834,7 +1900,7 @@ class DesignPowerFeedTestCase(TestCase):
         feed.full_clean()  # must not raise
 
     def test_edit_rejected_once_design_is_approved(self):
-        design = Design.objects.create(title="Flip me (feed)", site=self.site)
+        design = make_design(title="Flip me (feed)", site=self.site)
         feed = DesignPowerFeed.objects.create(design=design, rack=self.racks[0], name="Feed A")
         design.status = DesignStatusChoices.STATUS_APPROVED
         design.save()
@@ -1843,7 +1909,7 @@ class DesignPowerFeedTestCase(TestCase):
             feed.full_clean()
 
     def test_edit_allowed_after_design_returns_to_draft(self):
-        design = Design.objects.create(title="Flip me back (feed)", site=self.site)
+        design = make_design(title="Flip me back (feed)", site=self.site)
         feed = DesignPowerFeed.objects.create(design=design, rack=self.racks[0], name="Feed A")
         design.status = DesignStatusChoices.STATUS_APPROVED
         design.save()
@@ -1859,7 +1925,7 @@ class DesignRackPowerTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
 
     def test_power_config_defaults_to_none(self):
         rack_power = DesignRackPower.objects.create(design=self.design, rack=self.racks[0])
@@ -1896,7 +1962,7 @@ class DesignApplyTestCase(TestCase):
         cls.site = env["site"]
         cls.racks = env["racks"]
         cls.devices = env["devices"]
-        cls.design = Design.objects.create(title="Plan", site=cls.site)
+        cls.design = make_design(title="Plan", site=cls.site)
         cls.placement = DesignPlacement.objects.create(
             design=cls.design,
             kind=DesignPlacementKindChoices.KIND_MOVE,
@@ -2022,7 +2088,7 @@ class BaselineSlotValidationTestCase(TestCase):
         cls.racks = env["racks"]
         cls.devices = env["devices"]  # Device 1 @ Rack1/U1, Device 2 @ Rack1/U2
 
-        cls.parent = Design.objects.create(title="Parent", site=cls.site)
+        cls.parent = make_design(title="Parent", site=cls.site)
         cls.upstream_add = DesignPlacement.objects.create(
             design=cls.parent,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -2044,7 +2110,7 @@ class BaselineSlotValidationTestCase(TestCase):
         cls.parent.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent.save()
 
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Child", site=cls.site, based_on=cls.parent
         )
 
@@ -2105,7 +2171,7 @@ class BaselineSlotValidationTestCase(TestCase):
         self.assertIn("target_position", ctx.exception.message_dict)
 
     def test_a_design_with_no_parent_is_unaffected(self):
-        standalone = Design.objects.create(title="Standalone", site=self.site)
+        standalone = make_design(title="Standalone", site=self.site)
         placement = DesignPlacement(
             design=standalone,
             kind=DesignPlacementKindChoices.KIND_ADD,

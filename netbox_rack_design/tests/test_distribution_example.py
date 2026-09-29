@@ -48,8 +48,9 @@ from ..distribution_example import (
     read_planning_field,
     read_planning_fields,
 )
-from ..models import Design, DesignPlacement, DesignPowerFeed
+from ..models import DesignPlacement, DesignPowerFeed
 from ..projection import project_rack
+from .utils import make_design
 
 
 def _script_cfg(**planning_fields):
@@ -62,7 +63,8 @@ def _script_cfg(**planning_fields):
     return {"netbox_rack_design": cfg}
 
 
-def _consumer(name, u, draw, psus, status="active", role="server", known=True):
+def _consumer(name, u, draw, psus, status="active", role="server", known=True,
+              preferred_feed_legs=None):
     """A normalized consumer entry (matches distribution.devices_from_elevation)."""
     return {
         "name": name,
@@ -76,6 +78,7 @@ def _consumer(name, u, draw, psus, status="active", role="server", known=True):
                         for i in range(1, psus + 1)],
         "device": None,
         "device_type": None,
+        "preferred_feed_legs": preferred_feed_legs,
     }
 
 
@@ -108,7 +111,7 @@ class DistributionExampleTestCase(TestCase):
             phase=PowerFeedPhaseChoices.PHASE_SINGLE,
         )
 
-        cls.design = Design.objects.create(title="D Plan", site=cls.site)
+        cls.design = make_design(title="D Plan", site=cls.site)
 
         # Two REAL PDUs cabled to the two feeds -- feed/leg comes from the
         # binding (the native cable path), not from the PDU's name.
@@ -197,6 +200,47 @@ class DistributionExampleTestCase(TestCase):
         self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["2"]["planned_power"], 300)
         self.assertEqual(dist["pdus"]["d-pdu-r1-2"]["banks"]["2"]["planned_power"], 0)
 
+    def test_preferred_feed_legs_override_charges_leg_b_for_single_psu(self):
+        """A single-PSU device can never reach leg B under the old hardcoded
+        ["a"] heuristic -- the override is the headline fix for that."""
+        dist = build(self.rack, [_consumer("srv1", 2, 300, psus=1, preferred_feed_legs=["b"])])
+        self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 0)
+        self.assertEqual(dist["pdus"]["d-pdu-r1-2"]["banks"]["1"]["allocated_power"], 300)
+
+    def test_preferred_feed_legs_override_reaches_c_and_d(self):
+        """A 4-leg rack: legs c/d are unreachable by the old hardcoded a/b
+        heuristic no matter the fallback -- this is the impossible-today case
+        the override exists for."""
+        feed_c = PowerFeed.objects.create(
+            power_panel=self.power_panel, name="Feed C", voltage=230, amperage=32,
+            phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        feed_d = PowerFeed.objects.create(
+            power_panel=self.power_panel, name="Feed D", voltage=230, amperage=32,
+            phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        self._make_real_pdu("d-pdu-r1-3", feed_c)
+        self._make_real_pdu("d-pdu-r1-4", feed_d)
+        dist = build(self.rack, [_consumer("srv2", 2, 500, psus=2, preferred_feed_legs=["c", "d"])])
+        self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 0)
+        self.assertEqual(dist["pdus"]["d-pdu-r1-2"]["banks"]["1"]["allocated_power"], 0)
+        self.assertEqual(dist["pdus"]["d-pdu-r1-3"]["banks"]["1"]["allocated_power"], 500)
+        self.assertEqual(dist["pdus"]["d-pdu-r1-4"]["banks"]["1"]["allocated_power"], 500)
+
+    def test_preferred_feed_legs_override_skips_leg_the_rack_lacks(self):
+        # 'z' names no bound feed in this rack -- must be skipped, not raise.
+        dist = build(self.rack, [_consumer("srv3", 2, 300, psus=1, preferred_feed_legs=["z"])])
+        self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 0)
+        self.assertEqual(dist["pdus"]["d-pdu-r1-2"]["banks"]["1"]["allocated_power"], 0)
+
+    def test_none_or_empty_preferred_feed_legs_keeps_automatic_behavior(self):
+        """Regression guard: no override still reproduces today's a/b pick."""
+        dist_none = build(self.rack, [_consumer("srv4", 2, 500, psus=2, preferred_feed_legs=None)])
+        dist_empty = build(self.rack, [_consumer("srv5", 2, 500, psus=2, preferred_feed_legs=[])])
+        for dist, _name in ((dist_none, "srv4"), (dist_empty, "srv5")):
+            self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 500)
+            self.assertEqual(dist["pdus"]["d-pdu-r1-2"]["banks"]["1"]["allocated_power"], 500)
+
     def test_unknown_draw_not_charged(self):
         dist = build(self.rack, [_consumer("mystery", 2, 0, psus=2, known=False)])
         self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 0)
@@ -229,6 +273,73 @@ class DistributionExampleTestCase(TestCase):
         dist = build(self.rack, [entry])
         # Bank 2 on pdu_a, regardless of U-position based bank slicing.
         self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["2"]["allocated_power"], 250)
+
+    def test_moved_cabled_device_charged_by_new_u_position_not_stale_cabling(self):
+        """A device the design MOVES is attributed by its NEW U position --
+        its existing cabling is stale (it will be unplugged/re-plugged when
+        the move is implemented), so it must NOT be charged to its current
+        outlet's bank when that differs from what the new position implies.
+        """
+        srv_type = DeviceType.objects.create(
+            manufacturer=self.pdu_type.manufacturer, model="Srv Moved",
+            slug="srv-moved", u_height=1, is_full_depth=False)
+        srv_role = DeviceRole.objects.create(name="Server Mv", slug="server-mv")
+        srv = Device.objects.create(
+            name="moved-srv", device_type=srv_type, site=self.site,
+            rack=self.rack, position=9, face="front", status="active",
+            role=srv_role)
+        pp = PowerPort.objects.create(device=srv, name="PSU1", allocated_draw=250)
+        # Cabled to bank 2 (outlet "2/1"), but the design moves it to unit 2,
+        # which (default bottom direction, units 1-5 = bank 1) is bank 1.
+        outlet = PowerOutlet.objects.get(device=self.pdu_a, name="2/1")
+        Cable(a_terminations=[pp], b_terminations=[outlet]).save()
+
+        entry = {
+            "name": "moved-srv", "role": "server-mv", "status": "active",
+            "u_position": 2, "face": "front", "draw_w": 250.0, "draw_known": True,
+            "power_ports": [{"name": "PSU1", "draw": 250, "connected": "2/1"}],
+            "device": srv, "device_type": srv_type, "moved": True,
+        }
+        dist = build(self.rack, [entry])
+        self.assertEqual(
+            dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 250,
+            "a moved device must be charged by its NEW u_position, not its "
+            "stale outlet cabling")
+        self.assertEqual(
+            dist["pdus"]["d-pdu-r1-1"]["banks"]["2"]["allocated_power"], 0)
+
+    def test_unmoved_cabled_device_still_charged_by_outlet_bank(self):
+        """A device the design does NOT move keeps cabling-based attribution
+        even when its real outlet's bank differs from what its U position
+        would imply (real cabling does not always follow the tidy U-slice
+        split) -- ``moved`` absent/False must not change existing behaviour.
+        """
+        srv_type = DeviceType.objects.create(
+            manufacturer=self.pdu_type.manufacturer, model="Srv Stay",
+            slug="srv-stay", u_height=1, is_full_depth=False)
+        srv_role = DeviceRole.objects.create(name="Server St", slug="server-st")
+        srv = Device.objects.create(
+            name="stay-srv", device_type=srv_type, site=self.site,
+            rack=self.rack, position=2, face="front", status="active",
+            role=srv_role)
+        pp = PowerPort.objects.create(device=srv, name="PSU1", allocated_draw=250)
+        # Cabled to bank 2, even though unit 2 (default bottom) implies bank 1.
+        outlet = PowerOutlet.objects.get(device=self.pdu_a, name="2/1")
+        Cable(a_terminations=[pp], b_terminations=[outlet]).save()
+
+        entry = {
+            "name": "stay-srv", "role": "server-st", "status": "active",
+            "u_position": 2, "face": "front", "draw_w": 250.0, "draw_known": True,
+            "power_ports": [{"name": "PSU1", "draw": 250, "connected": "2/1"}],
+            "device": srv, "device_type": srv_type, "moved": False,
+        }
+        dist = build(self.rack, [entry])
+        self.assertEqual(
+            dist["pdus"]["d-pdu-r1-1"]["banks"]["2"]["allocated_power"], 250,
+            "an untouched device keeps cabling-based attribution even off "
+            "the tidy U-slice split")
+        self.assertEqual(
+            dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 0)
 
     def test_device_cabled_to_a_PDU_IN_ANOTHER_RACK_still_distributes(self):
         """REGRESSION (user 2026-08-28): "where did the bank distribution go?"

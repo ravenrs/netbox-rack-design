@@ -51,6 +51,16 @@ rack cf is named e.g. ``rack_power_cap`` maps it via config; a site using the
 generic names needs no ``planning_fields`` config at all (the shipped default,
 ``{}``, falls back cleanly: ``pdu_location`` defaults to ``"bottom"``,
 ``power_limitation`` is absent -- no rack cap).
+
+Planned-rack safe (PLAN-templates.md D30), unchanged: every ``rack`` attribute
+this file touches (``rack.name``, ``rack.u_height``, and ``rack.cf`` via
+``read_planning_fields``) is on the documented safe list in
+``distribution.py``'s module docstring, and PDU discovery goes through
+``distribution._collect_pdus``, which is itself planned-rack-safe. Nothing in
+this file needed to change for a ``PlannedRack`` to work here -- it already
+did, once the engine's rack-cf override (``distribution.
+apply_rack_power_override``) started patching ``custom_field_data`` as well as
+``.cf`` (``read_planning_fields`` reads the former).
 """
 
 import logging
@@ -173,11 +183,28 @@ def _legs_for(device, unit_map, pdus=None):
     """The ``(pdu, bank)`` refs a device charges, one per redundant leg.
 
     * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU) **in this
-      rack**: charge the outlet's bank directly, one ref per cabling.
-    * **Uncabled** -- and a device whose cabling leads OUT of this rack:
-      attributed by U position via ``unit_map``. A device with 2+ PSUs is
-      redundant -> charged in FULL to each leg it maps to (worst-case
-      failover); a single-PSU device sits on ONE leg only (never split).
+      rack**, and the design does NOT move it (``device.get("moved")`` is not
+      truthy): charge the outlet's bank directly, one ref per cabling.
+    * **Uncabled**, a device whose cabling leads OUT of this rack, or a device
+      the design MOVES: attributed by U position via ``unit_map``. If the
+      device carries a non-empty ``preferred_feed_legs`` (a planning hint set
+      on the placement -- e.g. ``["c", "d"]``), those exact legs are charged
+      instead, taking precedence over the automatic heuristic below; a leg
+      the override names that this rack doesn't have is silently skipped.
+      Otherwise automatic attribution applies: a device with 2+ PSUs is
+      redundant -> charged in FULL to each of the first two legs (sorted) it
+      maps to (worst-case failover); a single-PSU device sits on ONE leg
+      only (never split).
+
+    A design plans a FUTURE state: a device it relocates will be unplugged and
+    re-plugged into whatever PDU/bank serves its new position, so its current
+    cabling says nothing about where its power will come from there --
+    ``moved`` devices skip the cabling lookup entirely and fall through to
+    U-position attribution by their NEW ``u_position``. A device the design
+    does not touch keeps cabling-based attribution even when its real outlet's
+    bank differs from what its U position would imply -- real cabling does not
+    always follow the tidy U-slice split, so staying cabled-first there is
+    still correct; only a moved device's cabling is stale.
 
     Cross-rack cabling is ordinary: a device in one rack is often fed from a
     PDU in another (and a device MOVED between racks keeps its old cabling
@@ -190,7 +217,7 @@ def _legs_for(device, unit_map, pdus=None):
     go?" -- one rack's devices were cabled to the neighbour's PDUs).
     """
     device_obj = device.get("device")
-    if device_obj is not None:
+    if device_obj is not None and not device.get("moved"):
         refs = []
         for pp in device_obj.powerports.all():
             for peer in (pp.link_peers or []):
@@ -213,7 +240,20 @@ def _legs_for(device, unit_map, pdus=None):
     except (TypeError, ValueError):
         return []
     psu_count = len(device.get("power_ports") or [])
-    legs = ["a", "b"] if psu_count >= 2 else ["a"]
+    override = [leg for leg in (device.get("preferred_feed_legs") or []) if isinstance(leg, str)]
+    if override:
+        # Explicit planning hint wins outright -- no heuristic, no fallback.
+        legs = override
+    else:
+        # Automatic: first N legs in sorted order, N matching the device's
+        # redundancy. sorted(unit_map) instead of a hardcoded ["a", "b"]
+        # naturally lands on a/b for a two-feed rack (byte-identical to the
+        # old hardcoded heuristic there) while reaching whatever legs
+        # actually exist for other feed counts/namings. Stays conservative
+        # on purpose -- it never reaches into c/d/... by itself; that's what
+        # the explicit ``preferred_feed_legs`` override above is for.
+        legs = sorted(unit_map)[:2 if psu_count >= 2 else 1]
+    legs = [leg for leg in legs if leg in unit_map]
     refs = []
     for leg in legs:
         ref = unit_map.get(leg, {}).get(unit)

@@ -35,6 +35,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 # ---------------------------------------------------------------------------
 # Configuration (matches dev/config.sh)
 # ---------------------------------------------------------------------------
@@ -500,7 +502,7 @@ class EditorE2ETestCase(unittest.TestCase):
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-{uuid.uuid4()}",
-            "site": site_id,
+            "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         cls._design_id = design["id"]
@@ -601,6 +603,7 @@ class EditorE2ETestCase(unittest.TestCase):
     def setUp(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1400, "height": 1200})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.console_errors = []
         self.page.on(
@@ -730,6 +733,9 @@ class EditorE2ETestCase(unittest.TestCase):
 
         before = chassis_bg()
         before_theme = theme_state()
+        # On newer NetBox the debug toolbar's full-page #djDebugRoot sits over
+        # the navbar, so a forced click on the toggle lands on it instead.
+        self._dismiss_debug_toolbar()
 
         # NetBox renders the colour-mode control several times (desktop + mobile
         # navbars, one button per direction). Click the visible ones until the
@@ -1422,13 +1428,13 @@ class EditorE2ETestCase(unittest.TestCase):
         # version_root with anything below) that plans a device at the SAME
         # free unit this test's own design will then also target.
         peer = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-peer-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         # THIS test's own design: starts with NO placements, so its rack
         # renders no peer conflict until the drop+save below creates one.
         mine = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-mine-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         try:
@@ -1514,11 +1520,11 @@ class EditorE2ETestCase(unittest.TestCase):
         dup_name = f"e2e-dup-<i>rename</i>-{uuid.uuid4()}"
 
         peer = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-peer-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-peer-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         mine = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"e2e-mine-{uuid.uuid4()}", "site": site_id,
+            "title": f"e2e-mine-{uuid.uuid4()}", "sites": [site_id],
             "racks": [int(RACK_PK)],
         })
         try:

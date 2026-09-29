@@ -24,6 +24,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 BASE = os.environ.get("RD_BASE", "http://127.0.0.1:8000").rstrip("/")
 USER = os.environ.get("RD_USER", "rd_shot")
 PASS = os.environ.get("RD_PASS", "ShotPass12345!")
@@ -75,6 +77,7 @@ class EditorPowerTestCase(unittest.TestCase):
     @classmethod
     def _provision_fixture(cls):
         suffix = uuid.uuid4().hex[:8]
+        cls._suffix = suffix
         cf = {"custom_fields": {"warranty_type": ""}}
         mfr = cls._api("POST", "/api/dcim/manufacturers/", {
             "name": f"E2E PWR Mfr {suffix}", "slug": f"e2e-pwr-mfr-{suffix}"})
@@ -101,6 +104,8 @@ class EditorPowerTestCase(unittest.TestCase):
         rack = cls._api("POST", "/api/dcim/racks/", {
             "name": f"E2E PWR Rack {suffix}", "site": site["id"],
             "status": "active", "u_height": 20})
+        cls._rack_id = rack["id"]
+        cls._rack_u_height = 20
 
         cls._powered_name = f"e2e-pwr-srv-{suffix}"
         cls._passive_name = f"e2e-pwr-pp-{suffix}"
@@ -118,7 +123,7 @@ class EditorPowerTestCase(unittest.TestCase):
             "rack": rack["id"], "device_types": [dt_pwr["id"], dt_passive["id"]],
         }
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"pwr-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"pwr-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -202,6 +207,7 @@ class EditorPowerTestCase(unittest.TestCase):
     def setUp(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -369,7 +375,9 @@ class EditorPowerTestCase(unittest.TestCase):
         self.page.wait_for_selector("#nbx-rd-palette-search", state="visible", timeout=8000)
         # Filter the palette to our throwaway types so they are guaranteed to
         # render (the default top-50 may not include them on a busy instance).
-        self.page.fill("#nbx-rd-palette-search", "E2E-PWR-")
+        # Search by this run's unique suffix: killed runs leave E2E-PWR-* types
+        # behind and the palette only shows the top 50 matches.
+        self.page.fill("#nbx-rd-palette-search", self._suffix)
         # Wait for OUR powered row specifically to be rendered AND stamped by the
         # device-type-power fetch (a pre-existing favorites row could otherwise
         # satisfy a generic [data-draw-w] wait before the search results land).
@@ -495,6 +503,269 @@ class EditorPowerTestCase(unittest.TestCase):
         self.assertIn("PS psu1", text, text)
         self.assertIn("400 W", text, text)
         self.assertIn("Allocated", text, text)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    # ---- bank ZONE strip / per-leg legend (docs/pdu-distribution-spec.md) -
+    #
+    # This fixture's rack carries no real PDUs (deliberately -- see the module
+    # docstring), so there is no server-rendered Distribution to read back.
+    # Follow the same injection technique as
+    # tests.e2e.test_editor_distribution: post a Distribution JSON as
+    # ``#rd-distribution-<rackId>`` (the element the server would have
+    # emitted) AND intercept the live recompute-distribution endpoint to
+    # answer with the SAME blob -- otherwise the real (PDU-less) endpoint
+    # would answer null and immediately overwrite the injected static blob,
+    # since the live cache always wins (power_heatmap.js
+    # distributionForRackId).
+
+    def _distribution(self):
+        """A Distribution with two feed legs (a/b), one PDU each, two banks
+        that tile the whole rack (U1-10, U11-20) with no gap/overlap -- what
+        renderBankStrips needs to draw one full-height column per leg."""
+        lower = list(range(1, 11))
+        upper = list(range(11, 21))
+        return {
+            "scheme": "e2e", "pdu_location": "bottom",
+            "pdus": {
+                "site-pwr-r1-a1": {
+                    "feed_name": "a1", "feed_letter": "a", "phase": 1,
+                    "allocated_draw": 400, "power_bank_count": 2,
+                    "banks": {
+                        "1": {"max_power": 1840, "allocated_power": 400,
+                              "planned_power": 0, "util_pct": 22, "state": "ok",
+                              "units": lower,
+                              "devices": [{"name": self._powered_name, "ru": 5,
+                                           "draw_w": 400, "status": "active"}]},
+                        "2": {"max_power": 1840, "allocated_power": 0,
+                              "planned_power": 0, "util_pct": 0, "state": "ok",
+                              "units": upper, "devices": []},
+                    }},
+                "site-pwr-r1-b1": {
+                    "feed_name": "b1", "feed_letter": "b", "phase": 1,
+                    "allocated_draw": 0, "power_bank_count": 2,
+                    "banks": {
+                        "1": {"max_power": 1840, "allocated_power": 0,
+                              "planned_power": 0, "util_pct": 0, "state": "ok",
+                              "units": lower, "devices": []},
+                        "2": {"max_power": 1840, "allocated_power": 0,
+                              "planned_power": 0, "util_pct": 0, "state": "ok",
+                              "units": upper, "devices": []},
+                    }},
+            },
+            "rack": {"power_limitation_w": 6000, "total_w": 400, "alarm": False,
+                     "warnings": []},
+        }
+
+    def _inject_distribution(self):
+        """Inject self._distribution() as the static blob AND as the live
+        recompute-distribution answer (see class-note above), then ask the
+        module to repaint via its public refresh() hook, and wait for the
+        bank chip strip to land before returning."""
+        self.page.route(
+            "**/recompute-distribution/",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "distributions": {str(self._rack_id): self._distribution()},
+                    "distribution_status": {},
+                    "power": {},
+                }),
+            ),
+        )
+        self.page.evaluate(
+            """([dist, rackId]) => {
+                const block = document.querySelector(
+                    '.nbx-rd-rack-block[data-rack-id="'+rackId+'"]')
+                    || document.querySelector('.nbx-rd-rack-block');
+                let el = document.getElementById('rd-distribution-'+rackId);
+                if (!el) {
+                    el = document.createElement('script');
+                    el.type = 'application/json';
+                    el.id = 'rd-distribution-'+rackId;
+                    block.appendChild(el);
+                }
+                el.textContent = JSON.stringify(dist);
+                window.NbxRdPowerHeatmap.refresh();
+            }""",
+            [self._distribution(), str(self._rack_id)],
+        )
+        self.page.wait_for_selector(".nbx-rd-dist-chip", timeout=8000)
+        self.page.wait_for_selector(".nbx-rd-bank-strip", timeout=8000)
+
+    def test_bank_zone_strip_renders_per_leg(self):
+        self._inject_distribution()
+        res = self.page.evaluate(
+            """(uHeight) => {
+                const wraps = [...document.querySelectorAll('.nbx-rd-grid-wrap')]
+                    .filter(w => w.querySelector('.grid-stack.nbx-rd-rack[data-face]'));
+                return wraps.map(w => {
+                    const strip = w.querySelector('.nbx-rd-bank-strip');
+                    if (!strip) return {noStrip: true};
+                    const cols = [...strip.querySelectorAll('.nbx-rd-bank-col')];
+                    return {
+                        colCount: cols.length,
+                        cols: cols.map(col => {
+                            const label = col.querySelector('.nbx-rd-bank-col-label');
+                            const segs = [...col.querySelectorAll('.nbx-rd-bank-seg')];
+                            return {
+                                label: label ? label.textContent : null,
+                                tags: [...col.querySelectorAll('.nbx-rd-bank-pdu-tag')]
+                                    .map(t => t.textContent),
+                                segs: segs.map(s => ({
+                                    bottom: s.style.bottom, height: s.style.height,
+                                    bank: (s.querySelector('.nbx-rd-bank-no') || {}).textContent
+                                          || null,
+                                })),
+                            };
+                        }),
+                    };
+                });
+            }""",
+            self._rack_u_height,
+        )
+        self.assertTrue(res, "no face grid wrappers found")
+        uh = self._rack_u_height
+        for wrap in res:
+            self.assertNotIn("noStrip", wrap, f"a face grid wrap has no bank strip: {wrap}")
+            # Two feed letters (a, b) in the fixture -> two columns.
+            self.assertEqual(wrap["colCount"], 2, wrap)
+            seen_letters = set()
+            for col in wrap["cols"]:
+                self.assertIn(col["label"], ("A", "B"), col)
+                seen_letters.add(col["label"])
+                self.assertTrue(col["tags"], f"column has no PDU tag: {col}")
+                # site-pwr-r1-a1 -> "a1", site-pwr-r1-b1 -> "b1".
+                self.assertTrue(
+                    all(t in ("a1", "b1") for t in col["tags"]), col)
+                # Derive each segment's U range from its bottom/height % and
+                # assert the column tiles 1..u_height with no gap/overlap.
+                ranges = []
+                for seg in col["segs"]:
+                    self.assertTrue(seg["bottom"].endswith("%"), seg)
+                    self.assertTrue(seg["height"].endswith("%"), seg)
+                    bottom_pct = float(seg["bottom"].rstrip("%"))
+                    height_pct = float(seg["height"].rstrip("%"))
+                    lo = round(bottom_pct / 100 * uh) + 1
+                    span = round(height_pct / 100 * uh)
+                    hi = lo + span - 1
+                    ranges.append((lo, hi))
+                ranges.sort()
+                self.assertEqual(ranges[0][0], 1, f"column does not start at U1: {ranges}")
+                self.assertEqual(ranges[-1][1], uh,
+                                  f"column does not reach U{uh}: {ranges}")
+                for i in range(1, len(ranges)):
+                    self.assertEqual(
+                        ranges[i][0], ranges[i - 1][1] + 1,
+                        f"gap or overlap between segments: {ranges}")
+                # Every segment says WHICH bank it is (user report
+                # 2026-09-23): the strip showed where the zones are and
+                # which leg they belong to, but not whether a zone was
+                # bank 1 or bank 2 -- that lived only in the tooltip.
+                banks = [seg["bank"] for seg in col["segs"]]
+                self.assertTrue(
+                    all(b and b.strip() for b in banks),
+                    f"a zone segment carries no bank number: {col}")
+                self.assertEqual(
+                    sorted(b.strip() for b in banks), ["1", "2"],
+                    f"the two zones of a leg must read 1 and 2: {col}")
+            self.assertEqual(seen_letters, {"A", "B"}, wrap)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    def test_bank_zone_strip_toggle(self):
+        self._inject_distribution()
+        toggle = self.page.locator("input[data-rd-bank-zones]")
+        self.assertTrue(toggle.is_checked(), "bank zones default to on")
+        toggle.uncheck()
+        off = self.page.evaluate("""() => {
+            const wraps = [...document.querySelectorAll('.nbx-rd-grid-wrap')]
+                .filter(w => w.querySelector('.grid-stack.nbx-rd-rack[data-face]'));
+            return wraps.map(w => ({
+                stripGone: !w.querySelector('.nbx-rd-bank-strip'),
+                marginLeft: w.style.marginLeft,
+            }));
+        }""")
+        for wrap in off:
+            self.assertTrue(wrap["stripGone"], f"strip not removed on toggle-off: {wrap}")
+            self.assertEqual(wrap["marginLeft"], "", f"wrapper margin-left not cleared: {wrap}")
+        toggle.check()
+        on = self.page.evaluate("""() => {
+            const wraps = [...document.querySelectorAll('.nbx-rd-grid-wrap')]
+                .filter(w => w.querySelector('.grid-stack.nbx-rd-rack[data-face]'));
+            return wraps.map(w => !!w.querySelector('.nbx-rd-bank-strip'));
+        }""")
+        self.assertTrue(all(on), f"strip not restored on toggle-on: {on}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    def test_dist_legend_one_column_per_leg(self):
+        self._inject_distribution()
+        res = self.page.evaluate("""() => {
+            const legend = document.querySelector('.nbx-rd-dist-legend');
+            if (!legend) return null;
+            const legs = [...legend.querySelectorAll('.nbx-rd-dist-leg')];
+            return legs.map(leg => {
+                const pdus = [...leg.querySelectorAll('.nbx-rd-dist-pdu')];
+                return pdus.map(pdu => {
+                    const head = pdu.querySelector('.nbx-rd-dist-pdu-head');
+                    return {
+                        headClasses: head ? [...head.classList] : [],
+                    };
+                });
+            });
+        }""")
+        self.assertIsNotNone(res, "distribution legend not rendered")
+        # Two feed letters (a, b) in the fixture -> exactly two legs.
+        self.assertEqual(len(res), 2, res)
+        seen = set()
+        for leg in res:
+            self.assertTrue(leg, "a leg column has no PDU block")
+            for pdu in leg:
+                letters = [c for c in pdu["headClasses"]
+                           if c.startswith("nbx-rd-feedhead-")]
+                self.assertEqual(len(letters), 1, pdu)
+                seen.add(letters[0])
+        self.assertEqual(seen, {"nbx-rd-feedhead-a", "nbx-rd-feedhead-b"}, res)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    # ---- live recompute is gated behind a drag (rack.js setDragActive) ----
+
+    def test_live_recompute_waits_for_drag_end(self):
+        # While a drag is active, the mutation-driven SERVER round-trip
+        # (recompute-distribution) must be withheld entirely -- the local
+        # bar/heat re-render is cheap and still runs on every mutation, but
+        # the debounced network call must wait for the gate to release
+        # (power_heatmap.js LIVE_DIST_DEBOUNCE_MS = 400ms).
+        reqs = []
+        self.page.on(
+            "request",
+            lambda r: reqs.append(r.url) if "/recompute-distribution/" in r.url else None)
+        marked = self.page.evaluate("""() => {
+            const tile = [...document.querySelectorAll('.grid-stack-item')].find(t => {
+                const c = t.querySelector('.grid-stack-item-content');
+                return c && parseFloat(c.getAttribute('data-draw-w')) > 0
+                    && !t.classList.contains('nbx-rd-opposite');
+            });
+            if (!tile) return false;
+            tile.setAttribute('data-rd-test-mark', '1');
+            return true;
+        }""")
+        self.assertTrue(marked, "no powered tile to mutate")
+        self.page.evaluate("() => window.NbxRdPowerHeatmap.setDragActive(true)")
+        # Mutate the tile twice (toggle a class on then off) the way the
+        # existing live tests do -- each toggle is a real attribute mutation
+        # the observer sees, but the gate must swallow both while it is up.
+        self.page.evaluate("""() => {
+            const tile = document.querySelector('[data-rd-test-mark="1"]');
+            tile.classList.add('nbx-rd-state-remove');
+            tile.classList.remove('nbx-rd-state-remove');
+        }""")
+        self.page.wait_for_timeout(700)
+        self.assertEqual(reqs, [], f"recompute fired while the drag gate was up: {reqs}")
+        self.page.evaluate("() => window.NbxRdPowerHeatmap.setDragActive(false)")
+        self.page.wait_for_timeout(700)
+        self.assertEqual(
+            len(reqs), 1,
+            f"expected exactly one recompute once the drag gate released: {reqs}")
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
 

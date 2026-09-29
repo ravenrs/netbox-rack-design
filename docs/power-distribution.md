@@ -27,11 +27,15 @@ PLUGINS_CONFIG = {
 
 ## Mode: `none` (default)
 
+▶ Video: [Part 12 — Bank distribution: none, builtin, script](https://youtu.be/WkJjhm3IoXA)
+
 Per-device rack-share gradient — the current behavior. PDUs are excluded
 infrastructure. The heatmap colors each tile by the device's share of total
 rack power.
 
 ## Mode: `builtin`
+
+▶ Video: [Part 12 — Bank distribution: none, builtin, script](https://youtu.be/WkJjhm3IoXA)
 
 Zero-configuration distribution across PDUs and banks, built on two
 **universal naming conventions** that work on any NetBox instance:
@@ -57,11 +61,16 @@ The built-in mode works without a script or custom config, iff:
 
 Under these conventions, the plugin distributes each device's load per bank:
 
-- **Cabled device** (real or planned, with a power outlet on a PDU) → charge the
-  outlet's bank directly.
-- **Uncabled device** (planned, not yet cabled) → its position in the rack
-  determines which bank feeds it; redundant devices (2+ PSUs) charge both
-  feed-legs in full (worst-case failover).
+- **A device the design moves** (a planned add, or an existing device dragged
+  to a new position) → charged by its **new U position**, regardless of any
+  cabling it still carries. Moving a device in a design means its cable will
+  be re-run when the design is implemented, so the old outlet doesn't say
+  where the power will actually come from.
+- **A device the design leaves in place** → charged to its **real outlet's
+  bank**, even if that bank doesn't match what the device's U position would
+  suggest. Real cabling is ground truth for anything nobody is touching.
+- Redundant devices (2+ PSUs) charge both feed-legs in full (worst-case
+  failover), whichever rule above assigned their bank.
 
 Per-bank breaker = `pdu_input_draw / power_bank_count` (where
 `power_bank_count` is the distinct bank IDs on that PDU).
@@ -72,6 +81,8 @@ fixed direction. Sites that need either of those need `distribution_mode =
 "script"` (below).
 
 ## Mode: `script`
+
+▶ Video: [Part 12 — Bank distribution: none, builtin, script](https://youtu.be/WkJjhm3IoXA)
 
 For distribution behavior a configuration cannot express, point `distribution_script` at any
 importable callable with the signature `fn(rack, devices) -> Distribution | None`.
@@ -157,6 +168,8 @@ config bridge. Start from `distribution_example.py` and adapt it to your needs.
 
 ## Feed binding & planned PDUs
 
+▶ Video: [Part 10 — Greenfield planned power](https://youtu.be/iPRLaY1kVF0) · [Part 11 — Copying power, PDUs that bind themselves](https://youtu.be/X-16j1W0NmM)
+
 A real PDU cabled to a real `dcim.PowerFeed` sizes its breaker from that feed
 electricals (voltage × amperage × phase, the native path). A **planned PDU** (a
 placement add, not yet realized in `dcim`) has no real feed yet, so the plugin
@@ -164,16 +177,45 @@ models planned feeds the same way: a **`DesignPowerFeed`** row carries the same
 electrical fields (voltage, amperage, phase, supply), and a planned PDU **binds**
 to it just like a real PDU binds to a real feed.
 
+### Automatic binding
+
+**A PDU added to a rack that already has feeds binds itself** — no dialog, no
+clicking. The rack usually leaves no real choice to make, and a template stamped
+across ten racks would otherwise mean twenty trips through the picker.
+
+The feed is chosen by:
+
+1. **The leg letter in the PDU's name.** A PDU named `ams1-pdu-r3-a1` takes the
+   feed whose name ends in `-A`; `…-b1` takes `-B`. The separator matters — a
+   name that merely happens to end in a letter is not read as a leg.
+2. **The first feed no other PDU in that rack has taken**, when the name carries
+   no leg letter. Two PDUs dropped in a row therefore land on two different
+   feeds rather than doubling up on one.
+
+Real feeds rank above the design's own planned feeds, which rank above feeds
+inherited from an ancestor design. A leg-letter match beats that ranking: a
+redundant second PDU on leg A is a deliberate choice, not a mistake.
+
+The ⚡ button on the tile lights up and its tooltip names the feed
+("PDU power — bound to R1-A (click to change)"), so any automatic choice is one
+click from being overridden.
+
 ### Dialog flows
 
-When you add a PDU to a rack:
+When automatic binding has nothing to pick, you get the manual flows:
 
 - **If the rack has real feeds** (a provisioned rack with `dcim.PowerFeed`
-  records) — a **bind-to-feed picker** appears, listing the rack's feeds (real
-  first, then any planned feeds you've defined). Pick one to bind the PDU.
+  records) — the **bind-to-feed picker** lists the rack's feeds (real first,
+  then any planned feeds you've defined). Pick one to bind the PDU. This is also
+  what the ⚡ button reopens for any PDU, bound or not.
 - **If the rack has no real feeds** (greenfield planning) — a per-rack **Power**
   button opens the planned-power flow where you define feeds manually (name,
-  voltage, amperage, phase) or copy them from another rack's real feeds.
+  voltage, amperage, phase) or copy them from another rack's real feeds. The
+  picker opens by itself right after the drop, since there is nothing to bind to
+  yet.
+
+A template stamp never opens a dialog at all: every PDU it carries either binds
+automatically or stays unbound for you to settle with the ⚡ button.
 
 After feeds are defined, each PDU binding travels with the design and is
 restored on load. A PDU with no binding is omitted from the distribution (logged,
@@ -191,12 +233,50 @@ source:
 
 The two are mutually exclusive per placement.
 
+**What PDU location means.** It is where the power feed enters the rack. A
+vertical PDU is mounted with its input end towards the feed: with the feed
+coming up from the floor, the PDU stands with its input at the bottom and bank 1
+serves the lower half of the rack; with the feed coming from overhead, the same
+PDU is mounted upside down, input at the top, and bank 1 serves the **upper**
+half. `bottom` is the default. The builtin mode always assumes `bottom`; a
+distribution script such as `distribution_example.py` reads the value and flips
+the unit-to-bank mapping for `top`. Setting it in a design's rack Power dialog
+stores an override for that design only — the rack's own custom field in DCIM
+is never changed.
+
 Note `pdu_location` (top/bottom, for directing which bank claims which units)
 is a **rack**-level custom field, not a PDU-level one — it is declared under
 `planning_fields["rack"]` (see the example above) and reaches a
 `distribution_script` via `DesignRackPower` merged over `rack.cf`, the same
 path as `power_limitation`. It has nothing to do with `power_source_device` /
 `power_config`, which resolve a *PDU's* custom fields.
+
+## Bank zones, and choosing a feed per device
+
+▶ Video: [Part 8 — Bank zones & choosing a feed](https://youtu.be/u3_mIB0MiQ0)
+
+Two editor controls sit on top of the distribution result.
+
+**Bank zones** (a switch next to *Power heatmap*) draws a narrow strip on the
+left edge of every face grid: one column per feed leg (`a`, `b`, …), showing
+which U range each PDU bank serves and how full it is, in the same colours as
+the bank chips. On a rack with several PDUs per leg the leg's PDUs stack in
+one column, each with its name written up the column at its floor, so it is
+unambiguous which U to drop a device on to land it on `a2` rather than `a1`.
+The chip block above the grids uses the same layout — one column per leg,
+paired PDUs level with each other. The strip is structural, not a colouring
+view, so it is independent of the heatmap switch.
+
+**Per-device feed choice.** A device the design adds or moves is attributed
+to legs automatically — one PSU goes to leg `a`, two or more to `a` + `b`
+(§2.2 of the [spec](pdu-distribution-spec.md)). To pin one device elsewhere,
+open its **Planning attributes** dialog (the tag button on the tile) and use
+the **Power** block: one select per PSU, `Automatic` or a specific leg. The
+choice is stored on the placement as `preferred_feed_legs` (a list, one
+lowercase letter per PSU in PSU order; empty means automatic) and the engine
+charges those legs instead of the first-N heuristic. Devices the design
+leaves in place keep their real cabling; the override only steers what is
+planned. Exposed on the REST/GraphQL placement as `preferred_feed_legs`.
 
 ## Planning fields — custom-field bridge (script tier only)
 
@@ -346,9 +426,10 @@ A quick end-to-end check that distribution works the way you expect:
    - Overload warnings in red if any bank exceeds its breaker.
 
 4. **Drag a device to a different rack unit.** The bank colors should update
-   to reflect the new load distribution. If the device is cabled to a specific
-   PDU outlet, it charges that bank; if uncabled (planned), it charges the bank
-   corresponding to its new U position.
+   to reflect the new load distribution: a device the design moves is charged
+   to the bank at its **new** U position, even if it still has a real cable to
+   a different outlet — that cabling is assumed to be re-run when the design is
+   implemented. A device you leave alone keeps charging its real outlet's bank.
 
 5. **Check custom fields (script tier only).** If you've switched to
    `distribution_mode = "script"` with `planning_fields` configured, add a rack
@@ -393,11 +474,17 @@ degrades to `none` gracefully — logs a warning, never errors the editor.
 
 **The distribution looks wrong; devices are charged to the wrong banks.**
 
-- Verify cabling: a cabled device should charge the PDU outlet's bank directly
-  (the first segment before `/`).
-- Verify uncabled devices are placed at their intended U positions. The rack
-  distribution assumes a unit-to-bank mapping based on direction and bank
-  count; a device at U5 might charge a different bank than U7.
+- Check whether the design **moves** the device. A moved device (a new add, or
+  an existing device dragged to a different unit) is always charged by its
+  **new** U position — any cabling it still carries is ignored, because that
+  cable is assumed to be re-run when the design is implemented.
+- For a device the design does **not** move: verify cabling — it should charge
+  the PDU outlet's bank directly (the first segment before `/`), even if that
+  differs from what its U position would suggest.
+- For a device the design does not move and that has no cabling: verify it's
+  placed at its intended U position. The rack distribution assumes a
+  unit-to-bank mapping based on direction and bank count; a device at U5 might
+  charge a different bank than U7.
 - **`distribution_mode = "builtin"`** always splits in a fixed direction (bank 1
   at the bottom) — it does not read the rack custom field `pdu_location` or any
   other cf.

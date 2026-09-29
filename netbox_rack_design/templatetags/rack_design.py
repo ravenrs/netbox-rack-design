@@ -14,9 +14,49 @@ import json
 from django import template
 from utilities.html import foreground_color
 
-from .. import planning_fields, projection
+from .. import planning_fields, projection, rackinfo
 
 register = template.Library()
+
+
+@register.filter()
+def rack_dom_id(rack_key):
+    """
+    Turn a namespaced ``rack_key()`` string (``"r:<pk>"`` / ``"p:<pk>"``,
+    models.py D27) into the spelling used in HTML ``id`` / ``gs-id`` /
+    ``data-rack-id`` attributes.
+
+    **A real rack keeps its BARE pk; only a planned rack is prefixed**
+    (``"p-<pk>"``). That asymmetry is deliberate, and it is the whole point:
+
+    - The collision D31 describes only ever happens BETWEEN the two kinds --
+      ``dcim.Rack`` pk 1 and ``PlannedRack`` pk 1 are different racks (D28).
+      Real pks are unique among real racks and planned pks among planned
+      ones, so prefixing just one side removes the overlap completely. The
+      invariant "no two racks in one page share a DOM id" holds either way.
+    - Prefixing BOTH sides was tried first and broke all 125 editor e2e
+      tests at once: they build selectors like
+      ``"#nbx-rd-grid-front-" + rack_pk`` from the Python side, and every
+      one of them went dead with ``Cannot read properties of null``.
+      Rewriting 125 tests to buy nothing extra is churn, not safety.
+    - "A bare integer means a real rack" is already this codebase's rule on
+      the wire: ``api/views.py:parse_real_rack_id`` maps a bare int to a
+      real rack, and D27 keeps accepting that form for one release. The DOM
+      now says the same thing the API says.
+
+    ``-`` rather than ``:`` for the planned prefix because ``:`` is a CSS
+    selector metacharacter -- ``document.querySelector("#rd-rack-p:1")``
+    would silently match nothing rather than raise. No such ``#id`` selector
+    exists today (T1.5c-survey.md checked exhaustively); this is designing
+    out a future footgun. The colon form stays everywhere else (JS-internal
+    values, API payloads), so ``rackKeyToServer()`` is what converts back.
+    """
+    key = str(rack_key or "")
+    if key.startswith("r:"):
+        return key[2:]
+    if key.startswith("p:"):
+        return "p-" + key[2:]
+    return key
 
 
 @register.filter()
@@ -38,6 +78,18 @@ def mul2(value):
 
 
 @register.filter()
+def rack_unit_numbers(rack):
+    """
+    The numbering column's U values, top to bottom, for either rack kind
+    (T1.5): ``rack.units`` does not exist on a ``models.PlannedRack``, so
+    this shared template (used by both the editor and the read-only
+    elevation) reads through ``rackinfo.rack_unit_numbers`` instead of the
+    raw property.
+    """
+    return rackinfo.rack_unit_numbers(rack)
+
+
+@register.filter()
 def slot_gs_y(slot, rack):
     """
     Compute a slot's ``gs-y`` (top grid row) for a half-U GridStack column.
@@ -45,12 +97,15 @@ def slot_gs_y(slot, rack):
     GridStack lays out from row 0 at the top. NetBox racks number U1 at the
     bottom (ascending) unless ``desc_units`` flips them. Mirrors reorder-rack's
     ``calculate_u_position`` so the elevation reads top-of-rack first.
+    ``rackinfo.rack_desc_units`` rather than the raw ``rack.desc_units``
+    (T1.5): a ``PlannedRack`` has no field of its own for this -- see that
+    helper's docstring for why ``False`` is the right default.
     """
     u_height = int(rack.u_height) * 2
     height = int(slot["u_height"]) * 2
     unit_id = int(slot["u_position"]) * 2
 
-    if rack.desc_units:
+    if rackinfo.rack_desc_units(rack):
         return unit_id - 2
     if height > 1:
         return u_height - unit_id - height + 2
@@ -198,6 +253,76 @@ def bay_occupants(bays):
         # chassis layer, where there is room for it.
         out.append(f"Bay {index}: {label}")
     return ", ".join(out)
+
+
+@register.filter()
+def slot_moved_from(slot):
+    """Where a moved device stands TODAY -- for the destination tile's card.
+
+    A ``move_in`` tile is already drawn at its destination, so "To <this
+    rack> - U<this unit>" only repeats what the tile's own position says.
+    The half a planner cannot see from the tile is the ORIGIN: the device's
+    real ``dcim`` rack and unit, which is exactly what the vacated ghost at
+    the other end says in reverse (user ruling 2026-09-22).
+
+    Returns ``"<rack> \u00b7 U<n>"``, or ``"<rack> \u00b7 tray"`` for a 0U
+    device, and "" when the device has no rack to name (nothing to say, so
+    the template omits the attribute).
+    """
+    device = slot.get("device")
+    rack = getattr(device, "rack", None)
+    if device is None or rack is None:
+        return ""
+    return _place_label(rack, getattr(device, "position", None))
+
+
+@register.filter()
+def slot_moved_to(slot):
+    """Where a moved device is GOING -- for the vacated ghost's card.
+
+    The mirror of :func:`slot_moved_from`: the ghost is drawn at the origin,
+    so the half it cannot show is the destination. Reads the placement's
+    target, real rack or planned (``PlannedRack`` has no site of its own --
+    it takes its location's).
+    """
+    placement = slot.get("placement")
+    if placement is None:
+        return ""
+    rack = getattr(placement, "target_rack", None) or getattr(
+        placement, "target_planned_rack", None)
+    if rack is None:
+        return ""
+    return _place_label(rack, getattr(placement, "target_position", None))
+
+
+def _place_label(rack, position):
+    """``"<site> \u00b7 <rack> \u00b7 U<n>"`` -- or ``\u00b7 tray`` for a 0U slot.
+
+    The SITE leads, because a design may span several sites and rack names
+    repeat across them: every hall has an R101, so a bare rack name names no
+    place at all (user ruling 2026-09-22). A rack with no site to report
+    (a planned rack whose location was cleared) simply omits that part.
+    """
+    site = getattr(rack, "site", None)
+    where = f"U{int(position)}" if position is not None else "tray"
+    if site is None:
+        return f"{rack.name} \u00b7 {where}"
+    return f"{site.name} \u00b7 {rack.name} \u00b7 {where}"
+
+
+@register.filter()
+def planning_rows(planning_data):
+    """``(label, value)`` rows for a stored ``planning_data`` blob, in the
+    configured order and read the way a person reads them (a choice's label,
+    an object's name). Unset fields are omitted."""
+    data = planning_data or {}
+    rows = []
+    for field in planning_fields.placement_field_schema():
+        value = data.get(field["key"])
+        if value in (None, "", []):
+            continue
+        rows.append((field["label"], planning_fields.display_value(field, value)))
+    return rows
 
 
 @register.filter()

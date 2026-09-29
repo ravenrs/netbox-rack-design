@@ -3,7 +3,7 @@
 import json
 import os
 
-from dcim.models import PowerFeed, Rack, Site
+from dcim.models import Location, PowerFeed, Rack, Site
 from django import forms as django_forms
 from django.conf import settings
 from django.contrib import messages
@@ -24,7 +24,7 @@ from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
 
 from . import apply as apply_engine
-from . import filtersets, forms, models, planning_fields, projection, tables, versioning
+from . import filtersets, forms, models, planning_fields, projection, rackinfo, tables, versioning
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
 
@@ -40,6 +40,11 @@ __all__ = (
     "DesignPlacementView", "DesignPlacementListView", "DesignPlacementEditView", "DesignPlacementDeleteView",
     "DesignPlacementBulkImportView", "DesignPlacementBulkEditView", "DesignPlacementBulkDeleteView",
     "DesignDeriveView", "DesignRebaseView", "DesignApplyView", "DesignChainHealthView",
+    "PlannedRackView", "PlannedRackListView", "PlannedRackEditView", "PlannedRackDeleteView",
+    "TemplateGroupView", "TemplateGroupListView", "TemplateGroupEditView", "TemplateGroupDeleteView",
+    "TemplateView", "TemplateListView", "TemplateEditView", "TemplateDeleteView",
+    "TemplatePlacementView", "TemplatePlacementListView", "TemplatePlacementEditView",
+    "TemplatePlacementDeleteView",
 )
 
 
@@ -104,10 +109,12 @@ def _design_children_message(design):
     Only re-basing the dependents onto a different design actually severs
     the link, hence pointing at ``rebase``.
     """
-    names = ", ".join(str(child) for child in design.children)
+    children = [str(child) for child in design.children]
+    names = ", ".join(children)
+    verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
-        f"Cannot delete {design}: {names} are based on this design and "
-        "would silently lose their baseline. Re-base the dependent designs "
+        f"Cannot delete {design}: {names} {verb} based on this design and "
+        f"would silently lose {own} baseline. Re-base the dependent designs "
         "onto another design first."
     )
 
@@ -132,6 +139,37 @@ def _design_versions_message(design):
         f"Cannot delete {design}: {names} are later versions of this plan "
         "and would be destroyed along with it. Delete those versions "
         "first."
+    )
+
+
+def _planned_rack_realized_message(planned_rack):
+    """HTML-door twin of ``_planned_rack_realized_rest_message``
+    (api/views.py) -- see that function's docstring for the full argument
+    (PLAN-templates.md D7 / T1.9 decision 2). Kept as a separate function,
+    same wording convention as ``_design_children_message`` /
+    ``_design_children_rest_message``, so a user sees one consistent
+    explanation regardless of which door caught it.
+    """
+    return (
+        f"Cannot delete {planned_rack}: it has been realized as "
+        f"{planned_rack.realized_rack} and PLAN-templates.md D7 keeps this "
+        "row permanently, marked realized, so the fact that the rack was "
+        "once only planned is never lost."
+    )
+
+
+def _planned_rack_referenced_message(planned_rack):
+    """HTML-door twin of ``_planned_rack_referenced_rest_message``
+    (api/views.py) -- see that function's docstring for the full argument
+    (T1.9 decision 1)."""
+    designs = [str(design) for design in planned_rack.referencing_designs()]
+    names = ", ".join(designs)
+    verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
+    return (
+        f"Cannot delete {planned_rack}: {names} still {verb} across it and "
+        f"would silently lose {own} placements, planned power feeds and/or "
+        "rack power for this rack. Remove it from each design's planning "
+        "scope first."
     )
 
 
@@ -217,10 +255,18 @@ class DesignView(generic.ObjectView):
             .select_related("site", "location")
             .order_by("name", "pk")
         )
+        # The racks made with Create rack. They live in their own M2M, and the
+        # card used to read only design.racks -- so R5/R6 never showed here.
+        scoped_planned_racks = (
+            instance.planned_racks.restrict(request.user, "view")
+            .select_related("location", "location__site", "realized_rack")
+            .order_by("name", "pk")
+        )
         return {
             "affected_racks": affected_racks,
             "affected_rack_count": len(affected_racks),
             "scoped_racks": scoped_racks,
+            "scoped_planned_racks": scoped_planned_racks,
             "planned_feeds": self._planned_feed_rows(instance),
             # Changes this design can no longer carry out because the device
             # they referenced was deleted from DCIM. Reported here because the
@@ -353,6 +399,7 @@ _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor/frame.js",
     "netbox_rack_design/js/editor/registry.js",
     "netbox_rack_design/js/editor/rack.js",
+    "netbox_rack_design/js/editor/templates.js",
     "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
     "netbox_rack_design/js/power_heatmap.js",
@@ -496,21 +543,40 @@ def _project_rack_bundle(design, rack):
     all_slots = (*result.front, *result.rear, *result.non_racked)
     design_names = _design_names_for_slots(all_slots)
     widgets = [_slot_to_widget(slot, design_names) for slot in all_slots]
+    # T1.5: ``rack`` is now EITHER a real ``dcim.Rack`` (from ``design.racks``)
+    # or a ``models.PlannedRack`` (from the SEPARATE ``design.planned_racks``
+    # M2M, added below in ``_design_editor_context``). Every read below that
+    # used to assume a real rack now branches on ``rackinfo.is_planned()``.
+    is_planned = rackinfo.is_planned(rack)
     # Saved per-(design, rack) power planning override (docs/pdu-distribution-
     # spec.md, models.DesignRackPower): delivered into the editor context so the
     # rack-power button can pre-fill without an extra fetch (see api/views.py's
-    # rack-power GET action, which this mirrors).
-    rack_power_row = models.DesignRackPower.objects.filter(design=design, rack=rack).first()
+    # rack-power GET action, which this mirrors). Same "which column" branch
+    # DesignRackPower.effective_custom_fields() already uses (D25/D26): a
+    # planned rack's override lives on ``planned_rack``, never ``rack``.
+    rack_power_filter = (
+        {"planned_rack": rack} if is_planned else {"rack": rack}
+    )
+    rack_power_row = models.DesignRackPower.objects.filter(
+        design=design, **rack_power_filter
+    ).first()
     return {
         "rack": rack,
         "front": result.front,
         "rear": result.rear,
         "non_racked": result.non_racked,
         "widgets": widgets,
+        # Marks a planned rack visibly in the UI (T1.5): the header badge, so
+        # a planner can never mistake a rack that does not exist in DCIM yet
+        # for one that does.
+        "is_planned": is_planned,
         "rack_meta": {
-            "id": rack.pk,
+            # Namespaced (T1.4d/T1.5, PLAN-templates.md D27): "r:<pk>" for a
+            # real dcim.Rack, "p:<pk>" for a PlannedRack -- the two pk spaces
+            # are separate (D28), so this is the only safe cross-kind id.
+            "id": models.rack_key(None if is_planned else rack, rack if is_planned else None),
             "u_height": rack.u_height,
-            "desc_units": rack.desc_units,
+            "desc_units": rackinfo.rack_desc_units(rack),
         },
         # Power projection summary (docs/power-projection-spec.md): drives the
         # per-rack power bar shown in normal mode and the heatmap legend.
@@ -519,8 +585,13 @@ def _project_rack_bundle(design, rack):
         # Feed-model gating (docs/pdu-distribution-spec.md §6.3): the per-rack
         # "Power" button (greenfield planned-power flow) is only useful when the
         # rack has NO real PowerFeeds yet -- a provisioned rack's PDUs bind
-        # straight to its real feeds via the bind-to-feed dialog instead.
-        "has_real_feeds": PowerFeed.objects.filter(rack=rack).exists(),
+        # straight to its real feeds via the bind-to-feed dialog instead. A
+        # planned rack has no ``dcim.Rack`` row for a ``PowerFeed.rack`` FK to
+        # point at, so it can never have real feeds -- always the greenfield
+        # case.
+        "has_real_feeds": (
+            False if is_planned else PowerFeed.objects.filter(rack=rack).exists()
+        ),
         # Chain conflicts (PLAN-design-chains.md §8.3/G3), for this rack's
         # projection specifically. Folded into the design-level
         # ``chain_conflicts`` context key by ``_design_editor_context`` --
@@ -544,16 +615,27 @@ def _design_editor_context(request, design):
     scoped_racks = list(
         design.racks.select_related("site", "location").order_by("name", "pk")
     )
+    # T1.5: a design's greenfield racks (PLAN-templates.md §1) live in the
+    # SEPARATE ``planned_racks`` M2M, never in ``design.racks`` -- a
+    # PlannedRack has no ``dcim.Rack`` row for that FK to point at. Rendered
+    # in the SAME workspace as the real racks (via ``all_rack_blocks`` below)
+    # so a planner works both kinds side by side; ``_project_rack_bundle``
+    # already branches on ``rackinfo.is_planned()`` for every rack-shaped
+    # read it does.
+    scoped_planned_racks = list(
+        design.planned_racks.select_related("location", "location__site")
+        .order_by("name", "pk")
+    )
     # VISIBLE racks = scope minus the current user's hidden rows for this design.
     # We store HIDDEN rows, so "no rows" => everything is visible.
+    hidden_rack_ids, hidden_planned_ids = [], []
     if request.user.is_authenticated:
-        hidden_rack_ids = list(
-            models.HiddenDesignRack.objects.filter(
-                user=request.user, design=design
-            ).values_list("rack_id", flat=True)
-        )
-    else:
-        hidden_rack_ids = []
+        for rack_id, planned_id in models.HiddenDesignRack.objects.filter(
+                user=request.user, design=design).values_list("rack_id", "planned_rack_id"):
+            if rack_id is not None:
+                hidden_rack_ids.append(rack_id)
+            else:
+                hidden_planned_ids.append(planned_id)
     # Render EVERY scoped rack block and flag the hidden ones so the "Design
     # racks" panel can show/hide them via a CSS class with no page reload.
     all_rack_blocks = [
@@ -562,12 +644,35 @@ def _design_editor_context(request, design):
             "hidden": scoped_rack.pk in hidden_rack_ids,
         }
         for scoped_rack in scoped_racks
+    ] + [
+        # A planned rack hides like a real one (its own HiddenDesignRack row).
+        {**_project_rack_bundle(design, planned_rack),
+         "hidden": planned_rack.pk in hidden_planned_ids}
+        for planned_rack in scoped_planned_racks
     ]
     # Rows for the "Design racks" panel: one per scoped rack with its current
-    # shown/hidden state for this user.
+    # shown/hidden state for this user, followed by the design's PLANNED
+    # racks -- which hide the same way, and also need the REMOVE action: deleting a PlannedRack is refused while any
+    # design still plans across it, and the refusal says to remove it from
+    # each design's scope first -- which nothing could do until this row
+    # existed (user report 2026-09-22). ``key`` is the namespaced rack id the
+    # remove-rack endpoint parses ("r:<pk>" / "p:<pk>", D28).
     scoped_rack_rows = [
-        {"rack": scoped_rack, "hidden": scoped_rack.pk in hidden_rack_ids}
+        {
+            "rack": scoped_rack,
+            "hidden": scoped_rack.pk in hidden_rack_ids,
+            "planned": False,
+            "key": f"r:{scoped_rack.pk}",
+        }
         for scoped_rack in scoped_racks
+    ] + [
+        {
+            "rack": planned_rack,
+            "hidden": planned_rack.pk in hidden_planned_ids,
+            "planned": True,
+            "key": f"p:{planned_rack.pk}",
+        }
+        for planned_rack in scoped_planned_racks
     ]
     # Chain + peer conflicts (PLAN-design-chains.md §8.2/§8.3/G3,
     # PLAN-peer-conflicts.md P7): every rack's ``ProjectedElevation.conflicts``,
@@ -701,6 +806,13 @@ def _design_editor_context(request, design):
         # The user's NAMED favorite sets ("Default", "for server", ...), which
         # the palette's stars read from and write into.
         "favorite_sets_url": "/api/plugins/rack-design/favorite-sets/",
+        # The Templates tab (PLAN-templates.md Sec 3, T3.3): the same
+        # global, site-less REST list palette.js's own favorites lookups
+        # use -- editor/templates.js derives preview-template's own URL from
+        # save_url itself (one design pk, sibling actions), the same way
+        # editor.js derives recompute-distribution's.
+        "templates_url": "/api/plugins/rack-design/templates/",
+        "template_groups_url": "/api/plugins/rack-design/template-groups/",
         "asset_version": _asset_version(),
         # Developer-mode flag: gates the editor JS's opt-in drag-lifecycle
         # tracer (window.__rdDragTrace). True only on a dev build -- DEBUG on,
@@ -713,9 +825,40 @@ def _design_editor_context(request, design):
         # Drives the left-rail manufacturer/role/tenant selectors as NetBox
         # API-backed searchable selects (see forms.DesignEditorPaletteForm).
         "palette_form": forms.DesignEditorPaletteForm(),
-        # Drives the "Add rack" panel's Location + Rack choosers, scoped to this
-        # design's site (see forms.DesignEditorAddRackForm).
-        "add_rack_form": forms.DesignEditorAddRackForm(site_id=design.site_id),
+        # Drives the "Add rack" panel's Site -> Location -> Rack choosers
+        # (PLAN-multi-site.md M8/P3, see forms.DesignEditorAddRackForm):
+        # add_site is scoped to this design's own sites (M1, a design has one
+        # or more); with exactly one site it comes back pre-selected and the
+        # template renders it as a read-only chip instead of a live picker.
+        "add_rack_form": forms.DesignEditorAddRackForm(sites=design.sites),
+        # T1.5 "Create rack" dialog (PLAN-templates.md §1): creates a
+        # PlannedRack (a rack that does not exist in DCIM yet). ``location``
+        # is REQUIRED there (D4 -- it is the whole reason Apply can never hit
+        # an IntegrityError), so the dialog's location dropdown is scoped to
+        # exactly the design's own site's locations, the same same-site rule
+        # ``add_rack_form``/add-rack/planned-feed/rack-power already enforce.
+        # A plain id/name list (not a DynamicModelChoiceField): the dialog is
+        # a Bootstrap modal built at open time by editor_panels.js, the same
+        # pattern power.js's own dialogs use for a rack/PDU <select> -- no
+        # TomSelect widget to initialize on an element that does not exist in
+        # the DOM until the dialog opens.
+        "create_planned_rack_url": (
+            f"/api/plugins/rack-design/designs/{design.pk}/create-planned-rack/"
+        ),
+        # Grouped by site (M8) -- the Create-rack dialog's Site select filters
+        # its Location select from this; a one-site design pre-selects its one
+        # entry (editor_panels.js) and shows it as a chip, same as add_rack_form.
+        "site_locations": [
+            {
+                "site_id": site.pk,
+                "site": str(site),
+                "locations": [
+                    {"id": location.pk, "name": str(location)}
+                    for location in Location.objects.filter(site=site).order_by("name")
+                ],
+            }
+            for site in design.sites.order_by("name")
+        ],
         # Custom-field bridge schema (docs/pdu-distribution-spec.md §5): drives
         # the rack-power dialog's dynamically-rendered fields. `{}` (default) ->
         # the dialog shows only the copy-from-rack row, no hardcoded cf inputs.
@@ -799,9 +942,14 @@ class DesignEditorView(generic.ObjectView):
             "non_racked": result.non_racked,
             "widgets": widgets,
             "rack_meta": {
-                "id": rack.pk,
+                # Namespaced (T1.4d, PLAN-templates.md D27) -- see
+                # _project_rack_bundle's identical field for why. ``rack``
+                # here comes from the URL's <int:rack_id>, always a real
+                # dcim.Rack (get_object_or_404(Rack.objects.all(), ...)
+                # above), so this is always the "r:" form.
+                "id": models.rack_key(rack, None),
                 "u_height": rack.u_height,
-                "desc_units": rack.desc_units,
+                "desc_units": rackinfo.rack_desc_units(rack),
             },
         })
         return context
@@ -1115,8 +1263,11 @@ class ElevationBrowserView(ContentTypePermissionRequiredMixin, View):
             models.DesignPlacement.objects.filter(
                 Q(target_rack__isnull=False) | Q(device__rack__isnull=False)
             )
+            # "design__site" dropped (PLAN-multi-site.md M1/M2): `site` is no
+            # longer a FK select_related can traverse, and this row's own
+            # "site" (below) is read off the RACK, not the design, anyway.
             .select_related(
-                "design", "design__site",
+                "design",
                 "target_rack", "target_rack__site",
                 "device__rack", "device__rack__site",
             )
@@ -1449,6 +1600,221 @@ class DesignPowerFeedBulkDeleteView(generic.BulkDeleteView):
 
 
 # ---------------------------------------------------------------------------
+# PlannedRack (PLAN-templates.md §1) -- a rack that does not exist in NetBox
+# yet. Minimum view wiring so the model is a valid NetBoxModel (get_absolute_url
+# resolves, the changelog UI can link to it): list/add/edit/delete only.
+# No bulk import/edit/delete and no filterset -- the FilterSet + those bulk
+# views ride on it (T1.7, alongside the API); adding a filterset alone, ahead
+# of the REST filtering it will also need, would just have to be redone.
+# ---------------------------------------------------------------------------
+
+
+@register_model_view(models.PlannedRack)
+class PlannedRackView(generic.ObjectView):
+    queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
+
+    def get_extra_context(self, request, instance):
+        # Deleting a planned rack is refused while any design still plans
+        # across it, and the refusal tells the planner to remove it from
+        # each design's planning scope first -- so name them here, with a
+        # link into each editor, where the Racks panel's remove control is
+        # (user report 2026-09-22). Ordered by title so a long list reads
+        # predictably; `restrict` so a design the user may not see is not
+        # disclosed by this page (the refusal message itself is a different
+        # question, deliberately answered there -- an obstacle with no name
+        # is not actionable).
+        return {
+            "referencing_designs": (
+                instance.referencing_designs()
+                .restrict(request.user, "view")
+                .order_by("title", "version", "pk")
+            ),
+        }
+
+
+@register_model_view(models.PlannedRack, "list", path="", detail=False)
+class PlannedRackListView(generic.ObjectListView):
+    queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
+    table = tables.PlannedRackTable
+
+
+@register_model_view(models.PlannedRack, "add", detail=False)
+@register_model_view(models.PlannedRack, "edit")
+class PlannedRackEditView(generic.ObjectEditView):
+    queryset = models.PlannedRack.objects.all()
+    form = forms.PlannedRackForm
+
+
+@register_model_view(models.PlannedRack, "delete")
+class PlannedRackDeleteView(generic.ObjectDeleteView):
+    """
+    T1.9's deletion guards (PLAN-templates.md §1 "Still open"), mirroring
+    ``DesignDeleteView`` above -- a plain generic delete calls no ``clean()``,
+    so both refusals need their own check here. See
+    ``_planned_rack_realized_message`` / ``_planned_rack_referenced_message``
+    (and their REST twins in api/views.py) for the full argument. Both are
+    FULL refusals: a realized row never deletes (D7), and a still-referenced
+    row must be detached from every design first -- there is no confirm-and-
+    proceed step here, unlike ``remove_rack``'s single-design blast radius.
+    """
+
+    queryset = models.PlannedRack.objects.all()
+
+    def post(self, request, *args, **kwargs):
+        obj = self.get_object(**kwargs)
+        if obj.is_realized:
+            messages.error(request, _planned_rack_realized_message(obj))
+            return redirect(obj.get_absolute_url())
+        if not obj.is_orphan:
+            messages.error(request, _planned_rack_referenced_message(obj))
+            return redirect(obj.get_absolute_url())
+        return super().post(request, *args, **kwargs)
+
+
+@register_model_view(models.PlannedRack, "bulk_import", detail=False)
+class PlannedRackBulkImportView(generic.BulkImportView):
+    queryset = models.PlannedRack.objects.all()
+    model_form = forms.PlannedRackImportForm
+
+
+@register_model_view(models.PlannedRack, "bulk_edit", path="edit", detail=False)
+class PlannedRackBulkEditView(generic.BulkEditView):
+    queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
+    filterset = filtersets.PlannedRackFilterSet
+    table = tables.PlannedRackTable
+    form = forms.PlannedRackBulkEditForm
+
+
+@register_model_view(models.PlannedRack, "bulk_delete", path="delete", detail=False)
+class PlannedRackBulkDeleteView(generic.BulkDeleteView):
+    """The list's "Delete Selected", with :class:`PlannedRackDeleteView`'s guards.
+
+    Two reasons this view has to exist at all: NetBox renders the bulk
+    buttons for any list whose table has a checkbox column, and the form's
+    action is ``get_viewname(model, "bulk_delete")`` -- which is ``None``
+    when the view is missing, so the POST lands on ``/planned-racks/None``
+    and 404s (user report 2026-09-22).
+
+    The guards then have to be restated here, exactly as
+    ``DesignBulkDeleteView`` restates ``DesignDeleteView``'s: a bulk delete
+    never calls the single view. A realized row is kept forever (D7) and a
+    still-referenced one would silently strip other designs' placements
+    (T1.9), so a batch containing either is refused WHOLE -- deleting the
+    innocent half of a selection the user asked for as one action would be
+    a surprise in the destructive direction.
+    """
+
+    queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
+    filterset = filtersets.PlannedRackFilterSet
+    table = tables.PlannedRackTable
+
+    def post(self, request, **kwargs):
+        if "_confirm" in request.POST:
+            if request.POST.get("_all"):
+                qs = self.queryset.all()
+                if self.filterset is not None:
+                    qs = self.filterset(request.GET, qs, request=request).qs
+                pk_list = list(qs.values_list("pk", flat=True))
+            else:
+                pk_list = [int(pk) for pk in request.POST.getlist("pk")]
+            blocked = False
+            for planned_rack in self.queryset.filter(pk__in=pk_list):
+                if planned_rack.is_realized:
+                    messages.error(request, _planned_rack_realized_message(planned_rack))
+                    blocked = True
+                elif not planned_rack.is_orphan:
+                    messages.error(request, _planned_rack_referenced_message(planned_rack))
+                    blocked = True
+            if blocked:
+                return redirect(self.get_return_url(request))
+        return super().post(request, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Templates (PLAN-templates.md §2, task T2.1) -- a reusable rack layout with no
+# site, and the group that orders several of them into a product pod. Minimum
+# view wiring so these are valid NetBoxModels (get_absolute_url resolves, the
+# changelog UI can link to them) -- stamping (Phase 3) is not implemented here.
+# ---------------------------------------------------------------------------
+
+
+@register_model_view(models.TemplateGroup)
+class TemplateGroupView(generic.ObjectView):
+    queryset = models.TemplateGroup.objects.all()
+
+
+@register_model_view(models.TemplateGroup, "list", path="", detail=False)
+class TemplateGroupListView(generic.ObjectListView):
+    queryset = models.TemplateGroup.objects.all()
+    table = tables.TemplateGroupTable
+    filterset = filtersets.TemplateGroupFilterSet
+
+
+@register_model_view(models.TemplateGroup, "add", detail=False)
+@register_model_view(models.TemplateGroup, "edit")
+class TemplateGroupEditView(generic.ObjectEditView):
+    queryset = models.TemplateGroup.objects.all()
+    form = forms.TemplateGroupForm
+
+
+@register_model_view(models.TemplateGroup, "delete")
+class TemplateGroupDeleteView(generic.ObjectDeleteView):
+    queryset = models.TemplateGroup.objects.all()
+
+
+@register_model_view(models.Template)
+class TemplateView(generic.ObjectView):
+    queryset = models.Template.objects.select_related("group")
+
+
+@register_model_view(models.Template, "list", path="", detail=False)
+class TemplateListView(generic.ObjectListView):
+    queryset = models.Template.objects.select_related("group")
+    table = tables.TemplateTable
+    filterset = filtersets.TemplateFilterSet
+
+
+@register_model_view(models.Template, "add", detail=False)
+@register_model_view(models.Template, "edit")
+class TemplateEditView(generic.ObjectEditView):
+    queryset = models.Template.objects.all()
+    form = forms.TemplateForm
+
+
+@register_model_view(models.Template, "delete")
+class TemplateDeleteView(generic.ObjectDeleteView):
+    queryset = models.Template.objects.all()
+
+
+@register_model_view(models.TemplatePlacement)
+class TemplatePlacementView(generic.ObjectView):
+    queryset = models.TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    )
+
+
+@register_model_view(models.TemplatePlacement, "list", path="", detail=False)
+class TemplatePlacementListView(generic.ObjectListView):
+    queryset = models.TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    )
+    table = tables.TemplatePlacementTable
+    filterset = filtersets.TemplatePlacementFilterSet
+
+
+@register_model_view(models.TemplatePlacement, "add", detail=False)
+@register_model_view(models.TemplatePlacement, "edit")
+class TemplatePlacementEditView(generic.ObjectEditView):
+    queryset = models.TemplatePlacement.objects.all()
+    form = forms.TemplatePlacementForm
+
+
+@register_model_view(models.TemplatePlacement, "delete")
+class TemplatePlacementDeleteView(generic.ObjectDeleteView):
+    queryset = models.TemplatePlacement.objects.all()
+
+
+# ---------------------------------------------------------------------------
 # Design chains (PLAN-design-chains.md phase 1): derive a new design from an
 # approved one, and re-base an existing design onto a different parent.
 # ---------------------------------------------------------------------------
@@ -1465,7 +1831,8 @@ class DesignRebaseForm(django_forms.Form):
     based_on = django_forms.ModelChoiceField(
         queryset=models.Design.objects.filter(status=DesignStatusChoices.STATUS_APPROVED),
         label="New base design",
-        help_text="Only an approved design may be a base (PLAN-design-chains.md §2.2).",
+        help_text="An approved design, or another version of this design's "
+                  "current parent (the step that replaces a frozen parent).",
     )
 
 
@@ -1540,7 +1907,6 @@ class DesignDeriveView(generic.ObjectView):
 
         child = models.Design(
             title=form.cleaned_data["title"],
-            site=design.site,
             group=design.group,
             based_on=design,
             status=DesignStatusChoices.STATUS_DRAFT,
@@ -1549,6 +1915,10 @@ class DesignDeriveView(generic.ObjectView):
             with transaction.atomic():
                 child.full_clean()
                 child.save()
+                # M5: a derived design starts with the parent's own sites --
+                # mirrors api/views.py's `derive` action. Must run after
+                # save() (M2M needs a pk), same as `racks` below.
+                child.sites.set(design.sites.all())
                 # G6: seed the child's rack scope with a SNAPSHOT of the
                 # parent's racks at derive time, not a live link -- a rack
                 # added to the parent later does NOT retroactively appear on
@@ -1673,6 +2043,7 @@ class DesignRebaseView(generic.ObjectView):
     def get(self, request, pk):
         design = self.get_object(pk=pk)
         form = DesignRebaseForm(initial={"based_on": design.based_on_id})
+        form.fields["based_on"].queryset = design.rebase_targets()
         return render(request, self.template_name, {
             "object": design,
             "form": form,
@@ -1682,6 +2053,7 @@ class DesignRebaseView(generic.ObjectView):
     def post(self, request, pk):
         design = self.get_object(pk=pk)
         form = DesignRebaseForm(request.POST)
+        form.fields["based_on"].queryset = design.rebase_targets()
         if form.is_valid():
             previous_based_on = design.based_on_id
             design.based_on = form.cleaned_data["based_on"]
@@ -1739,6 +2111,7 @@ class DesignApplyView(generic.ObjectView):
         result = apply_engine.plan(design, request.user)
         return render(request, self.template_name, {
             "object": design,
+            "removal_status_label": _removal_status_label(),
             "result": result,
             "return_url": design.get_absolute_url(),
         })
@@ -1752,11 +2125,13 @@ class DesignApplyView(generic.ObjectView):
                 f"Applied {design}: {len(result.created)} created, "
                 f"{len(result.updated)} updated, {len(result.removed)} flagged "
                 f"for removal, {len(result.deleted)} deleted, "
-                f"{len(result.reverted)} reverted.",
+                f"{len(result.reverted)} reverted"
+                + _apply_infra_summary(result) + ".",
             )
             return redirect(design.get_absolute_url())
         return render(request, self.template_name, {
             "object": design,
+            "removal_status_label": _removal_status_label(),
             "result": result,
             "return_url": design.get_absolute_url(),
         })
@@ -1766,6 +2141,33 @@ class DesignApplyView(generic.ObjectView):
 # Chain health report (standalone, non-model-bound) -- PLAN-design-chains.md
 # G4's reporting half.
 # ---------------------------------------------------------------------------
+
+
+def _removal_status_label():
+    """The display label of the configured `removal_status` -- what apply
+    really sets on a removed device (e.g. "Decommissioning", "Offline")."""
+    from dcim.choices import DeviceStatusChoices
+    value = get_plugin_config("netbox_rack_design", "removal_status") or ""
+    labels = {choice[0]: choice[1] for choice in DeviceStatusChoices.CHOICES}
+    return labels.get(value, value)
+
+
+def _apply_infra_summary(result):
+    """", 1 rack created, 2 power feeds created" -- the racks and supply an
+    apply built, which the device counts alone never mentioned."""
+    def count(n, word):
+        return f"{n} {word}{'' if n == 1 else 's'}"
+    parts = []
+    racks = sum(1 for r in result.resolved_racks if r.created)
+    adopted = len(result.resolved_racks) - racks
+    feeds = sum(1 for f in result.feeds if f.existing is None)
+    if racks:
+        parts.append(count(racks, "rack") + " created")
+    if adopted:
+        parts.append(count(adopted, "rack") + " adopted")
+    if feeds:
+        parts.append(count(feeds, "power feed") + " created")
+    return "".join(", " + p for p in parts)
 
 
 def _chain_refusal_map():
@@ -1881,11 +2283,14 @@ def _chain_health_rows(user):
     if not candidate_pks:
         return []
 
+    # "site" -> "sites" (PLAN-multi-site.md M1/M2): a M2M is prefetched, not
+    # select_related. The `design.site` read below (the `site` property) uses
+    # this prefetch instead of a query per row.
     visible_designs = {
         d.pk: d
         for d in models.Design.objects.restrict(user, "view")
         .filter(pk__in=candidate_pks)
-        .select_related("site")
+        .prefetch_related("sites")
     }
     if not visible_designs:
         return []
@@ -1971,3 +2376,70 @@ class DesignChainHealthView(ContentTypePermissionRequiredMixin, View):
             "table": table,
             "row_count": len(rows),
         })
+
+
+@register_model_view(models.TemplateGroup, "bulk_import", detail=False)
+class TemplateGroupBulkImportView(generic.BulkImportView):
+    queryset = models.TemplateGroup.objects.all()
+    model_form = forms.TemplateGroupImportForm
+
+
+@register_model_view(models.TemplateGroup, "bulk_edit", path="edit", detail=False)
+class TemplateGroupBulkEditView(generic.BulkEditView):
+    queryset = models.TemplateGroup.objects.all()
+    filterset = filtersets.TemplateGroupFilterSet
+    table = tables.TemplateGroupTable
+    form = forms.TemplateGroupBulkEditForm
+
+
+@register_model_view(models.TemplateGroup, "bulk_delete", path="delete", detail=False)
+class TemplateGroupBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.TemplateGroup.objects.all()
+    filterset = filtersets.TemplateGroupFilterSet
+    table = tables.TemplateGroupTable
+
+
+@register_model_view(models.Template, "bulk_import", detail=False)
+class TemplateBulkImportView(generic.BulkImportView):
+    queryset = models.Template.objects.all()
+    model_form = forms.TemplateImportForm
+
+
+@register_model_view(models.Template, "bulk_edit", path="edit", detail=False)
+class TemplateBulkEditView(generic.BulkEditView):
+    queryset = models.Template.objects.select_related("group")
+    filterset = filtersets.TemplateFilterSet
+    table = tables.TemplateTable
+    form = forms.TemplateBulkEditForm
+
+
+@register_model_view(models.Template, "bulk_delete", path="delete", detail=False)
+class TemplateBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.Template.objects.select_related("group")
+    filterset = filtersets.TemplateFilterSet
+    table = tables.TemplateTable
+
+
+@register_model_view(models.TemplatePlacement, "bulk_import", detail=False)
+class TemplatePlacementBulkImportView(generic.BulkImportView):
+    queryset = models.TemplatePlacement.objects.all()
+    model_form = forms.TemplatePlacementImportForm
+
+
+@register_model_view(models.TemplatePlacement, "bulk_edit", path="edit", detail=False)
+class TemplatePlacementBulkEditView(generic.BulkEditView):
+    queryset = models.TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    )
+    filterset = filtersets.TemplatePlacementFilterSet
+    table = tables.TemplatePlacementTable
+    form = forms.TemplatePlacementBulkEditForm
+
+
+@register_model_view(models.TemplatePlacement, "bulk_delete", path="delete", detail=False)
+class TemplatePlacementBulkDeleteView(generic.BulkDeleteView):
+    queryset = models.TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    )
+    filterset = filtersets.TemplatePlacementFilterSet
+    table = tables.TemplatePlacementTable

@@ -41,6 +41,19 @@
     // page reload a Save triggers (user 2026-07-31).
     var HEATMAP_PREF_KEY = "nbxRdPowerHeatmap";
 
+    // Same idea for the bank ZONE strip beside each face grid. Defaults ON --
+    // it shipped always-on, and it is structural information rather than an
+    // opt-in view -- so only an explicit "0" hides it.
+    var BANK_ZONES_PREF_KEY = "nbxRdBankZones";
+
+    function bankZonesOn() {
+        try {
+            return window.localStorage.getItem(BANK_ZONES_PREF_KEY) !== "0";
+        } catch (e) {
+            return true;
+        }
+    }
+
     // Dev-only tracer, shared with editor.js (window.__rdTrace, gated on a dev
     // build + the __rdDragTrace toggle; inert otherwise). Lets the heatmap's
     // per-tile render be watched alongside the drag lifecycle.
@@ -105,11 +118,27 @@
     // edit -- the initial paint uses the server-rendered static blob below.
     var liveDist = {};
 
-    // The Distribution for a rack: the live-recomputed one if we have it (any edit
-    // has happened), else the static JSON the server emitted at render time
-    // (`#rd-distribution-<rackId>`). null = no resolvable PDUs (per-device heatmap).
-    function readDistribution(block) {
-        var rackId = block.getAttribute("data-rack-id") || "";
+    // The server keys every rack by its NAMESPACED rack_key() ("r:<pk>" /
+    // "p:<pk>", D27), while the DOM spells the same key colon-free
+    // ("r-<pk>"/"p-<pk>", rack_dom_id) -- and a REAL rack's block uses its
+    // bare pk. A real rack survived that mismatch by accident: the response
+    // files it under the bare pk too, which is exactly what its block
+    // carries. A PLANNED rack has no bare form, so "p:7" never matched the
+    // "p-7" in the DOM and its live capacity/chips silently never landed
+    // (user report 2026-09-23). Translate once, on the way in.
+    function domKeyForServerKey(serverKey) {
+        var s = String(serverKey);
+        if (s.slice(0, 2) === "r:" || s.slice(0, 2) === "p:") {
+            return s[0] + "-" + s.slice(2);
+        }
+        return s;
+    }
+
+    // The Distribution for a rack, by its opaque data-rack-id string: the
+    // live-recomputed one if we have it (any edit has happened), else the
+    // static JSON the server emitted at render time (`#rd-distribution-
+    // <rackId>`). null = no resolvable PDUs (per-device heatmap).
+    function distributionForRackId(rackId) {
         if (Object.prototype.hasOwnProperty.call(liveDist, rackId)) {
             return liveDist[rackId];
         }
@@ -121,6 +150,10 @@
         } catch (e) {
             return null;
         }
+    }
+
+    function readDistribution(block) {
+        return distributionForRackId(block.getAttribute("data-rack-id") || "");
     }
 
     // Why a rack has (or has not) a distribution: {state, engine, script, detail}.
@@ -160,6 +193,8 @@
                     phase: pdu.phase || 1,
                     bank: bankId, util: bank.util_pct || 0, state: bank.state || "ok",
                     load: load, max: bank.max_power || 0,
+                    // The U range this bank owns -- what the zone strip draws.
+                    units: bank.units || [],
                 };
                 banks.push(info);
                 (bank.devices || []).forEach(function (d) {
@@ -295,15 +330,24 @@
         legend.className = "nbx-rd-dist-legend";
         // The PDU header itself carries the feed color (A blue / B orange), which
         // matches each tile's accent edge -- so no separate key row is needed.
-        // Group the bank chips by PDU so one PDU's banks stack under each other
-        // (one column per PDU), rather than one long flat row.
+        // Group the bank chips by PDU so one PDU's banks stack under each
+        // other, and the PDU blocks by FEED LEG so a 4-PDU rack reads as two
+        // columns (A: a1 over a2, B: b1 over b2) with the paired PDUs level
+        // with each other, rather than four blocks wrapping at random.
         var order = [];
         var byPdu = {};
         idx.banks.forEach(function (b) {
             if (!byPdu[b.pdu]) { byPdu[b.pdu] = []; order.push(b.pdu); }
             byPdu[b.pdu].push(b);
         });
-        var cols = order.map(function (pduName) {
+        var legOrder = [];
+        var byLeg = {};
+        order.forEach(function (pduName) {
+            var key = byPdu[pduName][0].feedLetter || ("pdu:" + pduName);
+            if (!byLeg[key]) { byLeg[key] = []; legOrder.push(key); }
+            byLeg[key].push(pduName);
+        });
+        var pduBlock = function (pduName) {
             var first = byPdu[pduName][0];
             // Header carries the feed color (A blue / B orange) + a 3φ flag for
             // three-phase PDUs; it matches the tiles' accent edge = the key.
@@ -321,8 +365,11 @@
             return '<div class="nbx-rd-dist-pdu">'
                 + '<span class="nbx-rd-dist-pdu-head nbx-rd-feedhead-' + first.feedLetter
                 + '">' + head + "</span>" + chips + "</div>";
+        };
+        legend.innerHTML = legOrder.map(function (key) {
+            return '<div class="nbx-rd-dist-leg">'
+                + byLeg[key].map(pduBlock).join("") + "</div>";
         }).join("");
-        legend.innerHTML = cols;
         var rack = dist.rack || {};
         if (rack.alarm && (rack.warnings || []).length) {
             var alarm = document.createElement("span");
@@ -336,6 +383,137 @@
             if (bar && bar.parentNode) { bar.parentNode.insertBefore(legend, bar.nextSibling); }
             else { block.insertBefore(legend, block.firstChild); }
         }
+    }
+
+    // Bank ZONE strip: one narrow vertical bar per FEED LEG hanging off each
+    // face grid's LEFT edge (the right edge belongs to the displacement
+    // stripe), split into that leg's banks at the real U boundaries the engine
+    // assigned (``bank.units``). A leg's PDUs (a1, a2 on feed A) serve disjoint
+    // U ranges, so they stack in the same column: a 4-PDU rack still gets two
+    // columns, not four (user 2026-09-21). Each segment fills from the floor up with the bank's
+    // load/breaker ratio, colored by state like the chips above it.
+    //
+    // WHY: the chips say a bank is full but not WHERE it is, so there was no
+    // way to tell which U to drag a device onto for it to land on a different
+    // bank (user 2026-09-21). Zones are placed in %% against .nbx-rd-grid-wrap
+    // -- the same anchor the stripe bar uses -- so they track the rows through
+    // any zoom instead of assuming a cell height.
+    //
+    // A bank with no ``units`` is skipped: the builtin engine always fills them
+    // (_unit_to_bank), but a custom distribution script need not, and half a
+    // strip is worse than none.
+    var BANK_COL_W = 12;  // px, must match .nbx-rd-bank-col width
+    function renderBankStrips(block, dist) {
+        var uh = parseInt(block.getAttribute("data-u-height"), 10) || 0;
+        var cols = [];
+        if (dist && uh > 0 && bankZonesOn()) {
+            var byLeg = {};
+            indexBanks(dist).banks.forEach(function (b) {
+                if (!(b.units || []).length) { return; }
+                // A PDU with no feed letter gets its own column rather than
+                // being merged into some other unlettered PDU's.
+                var key = b.feedLetter || ("pdu:" + b.pdu);
+                if (!byLeg[key]) { byLeg[key] = []; cols.push(byLeg[key]); }
+                byLeg[key].push(b);
+            });
+            cols.sort(function (x, y) {
+                var kx = x[0].feedLetter || "~", ky = y[0].feedLetter || "~";
+                return kx < ky ? -1 : kx > ky ? 1 : 0;
+            });
+        }
+        // Face grids only -- a chassis body uses the same wrapper class.
+        block.querySelectorAll(
+            ".nbx-rd-grid-wrap > .grid-stack.nbx-rd-rack[data-face]"
+        ).forEach(function (grid) {
+            var wrap = grid.parentNode;
+            var strip = wrap.querySelector(".nbx-rd-bank-strip");
+            if (!cols.length) {
+                if (strip) { strip.remove(); }
+                wrap.style.removeProperty("margin-left");
+                return;
+            }
+            if (!strip) {
+                strip = document.createElement("div");
+                strip.className = "nbx-rd-bank-strip";
+                wrap.appendChild(strip);
+            }
+            strip.textContent = "";
+            cols.forEach(function (banks) {
+                var colEl = document.createElement("div");
+                colEl.className = "nbx-rd-bank-col";
+                // Floor-up order so each segment knows the PDU directly below
+                // it: where that changes, the segment gets a heavy bottom rule
+                // -- the PDU boundary is the one thing a leg column would
+                // otherwise not show (the banks of one PDU stay hairlined).
+                // The one label the strip carries: the feed letter, in the
+                // feed's chip color, sitting just above the column so a leg
+                // column can be told from its neighbour without hovering.
+                var letter = banks[0].feedLetter || "";
+                var label = document.createElement("div");
+                label.className = "nbx-rd-bank-col-label"
+                    + (letter ? " nbx-rd-feedhead-" + letter : "");
+                label.textContent = letter ? letter.toUpperCase() : "?";
+                var pduNames = [];
+                banks.forEach(function (b) {
+                    if (pduNames.indexOf(b.pdu) < 0) { pduNames.push(b.pdu); }
+                });
+                attachInstantTip(label, (banks[0].feed || "no feed")
+                    + "\n" + pduNames.join(", "));
+                colEl.appendChild(label);
+                var ordered = banks.slice().sort(function (x, y) {
+                    return Math.min.apply(null, x.units) - Math.min.apply(null, y.units);
+                });
+                ordered.forEach(function (b, i) {
+                    var lo = Math.min.apply(null, b.units);
+                    var hi = Math.max.apply(null, b.units);
+                    var seg = document.createElement("div");
+                    seg.className = "nbx-rd-bank-seg nbx-rd-dist-" + b.state;
+                    var pduStart = i === 0 || ordered[i - 1].pdu !== b.pdu;
+                    if (pduStart && i > 0) {
+                        seg.classList.add("nbx-rd-bank-seg-pdu-start");
+                    }
+                    // U1 is the rack FLOOR, so a zone is measured up from the
+                    // bottom -- matching how the tiles are laid out.
+                    seg.style.bottom = ((lo - 1) / uh * 100).toFixed(3) + "%";
+                    seg.style.height = ((hi - lo + 1) / uh * 100).toFixed(3) + "%";
+                    var fill = document.createElement("div");
+                    fill.className = "nbx-rd-bank-fill";
+                    fill.style.height =
+                        Math.max(0, Math.min(100, b.util || 0)).toFixed(1) + "%";
+                    seg.appendChild(fill);
+                    // WHICH bank this zone is, at the top of its own segment
+                    // (user 2026-09-23): the strip already said WHERE the
+                    // zones are and which leg they belong to, but bank 1 vs
+                    // bank 2 lived only in the tooltip, so a planner could
+                    // see two zones without knowing which was which. The
+                    // PDU tag below names the PDU; this names the bank.
+                    var bankNo = document.createElement("span");
+                    bankNo.className = "nbx-rd-bank-no";
+                    bankNo.textContent = String(b.bank == null ? "?" : b.bank);
+                    seg.appendChild(bankNo);
+                    if (pduStart) {
+                        // The PDU's name, written up the column from the
+                        // bottom of its lowest bank, over the fill: the
+                        // rack-name prefix is dropped ("0201_a2" -> "a2").
+                        var tag = document.createElement("span");
+                        tag.className = "nbx-rd-bank-pdu-tag";
+                        tag.textContent = String(b.pdu || "").split(/[_\-\s]+/).pop();
+                        seg.appendChild(tag);
+                    }
+                    // The tooltip is the full readout.
+                    attachInstantTip(seg, b.feed + " · " + b.pdu + " · bank " + b.bank
+                        + "\nU" + lo + "–" + hi
+                        + "\n" + Math.round(b.load) + " / " + Math.round(b.max)
+                        + " W · " + Math.round(b.util || 0) + "%");
+                    colEl.appendChild(seg);
+                });
+                strip.appendChild(colEl);
+            });
+            // Reserve the gutter the absolutely-positioned strip sits in, so it
+            // never lands on top of the U-number column beside it.
+            wrap.style.marginLeft =
+                (cols.length * BANK_COL_W + (cols.length - 1) * 2 + 6) + "px";
+        });
     }
 
     // ---- heatmap fill bars (live) ------------------------------------------
@@ -497,7 +675,11 @@
                 // The per-bank chip strip is always-on (like the power bar),
                 // rendered from readDistribution() which prefers the
                 // live-recomputed cache.
-                renderDistLegend(block, readDistribution(block));
+                // Read ONCE -- before the first edit this re-parses the static
+                // JSON blob on every call, and both renderers want the same one.
+                var dist = readDistribution(block);
+                renderDistLegend(block, dist);
+                renderBankStrips(block, dist);
                 renderDistNotice(block, readDistStatus(block));
                 if (on) { applyHeat(block, true); }
             });
@@ -559,7 +741,7 @@
                 var dists = res.distributions || {};
                 Object.keys(dists).forEach(function (rackId) {
                     var d = dists[rackId];
-                    liveDist[rackId] = (d && d.pdus) ? d : null;
+                    liveDist[domKeyForServerKey(rackId)] = (d && d.pdus) ? d : null;
                 });
                 // An edit can BREAK the engine (a script that trips over the new
                 // layout), so the reason travels with every recompute -- the
@@ -567,7 +749,7 @@
                 // the next page load.
                 var statuses = res.distribution_status || {};
                 Object.keys(statuses).forEach(function (rackId) {
-                    liveDistStatus[rackId] = statuses[rackId] || null;
+                    liveDistStatus[domKeyForServerKey(rackId)] = statuses[rackId] || null;
                 });
                 // Capacity/thresholds come from the server (feed derating maths
                 // over real AND planned feeds, which the browser must not
@@ -579,7 +761,8 @@
                     var p = powers[rackId];
                     if (!p || p.capacity_w == null) { return; }
                     var block = document.querySelector(
-                        '.nbx-rd-rack-block[data-rack-id="' + rackId + '"]');
+                        '.nbx-rd-rack-block[data-rack-id="'
+                        + domKeyForServerKey(rackId) + '"]');
                     var bar = block && block.querySelector(".nbx-rd-power-bar");
                     if (!bar) { return; }
                     bar.setAttribute("data-rd-power-capacity", Math.round(p.capacity_w));
@@ -609,6 +792,56 @@
         }, LIVE_DIST_DEBOUNCE_MS);
     }
 
+    // ---- drag gate ----------------------------------------------------------
+    //
+    // GridStack rewrites `gs-y` on the dragged tile once per row crossed, so
+    // the MutationObserver (attributeFilter includes "gs-y") fires continuously
+    // mid-drag -- each firing asks the server to recompute a layout the user
+    // has already moved past (measured: ~600ms/~235 queries per call). rack.js
+    // calls setDragActive(true)/(false) around a GridStack drag gesture
+    // (dragstart..dragstop, or the cross-grid dropped/added convergence where
+    // dragstop never fires); while active, the SERVER recompute is withheld --
+    // the local bar/heat re-render (recomputeAll, cheap/client-side) still runs
+    // on every mutation so the live shadow/preview stays accurate. Exactly one
+    // server recompute fires when the gate releases, and only if a mutation
+    // was actually suppressed while it was up.
+    //
+    // Not per-grid, deliberately: a cross-rack drag fires GridStack events on
+    // BOTH the source and destination grid instances, and per-grid state could
+    // desync (one side thinks it's still dragging). One shared boolean can
+    // only ever be released too early (harmless -- worst case an extra
+    // recompute reaches the existing debounce/latch) or, if some ending we
+    // did not anticipate never calls setDragActive(false), get stuck -- which
+    // the defensive timeout below covers.
+    var dragActive = false;
+    var dragSuppressed = false;
+    var dragGateTimer = null;
+    // Backstop only. Every real ending (drop, cross-grid convergence, a drag
+    // released outside any grid) is expected to call setDragActive(false)
+    // itself; this exists so an ending path nobody thought of cannot wedge the
+    // editor into never recomputing again.
+    var DRAG_GATE_MAX_MS = 15000;
+
+    function releaseDragGate() {
+        dragActive = false;
+        if (dragGateTimer) { window.clearTimeout(dragGateTimer); dragGateTimer = null; }
+        if (dragSuppressed) {
+            dragSuppressed = false;
+            requestLiveDistribution();
+        }
+    }
+
+    function setDragActive(active) {
+        if (active) {
+            dragActive = true;
+            dragSuppressed = false;
+            if (dragGateTimer) { window.clearTimeout(dragGateTimer); }
+            dragGateTimer = window.setTimeout(releaseDragGate, DRAG_GATE_MAX_MS);
+        } else {
+            releaseDragGate();
+        }
+    }
+
     function scheduleRecompute() {
         if (pending) { window.clearTimeout(pending); }
         pending = window.setTimeout(function () {
@@ -618,6 +851,10 @@
         // Kick the server recompute off the raw mutation (its own longer debounce),
         // NOT from recomputeAll -- recomputeAll writes DOM with observers detached,
         // so applying the result never re-triggers this and cannot loop.
+        if (dragActive) {
+            dragSuppressed = true;
+            return;
+        }
         requestLiveDistribution();
     }
 
@@ -739,7 +976,21 @@
             if (toggle.checked) { applyHeatAll(true); }
         }
 
-
+        // The bank ZONE strip's own toggle -- independent of the heatmap: the
+        // zones are structural (where each bank sits), the heatmap is a view.
+        var zones = document.querySelector("[data-rd-bank-zones]");
+        if (zones) {
+            zones.checked = bankZonesOn();
+            zones.addEventListener("change", function () {
+                try {
+                    window.localStorage.setItem(
+                        BANK_ZONES_PREF_KEY, zones.checked ? "1" : "0");
+                } catch (e) { /* ignore */ }
+                // Re-render from the numbers already in hand -- hiding the
+                // strip is a pure paint, never worth a server round trip.
+                recomputeAll();
+            });
+        }
     }
 
     // Public hook: a feed change (define/copy a planned feed) mutates no tile, so
@@ -749,6 +1000,30 @@
         // ``force``: a feed change alters the ANSWER without altering the layout,
         // so it must bypass the payload-identity guard in recomputeDistribution.
         refresh: function () { requestLiveDistribution(true); recomputeAll(); },
+        // The rack's distinct feed legs, letter + human name, sorted by
+        // letter -- e.g. [{letter:"a", name:"Feed A"}, {letter:"b", ...}].
+        // Reads the SAME live-preferred distribution as the chip strip, so
+        // the Planning attributes dialog's Power section (editor/power.js)
+        // never disagrees with what the rack is showing right now.
+        getLegs: function (rackId) {
+            var dist = distributionForRackId(String(rackId || ""));
+            if (!dist || !dist.pdus) { return []; }
+            var byLetter = {};
+            Object.keys(dist.pdus).forEach(function (name) {
+                var pdu = dist.pdus[name];
+                if (pdu && pdu.feed_letter) {
+                    byLetter[pdu.feed_letter] = pdu.feed_name || pdu.feed_letter.toUpperCase();
+                }
+            });
+            return Object.keys(byLetter).sort().map(function (letter) {
+                return { letter: letter, name: byLetter[letter] };
+            });
+        },
+        // Drag gate (see above): rack.js calls this true on GridStack
+        // dragstart and false on every gesture-ending event it knows about.
+        // Idempotent either way -- a redundant true re-arms the backstop
+        // timer, a redundant false is a no-op.
+        setDragActive: setDragActive,
     };
 
     if (document.readyState === "loading") {

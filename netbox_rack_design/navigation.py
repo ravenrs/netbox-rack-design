@@ -47,6 +47,17 @@ menu = PluginMenu(
                     ),
                 ),
                 PluginMenuItem(
+                    link="plugins:netbox_rack_design:plannedrack_list",
+                    link_text="Planned Racks",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rack_design:plannedrack_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
                     link="plugins:netbox_rack_design:elevation_browser",
                     link_text="Elevations",
                     permissions=["netbox_rack_design.view_design"],
@@ -58,6 +69,37 @@ menu = PluginMenu(
                     link="plugins:netbox_rack_design:design_chain_health",
                     link_text="Chain Health",
                     permissions=["netbox_rack_design.view_design"],
+                ),
+            ),
+        ),
+        (
+            "Templates",
+            (
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:template_list",
+                    link_text="Templates",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rack_design:template_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:templategroup_list",
+                    link_text="Template Groups",
+                    buttons=(
+                        PluginMenuButton(
+                            link="plugins:netbox_rack_design:templategroup_add",
+                            title="Add",
+                            icon_class="mdi mdi-plus-thick",
+                        ),
+                    ),
+                ),
+                PluginMenuItem(
+                    link="plugins:netbox_rack_design:templateplacement_list",
+                    link_text="Template Placements",
                 ),
             ),
         ),

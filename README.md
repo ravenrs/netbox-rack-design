@@ -7,9 +7,9 @@
 **Plan rack changes as versioned designs — on top of your real NetBox data, without touching it until you're ready.**
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=2N1hwF_oUYc"><b>▶ Watch the 2-minute quick tour</b></a>
+  <a href="https://youtu.be/o9W6OytpeEM"><b>▶ Watch the 5-minute quick tour</b></a>
   &nbsp;·&nbsp;
-  <a href="https://www.youtube.com/playlist?list=PLQrzYAZqdcXg"><b>▶ Full 10-part tutorial</b></a>
+  <a href="https://www.youtube.com/playlist?list=PLBRvuwB6Mwu4"><b>▶ Full 20-part course</b></a>
 </p>
 
 NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection, an auto-naming engine, design chains (baselining one design on another approved one), and an explicit Apply step already built in.
@@ -20,39 +20,44 @@ The plugin is fully generic and public — nothing organization-specific is hard
 
 Rack Design pairs a structured data model with an interactive visual editor for composing rack plans. Applying a design into NetBox, conflict detection within a design chain, and conflict detection between two unrelated designs planning the same rack are all delivered (see [Roadmap](#roadmap)).
 
-- **Three models** for capturing rack plans:
-  - **Design** — a proposed set of rack changes for a site, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution per site via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, may optionally belong to a group, and may be **`based_on`** exactly one other approved design — forming a design chain (see [docs/design-chains.md](docs/design-chains.md)). Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
+- **Three models** for capturing rack plans: ▶ [Part 1](https://youtu.be/pYAsDRdX_fU)
+  - **Design** — a proposed set of rack changes for one or more sites, scoped to one or more racks. Versioned (clone-and-tweak, with one approved version per plan), ordered for execution via an auto-assigned `sequence`, may declare explicit `depends_on` relationships, may optionally belong to a group, and may be **`based_on`** exactly one other approved design — forming a design chain (see [docs/design-chains.md](docs/design-chains.md)). Carries `title`, `status`, `summary`, generic external `link`, plus description/comments/tags/custom fields.
   - **DesignGroup** — an optional, hierarchical container that links related designs into a larger effort (multi-stage work or cross-site coordination). Purely organizational; never affects execution order.
   - **DesignPlacement** — a single proposed change within a design: **add** a new device from the device-type catalog (with an intended role and tenant), **move** an existing device, or **remove** (planned) one. Target slots are validated against NetBox's own `Rack.get_available_units()` collision logic. Real devices are never mutated.
-- **Interactive multi-rack visual editor** — a GridStack drag-and-drop editor that renders all of a design's racks side by side, across both front and rear faces, for composing adds/moves/removes. Includes a searchable **device-type catalog palette**, **per-user favorite device types** for quick access, and **per-user rack visibility** to focus the workspace. Every edit writes placements only — live devices are never touched.
-- **Projected rack elevations** — a read-only elevation view showing how a design's racks *would* look once applied (all racks, both faces, full-depth devices rendered across both faces), plus a filterable elevations list.
-- **Rack-page integration** — an optional panel on the core `dcim.rack` detail page listing the designs that touch that rack, each linking to its editor and elevation.
+- **Interactive multi-rack visual editor** — a GridStack drag-and-drop editor that renders all of a design's racks side by side, across both front and rear faces, for composing adds/moves/removes. Includes a searchable **device-type catalog palette**, **per-user favorite device types in named sets**, **per-user rack visibility**, a live-filtering legend, and a hover card with per-PSU power detail. Every edit writes placements only — live devices are never touched. See [docs/editor.md](docs/editor.md). ▶ [Part 2](https://youtu.be/NXj5lqCR5RI) · [Part 3](https://youtu.be/tTbLeEwYIUQ)
+- **Chassis & blades** — a device with bays (a blade chassis, a patch-panel frame) is edited on a **chassis layer**: every chassis in scope as a column of bays, driven by the same editor, with the palette filtered to child types. Works for a real chassis and for one the design itself adds; blade power is never double-counted; a read-only chassis elevation mirrors it. See [docs/editor.md](docs/editor.md#chassis--blades). ▶ [Part 6](https://youtu.be/6mCIUimNaq8)
+- **Planned racks** — plan into a rack that does not exist in NetBox yet: **Create rack** in the editor (name, height, location) and it behaves like any other rack — devices, naming, power, conflict detection. Shared between designs like a real rack; on Apply a matching real rack is **adopted**, otherwise one is created. See [docs/planned-racks.md](docs/planned-racks.md). ▶ [Part 9](https://youtu.be/By6q8FNIDJ0) · [Part 18](https://youtu.be/QWR9C5GDJ6M)
+- **Templates** — a reusable rack layout with no site ("our standard ToR"), stamped into any design by dragging a card onto a rack, or applied to several racks / a **template group** mapped rack-by-rack from one dialog. Stores device type, role, tenant, planning fields and an anchor — never a position, a name or power. Extract one from a rack in a design (**Save as template**) or from any real rack. See [docs/templates.md](docs/templates.md). ▶ [Part 13](https://youtu.be/joqDaBdxYbg)
+- **Planning fields** — declare your own per-deployment attributes (`placement_fields`) and they appear on the editor toolbar rail and in each tile's **Planning attributes** dialog, on the hover card, in the API, and are written to the planned device on Apply. A move can re-attribute the device it relocates. See [docs/planning-fields.md](docs/planning-fields.md). ▶ [Part 5](https://youtu.be/7Z8d_P3Sqio)
+- **Projected rack elevations** — a read-only elevation view showing how a design's racks *would* look once applied (all racks, both faces, full-depth devices rendered across both faces), plus a filterable elevations list. ▶ [Part 19](https://youtu.be/90WoG9IRy-Q)
+- **Rack-page integration** — an optional panel on the core `dcim.rack` detail page listing the designs that touch that rack, each linking to its editor and elevation. ▶ [Part 19](https://youtu.be/90WoG9IRy-Q)
+- **Read-only surfaces** — an **Elevations** browser across every design, a **Chain Health** report of designs whose chain is refused or that carry stale placements, and first-class list/detail views for placements, planned power feeds, planned racks, templates and template groups. ▶ [Part 19](https://youtu.be/90WoG9IRy-Q)
 - **Config-driven statuses** — which device statuses count as "planned" and which mark a planned removal are read from `PLUGINS_CONFIG`, never hardcoded.
-- **Naming convention engine** — auto-names planned devices via `naming_mode` = `sequence` / `template` / `script` (a dotted-path callable), with graceful fallback when a template or script fails. See [docs/device-naming.md](docs/device-naming.md).
-- **Power projection & PDU distribution** — a read-only power overlay: a per-rack capacity-vs-projected-consumption bar plus a per-device power heatmap, and per-PDU/per-bank power distribution (`distribution_mode` = `none` / `builtin` / `script`) with planned-PDU feed binding. See [docs/power-projection-spec.md](docs/power-projection-spec.md), [docs/power-distribution.md](docs/power-distribution.md), and [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md).
+- **Naming convention engine** — auto-names planned devices via `naming_mode` = `sequence` / `template` / `script` (a dotted-path callable), with graceful fallback when a template or script fails; a move gets a rename suggestion from the same engine. See [docs/device-naming.md](docs/device-naming.md). ▶ [Part 4](https://youtu.be/qH-ljS-W1uw)
+- **Power projection & PDU distribution** — a read-only power overlay: a per-rack capacity-vs-projected-consumption bar plus a per-device power heatmap, and per-PDU/per-bank power distribution (`distribution_mode` = `none` / `builtin` / `script`) with planned-PDU feed binding, planned power feeds for greenfield racks, **Copy from rack**, a **Bank zones** strip showing which units each bank serves, and a per-device feed-leg choice. See [docs/power-projection-spec.md](docs/power-projection-spec.md), [docs/power-distribution.md](docs/power-distribution.md), and [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md). ▶ [Part 7](https://youtu.be/jge_MjSdNxQ) · [Part 8](https://youtu.be/u3_mIB0MiQ0) · [Part 10](https://youtu.be/iPRLaY1kVF0) · [Part 11](https://youtu.be/X-16j1W0NmM) · [Part 12](https://youtu.be/WkJjhm3IoXA)
 - **Apply a design** — materialize an approved design in NetBox as *planned* devices: each target slot is
   reserved so nobody else can take it, planned cabling has real ports to attach to, and removals are flagged
   with a configured status. Safe to press twice (it reconciles rather than duplicating), all-or-nothing in one
   transaction, ordered along a chain, and run entirely with your own DCIM permissions. Available as a button and
-  as an API action with a read-only dry run. See [docs/apply.md](docs/apply.md).
-- **Design chains** — baseline a design on another **approved** design (`based_on`), so one team's moves/removes/adds render as the starting world for the next team's plan, across placements, naming and power. Approval freezes a design so its children can trust it; an ancestor that regresses to draft or moves to `implemented` makes the chain refuse (with a clear re-base prompt) rather than render a guess. See [docs/design-chains.md](docs/design-chains.md).
+  as an API action with a read-only dry run. See [docs/apply.md](docs/apply.md). ▶ [Part 17](https://youtu.be/xUeZtZSSjoQ) · [Part 18](https://youtu.be/QWR9C5GDJ6M)
+- **Design chains** — baseline a design on another **approved** design (`based_on`), so one team's moves/removes/adds render as the starting world for the next team's plan, across placements, naming and power. Approval freezes a design so its children can trust it; an ancestor that regresses to draft or moves to `implemented` makes the chain refuse (with a clear re-base prompt) rather than render a guess. See [docs/design-chains.md](docs/design-chains.md). ▶ [Part 14](https://youtu.be/mJNOlpu2H30) · [Part 15](https://youtu.be/u9MlQwXchvA) · [Part 16](https://youtu.be/7pVdqWlnPB8)
 - Full **CRUD UI** with list/detail/edit/bulk views and a navigation menu.
-- **REST API** at `/api/plugins/rack-design/`.
-- **GraphQL API** integration.
-- **Global search** integration.
+- **REST API** at `/api/plugins/rack-design/` — every model plus actions (`save-layout`, `recompute-distribution`, `derive`, `new-version`, `rebase`, `apply` with a `GET` dry run) and a read-only `design-applies/` record of what each apply created. ▶ [Part 20](https://youtu.be/ZBFt_cOQ8cQ)
+- **GraphQL API** integration. ▶ [Part 20](https://youtu.be/ZBFt_cOQ8cQ)
+- **Global search** integration. ▶ [Part 20](https://youtu.be/ZBFt_cOQ8cQ)
 - **Change logging**, **tags**, and **custom fields** on the models.
 - Integration with NetBox's native **permission** system.
 
 ## Screenshots
 
-▶ **[Watch the 2-minute quick tour](https://www.youtube.com/watch?v=2N1hwF_oUYc)** — the editor, moves, and the power heatmap in action.
+▶ **[Watch the 5-minute quick tour](https://youtu.be/o9W6OytpeEM)** — the editor, moves across racks, the power heatmap with per-bank load, a row of planned racks, templates, and applying a plan to NetBox.
 
-▶ **[Full 10-part tutorial playlist](https://www.youtube.com/playlist?list=PLQrzYAZqdcXg)** — the data model, the editor, the naming engine, power projection and rebalancing, greenfield planned power, per-bank distribution, and the REST/GraphQL/search integrations, one part per topic.
+▶ **[Full 20-part course](https://www.youtube.com/playlist?list=PLBRvuwB6Mwu4)** — about 75 minutes, one part per topic: the data model, the editor, naming, planning fields, chassis & blades, power projection and rebalancing, bank zones, planned racks and greenfield power, templates, design chains and their conflicts, peer conflicts, applying a design, read-only views, and the REST/GraphQL/search integrations.
 
 **Power heatmap with per-PDU / per-bank distribution** — each bank shows load vs.
 breaker, overloads in red, feeds color-coded per leg.
 
-[![Power heatmap with per-bank distribution](docs/assets/screenshots/03-power-heatmap.png)](https://www.youtube.com/watch?v=2N1hwF_oUYc)
+[![Power heatmap with per-bank distribution](docs/assets/screenshots/03-power-heatmap.png)](https://youtu.be/o9W6OytpeEM)
 
 **Multi-rack visual editor** — plan adds, moves, and removals across a design's
 racks side by side, on top of your live data.
@@ -78,15 +83,15 @@ More in the [documentation](https://ravenrs.github.io/netbox-rack-design/).
 
 | Plugin Version | Minimum NetBox Version | Maximum NetBox Version | Python    |
 |----------------|------------------------|------------------------|-----------|
-| 0.17.x         | 4.4.0                  | 4.6.99                 | 3.12+     |
-| 0.16.0         | 4.4.0                  | 4.6.99                 | 3.12+     |
+| 1.0.x          | 4.4.0                  | 4.7.99                 | 3.12+     |
+| 0.16.0–0.32.x  | 4.4.0                  | 4.6.99                 | 3.12+     |
 | 0.15.x         | 4.4.0                  | 4.4.99                 | 3.12+     |
 
 The supported NetBox range is enforced at load time via the plugin's `min_version` / `max_version`. See [COMPATIBILITY.md](https://github.com/ravenrs/netbox-rack-design/blob/main/COMPATIBILITY.md) for the full per-version matrix.
 
 ## Dependencies
 
-- **NetBox** 4.4.0 – 4.6.99 (tested against 4.4.8, 4.5.10 and 4.6.8)
+- **NetBox** 4.4.0 – 4.7.99 (tested against 4.4.8, 4.5.10, 4.6.8 and 4.7.1)
 - **Python** 3.12 or later
 
 No additional Python packages are required beyond NetBox's own dependencies.
@@ -185,7 +190,8 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 | `naming`            | `{}`                 | Reserved for future per-design naming options. No options are currently defined. |
 | `distribution_mode` | `"none"`             | How per-PDU/bank load is distributed for the power heatmap: `"none"` (per-rack total only, per-device gradient), `"builtin"` (native distribution from bank = outlet port name segment + feed-leg = bound feed, zero config), or `"script"` (a dotted path to `fn(rack, devices) -> Distribution` dict). See [docs/pdu-distribution-spec.md](docs/pdu-distribution-spec.md). |
 | `distribution_script` | `""`               | Dotted path to a callable used when `distribution_mode == "script"`.                                          |
-| `planning_fields`   | `{}`                 | Custom-field bridge mapping site custom fields into the rack/PDU planning dialogs. Empty by default; native fields (voltage/amperage/phase/supply, feed binding) are never listed here. |
+| `planning_fields`   | `{}`                 | Custom-field bridge mapping site custom fields into the rack/PDU planning dialogs (read side, `source`), reachable by a `distribution_script`. Empty by default; native fields (voltage/amperage/phase/supply, feed binding) are never listed here. See [docs/planning-fields.md](docs/planning-fields.md#the-read-side-counterpart). |
+| `placement_fields`  | `[]`                 | Your own per-device planning attributes (write side, `target`): shown on the editor rail / Planning attributes dialog / hover card / API, written to the planned device on Apply. See [docs/planning-fields.md](docs/planning-fields.md). |
 | `power_capacity_default_w` | `1000`        | Fallback rack power capacity (watts) used when no `dcim.PowerFeed` is modeled on the rack. Not present in `default_settings`; read via `get_plugin_config` with this default. |
 | `power_draw_basis`  | `"allocated"`        | Which PowerPort/PowerPortTemplate field to sum for projected draw: `"allocated"` or `"maximum"` (falls back to the other when the chosen one is unset). Not present in `default_settings`; read via `get_plugin_config` with this default. |
 | `power_warn_pct`    | `80`                 | Utilization percentage at/above which a rack's power state is "warn". Not present in `default_settings`; read via `get_plugin_config` with this default. |
@@ -195,12 +201,14 @@ All settings are optional and configured under the `netbox_rack_design` key in `
 
 The `power_*` keys are not listed in the plugin's `default_settings` (they have no admin-facing default in `__init__.py`); they are still fully overridable via `PLUGINS_CONFIG`, resolved at read time by `netbox_rack_design/projection.py` with the defaults shown above.
 
+**Note on object-permission constraints:** designs are now scoped by multiple sites. If you use NetBox's object-permission system to constrain designs by site (e.g., `{"site__slug": "…"}`), update your constraints to use `{"sites__slug": "…"}` to match designs in any of their sites.
+
 ## Roadmap
 
 **Delivered**
 
 - **Projected rack elevations (read-only)** — see how a design's racks *would* look once applied, with front/rear faces and full-depth devices rendered across both faces.
-- **Interactive visual rack editor** — GridStack drag-and-drop adds/moves/removes across a **multi-rack workspace** and both rack faces, writing placements without mutating live devices. Includes a searchable device-type catalog palette, per-user favorite device types, and per-user rack visibility.
+- **Interactive visual rack editor** — GridStack drag-and-drop adds/moves/removes across a **multi-rack workspace** and both rack faces, writing placements without mutating live devices. Includes a searchable device-type catalog palette, per-user favorite device types in named sets, per-user rack visibility, and a chassis layer for blades.
 - **Multi-rack designs** — a design carries an explicit, site-validated rack scope and a read-only elevation view spanning all of its racks.
 - **Naming convention engine** — auto-names planned devices via `naming_mode` = `"sequence"` / `"template"` / `"script"`, with graceful fallback when a template or script fails.
 - **Power projection** — config-driven capacity vs. projected consumption per rack, rendered as a capacity bar plus a per-device power heatmap.
@@ -208,6 +216,10 @@ The `power_*` keys are not listed in the plugin's `default_settings` (they have 
 - **Design chains and versioning** — baseline a design on another approved design (`based_on`), inheriting its placements, names, family-numbering counters, planned power feeds and rack-power overrides as a read-only, live-resolved layer. Approval freezes a design so it is safe to build on; an ancestor that is not approved, or has moved to `implemented`, makes the whole chain refuse to project (never a silent guess) until re-based. Clone-and-revise an approved design into a new draft version to escape the freeze when you have dependents, then re-base the children onto the new version. See [docs/design-chains.md](docs/design-chains.md).
 - **Apply** — materialize an approved design in NetBox as planned devices, reserving each target slot and flagging removals with a configured status. Reports every problem up front, runs all-or-nothing in one transaction, is safe to re-run (reconciles rather than duplicating), is ordered along a chain, and uses the acting user's own DCIM permissions. Button plus API action with a read-only dry run. See [docs/apply.md](docs/apply.md).
 - **Peer conflicts** — a design's projection reports overlaps with designs outside its own chain: a peer planning a device on the same unit, the same name, or a move of the same real device, surfaced as its own row in the editor's conflicts panel and as flagged tiles on both the editor and the elevation view, with a "Re-run naming" dialog to resolve a name claim. See [docs/peer-conflicts.md](docs/peer-conflicts.md).
+- **Planning fields** — config-declared per-device planning attributes, on the rail, in a per-tile dialog, on the hover card and in the API; a move can re-attribute the device it relocates. See [docs/planning-fields.md](docs/planning-fields.md).
+- **Planned racks** — plan into a rack that does not exist yet; adopted or created on Apply. See [docs/planned-racks.md](docs/planned-racks.md).
+- **Templates** — reusable, site-less rack layouts and template groups, stamped into a design in one drop and extracted from any rack. See [docs/templates.md](docs/templates.md).
+- **Multi-site designs** — a design can now span multiple sites, enabling cross-site coordination in a single plan. Device naming and power distribution are scoped per rack's site, and design chains require shared sites. Editor's Add rack panel uses a Site → Location → Rack hierarchy.
 
 **Planned for upcoming stages**
 

@@ -67,6 +67,11 @@ export function initHoverCard(root) {
         // The role the device has today, when the design re-attributes it.
         var oldRole = content.getAttribute("data-old-role");
         var newName = content.getAttribute("data-new-name");
+        // Each end of a move names the OTHER end (user ruling 2026-09-22):
+        // the destination tile (move_in) says where the device comes FROM,
+        // the vacated ghost says where it goes TO. Naming a tile's own
+        // position back to the planner reading that tile says nothing.
+        var movedFrom = content.getAttribute("data-moved-from");
         var movedTo = content.getAttribute("data-moved-to");
         var power = content.getAttribute("data-power");
         // Chain provenance/conflict (PLAN-design-chains.md §8.4/§8.5): an
@@ -114,6 +119,7 @@ export function initHoverCard(root) {
             ["Old role", (oldRole && oldRole !== role) ? oldRole : null],
             ["Tenant", tenant],
             ["Old tenant", (oldTenant && oldTenant !== tenant) ? oldTenant : null],
+            ["From", movedFrom],
             ["To", movedTo],
             ["Bays", baysTotal ? (baysUsed + " of " + baysTotal + " used") : null],
             ["Source", sourceDesignName],

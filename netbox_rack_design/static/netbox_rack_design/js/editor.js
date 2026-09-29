@@ -28,10 +28,12 @@ import { initHoverCard } from "rd/hovercard.js";
 import { getCsrfToken, createToast } from "rd/core.js";
 import { showRerunNamingDialog } from "rd/dialogs.js";
 import { setupPalette } from "rd/palette.js";
+import { setupTemplates, setupSaveAsTemplate } from "rd/templates.js";
 import {
     setPowerHooks,
     postSaveToastKey,
     looksLikePdu,
+    autoBindPduFeed,
     showPduPowerDialog,
     showRackPowerDialog,
 } from "rd/power.js";
@@ -424,7 +426,12 @@ import { initRack, setRackHooks } from "rd/rack.js";
         if (!force && lastRackBodies) {
             Object.keys(rackBodies).forEach(function (id) {
                 if (rackBodies[id] !== lastRackBodies[id]) {
-                    projectRacks.push(Number(id));
+                    // T1.5c (D31): id is `rack.rack_id` (frame.serverRackId),
+                    // the server's rack_key() string ("r:<pk>"/"p:<pk>") for a
+                    // rack block, or a plain chassis device pk. Number(id)
+                    // would turn "p:7" into NaN and drop it from the payload
+                    // parse_rack_id sees server-side (D28) -- keep it as-is.
+                    projectRacks.push(id);
                 }
             });
         }
@@ -544,6 +551,21 @@ import { initRack, setRackHooks } from "rd/rack.js";
     // reads only root and isChassisLayer from this closure.
     setupPalette(root, isChassisLayer);
 
+    // The Templates tab (PLAN-templates.md §3, T3.3) lives in editor/
+    // templates.js. It calls back into buildLayoutPayload (exposed below via
+    // NbxRdEditor, read lazily -- setupTemplates only wires listeners now,
+    // the payload is built at drop/apply time, by which point NbxRdEditor
+    // already exists) so preview-template sees this session's unsaved edits,
+    // per D19.
+    setupTemplates(root);
+
+    // "Save rack as template" (PLAN-templates.md Sec 4, T4.2) -- one button
+    // per rack block, wired straight to the from-design endpoint. Lives in
+    // the same module as the Templates tab (both talk to the Template API)
+    // but needs no unsaved-layout/preview plumbing of its own: from-design
+    // reads the design's own SAVED+committed projection server-side.
+    setupSaveAsTemplate(root);
+
     // The shared device hover card lives in editor/hovercard.js -- it reads only
     // data-* attributes off the tiles, so `root` was all it needed from here.
     initHoverCard(root);
@@ -559,25 +581,48 @@ import { initRack, setRackHooks } from "rd/rack.js";
         // read back the per-rack save payload without simulating a full
         // GridStack drag.
         rackControllers: rackControllers,
+        // The Templates tab's preview-template calls (both the single-rack
+        // drag-drop and the multi-rack/group apply dialog) pass the editor's
+        // CURRENT unsaved edits so the server-computed stamp lands against
+        // what the planner is actually looking at (D19), not just what is
+        // already saved.
+        buildLayoutPayload: buildLayoutPayload,
         // Live per-bank distribution: power_heatmap.js calls this (debounced, on
         // the same mutation signal that drives the power bar) to re-run the server
         // distribution engine over the unsaved layout. Read-only, never persists.
         recomputeDistribution: recomputeDistribution,
         looksLikePdu: looksLikePdu,
+        autoBindPduFeed: autoBindPduFeed,
         showPduPowerDialog: showPduPowerDialog,
         showRackPowerDialog: showRackPowerDialog,
+        // The Racks panel (editor_panels.js) has to RELOAD to show a rack
+        // block the server renders -- which is a navigation, and would throw
+        // away unsaved edits behind the browser's own "Reload site?" prompt.
+        // These three let it ask the same three-choice question this file
+        // already asks for the layer switch, in the app's own words.
+        hasUnsavedChanges: function () { return !!changesMade; },
+        discardUnsavedChanges: function () { changesMade = false; },
+        promptUnsavedChanges: showUnsavedChangesDialog,
+        // Save, then go to `redirectTo` (pass the current URL to reload).
+        saveLayout: doSave,
     };
 
     // The Phase 1 read-model (spec §2), its invariant checks and rdCanPlaceAt
     // now live in editor/model.js -- imported at the top of this file. They
     // closed over nothing here, so the move was a pure lift.
 
-    // ---- Layer switch with unsaved changes (spec §10.3) --------------------
-    // The rack view and the chassis layer are separate pages, so switching is a
-    // navigation and would drop unsaved edits. The browser's beforeunload guard
-    // below catches that, but a bare "leave site?" is a poor answer when the
-    // user's actual intent is "keep my work". Offer the three real choices.
-    function showSaveBeforeSwitchDialog(targetUrl) {
+    // ---- Unsaved changes, in the app's own words (spec §10.3) --------------
+    // Anything that leaves or re-renders this page would drop unsaved edits:
+    // the layer switch (a navigation to the chassis page) and the Racks
+    // panel's add/create/remove (which reload so the server can render the
+    // new block). The browser's beforeunload guard below catches both, but
+    // "Reload site? Changes you made may not be saved." is a poor answer
+    // when the user's actual intent is "keep my work" -- and its Reload
+    // button silently discards it. Offer the three real choices instead.
+    //
+    // opts: {body, saveLabel, discardLabel, onSave, onDiscard}
+    function showUnsavedChangesDialog(opts) {
+        var o = opts || {};
         var overlay = document.createElement("div");
         overlay.className = "modal fade nbx-rd-switch-modal";
         overlay.setAttribute("tabindex", "-1");
@@ -588,14 +633,15 @@ import { initRack, setRackHooks } from "rd/rack.js";
             + '<h5 class="modal-title">Unsaved changes</h5>'
             + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
             + "</div>"
-            + '<div class="modal-body"><p>You have unsaved changes. '
-            + "Save them before switching view?</p></div>"
+            + '<div class="modal-body"><p>' + (o.body
+                || "You have unsaved changes. Save them before switching view?")
+            + "</p></div>"
             + '<div class="modal-footer">'
             + '<button type="button" class="btn btn-sm btn-link" data-bs-dismiss="modal">Cancel</button>'
             + '<button type="button" class="btn btn-sm btn-outline-danger" data-rd-switch-discard>'
-            + "Discard</button>"
+            + (o.discardLabel || "Discard") + "</button>"
             + '<button type="button" class="btn btn-sm btn-primary" data-rd-switch-save>'
-            + "Save and switch</button>"
+            + (o.saveLabel || "Save and switch") + "</button>"
             + "</div></div></div>";
         document.body.appendChild(overlay);
 
@@ -606,15 +652,24 @@ import { initRack, setRackHooks } from "rd/rack.js";
         overlay.querySelector("[data-rd-switch-discard]").addEventListener("click", function () {
             changesMade = false;                 // disarm beforeunload
             if (modal) { modal.hide(); }
-            window.location.href = targetUrl;
+            if (o.onDiscard) { o.onDiscard(); }
         });
         overlay.querySelector("[data-rd-switch-save]").addEventListener("click", function () {
             if (modal) { modal.hide(); }
-            doSave(targetUrl);
+            if (o.onSave) { o.onSave(); }
         });
-        if (modal) { modal.show(); } else if (window.confirm("Save your changes before switching?")) {
-            doSave(targetUrl);
+        if (modal) {
+            modal.show();
+        } else if (window.confirm(o.body || "Save your changes first?")) {
+            if (o.onSave) { o.onSave(); }
         }
+    }
+
+    function showSaveBeforeSwitchDialog(targetUrl) {
+        showUnsavedChangesDialog({
+            onDiscard: function () { window.location.href = targetUrl; },
+            onSave: function () { doSave(targetUrl); },
+        });
     }
 
     document.addEventListener("click", function (event) {

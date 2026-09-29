@@ -27,7 +27,7 @@ from ..naming import (
     placement_ordinal,
     validate_naming_config,
 )
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 def sample_naming_fn(placement):
@@ -82,7 +82,7 @@ class NamingEngineTestCase(TestCase):
         cls.tenant = env["tenant"]
         cls.devices = env["devices"]
 
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
 
         # Three placements with ascending target positions -> deterministic order.
         cls.p_add = DesignPlacement.objects.create(
@@ -366,9 +366,9 @@ class PeerNameClaimsTestCase(TestCase):
         cls.site = env["site"]
         cls.device_type = env["device_type"]
         cls.devices = env["devices"]  # Device 1 @ U1, Device 2 @ U2
-        cls.design = Design.objects.create(title="Mine", site=cls.site)
-        cls.peer_a = Design.objects.create(title="Peer A", site=cls.site)
-        cls.peer_b = Design.objects.create(title="Peer B", site=cls.site)
+        cls.design = make_design(title="Mine", site=cls.site)
+        cls.peer_a = make_design(title="Peer A", site=cls.site)
+        cls.peer_b = make_design(title="Peer B", site=cls.site)
 
     def _add(self, design, name):
         return DesignPlacement.objects.create(
@@ -454,7 +454,7 @@ class MoveResolvedAttributesTestCase(TestCase):
 
         cls.pdu_role = DeviceRole.objects.create(name="PDU Role", slug="pdu-role")
 
-        cls.design = Design.objects.create(title="Move-Naming", site=cls.site)
+        cls.design = make_design(title="Move-Naming", site=cls.site)
 
         # devices[0]: real device, own role "Device Role 1", no tenant,
         # currently Rack 1 / U1 / front (see create_dcim_environment).
@@ -500,7 +500,7 @@ class MoveResolvedAttributesTestCase(TestCase):
         # base_placement fallback (G2): a move acting on an ancestor design's
         # still-planned 'add', with no override of its own -- the carry-over
         # source is that ancestor placement's own role/tenant.
-        cls.parent_design = Design.objects.create(title="Parent-Naming", site=cls.site)
+        cls.parent_design = make_design(title="Parent-Naming", site=cls.site)
         cls.upstream_add = DesignPlacement.objects.create(
             design=cls.parent_design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -513,7 +513,7 @@ class MoveResolvedAttributesTestCase(TestCase):
         )
         cls.parent_design.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent_design.save()
-        cls.child_design = Design.objects.create(
+        cls.child_design = make_design(
             title="Child-Naming", site=cls.site, based_on=cls.parent_design
         )
         cls.p_move_base_placement = DesignPlacement.objects.create(
@@ -651,7 +651,7 @@ class MoveResolvedAttributesTestCase(TestCase):
         # branch even though the source device's own role is not a PDU role.
         self.assertEqual(
             generate_name(self.p_move_pdu_override),
-            "site-1-pdu-rrack2-a1",
+            "site-1-pdu-rack2-a1",
         )
 
     @override_settings(
@@ -717,7 +717,7 @@ class ChainFamilyCounterTestCase(TestCase):
 
     @classmethod
     def _design(cls, title, project, *, based_on=None, approved=False):
-        return Design.objects.create(
+        return make_design(
             title=title,
             site=cls.site,
             based_on=based_on,

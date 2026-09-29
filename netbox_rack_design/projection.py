@@ -186,8 +186,8 @@ from dcim.choices import DeviceFaceChoices, SubdeviceRoleChoices
 from django.db.models import prefetch_related_objects
 from netbox.plugins import get_plugin_config
 
+from . import rackinfo
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import DesignApply
 
 __all__ = (
     "ProjectedSlotState",
@@ -262,6 +262,7 @@ class ProjectedElevation:
 # two call sites cannot silently disagree on what a chain kind is.
 CHAIN_CONFLICT_KINDS = {
     "ancestor_implemented", "ancestor_not_approved", "chain_broken", "bay_occupied",
+    "unit_occupied",
 }
 
 
@@ -1172,7 +1173,11 @@ class _Baseline:
         """
         out = []
         for entry in self.entries.values():
-            if entry.rack_id != self.rack.pk or entry.position is None:
+            # entry.rack_id is always a REAL dcim.Rack pk (the replay only
+            # ever reads an ancestor's target_rack_id -- see _replay), so
+            # comparing it to self.rack.pk directly is the T1.4b landmine the
+            # moment self.rack is a PlannedRack sharing that pk (D28).
+            if not rackinfo.device_is_in_rack(entry.rack_id, self.rack) or entry.position is None:
                 continue
             out.append({
                 "key": entry.key,
@@ -1201,7 +1206,9 @@ class _Baseline:
         for entry in self.entries.values():
             if entry.key in skip_keys:
                 continue
-            if entry.rack_id != self.rack.pk:
+            # Same T1.4b guard as claims() above: entry.rack_id is a real
+            # rack pk, self.rack may be planned.
+            if not rackinfo.device_is_in_rack(entry.rack_id, self.rack):
                 continue
             self._resolve_names(entry)
             slot = _slot(
@@ -1280,7 +1287,7 @@ def _existing_slots(rack, face, excluded_device_ids, applies_by_device_id=None, 
     ``_reservation_of``.
     """
     slots = []
-    units = rack.get_rack_units(face=face, expand_devices=False)
+    units = rackinfo.rack_units(rack, face=face, expand_devices=False)
     for unit in units:
         device = unit.get("device")
         if device is None:
@@ -1539,6 +1546,63 @@ def _bay_conflict(sink, entry, placement, seen):
     return reason
 
 
+def _unit_conflicts(*faces):
+    """Flag this design's own add / move-in that an ANCESTOR's hardware now
+    overlaps (docs/design-chains.md "Upstream conflicts": a later-approved
+    ancestor version, or a re-based lineage, puts inherited hardware where
+    this design had already planned something).
+
+    The rack-unit twin of ``_bay_conflict``: the own tile keeps its unit and
+    gets the conflict flag, and one ``unit_occupied`` entry per placement goes
+    to the persistent panel. Never the hard-collision path -- it never blocks
+    a save (§8.2). Without it both tiles were drawn on top of each other with
+    no word about it (found recording the tutorial, Part 15).
+    """
+    own_states = (ProjectedSlotState.ADD, ProjectedSlotState.MOVE_IN)
+    occupying = (ProjectedSlotState.EXISTING, ProjectedSlotState.ADD,
+                 ProjectedSlotState.MOVE_IN)
+    conflicts, seen = [], set()
+    for slots in faces:
+        inherited = [
+            s for s in slots
+            if s.get("inherited") and s["state"] in occupying
+            and s["u_position"] is not None
+        ]
+        if not inherited:
+            continue
+        for slot in slots:
+            placement = slot.get("placement")
+            if (slot.get("inherited") or slot["state"] not in own_states
+                    or placement is None or slot["u_position"] is None):
+                continue
+            low = float(slot["u_position"])
+            high = low + float(slot.get("u_height") or 1)
+            for other in inherited:
+                o_low = float(other["u_position"])
+                o_high = o_low + float(other.get("u_height") or 1)
+                if o_low >= high or low >= o_high:
+                    continue
+                occupant = other.get("display_label") or other.get("label") or "a device"
+                reason = f"{occupant} occupies this unit upstream."
+                slot["conflict"] = True
+                slot["conflict_reason"] = reason
+                if placement.pk in seen:
+                    break
+                seen.add(placement.pk)
+                conflicts.append(_conflict(
+                    "unit_occupied",
+                    severity="warning",
+                    slot=slot,
+                    placement=placement,
+                    source_design=getattr(other.get("placement"), "design", None),
+                    detail=f"U{_fmt_u(slot['u_position'])} is planned by this design, "
+                           f"but {occupant} now occupies it upstream. This design's "
+                           f"device is still shown -- move it, or re-base.",
+                ))
+                break
+    return conflicts
+
+
 def _overlay_planned_blades(design, slots_lists, baseline=None):
     """
     Fold this design's blade placements into the bay strips they target.
@@ -1749,7 +1813,7 @@ def _existing_tray_slots(rack, excluded_device_ids, applies_by_device_id=None, d
     """
     slots = []
     devices = (
-        rack.devices.filter(position__isnull=True, parent_bay__isnull=True)
+        rackinfo.rack_devices(rack).filter(position__isnull=True, parent_bay__isnull=True)
         .exclude(pk__in=excluded_device_ids)
         .select_related("device_type")
         .order_by("name", "pk")
@@ -1860,11 +1924,18 @@ def _rack_capacity_w(rack, default_w, design=None):
 
     total = 0.0
     any_feed = False
-    for feed in PowerFeed.objects.filter(rack=rack):
-        available = feed.available_power
-        if available:
-            total += float(available)
-            any_feed = True
+    # A real dcim.PowerFeed can only ever reference a real dcim.Rack (its `rack`
+    # FK's related model) -- passing a PlannedRack into this filter isn't just
+    # "correctly empty", Django raises a ValueError for the type mismatch. A
+    # planned rack has no cabling at all yet regardless, so there is nothing to
+    # query for it: only its DESIGN-planned feeds (below) ever size it.
+    planned = rackinfo.is_planned(rack)
+    if not planned:
+        for feed in PowerFeed.objects.filter(rack=rack):
+            available = feed.available_power
+            if available:
+                total += float(available)
+                any_feed = True
     if design is not None:
         # Derate planned feeds by the SAME max-utilization NetBox stamps into a
         # real feed's available_power. Read the live config parameter (the field
@@ -1880,8 +1951,14 @@ def _rack_capacity_w(rack, default_w, design=None):
         # -- and therefore each feed row -- exactly once, structurally.
         chain, _refusal = resolve_baseline_chain(design)
         design_ids = {design.pk} | {ancestor.pk for ancestor in chain}
-        for planned in DesignPowerFeed.objects.filter(design_id__in=design_ids, rack=rack):
-            watts = breaker_watts(planned)
+        # Two real FKs on DesignPowerFeed (PLAN-templates.md D25), never a bare
+        # `rack=`: a planned rack's planned feeds are bound via `planned_rack`,
+        # since `rack` targets a dcim.Rack that doesn't exist yet.
+        rack_filter = {"planned_rack": rack} if planned else {"rack": rack}
+        for planned_feed in DesignPowerFeed.objects.filter(
+            design_id__in=design_ids, **rack_filter
+        ):
+            watts = breaker_watts(planned_feed)
             if watts:
                 total += float(round(watts * max_util / 100.0))
                 any_feed = True
@@ -2573,9 +2650,10 @@ def _lineage_exclusion_ids(design):
     """
     excluded = {design.pk}
     try:
-        excluded.update(ancestor.pk for ancestor in design.baseline_chain())
+        ancestors = list(design.baseline_chain())
     except ValueError:
-        pass  # A cycle: already reported as `chain_broken` elsewhere.
+        ancestors = []  # A cycle: already reported as `chain_broken` elsewhere.
+    excluded.update(ancestor.pk for ancestor in ancestors)
 
     # Descendants: BFS over `children` (direct `based_on` pointers back at
     # this design). One query per depth level of design's OWN lineage tree --
@@ -2594,10 +2672,13 @@ def _lineage_exclusion_ids(design):
 
     from .models import Design
 
-    root = design.version_root
-    if root.pk is not None:
+    # Version families: this design's, and every ANCESTOR's -- a child
+    # re-based onto v3 of its parent must not see v1/v2 of that parent as
+    # peers; they are the same plan, superseded (found recording Part 15).
+    roots = {d.version_root.pk for d in [design, *ancestors] if d.version_root.pk is not None}
+    if roots:
         excluded.update(
-            Design.objects.filter(Q(root=root) | Q(pk=root.pk))
+            Design.objects.filter(Q(root_id__in=roots) | Q(pk__in=roots))
             .values_list("pk", flat=True)
         )
     return excluded
@@ -2606,18 +2687,31 @@ def _lineage_exclusion_ids(design):
 def _peer_placements(rack, excluded_design_ids):
     """Every OTHER design's placement that could conflict with a design
     projecting ``rack`` -- ONE query (P1/P2/perf): designs that scope this
-    rack (``design__racks``), are not in ``excluded_design_ids`` (this
-    design's own lineage + version siblings), and are not ``implemented``
-    (an implemented peer's device is real; the existing real-device
-    collision rules already own that case, and it is not a "peer conflict").
+    rack, are not in ``excluded_design_ids`` (this design's own lineage +
+    version siblings), and are not ``implemented`` (an implemented peer's
+    device is real; the existing real-device collision rules already own
+    that case, and it is not a "peer conflict").
+
+    ``rack`` is either kind (T1.4c, PLAN-templates.md D6): a real
+    ``dcim.Rack`` is scoped via ``design__racks`` (the M2M), a
+    ``PlannedRack`` via the SEPARATE ``design__planned_racks`` M2M
+    (``models.Design.planned_racks``) -- they are two distinct relations on
+    two distinct target models, not one that happens to also accept a
+    planned rack, so which filter kwarg applies has to be chosen explicitly
+    per call rather than left to Django to figure out.
     """
     from .models import DesignPlacement
 
+    if rackinfo.is_planned(rack):
+        scope_filter = {"design__planned_racks": rack}
+    else:
+        scope_filter = {"design__racks": rack}
+
     return list(
-        DesignPlacement.objects.filter(design__racks=rack)
+        DesignPlacement.objects.filter(**scope_filter)
         .exclude(design_id__in=excluded_design_ids)
         .exclude(design__status=DesignStatusChoices.STATUS_IMPLEMENTED)
-        .select_related("design", "device", "device_type", "target_rack")
+        .select_related("design", "device", "device_type", "target_rack", "target_planned_rack")
     )
 
 
@@ -2646,7 +2740,11 @@ def peer_placements_for_design(design):
         return []
     exclusion_ids = _lineage_exclusion_ids(design)
     peers = {}
-    for rack in design.racks.all():
+    # Both scoping M2Ms (real racks via `racks`, greenfield racks via the
+    # SEPARATE `planned_racks` -- models.py's Design fields, T1.4c/D6): a
+    # design's scope is the union of the two, and `_peer_placements` already
+    # knows which of the two relations to query for a given rack instance.
+    for rack in list(design.racks.all()) + list(design.planned_racks.all()):
         for placement in _peer_placements(rack, exclusion_ids):
             peers[placement.pk] = placement
     return list(peers.values())
@@ -2702,7 +2800,14 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
     for peer in peers:
         if peer.kind == DesignPlacementKindChoices.KIND_REMOVE:
             continue  # Removals are not a case (P3): the real device still stands.
-        if peer.target_rack_id != rack.pk or peer.target_position is None:
+        # D28: a bare `peer.target_rack_id != rack.pk` is the same-pk landmine
+        # -- `target_rack_id` is always None for a placement that targets a
+        # PlannedRack, and PlannedRack/dcim.Rack keep separate pk sequences,
+        # so the bare comparison would either miss every planned-rack peer or
+        # (worse) silently match an unrelated real rack sharing this planned
+        # rack's pk. `rackinfo.placement_targets_rack` already resolves this
+        # for either rack kind.
+        if not rackinfo.placement_targets_rack(peer, rack) or peer.target_position is None:
             continue
         if peer.target_bay_id or peer.parent_placement_id or peer.base_parent_placement_id:
             continue  # A blade in a bay is not a rack slot; out of scope here.
@@ -2825,9 +2930,16 @@ def project_rack(design, rack):
         .select_related("device", "device__device_type", "device_type", "target_rack",
                         "base_placement", "base_placement__device_type")
     )
+    # Two real FKs, not one (models.py's PlannedRack docstring / D3): an add
+    # targets EITHER `target_rack` (real) or `target_planned_rack` (greenfield),
+    # never both, so which one this rack's adds are filtered by depends on
+    # which kind `rack` itself is.
+    _rack_filter = (
+        {"target_planned_rack": rack} if rackinfo.is_planned(rack) else {"target_rack": rack}
+    )
     adds = list(
         design.placements.filter(kind=DesignPlacementKindChoices.KIND_ADD)
-        .filter(target_rack=rack)
+        .filter(**_rack_filter)
         # A blade is not a rack slot: a placement targeting a device bay -- real,
         # planned here, or planned by an ANCESTOR (G2) -- is folded into its
         # chassis's strip by _overlay_planned_blades() instead. Emitting it here
@@ -2843,7 +2955,8 @@ def project_rack(design, rack):
     design_device_ids = set(baseline.suppressed_device_ids)
     for placement in moves_removes:
         if placement.device_id and (
-            placement.device.rack_id == rack.pk or placement.target_rack_id == rack.pk
+            rackinfo.device_is_in_rack(placement.device.rack_id, rack)
+            or rackinfo.placement_targets_rack(placement, rack)
         ):
             design_device_ids.add(placement.device_id)
 
@@ -2854,9 +2967,12 @@ def project_rack(design, rack):
     # OTHER design's apply created (flag it `reserved_by_design_*` in
     # `_existing_slots`/`_existing_tray_slots`). Keyed by the rack, not by
     # placement or by name, so the query count is independent of how many
-    # devices are applied.
+    # devices are applied. A planned rack has no applied devices by
+    # definition (T1.4b/D28) -- `applies_for_rack` returns empty for one
+    # rather than the bare filter risking a pk collision with an unrelated
+    # real rack's apply rows.
     apply_rows = list(
-        DesignApply.objects.filter(device__rack_id=rack.pk, device__isnull=False)
+        rackinfo.applies_for_rack(rack)
         .only("design_id", "design_title", "placement_id", "device_id")
     )
     applies_by_device_id = {row.device_id: row for row in apply_rows}
@@ -2899,6 +3015,12 @@ def project_rack(design, rack):
     def _append(slot, full_depth=False):
         # A position-less slot (e.g. a target-less add/move) is never face-mirrored.
         if slot["u_position"] is None:
+            # And carries no face: the tray is a list (spec §9.2). An inherited
+            # slot is built with _normalize_face, which turns a blank face into
+            # "front"; the editor then took an untouched inherited tray PDU for
+            # one moved out of "front" and saved a phantom move into the child,
+            # dropping its feed binding (found recording Part 14).
+            slot["face"] = ""
             non_racked.append(slot)
             return
         # Full-depth devices physically occupy BOTH faces, so a design slot for
@@ -3002,8 +3124,12 @@ def project_rack(design, rack):
         full_depth = _is_full_depth(device_type)
 
         if placement.kind == DesignPlacementKindChoices.KIND_REMOVE:
-            # Flag the identity's current slot (only if it lives in this rack).
-            if current_rack_id != rack.pk:
+            # Flag the identity's current slot (only if it lives in this
+            # rack). current_rack_id is always a real dcim.Rack pk (entry
+            # .rack_id or device.rack_id above), so this is the same T1.4b
+            # guard as _Baseline.claims()/emit(): False, unconditionally,
+            # when `rack` is planned (D28).
+            if not rackinfo.device_is_in_rack(current_rack_id, rack):
                 continue
             _append(
                 _slot(
@@ -3040,14 +3166,18 @@ def project_rack(design, rack):
         # before, and whether such a placement should even be allowed to exist
         # is a separate question this fix does not decide.
         same_location = (
-            current_rack_id == rack.pk
+            rackinfo.device_is_in_rack(current_rack_id, rack)
             and current_position is not None
-            and placement.target_rack_id == rack.pk
+            and rackinfo.placement_targets_rack(placement, rack)
             and placement.target_position is not None
             and float(current_position) == float(placement.target_position)
             and _normalize_face(current_face) == _normalize_face(placement.target_face)
         )
-        if current_rack_id == rack.pk and current_position is not None and not same_location:
+        if (
+            rackinfo.device_is_in_rack(current_rack_id, rack)
+            and current_position is not None
+            and not same_location
+        ):
             _append(
                 _slot(
                     u_position=Decimal(current_position),
@@ -3068,7 +3198,7 @@ def project_rack(design, rack):
                 ),
                 full_depth=full_depth,
             )
-        if placement.target_rack_id == rack.pk:
+        if rackinfo.placement_targets_rack(placement, rack):
             position = placement.target_position
             _append(
                 _slot(
@@ -3117,6 +3247,7 @@ def project_rack(design, rack):
     # bay layer -- peer detection today covers rack U slots only (§ P8 note in
     # `_peer_conflicts`), not chassis bays.
     peer_conflicts = _peer_conflicts(design, rack, adds + moves_removes, front, rear)
+    unit_conflicts = _unit_conflicts(front, rear)
     # The BAY layer, in the order the layers compose (G1): reality, minus the
     # parts an ancestor already invalidated; bay templates for a planned chassis;
     # the inherited blades; then this design's own.
@@ -3140,7 +3271,7 @@ def project_rack(design, rack):
         # Whatever the replay could not do, in the order it hit it: the §9.2
         # chain refusal first, per-slot problems from ``emit``, then peer
         # conflicts (a design outside this one's lineage/version group).
-        conflicts=baseline.conflicts + peer_conflicts,
+        conflicts=baseline.conflicts + unit_conflicts + peer_conflicts,
     )
     # Power projection (docs/power-projection-spec.md): fills per-slot draw and
     # the rack-level summary over the planned world just built above.

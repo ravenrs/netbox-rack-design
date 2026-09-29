@@ -1,11 +1,15 @@
 """REST API viewsets for NetBox Rack Design."""
 
+import itertools
 import logging
+import re
+from decimal import Decimal
 
-from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, PowerFeed, Rack
+from dcim.choices import DeviceFaceChoices
+from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, Location, PowerFeed, Rack
 from django.core.exceptions import ValidationError
-from django.db import transaction
-from django.db.models import Q
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Q
 from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
 from netbox.plugins import get_plugin_config
@@ -15,9 +19,11 @@ from rest_framework.exceptions import APIException, PermissionDenied
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
+from utilities.forms.constants import ALPHANUMERIC_EXPANSION_PATTERN
+from utilities.forms.utils import expand_alphanumeric_pattern
 
 from .. import apply as apply_engine
-from .. import filtersets, naming, planning_fields, projection, versioning
+from .. import filtersets, naming, planning_fields, projection, rackinfo, stamping, versioning
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
@@ -30,9 +36,15 @@ from ..models import (
     FavoriteSet,
     HiddenDesignChassis,
     HiddenDesignRack,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+    rack_key,
 )
 from .serializers import (
     CopyFeedsSerializer,
+    CreatePlannedRackSerializer,
     DesignApplySerializer,
     DesignGroupSerializer,
     DesignPlacementSerializer,
@@ -40,6 +52,8 @@ from .serializers import (
     DesignRackScopeSerializer,
     DesignRebaseSerializer,
     DesignSerializer,
+    ExtractTemplateFromDesignSerializer,
+    ExtractTemplateFromRackSerializer,
     FavoriteSetWriteSerializer,
     FavoriteToggleSerializer,
     HiddenChassisToggleSerializer,
@@ -49,10 +63,15 @@ from .serializers import (
     PlannedFeedDeleteSerializer,
     PlannedFeedSerializer,
     PlannedFeedUpsertSerializer,
+    PlannedRackSerializer,
     PreviewNameSerializer,
+    PreviewTemplateSerializer,
     RackPowerSerializer,
     RecomputeDistributionSerializer,
     SaveLayoutSerializer,
+    TemplateGroupSerializer,
+    TemplatePlacementSerializer,
+    TemplateSerializer,
 )
 
 logger = logging.getLogger("netbox_rack_design.api")
@@ -61,6 +80,7 @@ __all__ = (
     "DesignGroupViewSet",
     "DesignViewSet",
     "DesignPlacementViewSet",
+    "PlannedRackViewSet",
     "DesignPowerFeedViewSet",
     "DesignApplyViewSet",
     "FavoriteDeviceTypeViewSet",
@@ -68,6 +88,9 @@ __all__ = (
     "HiddenDesignRackViewSet",
     "DeviceTypePowerViewSet",
     "PlacementFieldsView",
+    "TemplateGroupViewSet",
+    "TemplateViewSet",
+    "TemplatePlacementViewSet",
 )
 
 
@@ -83,7 +106,15 @@ def _norm_pos(value):
 
 
 class _RackSlotTarget:
-    """A slot on a rack face: the classic target (spec §2 RackFaceContainer)."""
+    """A slot on a rack face: the classic target (spec §2 RackFaceContainer).
+
+    ``rack`` is EITHER a real ``dcim.Rack`` or a ``PlannedRack`` (T1.4e) --
+    exactly one of ``target_rack``/``target_planned_rack`` is ever written,
+    the other always explicitly cleared, mirroring how the bay fields below
+    are cleared. Distinguished by ``isinstance``, not a caller-passed flag:
+    there is exactly one place a target is chosen (this class), so there is
+    exactly one place that needs to know which table ``rack`` came from.
+    """
 
     is_bay = False
 
@@ -91,8 +122,10 @@ class _RackSlotTarget:
         self.rack = rack
         self.u_position = u_position
         self.face = face
+        self.is_planned = isinstance(rack, PlannedRack)
         self.fields = {
-            "target_rack": rack,
+            "target_rack": None if self.is_planned else rack,
+            "target_planned_rack": rack if self.is_planned else None,
             "target_position": u_position,
             "target_face": face,
             # A rack slot is not a bay: clear any bay target a matched placement
@@ -104,6 +137,11 @@ class _RackSlotTarget:
 
     def at_rest(self, device, full_depth=False):
         """The device already physically sits exactly here."""
+        if self.is_planned:
+            # A PlannedRack is not a real dcim.Rack -- no real Device can
+            # already be sitting in a rack that does not exist yet, so this
+            # is never "at rest" and always needs a placement.
+            return False
         if device is None or device.rack_id != self.rack.pk:
             return False
         if _norm_pos(device.position) != _norm_pos(self.u_position):
@@ -121,6 +159,12 @@ class _BayTarget:
     A child device may carry neither a rack position nor a face (core forbids
     both), so the target is a real ``dcim.DeviceBay`` or -- when the chassis is
     itself planned -- the chassis's own placement.
+
+    ``rack`` is EITHER a real ``dcim.Rack`` or a ``PlannedRack`` (T1.4e),
+    same as ``_RackSlotTarget`` -- a blade's chassis may itself be planned
+    into a rack that does not exist yet, so the FK it writes must follow the
+    same real-xor-planned split, or assigning a ``PlannedRack`` to the
+    ``target_rack`` FK would raise ``ValueError`` at save time.
     """
 
     is_bay = True
@@ -131,8 +175,10 @@ class _BayTarget:
         self.parent_placement = parent_placement
         self.u_position = None
         self.face = ""
+        self.is_planned = isinstance(rack, PlannedRack)
         self.fields = {
-            "target_rack": rack,
+            "target_rack": None if self.is_planned else rack,
+            "target_planned_rack": rack if self.is_planned else None,
             "target_position": None,
             "target_face": "",
             "target_bay": target_bay,
@@ -174,6 +220,31 @@ def _feed_dict(feed, source):
         "supply": getattr(feed.supply, "value", feed.supply),
         "source": source,
     }
+
+
+def expand_planned_rack_name_pattern(raw_name):
+    """
+    Expand a "Create rack" name into the list of names it actually creates
+    (task brief: NetBox-style name patterns, ``R[1-4]`` -> ``R1``..``R4``).
+
+    Mirrors ``utilities.forms.fields.ExpandableNameField.to_python`` exactly
+    (the field NetBox's own interface-creation form uses) rather than
+    reinventing the "is this a pattern" check: ``expand_alphanumeric_pattern``
+    itself raises a bare ``ValueError`` (an unpack failure) when handed a
+    string with no bracket expression at all -- see
+    ``utilities/tests/test_forms.py::ExpandAlphanumeric::test_invalid_non_pattern``
+    -- so it must never be called on a plain name. Gating on
+    ``ALPHANUMERIC_EXPANSION_PATTERN`` first is what makes a plain name (no
+    brackets) behave exactly as it always has: one name, unexpanded.
+
+    Raises ``django.core.exceptions.ValidationError`` (via
+    ``django.forms.ValidationError``, the same class) for a recognized but
+    malformed range, e.g. ``R[9-8]`` (end before start) -- the view turns
+    that into a clean 400, never a 500.
+    """
+    if re.search(ALPHANUMERIC_EXPANSION_PATTERN, raw_name):
+        return list(expand_alphanumeric_pattern(raw_name))
+    return [raw_name]
 
 
 def _retarget_feed_name(name, source_rack_name, target_rack_name):
@@ -234,10 +305,12 @@ def _design_children_rest_message(design):
     different design actually severs the link, hence pointing at
     ``rebase``, which does.
     """
-    names = ", ".join(str(child) for child in design.children)
+    children = [str(child) for child in design.children]
+    names = ", ".join(children)
+    verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
-        f"Cannot delete {design}: {names} are based on this design and "
-        "would silently lose their baseline. Re-base the dependent designs "
+        f"Cannot delete {design}: {names} {verb} based on this design and "
+        f"would silently lose {own} baseline. Re-base the dependent designs "
         "onto another design first."
     )
 
@@ -259,6 +332,54 @@ def _design_versions_rest_message(design):
         f"Cannot delete {design}: {names} are later versions of this plan "
         "and would be destroyed along with it. Delete those versions "
         "first."
+    )
+
+
+def _planned_rack_realized_rest_message(planned_rack):
+    """
+    The message body for a REST 409 rejecting the delete of a REALIZED
+    ``PlannedRack`` (PLAN-templates.md D7 / T1.9, decision 2). D7 is explicit
+    that this row "survives forever" once realized, precisely so every design
+    that ever referenced it -- and anyone reading the changelog later -- can
+    still see that the real rack it now derefs to (``resolve_rack``) was once
+    only a plan. Deleting it destroys that trail permanently and, for any
+    design still pointed at it, breaks ``resolve_rack`` outright. Unlike the
+    "still referenced" guard below, this refusal does not depend on whether
+    any design still references the row -- it is permanent the moment
+    ``realized_rack`` is set, matching D7's own "forever".
+    """
+    return (
+        f"Cannot delete {planned_rack}: it has been realized as "
+        f"{planned_rack.realized_rack} and PLAN-templates.md D7 keeps this "
+        "row permanently, marked realized, so the fact that the rack was "
+        "once only planned is never lost."
+    )
+
+
+def _planned_rack_referenced_rest_message(planned_rack):
+    """
+    The message body for a REST 409 rejecting the delete of a ``PlannedRack``
+    still referenced by one or more designs (T1.9, decision 1). Every FK that
+    can point at a ``PlannedRack`` (``DesignPlacement.target_planned_rack``,
+    ``DesignPowerFeed.planned_rack``, ``DesignRackPower.planned_rack``) is
+    CASCADE, deliberately, because each names a DESTINATION rather than
+    history (see the long comment beside ``target_planned_rack`` in
+    models.py) -- so a naive delete would silently erase those designs'
+    placements, planned feeds and rack power, some of which may belong to a
+    FROZEN (approved) design the requester cannot even see. This is a full
+    refusal, not the two-step confirm ``remove_rack`` offers for detaching one
+    rack from one design's own scope -- see ``PlannedRack.referencing_designs``'s
+    docstring for why a shared object like this one does not get that
+    shortcut.
+    """
+    designs = [str(design) for design in planned_rack.referencing_designs()]
+    names = ", ".join(designs)
+    verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
+    return (
+        f"Cannot delete {planned_rack}: {names} still {verb} across it and "
+        f"would silently lose {own} placements, planned power feeds and/or "
+        "rack power for this rack. Remove it from each design's planning "
+        "scope first."
     )
 
 
@@ -301,6 +422,7 @@ def _serialize_apply_result(result):
                 "rack": entry.rack.pk if entry.rack else None,
                 "position": None if entry.position is None else str(entry.position),
                 "face": entry.face or "",
+                "bay": entry.where if entry.blade else None,
                 "recreated": entry.recreated,
             }
             for entry in result.created
@@ -339,6 +461,29 @@ def _serialize_apply_result(result):
                 "prior_status": entry.prior_status,
             }
             for entry in result.reverted
+        ],
+        # What apply builds around the devices: each planned rack it creates
+        # (or adopts) and each planned feed it creates (or reuses) and cables.
+        "racks": [
+            {
+                "planned_rack": entry.planned_rack.pk,
+                "name": entry.planned_rack.name,
+                "location": entry.planned_rack.location_id,
+                "rack": entry.rack.pk if entry.rack else None,
+                "created": bool(entry.created or entry.rack is None),
+            }
+            for entry in result.resolved_racks
+        ],
+        "feeds": [
+            {
+                "planned_feed": entry.planned_feed.pk,
+                "name": entry.planned_feed.name,
+                "power_panel": entry.power_panel.pk if entry.power_panel else None,
+                "rack": entry.rack.pk if entry.rack else None,
+                "existing": entry.existing.pk if entry.existing else None,
+                "feed": entry.feed.pk if entry.feed else None,
+            }
+            for entry in result.feeds
         ],
     }
 
@@ -488,10 +633,162 @@ class ViewDesignPermissions(TokenPermissions):
     }
 
 
+# --- namespaced rack keys (PLAN-templates.md D27, T1.4d) ---------------------
+#
+# Every action below that identifies a rack by id now accepts EITHER the
+# legacy bare integer (a real dcim.Rack pk -- kept working for one release so
+# an existing bookmark or an in-flight request from an older editor tab is not
+# broken by this change) or the namespaced string models.rack_key() emits:
+# "r:<pk>" for a real dcim.Rack, "p:<pk>" for a PlannedRack. ``preview-
+# template`` was the first action to speak the namespaced form (T3.2); this
+# is the one place that parsing now lives, so every OTHER action shares it
+# rather than growing its own ``partition(":")`` -- which is exactly how the
+# accepted shapes would drift apart the next time one of these is edited.
+
+
+def parse_rack_id(value):
+    """
+    Parse a rack identifier in either form this API accepts. Returns
+    ``(kind, pk)`` with ``kind`` one of ``"r"``/``"p"`` and ``pk`` an
+    ``int``. Raises ``ValueError``, naming the offending value, for anything
+    that is neither shape -- callers turn that into a 400 rather than
+    silently coercing or skipping it.
+
+    This matters more than it looks: ``dcim.Rack`` and ``PlannedRack`` keep
+    SEPARATE pk sequences (D28), so pk 74 can mean two different racks. A
+    value this function can't place unambiguously (not a plain integer, not
+    a digit string, not "r:"/"p:" followed by digits) must never be guessed
+    at -- there is no safe default kind to assume.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"Malformed rack id {value!r}: expected a rack pk (legacy) or "
+            f"'r:<pk>' (a real rack) or 'p:<pk>' (a planned rack)."
+        )
+    if isinstance(value, int):
+        return "r", value
+    if isinstance(value, str):
+        if value.isdigit():
+            return "r", int(value)
+        kind, sep, raw_pk = value.partition(":")
+        if sep and kind in ("r", "p") and raw_pk.isdigit():
+            return kind, int(raw_pk)
+    raise ValueError(
+        f"Malformed rack id {value!r}: expected a rack pk (legacy) or "
+        f"'r:<pk>' (a real rack) or 'p:<pk>' (a planned rack)."
+    )
+
+
+def resolve_rack_from_id(value):
+    """
+    ``parse_rack_id`` plus the DB lookup it implies: returns ``(kind, pk,
+    rack_or_none)``. Looks up ONLY the table its own kind names -- never
+    ``Rack.objects.filter(pk=pk)`` for a ``"p:"`` key, nor
+    ``PlannedRack.objects.filter(pk=pk)`` for an ``"r:"`` one -- because the
+    two apps keep separate pk sequences (D28) and querying the wrong table
+    would silently resolve to an unrelated rack that happens to share the pk.
+    """
+    kind, pk = parse_rack_id(value)
+    if kind == "r":
+        return kind, pk, Rack.objects.filter(pk=pk).first()
+    return kind, pk, PlannedRack.objects.filter(pk=pk).first()
+
+
+def parse_real_rack_id(value):
+    """
+    ``parse_rack_id`` for an action that only ever operates on a REAL
+    ``dcim.Rack`` -- every rack-power/feeds/planned-feed/power-source/
+    copy-feeds action, plus save-layout/recompute-distribution's per-rack
+    buckets: none of these read or write a ``PlannedRack`` yet (extending
+    ``DesignPowerFeed``/``DesignRackPower`` to a planned rack is D25, a
+    separate task that also needs a ``models.py`` migration, out of scope
+    here).
+
+    Returns the rack pk as a plain ``int`` when ``value`` names a real rack
+    (bare integer or ``"r:<pk>"``), or ``None`` when it is well-formed but
+    names a planned rack (``"p:<pk>"``) -- every caller treats that exactly
+    like an unknown pk ("Rack does not exist"), never as a crash. Still
+    raises ``ValueError`` for a value that is neither shape, so a genuinely
+    malformed key is a 400 rather than a silent "not found".
+    """
+    kind, pk = parse_rack_id(value)
+    return pk if kind == "r" else None
+
+
+# --- preview-template helpers (PLAN-templates.md Sec 3, T3.2) -----------------
+#
+# A tiny duck-typed wrapper so a ``TemplatePlacement`` row satisfies
+# ``stamping.compute_stamp``'s four-attribute contract (u_height, face, anchor,
+# is_full_depth) without stamping.py ever importing a Django model -- that
+# module is deliberately DB-free (see its own docstring). ``face`` defaults to
+# "front" when the row leaves it blank: TemplatePlacement.face has no
+# model-level "must be set for a non-full-depth device type" validation (unlike
+# a real add item, which the editor always sends a definite face for), so a
+# template built by hand with a blank face must still resolve to something the
+# algorithm's single-face branch can use.
+class _StampItem:
+    def __init__(self, tp):
+        self.tp = tp
+        self.u_height = tp.device_type.u_height
+        self.is_full_depth = tp.device_type.is_full_depth
+        self.face = tp.face if tp.face in ("front", "rear") else "front"
+        self.anchor = tp.anchor
+        self.offset = tp.offset
+
+
+# Slot states that represent something actually sitting in a unit right now,
+# under this design's own projected layout (module docstring of projection.py,
+# ``ProjectedSlotState``). MOVE_OUT_GHOST and REMOVE are deliberately excluded:
+# both describe a unit this design's own plan is VACATING, and D12 requires
+# that vacated space be treated as free for a template stamp exactly like it
+# already is for save-layout's own collision check (``_batch_vacated_device_ids``).
+_OCCUPYING_SLOT_STATES = {
+    projection.ProjectedSlotState.EXISTING,
+    projection.ProjectedSlotState.ADD,
+    projection.ProjectedSlotState.MOVE_IN,
+}
+
+
+def _occupied_from_elevation(elevation):
+    """
+    Build ``stamping.compute_stamp``'s ``occupied`` argument from a
+    ``ProjectedElevation`` (``projection.project_rack(design, rack)``).
+
+    Reusing the projection here -- rather than querying ``dcim.Device`` and
+    this design's placements a second time by hand -- is what gives us D12 for
+    free: ``project_rack`` never emits a slot for a PEER design's own virtual
+    add (its own docstring / PLAN-templates.md D12 confirm this: a peer's claim
+    only ever ANNOTATES one of THIS design's own occupied slots, it never
+    invents a new one), so a peer's claim on an empty unit simply never
+    appears here and cannot block a stamp. It is also what gives us D28 (the
+    same-pk landmine) for free: ``project_rack``/``rackinfo`` already resolve a
+    ``PlannedRack`` correctly, so this function does not need to know or care
+    which kind of rack it was built for.
+
+    A full-depth occupant already appears on BOTH faces in the elevation (see
+    ``project_rack``'s ``_append`` helper), which is exactly the shape
+    ``compute_stamp`` documents its ``occupied`` argument needing -- no extra
+    handling required here.
+    """
+    occupied = {"front": [], "rear": []}
+    for face_name, slots in (("front", elevation.front), ("rear", elevation.rear)):
+        for slot in slots:
+            if slot["state"] not in _OCCUPYING_SLOT_STATES:
+                continue
+            if slot["u_position"] is None:
+                continue
+            occupied[face_name].append((slot["u_position"], slot["u_height"]))
+    return occupied
+
+
 class DesignViewSet(NetBoxModelViewSet):
+    # "site" -> "sites" (PLAN-multi-site.md M1): a M2M is prefetched, not
+    # select_related.
     queryset = Design.objects.select_related(
-        "site", "group", "root", "based_on"
-    ).prefetch_related("placements", "depends_on", "racks", "tags")
+        "group", "root", "based_on"
+    ).prefetch_related(
+        "placements", "depends_on", "racks", "planned_racks", "tags", "sites",
+    )
     serializer_class = DesignSerializer
     filterset_class = filtersets.DesignFilterSet
 
@@ -514,7 +811,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # ``rack_power``'s split below.
             return [ChangeDesignPermissions()]
         if action in ("preview_name", "power_source", "feeds", "recompute_distribution",
-                      "chain", "rerun_naming_preview", "conflicts"):
+                      "chain", "rerun_naming_preview", "conflicts", "preview_template"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -541,7 +838,38 @@ class DesignViewSet(NetBoxModelViewSet):
             exc = APIException(" ".join(reasons))
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
-        super().perform_destroy(instance)
+        # Lock this design's row before deleting it (T1.5b / PLAN-templates.md
+        # §1). Django's cascade delete collects the rows it needs to remove
+        # from ``design_planned_racks`` (the ``planned_racks`` M2M's
+        # auto-created through table) UP FRONT, then deletes them, then
+        # deletes this row. If a concurrent ``create-planned-rack`` request
+        # (below) commits a NEW row in that through table after this
+        # collection but before this row is gone, that row is never
+        # collected, and the final DELETE on this row hits Postgres's own FK
+        # constraint -- an uncaught IntegrityError, surfaced as a raw 500.
+        # Reproduced deterministically in
+        # tests/test_planned_rack_delete.py via a pre_delete signal that
+        # inserts into that exact window. Taking this row lock first means a
+        # concurrent create-planned-rack's own lock acquisition (see below)
+        # either finishes and commits its M2M row BEFORE this transaction
+        # takes the lock (so it gets collected normally), or blocks until
+        # this delete's transaction ends (so there is no row left for it to
+        # attach to, and it correctly 404s instead of landing in the gap).
+        # Belt-and-braces: the lock above closes the only production writer
+        # (create-planned-rack), but if any future or out-of-band writer ever
+        # attaches something to this design between the lock and the delete
+        # anyway, surface it as a 409 asking for a retry rather than an
+        # uncaught 500 -- a delete should never crash the request.
+        try:
+            with transaction.atomic():
+                Design.objects.select_for_update().filter(pk=instance.pk).first()
+                super().perform_destroy(instance)
+        except IntegrityError as db_exc:
+            exc = APIException(
+                "This design was modified concurrently and could not be deleted. Please retry."
+            )
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc from db_exc
 
     @action(detail=True, methods=["post"], url_path="preview-name")
     def preview_name(self, request, pk=None):
@@ -580,7 +908,6 @@ class DesignViewSet(NetBoxModelViewSet):
             ("device", Device),
             ("device_role", DeviceRole),
             ("tenant", Tenant),
-            ("target_rack", Rack),
         ):
             pk_value = data.get(field)
             if pk_value is None:
@@ -594,6 +921,24 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
             resolved[field] = obj
 
+        # The rack is a KEY, and it may name a PLANNED rack: the editor sends
+        # whichever rack it drew the tile in, and a tile dropped into a
+        # planned rack must be named by the same engine as any other (it
+        # used to 400 here and land unnamed -- user report 2026-09-22).
+        resolved["target_rack"] = None
+        resolved["target_planned_rack"] = None
+        rack_key_value = data.get("target_rack")
+        if rack_key_value not in (None, ""):
+            try:
+                kind, _pk, rack_obj = resolve_rack_from_id(rack_key_value)
+            except ValueError as exc:
+                return Response({"target_rack": [str(exc)]},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if rack_obj is None:
+                return Response({"target_rack": ["Rack does not exist."]},
+                                status=status.HTTP_400_BAD_REQUEST)
+            resolved["target_planned_rack" if kind == "p" else "target_rack"] = rack_obj
+
         placement = DesignPlacement(
             design=design,
             kind=data.get("kind", DesignPlacementKindChoices.KIND_ADD),
@@ -602,6 +947,7 @@ class DesignViewSet(NetBoxModelViewSet):
             device_role=resolved["device_role"],
             tenant=resolved["tenant"],
             target_rack=resolved["target_rack"],
+            target_planned_rack=resolved["target_planned_rack"],
             target_position=data.get("target_position"),
             target_face=data.get("target_face") or "",
         )
@@ -610,10 +956,25 @@ class DesignViewSet(NetBoxModelViewSet):
         # so the naming engine -- the built-in sequence mode AND naming
         # scripts via naming.pending_names() -- can count unsaved siblings.
         placement._rd_pending_names = data.get("pending_names") or []
+        # What the tile will carry: {device.cf[...]} reads it for an add.
+        placement.planning_data = data.get("planning_data") or {}
 
-        name = naming.generate_name(placement, index=data.get("index"))
+        # A palette add sends its session ordinal as ``index``; the move
+        # dialog's rename preview sends none. Without one, the ordinal must
+        # still count the session's unsaved names, or template mode's {n}
+        # re-issues a number an unsaved add already holds (-01 again).
+        index = data.get("index")
+        if index is None:
+            index = (naming.placement_ordinal(placement)
+                     + len(placement._rd_pending_names))
+        name = naming.generate_name(placement, index=index)
+        # M4: scope by the PLACEMENT's own site, not the design's (a
+        # multi-site design has one name space per site) -- falling back to
+        # the design's own site when no target_rack was supplied (this is a
+        # scratch, not-yet-targeted placement, so `placement.site` is None),
+        # matching a one-site design's pre-P1 behaviour.
         exists = naming.name_exists_in_site(
-            name, design.site, exclude_placement=None
+            name, placement.site or design.site, exclude_placement=None
         )
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
@@ -726,9 +1087,24 @@ class DesignViewSet(NetBoxModelViewSet):
         work. Racks left unprojected are simply absent from the response, and
         the editor keeps their last-known numbers.
 
-        Returns ``{"distributions": {"<rack_id>": <distribution-json-or-null>},
-        "distribution_status": {"<rack_id>": {"state","engine","script","detail"}},
-        "power": {"<rack_id>": <rack power summary without "distribution">}}``.
+        Returns ``{"distributions": {"<rack key>": <distribution-json-or-null>},
+        "distribution_status": {"<rack key>": {"state","engine","script","detail"}},
+        "power": {"<rack key>": <rack power summary without "distribution">}}``.
+        Every real rack's result is keyed by BOTH the legacy bare pk (as a
+        string, matching the shape this response has always had) AND the
+        NAMESPACED form ``models.rack_key()`` defines (D27, ``"r:<pk>"``) --
+        the same one-release input/output symmetry the ``rack_id`` field
+        itself now has. This keeps an existing consumer of this exact
+        response indexing by bare rack id (``power_heatmap.js``, which is
+        NOT part of the editor's own ES-module set and therefore out of this
+        change's touch scope) working unchanged, while a namespaced-aware
+        caller can already rely on the ``"r:<pk>"``/``"p:<pk>"`` form. A
+        planned rack is projected exactly like a real one, and is reported
+        only under its ``"p:<pk>"`` key, since it never had a bare-int form
+        to begin with.
+        The per-rack bucket's own ``rack_id`` accepts EITHER a legacy bare
+        integer or ``"r:<pk>"`` on the way IN, for one release, so an
+        in-flight request from an older editor tab keeps working.
         ``distribution_status`` says WHY a rack has no distribution (engine off,
         the script raised, no usable PDU), so a live edit that breaks the engine
         reports itself instead of silently emptying the chip strip.
@@ -750,8 +1126,23 @@ class DesignViewSet(NetBoxModelViewSet):
         body = RecomputeDistributionSerializer(data=request.data)
         body.is_valid(raise_exception=True)
         data = body.validated_data
-        # Which racks to project. Empty means "all of them".
-        project_only = set(data.get("project_racks") or [])
+
+        # Parse every rack id BEFORE any reconciliation starts (T1.4d). This
+        # must happen outside the transaction below: a malformed key found
+        # mid-loop would otherwise force an early ``return`` out of the
+        # ``with transaction.atomic()`` block, which COMMITS whatever the
+        # loop had already reconciled for earlier racks instead of rolling
+        # it back -- exactly the write this read-only preview must never
+        # make. Validating the whole batch first means the transaction below
+        # either runs to its own explicit rollback or is never entered.
+        try:
+            parsed_racks = [
+                (rack_data, *parse_rack_id(rack_data["rack_id"]))
+                for rack_data in data["racks"]
+            ]
+            project_only = {parse_rack_id(raw) for raw in (data.get("project_racks") or [])}
+        except ValueError as exc:
+            return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
         # State the reconciliation helpers rely on (mirrors save_layout). We never
         # inspect the resulting ids/flags here -- the whole transaction is rolled
@@ -761,18 +1152,38 @@ class DesignViewSet(NetBoxModelViewSet):
         desired_placement_ids = set()
         self._made_db_change = False
         self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
+        # Request-scoped point-lookup cache (see _collect_batch_cache) so
+        # _reconcile_item's per-item helpers read a dict instead of issuing
+        # their own Device/DeviceType/DesignPlacement SELECT per item.
+        self._batch = self._collect_batch_cache(data)
+
+        # Every real rack's entry is filed under BOTH its bare-pk string (the
+        # shape this response has always had) and its namespaced "r:<pk>"
+        # key -- see this action's own docstring for why. A planned rack has
+        # no bare-pk form, so it is filed under "p:<pk>" only.
+        def _keys_for(kind, pk):
+            return (str(pk), f"{kind}:{pk}") if kind == "r" else (f"{kind}:{pk}",)
 
         distributions = {}
         dist_status = {}
         powers = {}
         with transaction.atomic():
-            for rack_data in data["racks"]:
-                rack_id = rack_data["rack_id"]
-                rack = Rack.objects.filter(pk=rack_id).first()
+            for rack_data, kind, pk in parsed_racks:
+                keys = _keys_for(kind, pk)
+                # A well-formed "p:<pk>" key is looked up in the PlannedRack
+                # table only (D28: dcim.Rack and PlannedRack keep separate pk
+                # sequences, so a bare Rack lookup could silently resolve to
+                # an unrelated real rack sharing the pk). Either way, a
+                # lookup miss is reported as null -- never a crash.
+                rack = (
+                    Rack.objects.filter(pk=pk).first() if kind == "r"
+                    else PlannedRack.objects.filter(pk=pk).first()
+                )
                 if rack is None:
-                    distributions[str(rack_id)] = None
-                    dist_status[str(rack_id)] = None
-                    powers[str(rack_id)] = None
+                    for key in keys:
+                        distributions[key] = None
+                        dist_status[key] = None
+                        powers[key] = None
                     continue
                 items = []
                 for face_key in ("front", "rear", "other"):
@@ -793,25 +1204,26 @@ class DesignViewSet(NetBoxModelViewSet):
                     except Exception:  # noqa: BLE001 - preview must never 500
                         logger.debug(
                             "recompute_distribution: item skipped rack=%s item=%r",
-                            rack_id, item, exc_info=True,
+                            keys[0], item, exc_info=True,
                         )
 
             # Project each submitted rack against the transient (uncommitted)
             # layout. project_rack re-queries design.placements, so it sees the
             # rows just reconciled inside this transaction.
-            for rack_data in data["racks"]:
-                rack_id = rack_data["rack_id"]
-                if str(rack_id) in distributions:
-                    continue  # rack did not exist
-                if project_only and rack_id not in project_only:
+            for _rack_data, kind, pk in parsed_racks:
+                keys = _keys_for(kind, pk)
+                if keys[0] in distributions:
+                    continue  # rack did not exist (or is not real yet)
+                if project_only and (kind, pk) not in project_only:
                     # Not asked for: reconciled above (so the racks that WERE
                     # asked for see a complete layout), but not projected. The
                     # caller keeps whatever numbers it already had for it.
                     continue
-                rack = Rack.objects.get(pk=rack_id)
+                rack = (
+                    Rack.objects.get(pk=pk) if kind == "r"
+                    else PlannedRack.objects.get(pk=pk)
+                )
                 elevation = projection.project_rack(design, rack)
-                distributions[str(rack_id)] = elevation.power.get("distribution")
-                dist_status[str(rack_id)] = elevation.power.get("distribution_status")
                 # The rack-level summary rides along so the editor's power BAR is
                 # live too, not just the per-bank chips. Capacity is the reason:
                 # it comes from the rack's feeds -- including PLANNED ones -- and
@@ -820,7 +1232,10 @@ class DesignViewSet(NetBoxModelViewSet):
                 # page was rendered with until the next Save (user 2026-08-20).
                 power = {k: v for k, v in elevation.power.items()
                          if k not in ("distribution", "distribution_status")}
-                powers[str(rack_id)] = power
+                for key in keys:
+                    distributions[key] = elevation.power.get("distribution")
+                    dist_status[key] = elevation.power.get("distribution_status")
+                    powers[key] = power
 
             # Read-only: discard every transient placement. Must be the LAST DB
             # action in this atomic block (no ORM use is allowed after it).
@@ -831,6 +1246,507 @@ class DesignViewSet(NetBoxModelViewSet):
              "power": powers},
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["post"], url_path="preview-template")
+    def preview_template(self, request, pk=None):
+        """
+        Compute where a Template's placements would land in one or more racks,
+        and what the naming engine would call them, WITHOUT writing anything
+        (PLAN-templates.md Sec 3, D19: "server computes, client applies,
+        nothing is written until Save").
+
+        Structurally this mirrors ``recompute_distribution`` above: an
+        optional ``layout`` -- the editor's current, possibly UNSAVED
+        ``save-layout`` body -- is applied through the exact same
+        reconciliation helpers (``_reconcile_item``/``_compute_vacated_device_ids``)
+        inside a transaction, so occupancy reflects what the planner is
+        currently looking at rather than only what is committed, and the
+        whole transaction (layout AND every DesignPlacement this action would
+        otherwise build) is then ROLLED BACK. Nothing this action does is
+        visible outside the request.
+
+        ``racks`` (:class:`PreviewTemplateSerializer`) uses the NAMESPACED
+        rack keys ``models.rack_key()`` defines (D27): ``"r:<pk>"`` for a real
+        ``dcim.Rack``, ``"p:<pk>"`` for a ``PlannedRack``. A malformed key is a
+        400 naming it -- never silently skipped -- because (D28) a bare
+        integer is genuinely ambiguous: ``PlannedRack`` and ``dcim.Rack`` keep
+        separate pk sequences, so pk 74 can mean two different racks.
+
+        Exactly one of ``template`` / ``group`` is required (D14/D24, T3.6):
+
+        - ``template`` -- REPETITION. ``racks`` is every rack that should
+          get the SAME content (drag-onto-one-rack and the single-template
+          checklist dialog both collapse to this: a one-rack ``racks`` list
+          is just the N=1 case).
+        - ``group`` -- CORRESPONDENCE. ``racks`` is POSITIONAL against the
+          ``TemplateGroup``'s members in ``(order, name)`` order: member 0
+          gets ``racks[0]``, member 1 gets ``racks[1]``, etc. If ``racks``
+          is SHORTER than the member count the WHOLE request is refused
+          (400 on ``racks``, naming every unmapped member) rather than
+          stamping the mapped prefix and reporting the rest as skipped --
+          see ``PreviewTemplateSerializer.validate``'s docstring and the
+          long comment at this action's group branch for the reasoning
+          (short version: a partial-success response is exactly the shape
+          a planner skims past, believing the whole pod landed). A
+          ``racks`` list LONGER than the member count is fine -- the extra
+          entries are simply unused, mirroring an unchecked row in the
+          single-template checklist dialog.
+
+        For each (Template, rack) pair, in order:
+          1. Project it (``projection.project_rack``, already planned-rack
+             aware) and turn the result into ``stamping.compute_stamp``'s
+             ``occupied`` argument (``_occupied_from_elevation``). Real
+             devices and this design's own placements block a slot; a PEER
+             design's claim never does (D12) -- see that helper's docstring
+             for why this falls out of reusing the projection rather than
+             querying ``dcim`` a second time.
+          2. Walk the template's TOP-LEVEL placements (``parent_placement`` is
+             null -- a blade never takes a U of its own, D10) through
+             ``compute_stamp``. If ANY of them do not fit, the WHOLE rack is
+             reported under ``skipped`` and NONE of the template is placed
+             there -- matching the worked example in PLAN-templates.md Sec 3
+             ("If the devices do not fit at all, nothing is placed and the
+             rack is reported as not fitting"), even though the lower-level
+             algorithm itself can place a partial set (its own docstring).
+          3. For every item that DID fit, build an in-memory (never saved)
+             ``DesignPlacement`` and ask the naming engine
+             (``naming.generate_name``) for its name, exactly the batching the
+             plan prescribes: ``import_string`` resolves the configured
+             naming script/template ONCE per request (inside
+             ``generate_name``'s own caching-free but O(1)-import call), and
+             every device's ``_rd_pending_names`` sees every name computed so
+             far so two devices in the same request can never collide
+             (mirrors ``preview_name``'s same-session sibling handling).
+             Crucially, the naming pass counter and pending-name list are
+             SHARED ACROSS EVERY RACK this call stamps, not reset per rack --
+             stamping the same template onto three racks in one request is
+             one continuous naming pass over all of them, the same as the
+             plan's own "18 devices x 3 racks = 54 in-process calls, ONE
+             naming pass" accounting.
+          4. Blades (``parent_placement`` set) are named and reported the same
+             way but never take a slot -- they ride along under their
+             chassis's own entry as a ``"blades"`` list, addressed the same
+             way the editor's own add-a-blade payload addresses a
+             same-submit chassis: by ``target_bay_name`` against the parent.
+
+        A rack whose key does not resolve to any real/planned rack row is
+        reported under ``skipped`` with reason "rack does not exist" rather
+        than a hard error -- a stale key (the rack was deleted between the
+        editor loading and the stamp click) should not fail the whole batch.
+
+        Returns ``{"<rack key>": [{"template_placement", "device_type",
+        "position", "face", "device_role", "tenant", "name",
+        "name_collision", "label", "planning_data", "from_template",
+        "from_template_version", "blades": [...]}, ...], ...,
+        "skipped": [{"rack", "reason"}, ...],
+        "already_stamped": {"<rack key>": [{"version", "count"}, ...], ...}}``.
+        ``name_collision`` mirrors ``preview-name``'s ``exists_in_site``: a
+        warning for the editor to show, never something this action resolves
+        itself. ``from_template``/``from_template_version`` (PLAN-templates.md
+        D20) are this call's ``template`` pk and its live ``Template.version``
+        -- the client echoes both back, unchanged, as ``from_template_id``/
+        ``from_template_version`` on the matching save-layout 'add' item, so
+        the placement Save eventually writes carries provenance. This action
+        itself still writes nothing.
+
+        ``already_stamped`` (T3.6, gap 1 -- PLAN-templates.md §6 "Still
+        open": "Applying the same template twice to one rack") only carries
+        a key for a rack where THIS design already holds placements FROM
+        THIS SAME Template -- a rack with no such history, or with
+        placements from a DIFFERENT template, is simply absent, not an
+        empty list. Each entry names a distinct ``from_template_version``
+        already found there and how many placements carry it, so a
+        drifted template (stamped once, edited since, about to be stamped
+        again) shows its OLD version alongside the NEW one this call would
+        write, never silently collapsed into one count. This never blocks
+        or deduplicates anything -- a planner may legitimately want two
+        identical ToR blocks in one rack -- it only makes the prior stamp
+        VISIBLE so the decision to go ahead (or not) stays theirs.
+
+        Performs NO writes (read-only preview; requires only ``view`` on the
+        design, like ``preview-name``/``recompute-distribution``).
+
+        URL name: plugins-api:netbox_rack_design-api:design-preview-template
+        Path:     /api/plugins/rack-design/designs/<pk>/preview-template/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        body = PreviewTemplateSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        # Prefetch shape shared by a single Template and by every member of a
+        # TemplateGroup below -- kept as one queryset builder so the two
+        # modes can never drift on what they eagerly load.
+        template_qs = Template.objects.prefetch_related(
+            "placements__device_type", "placements__device_role",
+            "placements__tenant", "placements__bay_children__device_type",
+            "placements__bay_children__device_role", "placements__bay_children__tenant",
+        )
+
+        # ``template_rack_pairs``: the ordered (Template, rack key) work list
+        # this request will stamp. ``template`` mode is REPETITION -- one
+        # Template, every listed rack. ``group`` mode is CORRESPONDENCE
+        # (D14) -- ``racks`` is positional against the group's ordered
+        # members, never repeated content (PreviewTemplateSerializer's own
+        # docstring). The serializer's ``validate()`` already guarantees
+        # exactly one of the two is present.
+        if "group" in data:
+            group = TemplateGroup.objects.filter(pk=data["group"]).first()
+            if group is None:
+                return Response(
+                    {"group": ["Template group does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            members = list(template_qs.filter(group_id=group.pk).order_by("order", "name"))
+            if not members:
+                return Response(
+                    {"group": ["This group has no templates."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # T3.6 / PLAN-templates.md §6 "Still open": a group apply with
+            # FEWER target racks than members is refused OUTRIGHT, naming
+            # every member left without one, rather than silently stamping
+            # only the mapped prefix. Considered and rejected: (a) apply the
+            # mapped members and report the rest as "skipped" -- the exact
+            # per-rack "skipped" list this action already returns for a
+            # rack that doesn't fit, reused for "no rack chosen". Rejected
+            # because a per-rack skip list is easy to skim past when most
+            # rows say OK, and the failure this must design against is a
+            # planner believing the WHOLE pod landed when only part of it
+            # did -- a partial success response invites exactly that read.
+            # (b) require every member mapped before the dialog's confirm
+            # button even enables -- purely client-side, and therefore only
+            # as strong as every client that ever calls this endpoint;
+            # nothing stops a stale tab or a future caller from posting a
+            # short ``racks`` list anyway. Refusing here, at the one place
+            # every caller must pass through, makes the guarantee real
+            # rather than advisory. This is also cheaply recoverable: the
+            # planner adds/creates the missing rack(s) (D3's "Create rack"
+            # dialog) and re-applies the SAME group once every member has a
+            # target -- nothing about a 400 here destroys any state, since
+            # this action never writes anything (D19) either way.
+            if len(data["racks"]) < len(members):
+                unmapped = members[len(data["racks"]):]
+                return Response(
+                    {
+                        "racks": [
+                            "Group \"" + group.name + "\" has " + str(len(members))
+                            + " template(s) but only " + str(len(data["racks"]))
+                            + " target rack(s) were supplied. No target rack for: "
+                            + ", ".join(m.name for m in unmapped) + ".",
+                        ],
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # More racks than members is not the gap this closes -- the
+            # extra rack(s) are simply unused, exactly like an extra row a
+            # planner never checked in the single-template checklist dialog.
+            # Not `strict=True`: `racks` may legitimately be LONGER than
+            # `members` (extras simply unused, see comment above) -- zip's
+            # own shorter-wins truncation is exactly the "positional
+            # correspondence, ignore the tail" behaviour wanted here.
+            template_rack_pairs = list(zip(members, data["racks"], strict=False))
+        else:
+            template = template_qs.filter(pk=data["template"]).first()
+            if template is None:
+                return Response(
+                    {"template": ["Template does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            template_rack_pairs = [(template, key) for key in data["racks"]]
+
+        # Resolve every rack key up front (D27/D28) via the shared
+        # ``resolve_rack_from_id`` (T1.4d) -- this used to parse "r:"/"p:"
+        # inline; that parsing is now the ONE place every rack-identifying
+        # action in this file shares, so preview-template and (for instance)
+        # recompute-distribution can never drift apart on what counts as a
+        # malformed key. A key that resolves to neither shape is a hard 400,
+        # never silently coerced or skipped, because the two kinds keep
+        # SEPARATE pk sequences and a bare integer would be genuinely
+        # ambiguous.
+        resolved_racks = []
+        for template_obj, key in template_rack_pairs:
+            try:
+                _kind, _pk, rack_obj = resolve_rack_from_id(key)
+            except ValueError as exc:
+                return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+            resolved_racks.append((key, rack_obj, template_obj))
+
+        result = {}
+        skipped = []
+        # T3.6 gap 1 (PLAN-templates.md §6 "Still open": "Applying the same
+        # template twice to one rack"): keyed by rack, the placements THIS
+        # DESIGN already holds there from a PRIOR stamp of the SAME
+        # Template, grouped by the ``from_template_version`` recorded at
+        # that stamp time (not the template's live version -- a drifted
+        # template must stay visible). Never used to block or dedupe the
+        # new stamp: a planner may legitimately want two identical ToR
+        # blocks in one rack (T3.6 brief). Only made VISIBLE, so the
+        # decision stays theirs.
+        already_stamped = {}
+
+        with transaction.atomic():
+            # Optional unsaved editor state (D19): reconcile it through the
+            # SAME helpers save-layout/recompute-distribution use, so occupancy
+            # below reflects what the planner is currently looking at. Only
+            # real racks are addressable this way -- the save-layout body
+            # format (reused verbatim here) keys a rack bucket by a plain
+            # dcim.Rack pk, exactly as it does for save-layout/recompute-
+            # distribution today; a planned rack's occupancy always comes
+            # straight from this design's already-saved placements instead
+            # (there is nothing "unsaved" to reconcile for one yet, since the
+            # editor's layout format has no planned-rack bucket of its own --
+            # a separate task, per PLAN-templates.md D27's touchpoint list).
+            layout = data.get("layout")
+            if layout:
+                errors = []
+                desired_placement_ids = set()
+                self._made_db_change = False
+                self._batch_vacated_device_ids = self._compute_vacated_device_ids(layout)
+                self._batch = self._collect_batch_cache(layout)
+                for rack_data in layout["racks"]:
+                    # This nested "layout" bucket is the SAME save-layout
+                    # rack format, which now accepts a bare int or "r:<pk>"
+                    # (T1.4d) -- but this reconciliation pass is best-effort
+                    # preview state, not a validated request body, so a
+                    # value this preview can't place (malformed, or "p:<pk>"
+                    # -- there is no unsaved-layout bucket for a planned
+                    # rack yet) is treated exactly like an unknown pk: skip
+                    # it, never a 500 or a 400 out of an optional field.
+                    try:
+                        rack_id = parse_real_rack_id(rack_data["rack_id"])
+                    except ValueError:
+                        rack_id = None
+                    rack = Rack.objects.filter(pk=rack_id).first() if rack_id is not None else None
+                    if rack is None:
+                        continue
+                    items = []
+                    for face_key in ("front", "rear", "other"):
+                        for item in rack_data.get(face_key, []):
+                            items.append((face_key, item))
+                    items = self._frees_first(items)
+
+                    ref_map = {}
+                    for face_key, item in items:
+                        try:
+                            with transaction.atomic():
+                                placement = self._reconcile_item(
+                                    design, rack, face_key, item, errors,
+                                    desired_placement_ids,
+                                )
+                        except Exception:  # noqa: BLE001 - preview must never 500
+                            logger.debug(
+                                "preview_template: layout item skipped rack=%s "
+                                "item=%r", rack_id, item, exc_info=True,
+                            )
+                            placement = None
+                        ref = item.get("ref")
+                        if ref and placement is not None:
+                            ref_map[ref] = placement
+
+                    for _, item in self._frees_first(
+                        [("bays", it) for it in rack_data.get("bays", [])]
+                    ):
+                        try:
+                            with transaction.atomic():
+                                self._reconcile_item(
+                                    design, rack, "bays", item, errors,
+                                    desired_placement_ids, ref_map=ref_map,
+                                )
+                        except Exception:  # noqa: BLE001 - preview must never 500
+                            logger.debug(
+                                "preview_template: layout bay item skipped "
+                                "rack=%s item=%r", rack_id, item, exc_info=True,
+                            )
+
+            # Naming state SHARED across every rack this request stamps (see
+            # the docstring above): one continuous pass, never reset per rack.
+            # ``design.placements.count()`` mirrors what an unsaved
+            # placement's own ``naming.placement_ordinal`` would compute for
+            # the FIRST one (``len(pks) + 1``) -- computed once here, as a
+            # plain int, rather than once per device via that helper's query.
+            counter = design.placements.count()
+            pending = []
+
+            # ``template.placements`` (the reverse FK manager) already sorts by
+            # ``TemplatePlacement.Meta.ordering`` = ("template", "order", "pk"),
+            # so filtering it in Python preserves that order without a second
+            # query or an explicit re-sort. Cached per Template pk -- ``group``
+            # mode walks several DISTINCT templates in one request (one per
+            # member), so this can no longer be computed once outside the loop
+            # the way single-``template`` mode always could.
+            top_level_cache = {}
+
+            def _top_level_placements(tmpl):
+                if tmpl.pk not in top_level_cache:
+                    top_level_cache[tmpl.pk] = [
+                        tp for tp in tmpl.placements.all() if tp.parent_placement_id is None
+                    ]
+                return top_level_cache[tmpl.pk]
+
+            for key, rack, template in resolved_racks:
+                if rack is None:
+                    skipped.append({"rack": key, "reason": "rack does not exist"})
+                    continue
+
+                is_planned = rackinfo.is_planned(rack)
+
+                # Gap 1 (T3.6): does THIS design already hold placements in
+                # THIS rack from a PRIOR stamp of THIS SAME Template? Grouped
+                # by version so a drifted template still shows every distinct
+                # version stamped, not just one. Computed even for a rack
+                # that ends up "skipped" below (doesn't fit) -- the planner
+                # deciding whether to retry with a smaller selection still
+                # benefits from knowing a copy already landed here.
+                existing_rows = (
+                    design.placements.filter(
+                        kind=DesignPlacementKindChoices.KIND_ADD,
+                        from_template_id=template.pk,
+                        **(
+                            {"target_planned_rack_id": rack.pk} if is_planned
+                            else {"target_rack_id": rack.pk}
+                        ),
+                    )
+                    .values("from_template_version")
+                    .annotate(count=Count("pk"))
+                    .order_by("from_template_version")
+                )
+                existing = [
+                    {"version": row["from_template_version"], "count": row["count"]}
+                    for row in existing_rows
+                ]
+                if existing:
+                    already_stamped[key] = existing
+
+                elevation = projection.project_rack(design, rack)
+                occupied = _occupied_from_elevation(elevation)
+                starting_unit = rackinfo.rack_starting_unit(rack)
+
+                items = [_StampItem(tp) for tp in _top_level_placements(template)]
+                placements, unplaced = stamping.compute_stamp(
+                    items, occupied, rack.u_height, starting_unit=starting_unit,
+                )
+                if unplaced:
+                    skipped.append({"rack": key, "reason": unplaced[0][1]})
+                    continue
+
+                rack_result = []
+                for stamp_item, position, face in placements:
+                    tp = stamp_item.tp
+                    placement = DesignPlacement(
+                        design=design,
+                        kind=DesignPlacementKindChoices.KIND_ADD,
+                        device_type=tp.device_type,
+                        device_role=tp.device_role,
+                        tenant=tp.tenant,
+                        target_rack=None if is_planned else rack,
+                        target_planned_rack=rack if is_planned else None,
+                        # A 0U item (stamping.compute_stamp's tray branch --
+                        # position/face both None/"") is a non-racked tray
+                        # device, same as a manual tray add's
+                        # _RackSlotTarget: no U position, no face.
+                        target_position=position,
+                        target_face=face,
+                    )
+                    counter += 1
+                    placement._rd_pending_names = pending
+                    name = naming.generate_name(placement, index=counter)
+                    pending.append(name)
+                    # M4: the placement's own site, not the design's.
+                    exists = naming.name_exists_in_site(
+                        name, placement.site, exclude_placement=None
+                    )
+
+                    entry = {
+                        "template_placement": tp.pk,
+                        "device_type": tp.device_type_id,
+                        # None for a tray (0U) item -- see the tray branch's
+                        # comment in stamping.compute_stamp. float() would
+                        # raise on None, so this must not be unconditional.
+                        "position": None if position is None else float(position),
+                        "face": face,
+                        "device_role": tp.device_role_id,
+                        "tenant": tp.tenant_id,
+                        "name": name,
+                        "name_collision": exists,
+                        "label": tp.label,
+                        # D8: a template placement stores everything an "add"
+                        # placement carries except rack/position/power,
+                        # including the deployment's config-declared planning
+                        # fields (planning_fields.py). Without this the stamped
+                        # tile silently loses them -- previously omitted here.
+                        "planning_data": tp.planning_data,
+                        # Provenance (D20): which Template, and which
+                        # Template.version, this item was computed from -- the
+                        # editor echoes both back verbatim as
+                        # from_template_id/from_template_version on the
+                        # matching save-layout 'add' item, so the resulting
+                        # DesignPlacement can answer "which racks use the
+                        # standard ToR?" and later warn that the template has
+                        # since changed (from_template_version vs. the live
+                        # Template.version). Read off ``template`` itself,
+                        # not ``tp`` -- ``tp.template_id`` is the same value,
+                        # but the version belongs to the Template, not the
+                        # per-device TemplatePlacement row.
+                        "from_template": template.pk,
+                        "from_template_version": template.version,
+                    }
+
+                    blades = []
+                    for blade in tp.bay_children.all():
+                        blade_placement = DesignPlacement(
+                            design=design,
+                            kind=DesignPlacementKindChoices.KIND_ADD,
+                            device_type=blade.device_type,
+                            device_role=blade.device_role,
+                            tenant=blade.tenant,
+                            target_rack=None if is_planned else rack,
+                            target_planned_rack=rack if is_planned else None,
+                        )
+                        counter += 1
+                        blade_placement._rd_pending_names = pending
+                        blade_name = naming.generate_name(blade_placement, index=counter)
+                        pending.append(blade_name)
+                        # M4: the placement's own site, not the design's.
+                        blade_exists = naming.name_exists_in_site(
+                            blade_name, blade_placement.site, exclude_placement=None
+                        )
+                        blades.append({
+                            "template_placement": blade.pk,
+                            "device_type": blade.device_type_id,
+                            "device_role": blade.device_role_id,
+                            "tenant": blade.tenant_id,
+                            "target_bay_name": blade.target_bay_name,
+                            "name": blade_name,
+                            "name_collision": blade_exists,
+                            "label": blade.label,
+                            "planning_data": blade.planning_data,
+                            # Same provenance pair as the top-level entry
+                            # above -- a blade is stamped from the same
+                            # Template, at the same version.
+                            "from_template": template.pk,
+                            "from_template_version": template.version,
+                        })
+                    if blades:
+                        entry["blades"] = blades
+
+                    rack_result.append(entry)
+
+                result[key] = rack_result
+
+            # Read-only: discard the layout replay AND every in-memory
+            # DesignPlacement built above (none of them were ever .save()d, so
+            # there is nothing of ours to discard beyond the layout replay --
+            # this rollback exists for THAT). Must be the LAST DB action in
+            # this atomic block.
+            transaction.set_rollback(True)
+
+        result["skipped"] = skipped
+        result["already_stamped"] = already_stamped
+        return Response(result, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="add-rack")
     def add_rack(self, request, pk=None):
@@ -863,26 +1779,245 @@ class DesignViewSet(NetBoxModelViewSet):
 
         body = DesignRackScopeSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        rack_id = body.validated_data["rack_id"]
+        try:
+            rack_pk = parse_real_rack_id(body.validated_data["rack_id"])
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-        rack = Rack.objects.filter(pk=rack_id).first()
+        rack = Rack.objects.filter(pk=rack_pk).first()
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Same-site rule, identical to Design.clean(): a scoped rack must belong
-        # to the design's site.
-        if rack.site_id != design.site_id:
-            return Response(
-                {"rack_id": ["This rack is not in the design's site."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # A rack of a site this design does not cover yet WIDENS it (M8, user
+        # ruling 2026-09-22): a design covers one or more sites (M1), and the
+        # editor's Add-rack panel is the only place a planner reaches for a
+        # rack -- so picking one across the hall is how a design becomes
+        # multi-site. Refusing here (as this did, mirroring Design.clean())
+        # left the editor able to work only inside the sites the design was
+        # created with, which is the same single-site world M1 replaced.
+        # Frozen designs never get here: is_frozen is checked above, so an
+        # approved plan's scope still cannot move.
+        if not design.sites.filter(pk=rack.site_id).exists():
+            design.sites.add(rack.site)
         design.racks.add(rack)
 
         rack_ids = list(design.racks.values_list("pk", flat=True))
         return Response({"rack_ids": rack_ids}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="create-planned-rack")
+    def create_planned_rack(self, request, pk=None):
+        """
+        Create one or more ``PlannedRack``\\ s (racks that do not exist in
+        DCIM yet -- PLAN-templates.md §1/D3/D6) and add them to this
+        design's greenfield scope (``design.planned_racks``). Backs the
+        editor's "Create rack" dialog (T1.5).
+
+        ``name`` supports NetBox's own bracketed pattern syntax (``R[1-4]``
+        -> ``R1``..``R4``, via ``expand_planned_rack_name_pattern`` /
+        ``utilities.forms.utils.expand_alphanumeric_pattern`` -- the same
+        helper interface creation uses); a name with no brackets still
+        creates exactly one rack, with the SAME response shape this action
+        has always returned. A malformed-but-recognized pattern (e.g.
+        ``R[9-8]``, end before start) is a clean 400, never a 500.
+
+        ``location`` is REQUIRED and must be one of the design's own site's
+        locations (mirrors the same-site rule ``add-rack``/planned-feed/
+        rack-power already enforce): D4 makes ``(location, name)`` the
+        planned rack's whole identity, exactly matching ``dcim.Rack``'s own
+        uniqueness constraint, so a location outside the design's site would
+        let Apply try to adopt or create a rack somewhere the design was
+        never scoped to touch.
+
+        ALL-OR-NOTHING (matches this plugin's existing bulk style, e.g.
+        ``PlannedRackBulkDeleteView``): if ANY expanded name already exists
+        as a ``(location, name)`` planned rack -- or any other validation
+        fails -- NOTHING in this request is created, and the response names
+        every offending name. Checked proactively rather than left to hit the
+        model's own ``UniqueConstraint``: a bare ``IntegrityError`` would
+        surface as an opaque 500 partway through the batch, not the friendly
+        "already taken" message the dialog needs, and could leave some racks
+        of the batch created and others not.
+
+        ``copy_feeds_from_rack_id`` (optional): a rack key naming an existing
+        rack in this design (real or planned) to clone feeds from, via the
+        SAME ``_copy_feeds_core`` write ``copy_feeds`` uses for the rack-
+        power dialog's "Copy from rack" -- REPLACE semantics, feed names
+        retargeted onto each new rack's own name. Every rack this request
+        creates gets its OWN copy (a rack planned earlier in this same batch
+        is never a source -- only a rack that already existed before this
+        request). Omitted or null copies no feeds, exactly as before this
+        field existed.
+
+        Refuses with a 409 on a FROZEN (approved) design, same as add-rack:
+        the design's greenfield scope is part of what was approved.
+
+        URL name: plugins-api:netbox_rack_design-api:design-create-planned-rack
+        Path:     /api/plugins/rack-design/designs/<pk>/create-planned-rack/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+
+        if design.is_frozen:
+            return _reject_frozen_design(design)
+
+        body = CreatePlannedRackSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        raw_name = body.validated_data["name"].strip()
+        u_height = body.validated_data["u_height"]
+        location_id = body.validated_data["location_id"]
+        copy_feeds_from_rack_id = body.validated_data.get("copy_feeds_from_rack_id") or None
+
+        if not raw_name:
+            return Response(
+                {"name": ["This field may not be blank."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # A name with NO brackets is untouched: exactly one name, same as
+        # every response this action has ever returned for it.
+        is_pattern = bool(re.search(ALPHANUMERIC_EXPANSION_PATTERN, raw_name))
+        try:
+            names = expand_planned_rack_name_pattern(raw_name)
+        except ValidationError as exc:
+            return Response({"name": exc.messages}, status=status.HTTP_400_BAD_REQUEST)
+        names = [n.strip() for n in names]
+        if not names or any(not n for n in names):
+            return Response(
+                {"name": ["This field may not be blank."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        location = Location.objects.filter(pk=location_id).first()
+        if location is None:
+            return Response(
+                {"location_id": ["Location does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Resolve an optional copy-feeds source ONCE, before any rack is
+        # created -- same validation shape as copy_feeds's own source lookup.
+        copy_source_kind = copy_source = None
+        if copy_feeds_from_rack_id:
+            try:
+                copy_source_kind, _copy_source_pk, copy_source = resolve_rack_from_id(
+                    copy_feeds_from_rack_id
+                )
+            except ValueError as exc:
+                return Response(
+                    {"copy_feeds_from_rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST
+                )
+            if copy_source is None:
+                return Response(
+                    {"copy_feeds_from_rack_id": ["Rack does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # ALL-OR-NOTHING collision check: every expanded name against both
+        # the DB (D4's (location, name) identity) AND the rest of this same
+        # batch (a pattern can never legitimately repeat a name -- expand_
+        # alphanumeric_pattern only would if the ranges given overlap).
+        existing_names = set(
+            PlannedRack.objects.filter(
+                location_id=location_id, name__in=names
+            ).values_list("name", flat=True)
+        )
+        seen, batch_dupes = set(), set()
+        for n in names:
+            (batch_dupes if n in seen else seen).add(n)
+        offending = sorted(existing_names | batch_dupes)
+        if offending:
+            return Response(
+                {
+                    "name": [
+                        "A planned rack with this name already exists in this "
+                        "location: " + ", ".join(offending) + "."
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Planning a rack into a site this design does not cover yet widens
+        # it, exactly as add-rack does (M8, user ruling 2026-09-22) -- the
+        # two are the same gesture, one for a rack that exists and one for a
+        # rack that does not. A frozen design is refused before this point.
+        if not design.sites.filter(pk=location.site_id).exists():
+            design.sites.add(location.site)
+
+        # Build + validate every instance before writing anything (D4's
+        # uniqueness is already proven clear above; full_clean() here catches
+        # any other model-level validation, e.g. u_height's bounds) -- so a
+        # bad row anywhere in the batch is reported without ever opening the
+        # write transaction below.
+        planned_racks = []
+        for name in names:
+            pr = PlannedRack(name=name, u_height=u_height, location=location)
+            try:
+                pr.full_clean()
+            except ValidationError as exc:
+                return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+            planned_racks.append(pr)
+
+        # Lock this design's row before attaching the new planned rack(s)
+        # (T1.5b / PLAN-templates.md §1): closes the other half of the race
+        # `DesignViewSet.perform_destroy` guards against. Without this lock,
+        # this ``design.planned_racks.add()`` and a concurrent DELETE of this
+        # same design can interleave so that Django's delete-time M2M
+        # cascade never sees this row, and the DELETE dies on Postgres's own
+        # FK constraint instead (reproduced in
+        # tests/test_planned_rack_delete.py). Taking the SAME row lock here
+        # means the two requests are strictly ordered: either this commits
+        # its attachment first (so a concurrent delete collects and removes
+        # it normally), or the design is already gone by the time this lock
+        # is granted, in which case there is nothing to attach the new
+        # planned rack to (see the DoesNotExist handling below). The whole
+        # batch -- saves, M2M attach, and every per-rack feed copy -- is ONE
+        # transaction: any failure rolls back every rack this request would
+        # otherwise have created.
+        created_entries = []
+        try:
+            with transaction.atomic():
+                design = Design.objects.select_for_update().get(pk=design.pk)
+                for pr in planned_racks:
+                    pr.save()
+                    design.planned_racks.add(pr)
+                    entry = {
+                        "name": pr.name,
+                        # Namespaced key (D27), same vocabulary as
+                        # recompute-distribution and save-layout use for
+                        # every rack reference.
+                        "rack_key": rack_key(None, pr),
+                        "planned_rack_id": pr.pk,
+                    }
+                    if copy_source is not None:
+                        entry["feeds"] = self._copy_feeds_core(
+                            design, copy_source, pr, copy_source_kind, "p"
+                        )
+                    created_entries.append(entry)
+        except Design.DoesNotExist:
+            return Response(
+                {"detail": "This design was deleted."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        first = created_entries[0]
+        response_data = {
+            "rack_key": first["rack_key"],
+            "planned_rack_id": first["planned_rack_id"],
+            "planned_rack_ids": list(
+                design.planned_racks.values_list("pk", flat=True)
+            ),
+        }
+        # A name with brackets always gets the list, even when the pattern
+        # happens to expand to exactly one name -- brackets are an explicit
+        # request for pattern mode. A plain name never gets it: same response
+        # shape this action has always returned (task brief).
+        if is_pattern:
+            response_data["planned_racks"] = created_entries
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="remove-rack")
     def remove_rack(self, request, pk=None):
@@ -917,15 +2052,21 @@ class DesignViewSet(NetBoxModelViewSet):
 
         body = DesignRackScopeSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        rack_id = body.validated_data["rack_id"]
         confirm = body.validated_data["confirm"]
-
-        rack = Rack.objects.filter(pk=rack_id).first()
+        # Both kinds of rack: a PLANNED rack must be detachable too, because
+        # deleting one is refused while any design still plans across it and
+        # the refusal tells the planner to remove it from each design's scope
+        # first -- which nothing could do (user report 2026-09-22).
+        try:
+            kind, _pk, rack = resolve_rack_from_id(body.validated_data["rack_id"])
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        is_planned = kind == "p"
 
         # Removing a rack from scope DELETES the placements targeting it
         # (below), so a frozen design must reject this before anything is
@@ -934,7 +2075,11 @@ class DesignViewSet(NetBoxModelViewSet):
             return _reject_frozen_design(design)
 
         # Placements made meaningless by the removal: strictly those targeting R.
-        affected = DesignPlacement.objects.filter(design=design, target_rack=rack)
+        # A planned rack is targeted through its own FK (models.py D27).
+        affected = DesignPlacement.objects.filter(
+            design=design,
+            **({"target_planned_rack": rack} if is_planned else {"target_rack": rack}),
+        )
 
         if affected.exists() and not confirm:
             return Response(
@@ -964,7 +2109,16 @@ class DesignViewSet(NetBoxModelViewSet):
         with transaction.atomic():
             deleted_count = affected.count()
             affected.delete()
-            design.racks.remove(rack)
+            if is_planned:
+                # Detach only: a PlannedRack is shared between designs (D3/D6)
+                # and outlives every one of them -- deleting it here would
+                # take it out from under any other design planning the same
+                # future rack. Its own delete view is where that is decided.
+                design.planned_racks.remove(rack)
+                DesignPowerFeed.objects.filter(design=design, planned_rack=rack).delete()
+                DesignRackPower.objects.filter(design=design, planned_rack=rack).delete()
+            else:
+                design.racks.remove(rack)
 
         rack_ids = list(design.racks.values_list("pk", flat=True))
         return Response(
@@ -999,39 +2153,55 @@ class DesignViewSet(NetBoxModelViewSet):
 
             body = RackPowerSerializer(data=request.data)
             body.is_valid(raise_exception=True)
-            rack_id = body.validated_data["rack_id"]
             power_config = body.validated_data.get("power_config")
+            # Accepts a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+            # (planned rack, D25/T1.8b) -- DesignRackPower.planned_rack is the
+            # ONLY source of a planned rack's power custom fields (no
+            # dcim.Rack row to hold rack.cf at all).
+            try:
+                kind, rack_pk, rack_obj = resolve_rack_from_id(body.validated_data["rack_id"])
+            except ValueError as exc:
+                return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-            rack = Rack.objects.filter(pk=rack_id).first()
-            if rack is None:
+            if rack_obj is None:
                 return Response(
                     {"rack_id": ["Rack does not exist."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            lookup = {"rack": rack_obj} if kind == "r" else {"planned_rack": rack_obj}
             rack_power, _created = DesignRackPower.objects.get_or_create(
-                design=design, rack=rack
+                design=design, **lookup
             )
             rack_power.power_config = power_config
             rack_power.save()
             logger.debug(
-                "api.rack_power: design=%s rack_id=%s %s",
-                design.pk, rack_id, "created" if _created else "updated",
+                "api.rack_power: design=%s rack_id=%s:%s %s",
+                design.pk, kind, rack_pk, "created" if _created else "updated",
             )
             return Response(
                 {"power_config": rack_power.power_config}, status=status.HTTP_200_OK
             )
 
         # GET: reopen the rack-power dialog pre-filled with the stored config.
-        rack_id = request.query_params.get("rack_id")
-        if not rack_id:
+        # Mirrors the pre-D25 real-rack behaviour exactly (T1.4d): this is a
+        # plain filter, never a "does the rack exist" check -- a rack_id
+        # naming no stored override (real, planned, or simply unknown) is
+        # indistinguishable from one with an override of {} and returns
+        # power_config=null either way. Only the POST branch above insists
+        # the rack itself exists, because it is about to create a row for it.
+        raw_rack_id = request.query_params.get("rack_id")
+        if not raw_rack_id:
             return Response(
                 {"rack_id": ["This query parameter is required."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        rack_power = DesignRackPower.objects.filter(
-            design=design, rack_id=rack_id
-        ).first()
+        try:
+            kind, rack_pk = parse_rack_id(raw_rack_id)
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+        lookup = {"rack_id": rack_pk} if kind == "r" else {"planned_rack_id": rack_pk}
+        rack_power = DesignRackPower.objects.filter(design=design, **lookup).first()
         return Response(
             {"power_config": rack_power.power_config if rack_power else None},
             status=status.HTTP_200_OK,
@@ -1067,7 +2237,10 @@ class DesignViewSet(NetBoxModelViewSet):
            "updated":  [{"placement","device","changes"}, ...],
            "removed":  [{"placement","device","status","prior_status"}, ...],
            "deleted":  [{"device","device_name","design_title"}, ...],
-           "reverted": [{"device","device_name","prior_status"}, ...]}
+           "reverted": [{"device","device_name","prior_status"}, ...],
+           "racks":    [{"planned_rack","name","location","rack","created"}, ...],
+           "feeds":    [{"planned_feed","name","power_panel","rack","existing",
+                         "feed"}, ...]}
         ``deleted``/``reverted`` (the cleanup lists) are present on BOTH
         methods: a deletion is the only irreversible step in the whole flow,
         so a dry run must show it before the button is ever pressed.
@@ -1125,35 +2298,61 @@ class DesignViewSet(NetBoxModelViewSet):
         # rack when that rack has no real ones.
         design = self.get_object()
 
-        kind = request.query_params.get("kind")
-        if kind != "rack":
+        query_kind = request.query_params.get("kind")
+        if query_kind != "rack":
             return Response(
                 {"kind": ["kind must be 'rack'."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        rack_id = request.query_params.get("rack_id")
-        rack = Rack.objects.filter(pk=rack_id).first() if rack_id else None
+        # The rack picker in the "copy from rack" dialog lists every rack in
+        # the design -- real AND planned (racksInDom() in power.js) -- so a
+        # planned rack earlier in the same design is a legitimate copy
+        # SOURCE too (D25/T1.8b). Resolves via resolve_rack_from_id rather
+        # than parse_real_rack_id so a "p:<pk>" no longer looks like an
+        # unknown rack.
+        raw_rack_id = request.query_params.get("rack_id")
+        try:
+            rack_kind, rack_pk, rack = (
+                resolve_rack_from_id(raw_rack_id) if raw_rack_id else (None, None, None)
+            )
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        feeds = [
-            _feed_dict(feed, "real")
-            for feed in PowerFeed.objects.filter(rack=rack).order_by("name")
-        ]
-        if not feeds:
+        if rack_kind == "r":
+            feeds = [
+                _feed_dict(feed, "real")
+                for feed in PowerFeed.objects.filter(rack=rack).order_by("name")
+            ]
+            if not feeds:
+                feeds = [
+                    _feed_dict(feed, "planned")
+                    for feed in DesignPowerFeed.objects.filter(
+                        design=design, rack=rack).order_by("name")
+                ]
+            custom_fields = dict(rack.cf)
+        else:
+            # A planned rack has no dcim.Rack row at all: no real feeds are
+            # possible, and its custom fields live ONLY in DesignRackPower
+            # (merged across the same baseline chain the distribution engine
+            # itself reads -- effective_custom_fields).
             feeds = [
                 _feed_dict(feed, "planned")
                 for feed in DesignPowerFeed.objects.filter(
-                    design=design, rack=rack).order_by("name")
+                    design=design, planned_rack=rack).order_by("name")
             ]
+            custom_fields, _conflict = DesignRackPower.effective_custom_fields(design, rack)
+
         logger.debug(
-            "api.power_source: kind=rack rack_id=%s feeds=%d", rack_id, len(feeds))
+            "api.power_source: kind=rack rack_id=%s:%s feeds=%d",
+            rack_kind, rack_pk, len(feeds))
         return Response(
-            {"custom_fields": dict(rack.cf), "feeds": feeds},
+            {"custom_fields": custom_fields, "feeds": feeds},
             status=status.HTTP_200_OK,
         )
 
@@ -1205,27 +2404,78 @@ class DesignViewSet(NetBoxModelViewSet):
         body.is_valid(raise_exception=True)
         data = body.validated_data
 
-        target = Rack.objects.filter(pk=data["rack_id"]).first()
+        # Both ids accept a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+        # (planned rack, D25/T1.8b) -- the TARGET is normally the greenfield
+        # rack, but the SOURCE may be planned too: a rack planned earlier in
+        # the same design is a legitimate donor for one planned later
+        # (mirrors the existing "no real feeds -> fall back to this design's
+        # planned feeds" case below, just for a source that never has real
+        # feeds to begin with).
+        try:
+            target_kind, target_pk, target = resolve_rack_from_id(data["rack_id"])
+            source_kind, source_pk, source = resolve_rack_from_id(data["source_rack_id"])
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+
         if target is None:
             return Response({"rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        # Same-site rule, mirroring add-rack / rack-power / planned-feed.
-        if target.site_id != design.site_id:
-            return Response({"rack_id": ["This rack is not in the design's site."]},
+        # Same-site rule, mirroring add-rack / rack-power / planned-feed (M3).
+        # PlannedRack has no site FK of its own -- ``site`` is a property that
+        # derefs through ``location`` (mirrors DesignPowerFeed.clean()).
+        target_site_id = target.site_id if target_kind == "r" else target.location.site_id
+        if not design.sites.filter(pk=target_site_id).exists():
+            return Response({"rack_id": ["This rack is not in one of the design's sites."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        source = Rack.objects.filter(pk=data["source_rack_id"]).first()
         if source is None:
             return Response({"source_rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        if source.pk == target.pk:
+        # pk alone is not enough (D28): a real rack and a planned rack keep
+        # SEPARATE pk sequences, so pk 5 of each is a different rack.
+        if source_kind == target_kind and source.pk == target.pk:
             return Response(
                 {"source_rack_id": ["Source and target rack must differ."]},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        sources = list(PowerFeed.objects.filter(rack=source).order_by("name"))
-        if not sources:
+        result = self._copy_feeds_core(design, source, target, source_kind, target_kind)
+        logger.debug(
+            "api.copy_feeds: design=%s %s -> %s created=%d updated=%d deleted=%d "
+            "unbound=%d",
+            design.pk, source.name, target.name, result["created"], result["updated"],
+            result["deleted"], result["unbound"])
+        return Response(result, status=status.HTTP_200_OK)
+
+    def _copy_feeds_core(self, design, source, target, source_kind, target_kind):
+        """
+        The write itself, shared by ``copy_feeds`` above (its "copy from
+        rack" button) and ``create_planned_rack``'s optional copy-feeds-on-
+        create: clone ``source``'s feeds onto ``target`` as PLANNED feeds,
+        REPLACING whatever ``target`` was already planned to have. See
+        ``copy_feeds``'s own docstring for the full behaviour (REPLACE
+        semantics, name-retargeting, real-vs-planned source fallback) -- this
+        is exactly that method's body, factored out so a second caller never
+        has to re-derive it by hand.
+
+        Callers own their own validation (existence, same-site, frozen
+        design, source != target) and their own transaction; this only
+        writes ``DesignPowerFeed`` rows for the one rack pair given.
+
+        Returns the same shape ``copy_feeds`` responds with:
+        ``{"feeds", "created", "updated", "deleted", "unbound"}``.
+        """
+        if source_kind == "r":
+            sources = list(PowerFeed.objects.filter(rack=source).order_by("name"))
+            if not sources:
+                sources = list(DesignPowerFeed.objects.filter(
+                    design=design, rack=source).order_by("name"))
+        else:
+            # A planned rack has no dcim.Rack row, so no real PowerFeed can
+            # ever exist for it -- its only feeds are this design's own
+            # planned ones.
             sources = list(DesignPowerFeed.objects.filter(
-                design=design, rack=source).order_by("name"))
+                design=design, planned_rack=source).order_by("name"))
+
+        target_lookup = {"rack": target} if target_kind == "r" else {"planned_rack": target}
 
         copied, created_count, updated_count = [], 0, 0
         with transaction.atomic():
@@ -1236,9 +2486,12 @@ class DesignViewSet(NetBoxModelViewSet):
                     "amperage": feed.amperage,
                     "phase": getattr(feed.phase, "value", feed.phase),
                     "supply": getattr(feed.supply, "value", feed.supply),
+                    # A copy hangs off the same panel as its source -- which is
+                    # what lets Apply create it as a real dcim.PowerFeed later.
+                    "power_panel": feed.power_panel,
                 }
                 planned, created = DesignPowerFeed.objects.get_or_create(
-                    design=design, rack=target, name=name, defaults=electricals)
+                    design=design, name=name, defaults=electricals, **target_lookup)
                 if created:
                     created_count += 1
                 else:
@@ -1257,7 +2510,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # picker than an instruction to strip this rack of its supply, and
             # the destructive reading has no undo.
             stale = DesignPowerFeed.objects.filter(
-                design=design, rack=target
+                design=design, **target_lookup
             ).exclude(pk__in=[f.pk for f in copied]) if copied else (
                 DesignPowerFeed.objects.none())
             unbound = DesignPlacement.objects.filter(
@@ -1266,21 +2519,13 @@ class DesignViewSet(NetBoxModelViewSet):
             deleted_count = stale.count()
             stale.delete()
 
-        logger.debug(
-            "api.copy_feeds: design=%s %s -> %s created=%d updated=%d deleted=%d "
-            "unbound=%d",
-            design.pk, source.name, target.name, created_count, updated_count,
-            deleted_count, unbound)
-        return Response(
-            {
-                "feeds": PlannedFeedSerializer(copied, many=True).data,
-                "created": created_count,
-                "updated": updated_count,
-                "deleted": deleted_count,
-                "unbound": unbound,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return {
+            "feeds": PlannedFeedSerializer(copied, many=True).data,
+            "created": created_count,
+            "updated": updated_count,
+            "deleted": deleted_count,
+            "unbound": unbound,
+        }
 
     @action(detail=True, methods=["get"], url_path="feeds")
     def feeds(self, request, pk=None):
@@ -1326,25 +2571,39 @@ class DesignViewSet(NetBoxModelViewSet):
             self.queryset = Design.objects.restrict(request.user, "view")
         design = self.get_object()
 
-        rack_id = request.query_params.get("rack_id")
-        if not rack_id:
+        raw_rack_id = request.query_params.get("rack_id")
+        if not raw_rack_id:
             return Response(
                 {"rack_id": ["This query parameter is required."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        logger.debug("api.feeds: design=%s rack_id=%s", design.pk, rack_id)
+        # Accepts a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+        # (planned rack, D25/T1.8b). A real dcim.PowerFeed genuinely cannot
+        # exist for a planned rack (no dcim.Rack row to hang it on), so
+        # ``real`` stays [] for one -- but ``planned`` now reads this
+        # design's (and its approved ancestors') DesignPowerFeed rows keyed
+        # by ``planned_rack`` instead of being unconditionally empty.
+        try:
+            rack_kind, rack_pk = parse_rack_id(raw_rack_id)
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+        logger.debug("api.feeds: design=%s rack_id=%s:%s", design.pk, rack_kind, rack_pk)
 
+        # Never pass a real-rack-only rack_id=<value> filter for a planned
+        # rack, nor vice versa (D28: the two tables keep separate pk
+        # sequences) -- own_lookup picks the column that matches rack_kind.
+        own_lookup = {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
         real_feeds = [
-            _feed_dict(f, "real") for f in PowerFeed.objects.filter(rack_id=rack_id)
-        ]
+            _feed_dict(f, "real") for f in PowerFeed.objects.filter(rack_id=rack_pk)
+        ] if rack_kind == "r" else []
         planned_feeds = [
             _feed_dict(f, "planned")
-            for f in DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
+            for f in DesignPowerFeed.objects.filter(design=design, **own_lookup)
         ]
         chain, _refusal = projection.resolve_baseline_chain(design)
         for ancestor in chain:
             for f in DesignPowerFeed.objects.filter(
-                design=ancestor, rack_id=rack_id
+                design=ancestor, **own_lookup
             ):
                 entry = _feed_dict(f, "planned")
                 entry["inherited"] = True
@@ -1352,8 +2611,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 entry["design_name"] = str(ancestor)
                 planned_feeds.append(entry)
         logger.debug(
-            "api.feeds: design=%s rack_id=%s real=%d planned=%d",
-            design.pk, rack_id, len(real_feeds), len(planned_feeds),
+            "api.feeds: design=%s rack_id=%s:%s real=%d planned=%d",
+            design.pk, rack_kind, rack_pk, len(real_feeds), len(planned_feeds),
         )
         return Response(
             {"real": real_feeds, "planned": planned_feeds}, status=status.HTTP_200_OK
@@ -1396,35 +2655,44 @@ class DesignViewSet(NetBoxModelViewSet):
             body = PlannedFeedUpsertSerializer(data=request.data)
             body.is_valid(raise_exception=True)
             data = body.validated_data
-            rack_id = data["rack_id"]
+            # Accepts a legacy bare int, "r:<pk>" (real rack) or "p:<pk>"
+            # (planned rack, D25/T1.8b): DesignPowerFeed.planned_rack is
+            # exactly the greenfield case this dialog flow exists for.
+            try:
+                rack_kind, rack_pk, rack = resolve_rack_from_id(data["rack_id"])
+            except ValueError as exc:
+                return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-            rack = Rack.objects.filter(pk=rack_id).first()
             if rack is None:
                 return Response(
                     {"rack_id": ["Rack does not exist."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            # Same-site rule, mirroring add-rack/rack_power: a planned feed can
-            # only be defined for a rack in the design's own site.
-            if rack.site_id != design.site_id:
+            # Same-site rule, mirroring add-rack/rack_power (M3): a planned
+            # feed can only be defined for a rack in one of the design's
+            # sites. PlannedRack has no site FK of its own -- ``site`` is a
+            # property that derefs through ``location``.
+            rack_site_id = rack.site_id if rack_kind == "r" else rack.location.site_id
+            if not design.sites.filter(pk=rack_site_id).exists():
                 return Response(
-                    {"rack_id": ["This rack is not in the design's site."]},
+                    {"rack_id": ["This rack is not in one of the design's sites."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             electricals = {
                 k: data[k] for k in ("voltage", "amperage", "phase", "supply") if k in data
             }
+            target_lookup = {"rack": rack} if rack_kind == "r" else {"planned_rack": rack}
             feed, created = DesignPowerFeed.objects.get_or_create(
-                design=design, rack=rack, name=data["name"], defaults=electricals
+                design=design, name=data["name"], defaults=electricals, **target_lookup
             )
             if not created and electricals:
                 for field_name, value in electricals.items():
                     setattr(feed, field_name, value)
                 feed.save()
             logger.debug(
-                "api.planned_feed: design=%s rack_id=%s name=%s %s",
-                design.pk, rack_id, data["name"], "created" if created else "updated",
+                "api.planned_feed: design=%s rack_id=%s:%s name=%s %s",
+                design.pk, rack_kind, rack_pk, data["name"], "created" if created else "updated",
             )
             return Response(PlannedFeedSerializer(feed).data, status=status.HTTP_200_OK)
 
@@ -1436,8 +2704,15 @@ class DesignViewSet(NetBoxModelViewSet):
             if data.get("feed_id") is not None:
                 feeds_qs = feeds_qs.filter(pk=data["feed_id"])
             else:
-                feeds_qs = feeds_qs.filter(
-                    rack_id=data["rack_id"], name=data["name"])
+                # Accepts a legacy bare int, "r:<pk>" or "p:<pk>" (D25/T1.8b).
+                try:
+                    rack_kind, rack_pk = parse_rack_id(data["rack_id"])
+                except ValueError as exc:
+                    return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+                own_lookup = (
+                    {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
+                )
+                feeds_qs = feeds_qs.filter(name=data["name"], **own_lookup)
             if not feeds_qs.exists():
                 return Response(
                     {"detail": "No such planned feed in this design."},
@@ -1458,16 +2733,21 @@ class DesignViewSet(NetBoxModelViewSet):
             )
 
         # GET: list this rack's planned feeds.
-        rack_id = request.query_params.get("rack_id")
-        if not rack_id:
+        raw_rack_id = request.query_params.get("rack_id")
+        if not raw_rack_id:
             return Response(
                 {"rack_id": ["This query parameter is required."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        feeds_qs = DesignPowerFeed.objects.filter(design=design, rack_id=rack_id)
+        try:
+            rack_kind, rack_pk = parse_rack_id(raw_rack_id)
+        except ValueError as exc:
+            return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+        own_lookup = {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
+        feeds_qs = DesignPowerFeed.objects.filter(design=design, **own_lookup)
         logger.debug(
-            "api.planned_feed: design=%s rack_id=%s list count=%d",
-            design.pk, rack_id, feeds_qs.count(),
+            "api.planned_feed: design=%s rack_id=%s:%s list count=%d",
+            design.pk, rack_kind, rack_pk, feeds_qs.count(),
         )
         return Response(
             PlannedFeedSerializer(feeds_qs, many=True).data, status=status.HTTP_200_OK
@@ -1516,6 +2796,12 @@ class DesignViewSet(NetBoxModelViewSet):
         # delete the design's stale move/remove rows for those racks afterwards.
         desired_placement_ids = set()
         submitted_rack_ids = set()
+        # PlannedRack pks this submit addressed, kept in a SEPARATE set from
+        # submitted_rack_ids (T1.4e / D28): dcim.Rack and PlannedRack keep
+        # separate pk sequences, so folding the two together could make an
+        # unrelated real rack that happens to share a pk look "submitted"
+        # below.
+        submitted_planned_rack_ids = set()
         # Devices the payload explicitly mentioned, per submitted rack. This is the
         # ONLY basis on which we may delete a pre-existing move/remove placement:
         # the user must have actually addressed that device in the editor (e.g.
@@ -1535,22 +2821,54 @@ class DesignViewSet(NetBoxModelViewSet):
         # the slot they vacate (the swap / move-into-vacated case). Computed once
         # over the whole batch so cross-rack and not-yet-persisted moves are seen.
         self._batch_vacated_device_ids = self._compute_vacated_device_ids(data)
+        # Request-scoped point-lookup cache (see _collect_batch_cache) so
+        # _reconcile_item's per-item helpers read a dict instead of issuing
+        # their own Device/DeviceType/DesignPlacement SELECT per item.
+        self._batch = self._collect_batch_cache(data)
+
+        # Parse every rack id BEFORE any reconciliation starts (T1.4d), for the
+        # same reason recompute-distribution does: a malformed key discovered
+        # mid-loop would otherwise force an early ``return`` out of the
+        # ``with transaction.atomic()`` below, which -- unlike the read-only
+        # recompute path -- would COMMIT whatever had already been written for
+        # earlier racks in this same submit instead of rejecting the whole
+        # request. ``rack_id`` accepts a legacy bare integer, ``"r:<pk>"``
+        # (real rack), or ``"p:<pk>"`` (planned rack) -- only ``parse_rack_id``
+        # (kind + pk, no DB lookup) runs here, so a malformed key still fails
+        # fast without touching the database.
+        try:
+            parsed_rack_ids = [
+                (rack_data, *parse_rack_id(rack_data["rack_id"]))
+                for rack_data in data["racks"]
+            ]
+        except ValueError as exc:
+            return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             with transaction.atomic():
-                for rack_data in data["racks"]:
-                    rack_id = rack_data["rack_id"]
-                    submitted_rack_ids.add(rack_id)
-                    try:
-                        rack = Rack.objects.get(pk=rack_id)
-                    except Rack.DoesNotExist:
-                        errors.append({
-                            "rack_id": rack_id,
-                            "u_position": None,
-                            "device_id": None,
-                            "detail": "Rack does not exist.",
-                        })
-                        continue
+                for rack_data, kind, rack_pk in parsed_rack_ids:
+                    if kind == "p":
+                        rack = PlannedRack.objects.filter(pk=rack_pk).first()
+                        if rack is None:
+                            errors.append({
+                                "rack_id": rack_data["rack_id"],
+                                "u_position": None,
+                                "device_id": None,
+                                "detail": "Rack does not exist.",
+                            })
+                            continue
+                        submitted_planned_rack_ids.add(rack_pk)
+                    else:
+                        rack = Rack.objects.filter(pk=rack_pk).first()
+                        if rack is None:
+                            errors.append({
+                                "rack_id": rack_data["rack_id"],
+                                "u_position": None,
+                                "device_id": None,
+                                "detail": "Rack does not exist.",
+                            })
+                            continue
+                        submitted_rack_ids.add(rack_pk)
 
                     items = []
                     for face_key in ("front", "rear", "other"):
@@ -1609,13 +2927,24 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
                 deleted_any = False
                 for p in stale:
-                    rack_id = p.target_rack_id or (
-                        p.device.rack_id if p.device_id else None
-                    )
+                    # A planned-rack move/remove is scoped against
+                    # submitted_planned_rack_ids, kept separate from the real
+                    # rack set for the same D28 reason it is tracked
+                    # separately above. A real device can never be "at rest"
+                    # in a rack that does not exist yet, so a remove's
+                    # fallback to the device's own (real) rack never applies
+                    # here.
+                    if p.target_planned_rack_id:
+                        rack_submitted = p.target_planned_rack_id in submitted_planned_rack_ids
+                    else:
+                        rack_id = p.target_rack_id or (
+                            p.device.rack_id if p.device_id else None
+                        )
+                        rack_submitted = rack_id in submitted_rack_ids
                     # Require BOTH: the placement's rack was submitted AND its
                     # device was explicitly named in the payload for that submit.
                     if (
-                        rack_id in submitted_rack_ids
+                        rack_submitted
                         and p.device_id is not None
                         and p.device_id in submitted_device_ids
                     ):
@@ -1675,6 +3004,7 @@ class DesignViewSet(NetBoxModelViewSet):
             placement.proposed_name or "",
             placement.power_config,
             placement.planning_data,
+            placement.preferred_feed_legs,
             placement.real_power_feed_id,
             placement.planned_power_feed_id,
             placement.power_source_device_id,
@@ -1701,6 +3031,58 @@ class DesignViewSet(NetBoxModelViewSet):
         they arrived in.
         """
         return sorted(items, key=lambda pair: 0 if pair[1].get("cancel") else 1)
+
+    @staticmethod
+    def _collect_batch_cache(data):
+        """
+        Pre-load every Device / DeviceType / DesignPlacement the payload's
+        items will look up by pk, so _reconcile_item's per-item helpers hit a
+        dict instead of issuing their own point SELECT for each item (profile:
+        design 835's 14-item recompute-distribution issued 34 dcim_device and
+        28 designplacement queries from these lookups alone).
+
+        Only pks of rows that exist BEFORE the loop starts are safe to batch
+        here. A placement this same submit CREATES (a brand-new "add") is
+        added to the cache at creation time in _reconcile_item, so a later
+        item that references it by pk still hits the cache. The "existing
+        placement for (design, rack, device)" lookup in _reconcile_item is
+        deliberately NOT served from here -- it must see rows the loop itself
+        creates/deletes as it goes, which a point-in-time batch cannot
+        represent.
+
+        Returns {"devices": {pk: Device}, "device_types": {pk: DeviceType},
+        "placements": {pk: DesignPlacement}}.
+        """
+        device_ids = set()
+        device_type_ids = set()
+        placement_ids = set()
+        for rack_data in data.get("racks", []):
+            for face_key in ("front", "rear", "other", "bays"):
+                for item in rack_data.get(face_key, []):
+                    if item.get("device_id"):
+                        device_ids.add(item["device_id"])
+                    if item.get("device_type_id"):
+                        device_type_ids.add(item["device_type_id"])
+                    if item.get("placement_id"):
+                        placement_ids.add(item["placement_id"])
+                    if item.get("parent_placement_id"):
+                        placement_ids.add(item["parent_placement_id"])
+                    if item.get("power_source_device_id"):
+                        device_ids.add(item["power_source_device_id"])
+        return {
+            "devices": {
+                d.pk: d for d in
+                Device.objects.filter(pk__in=device_ids).select_related("device_type")
+            } if device_ids else {},
+            "device_types": {
+                dt.pk: dt for dt in DeviceType.objects.filter(pk__in=device_type_ids)
+            } if device_type_ids else {},
+            "placements": {
+                p.pk: p for p in
+                DesignPlacement.objects.filter(pk__in=placement_ids)
+                .select_related("device_type", "device__device_type", "design")
+            } if placement_ids else {},
+        }
 
     @staticmethod
     def _compute_vacated_device_ids(data):
@@ -1740,8 +3122,19 @@ class DesignViewSet(NetBoxModelViewSet):
                     elif kind == "existing":
                         pos = item.get("u_position")
                         face = "" if face_key == "other" else (item.get("face") or "")
+                        # ``rack_data["rack_id"]`` is compared below against
+                        # ``dev.rack_id`` (a real dcim.Rack pk, an int) --
+                        # since T1.4d it may arrive as a namespaced STRING
+                        # ("r:5") or a numeric string ("5"), so it must be
+                        # normalized to the same int (or None) shape here, or
+                        # every "existing" tile would compare unequal to its
+                        # own real position and be treated as vacated.
+                        try:
+                            target_rack_id = parse_real_rack_id(rack_data.get("rack_id"))
+                        except ValueError:
+                            target_rack_id = None
                         existing_targets[device_id] = (
-                            _norm_pos(pos), face, rack_data.get("rack_id"),
+                            _norm_pos(pos), face, target_rack_id,
                         )
         # An "existing" tile that was actually relocated also vacates its slot.
         if existing_targets:
@@ -1765,8 +3158,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     candidate_ids.add(device_id)
         return candidate_ids
 
-    @staticmethod
-    def _item_is_full_depth(item):
+    def _item_is_full_depth(self, item):
         """
         True when the item's device/device_type spans the full rack depth.
 
@@ -1775,22 +3167,36 @@ class DesignViewSet(NetBoxModelViewSet):
         editor stamps it on every tile), else the device's type, else the
         referenced placement's type. Callers normalise a full-depth item's face to
         "" so the per-face copies reconcile to a single, idempotent placement.
+
+        A regular method (not @staticmethod) so it can read the request-scoped
+        ``self._batch`` cache (_collect_batch_cache) when the caller set one up,
+        falling back to the original point queries when it did not.
         """
+        batch = getattr(self, "_batch", None)
         dt_id = item.get("device_type_id")
         if dt_id:
-            dt = DeviceType.objects.filter(pk=dt_id).only("is_full_depth").first()
+            if batch is not None:
+                dt = batch["device_types"].get(dt_id)
+            else:
+                dt = DeviceType.objects.filter(pk=dt_id).only("is_full_depth").first()
             return bool(dt and dt.is_full_depth)
         dev_id = item.get("device_id")
         if dev_id:
-            dev = Device.objects.filter(pk=dev_id).select_related("device_type").first()
+            if batch is not None:
+                dev = batch["devices"].get(dev_id)
+            else:
+                dev = Device.objects.filter(pk=dev_id).select_related("device_type").first()
             return bool(dev and dev.device_type and dev.device_type.is_full_depth)
         placement_id = item.get("placement_id")
         if placement_id:
-            p = (
-                DesignPlacement.objects.filter(pk=placement_id)
-                .select_related("device_type", "device__device_type")
-                .first()
-            )
+            if batch is not None:
+                p = batch["placements"].get(placement_id)
+            else:
+                p = (
+                    DesignPlacement.objects.filter(pk=placement_id)
+                    .select_related("device_type", "device__device_type")
+                    .first()
+                )
             if p is not None:
                 dt = p.device_type or (p.device.device_type if p.device_id else None)
                 return bool(dt and dt.is_full_depth)
@@ -1826,6 +3232,52 @@ class DesignViewSet(NetBoxModelViewSet):
             })
             return False, None, None
         return True, device_role_id, tenant_id
+
+    @staticmethod
+    def _resolve_template_provenance(item, rack, u_position, errors):
+        """
+        Validate the optional ``from_template_id`` / ``from_template_version``
+        on a brand-new 'add' item (PLAN-templates.md D20): which Template (and
+        which ``Template.version``) the editor's ``preview-template`` call
+        said this device would come from, echoed back on save so the
+        resulting placement can answer "which racks use the standard ToR?".
+
+        Same shape as ``_resolve_add_refs``: an unknown ``from_template_id``
+        is a 400 naming it (mirroring "Device role does not exist." /
+        "Tenant does not exist." above), never a silent null -- the brief is
+        explicit that a bad pk here must not be swallowed the way
+        ``_resolve_feed_binding``/``_resolve_power_source_device`` swallow a
+        stale id, because THOSE are best-effort convenience bindings while
+        this is the provenance record the whole feature exists to produce.
+
+        ``from_template_version`` is only meaningful alongside a resolved
+        ``from_template_id`` -- an item that sends a version with no
+        template is rejected the same way ``DesignPlacement.clean()`` would
+        (a version with nothing to be a version OF is not lesser
+        provenance, it is inconsistent data), so this stays the one place
+        that invariant is enforced before a row is even built.
+
+        Returns (ok, from_template_id, from_template_version).
+        """
+        from_template_id = item.get("from_template_id")
+        from_template_version = item.get("from_template_version")
+        if from_template_id is not None and not Template.objects.filter(pk=from_template_id).exists():
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": _norm_pos(u_position),
+                "device_id": None,
+                "detail": "Template does not exist.",
+            })
+            return False, None, None
+        if from_template_id is None and from_template_version is not None:
+            errors.append({
+                "rack_id": rack.pk,
+                "u_position": _norm_pos(u_position),
+                "device_id": None,
+                "detail": "from_template_version requires from_template_id to be set.",
+            })
+            return False, None, None
+        return True, from_template_id, from_template_version
 
     @staticmethod
     def _resolve_feed_binding(item, rack, u_position, errors):
@@ -1872,22 +3324,30 @@ class DesignViewSet(NetBoxModelViewSet):
 
         return True, real_id, planned_id
 
-    @staticmethod
-    def _resolve_power_source_device(item):
+    def _resolve_power_source_device(self, item):
         """
         Resolve the optional ``power_source_device_id`` on a PDU add item
         (docs/pdu-distribution-spec.md §6): the real PDU device this planned PDU
         inherits its custom fields from (read live off ``device.cf``). An id that
         does not resolve to a real device is skipped gracefully (logged), never a
         hard error. Returns the id to assign, or None. Absent key -> None.
+
+        A regular method (not @staticmethod) so an existence check can be
+        served from ``self._batch`` (_collect_batch_cache) when set up.
         """
         source_id = item.get("power_source_device_id")
-        if source_id and not Device.objects.filter(pk=source_id).exists():
-            logger.debug(
-                "api._reconcile_item: power_source_device_id=%s does not exist, skipping",
-                source_id,
+        if source_id:
+            batch = getattr(self, "_batch", None)
+            exists = (
+                source_id in batch["devices"] if batch is not None
+                else Device.objects.filter(pk=source_id).exists()
             )
-            return None
+            if not exists:
+                logger.debug(
+                    "api._reconcile_item: power_source_device_id=%s does not exist, skipping",
+                    source_id,
+                )
+                return None
         return source_id
 
     def _resolve_target(self, design, rack, face_key, item, ref_map, errors):
@@ -1939,9 +3399,16 @@ class DesignViewSet(NetBoxModelViewSet):
                 fail(f"Unknown parent reference {parent_ref!r} for a bay placement.")
                 return None
         elif item.get("parent_placement_id"):
-            parent_placement = DesignPlacement.objects.filter(
-                pk=item["parent_placement_id"], design=design
-            ).first()
+            parent_placement_id = item["parent_placement_id"]
+            batch = getattr(self, "_batch", None)
+            if batch is not None:
+                parent_placement = batch["placements"].get(parent_placement_id)
+                if parent_placement is not None and parent_placement.design_id != design.pk:
+                    parent_placement = None
+            else:
+                parent_placement = DesignPlacement.objects.filter(
+                    pk=parent_placement_id, design=design
+                ).first()
             if parent_placement is None:
                 fail("Parent chassis placement does not exist in this design.")
                 return None
@@ -1957,6 +3424,41 @@ class DesignViewSet(NetBoxModelViewSet):
             return None
 
         return _BayTarget(rack, target_bay, parent_placement, bay_name)
+
+    @staticmethod
+    def _at_inherited_rest(design, device, target, full_depth=False):
+        """True when ``design``'s nearest approved ancestor that moves
+        ``device`` puts it exactly at ``target`` -- the inherited slot."""
+        if device is None or not design.based_on_id or target.is_bay:
+            return False
+        try:
+            chain = design.baseline_chain()
+        except ValueError:
+            return False
+        move = (
+            DesignPlacement.objects.filter(
+                design__in=chain, device=device,
+                kind=DesignPlacementKindChoices.KIND_MOVE,
+            )
+            .order_by()
+            .select_related("design")
+        )
+        by_design = {placement.design_id: placement for placement in move}
+        for ancestor in reversed(chain):          # nearest ancestor wins
+            placement = by_design.get(ancestor.pk)
+            if placement is None:
+                continue
+            fields = target.fields
+            if (placement.target_rack_id != getattr(fields["target_rack"], "pk", None)
+                    or placement.target_planned_rack_id
+                    != getattr(fields["target_planned_rack"], "pk", None)):
+                return False
+            if _norm_pos(placement.target_position) != _norm_pos(target.u_position):
+                return False
+            if full_depth or target.u_position is None:
+                return True
+            return (placement.target_face or "") == (target.face or "")
+        return False
 
     def _reconcile_item(self, design, rack, face_key, item, errors,
                         desired_placement_ids, ref_map=None):
@@ -1994,12 +3496,21 @@ class DesignViewSet(NetBoxModelViewSet):
         # outside this design.
         foreign_placement = None
         if placement_id:
-            foreign_placement = (
-                DesignPlacement.objects.filter(pk=placement_id)
-                .exclude(design=design)
-                .select_related("design")
-                .first()
-            )
+            batch = getattr(self, "_batch", None)
+            if batch is not None:
+                candidate = batch["placements"].get(placement_id)
+                foreign_placement = (
+                    candidate
+                    if candidate is not None and candidate.design_id != design.pk
+                    else None
+                )
+            else:
+                foreign_placement = (
+                    DesignPlacement.objects.filter(pk=placement_id)
+                    .exclude(design=design)
+                    .select_related("design")
+                    .first()
+                )
 
         target = self._resolve_target(design, rack, face_key, item, ref_map, errors)
         if target is None:
@@ -2051,7 +3562,11 @@ class DesignViewSet(NetBoxModelViewSet):
         if kind == "add":
             # Brand-new catalog add: no placement to reposition, build a fresh one.
             if not placement_id and device_type_id:
-                dt = DeviceType.objects.filter(pk=device_type_id).first()
+                batch = getattr(self, "_batch", None)
+                dt = (
+                    batch["device_types"].get(device_type_id) if batch is not None
+                    else DeviceType.objects.filter(pk=device_type_id).first()
+                )
                 if dt is None:
                     errors.append({
                         "rack_id": rack.pk,
@@ -2070,12 +3585,23 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
                 if not ok:
                     return None
+                ok, from_template_id, from_template_version = self._resolve_template_provenance(
+                    item, rack, u_position, errors
+                )
+                if not ok:
+                    return None
                 new_add = DesignPlacement(
                     design=design,
                     kind=DesignPlacementKindChoices.KIND_ADD,
                     device_type=dt,
                     device_role_id=device_role_id,
                     tenant_id=tenant_id,
+                    # Where this device came from (PLAN-templates.md D20), if
+                    # the editor stamped it from a Template's preview -- an
+                    # ordinary catalog add simply omits both keys, so both
+                    # stay null.
+                    from_template_id=from_template_id,
+                    from_template_version=from_template_version,
                     **target.fields,
                     # Editor-chosen name (auto-filled from the naming engine and/or
                     # user-edited). Absent => "" (the model field is blank=True).
@@ -2088,6 +3614,11 @@ class DesignViewSet(NetBoxModelViewSet):
                     # against that schema by DesignPlacement.clean(). Absent =>
                     # None.
                     planning_data=item.get("planning_data"),
+                    # Operator override of which feed leg(s) this device's PSUs
+                    # draw from (docs/pdu-distribution-spec.md), for the power
+                    # projection only. Absent => None (engine's automatic
+                    # heuristic).
+                    preferred_feed_legs=item.get("preferred_feed_legs"),
                     # The feed this PDU binds to (docs/pdu-distribution-spec.md
                     # §6.2); at most one of the pair is set (enforced above and
                     # again by DesignPlacement.clean()).
@@ -2103,6 +3634,13 @@ class DesignViewSet(NetBoxModelViewSet):
                     new_add.full_clean()
                     new_add.save()
                     self._made_db_change = True
+                    # A later item in THIS submit may reference the new row by
+                    # placement_id (e.g. a bay item's parent_placement_id) --
+                    # the batch cache was built before this row existed, so it
+                    # is added now rather than left to miss on a cache read.
+                    batch = getattr(self, "_batch", None)
+                    if batch is not None:
+                        batch["placements"][new_add.pk] = new_add
                 except ValidationError as exc:
                     detail = "; ".join(
                         f"{k}: {' '.join(str(m) for m in v)}"
@@ -2130,11 +3668,22 @@ class DesignViewSet(NetBoxModelViewSet):
                 return new_add
             if not placement_id:
                 return None
-            add = DesignPlacement.objects.filter(
-                pk=placement_id,
-                design=design,
-                kind=DesignPlacementKindChoices.KIND_ADD,
-            ).first()
+            batch = getattr(self, "_batch", None)
+            if batch is not None:
+                candidate = batch["placements"].get(placement_id)
+                add = (
+                    candidate
+                    if candidate is not None
+                    and candidate.design_id == design.pk
+                    and candidate.kind == DesignPlacementKindChoices.KIND_ADD
+                    else None
+                )
+            else:
+                add = DesignPlacement.objects.filter(
+                    pk=placement_id,
+                    design=design,
+                    kind=DesignPlacementKindChoices.KIND_ADD,
+                ).first()
             if add is None:
                 return None
             # The user flagged this planned addition for cancellation via the
@@ -2144,6 +3693,8 @@ class DesignViewSet(NetBoxModelViewSet):
             if item.get("cancel"):
                 add.delete()
                 self._made_db_change = True
+                if batch is not None:
+                    batch["placements"].pop(placement_id, None)
                 return None
             ok, device_role_id, tenant_id = self._resolve_add_refs(
                 item, rack, u_position, errors
@@ -2173,6 +3724,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 add.power_config = item.get("power_config")
             if "planning_data" in item:
                 add.planning_data = item.get("planning_data")
+            if "preferred_feed_legs" in item:
+                add.preferred_feed_legs = item.get("preferred_feed_legs")
             if "power_source_device_id" in item:
                 add.power_source_device_id = self._resolve_power_source_device(item)
             # Only overwrite the binding when the editor actually sent one of the
@@ -2220,7 +3773,11 @@ class DesignViewSet(NetBoxModelViewSet):
 
         device = None
         if device_id:
-            device = Device.objects.filter(pk=device_id).first()
+            batch = getattr(self, "_batch", None)
+            device = (
+                batch["devices"].get(device_id) if batch is not None
+                else Device.objects.filter(pk=device_id).first()
+            )
             if device is None:
                 errors.append({
                     "rack_id": rack.pk,
@@ -2285,7 +3842,14 @@ class DesignViewSet(NetBoxModelViewSet):
             # its rear (or front) per-face copy would look "moved" and spawn a
             # spurious move placement on an untouched save.
             at_real = target.at_rest(device, full_depth)
-            if at_real:
+            # Where an approved ancestor already moved it counts as "at rest"
+            # too: the editor renders that inherited move and posts it back
+            # untouched as "existing". Comparing only against the REAL
+            # position promoted it into this design's own move, so every
+            # sibling of one parent "planned" the parent's move (false peer
+            # conflicts) and the tile took this design's title as its name
+            # prefix (found recording the tutorial, Part 14).
+            if at_real or self._at_inherited_rest(design, device, target, full_depth):
                 if existing is not None:
                     existing.delete()
                     self._made_db_change = True
@@ -2333,6 +3897,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 placement.tenant_id = move_tenant_id
             if "planning_data" in item:
                 placement.planning_data = item.get("planning_data")
+            if "preferred_feed_legs" in item:
+                placement.preferred_feed_legs = item.get("preferred_feed_legs")
             # A full-depth device occupies BOTH faces, so a client may still POST
             # one copy per face (the editor no longer does -- buildRackPayload
             # skips the opposite-face tile). Both copies reconcile to the same
@@ -2578,7 +4144,6 @@ class DesignViewSet(NetBoxModelViewSet):
 
         child = Design(
             title=title,
-            site=design.site,
             group=design.group,
             based_on=design,
             status=DesignStatusChoices.STATUS_DRAFT,
@@ -2586,6 +4151,13 @@ class DesignViewSet(NetBoxModelViewSet):
         with transaction.atomic():
             child.full_clean()
             child.save()
+            # M5: a derived design starts with the parent's own sites (a
+            # design cannot be created with zero sites -- Design.clean()
+            # enforces "at least one", M1 -- and copying the parent's is what
+            # guarantees the `based_on` "shares at least one site" check
+            # below passes for a freshly derived child). Must run after
+            # save() (M2M needs a pk), same as `racks` below.
+            child.sites.set(design.sites.all())
             # G6: seed the child's rack scope with a SNAPSHOT of the parent's
             # racks at derive time, not a live link -- a rack added to the
             # parent later does NOT retroactively appear on the child, which
@@ -2692,12 +4264,12 @@ class DesignViewSet(NetBoxModelViewSet):
                 {"based_on": ["Design does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if target.status != DesignStatusChoices.STATUS_APPROVED:
+        if not design.rebase_targets().filter(pk=target.pk).exists():
             return Response(
                 {
                     "based_on": [
-                        f"Only an approved design may be a base "
-                        f"(PLAN-design-chains.md §2.2). {target} is "
+                        f"A base must be approved, or another version of this "
+                        f"design's current parent. {target} is "
                         f"{target.get_status_display().lower()}."
                     ]
                 },
@@ -2732,6 +4304,7 @@ class DesignPlacementViewSet(NetBoxModelViewSet):
         "device_role",
         "tenant",
         "target_rack",
+        "target_planned_rack__location",
         "target_bay",
         "parent_placement",
     ).prefetch_related("tags")
@@ -2755,11 +4328,686 @@ class DesignPlacementViewSet(NetBoxModelViewSet):
         super().perform_destroy(instance)
 
 
+class PlannedRackViewSet(NetBoxModelViewSet):
+    """A rack that does not exist in DCIM yet (PLAN-templates.md D3/D6/T1.7).
+
+    Mirrors ``DesignPowerFeedViewSet`` -- an ordinary plugin ``NetBoxModel``
+    with its own list/detail API, no custom actions. Nothing here ever
+    resolves a bare integer pk against ``dcim.Rack``: DRF's own
+    ``get_object()`` scopes the lookup to THIS queryset (``PlannedRack``'s own
+    pk sequence), so a request naming planned-rack pk 74 can never reach
+    ``dcim.Rack`` pk 74 (D28) -- the two live in entirely separate tables and
+    URL namespaces (``/planned-racks/74/`` vs. core's ``/dcim/racks/74/``).
+    """
+
+    queryset = PlannedRack.objects.select_related(
+        "location__site", "realized_rack"
+    ).prefetch_related("tags")
+    serializer_class = PlannedRackSerializer
+    filterset_class = filtersets.PlannedRackFilterSet
+
+    def perform_destroy(self, instance):
+        """
+        T1.9's two deletion guards, in order. Both are FULL refusals (409),
+        not the two-step confirm ``DesignViewSet.remove_rack`` offers -- see
+        the module-level message helpers' docstrings for why a shared object
+        like this one does not get that shortcut. ``perform_destroy`` is the
+        one hook both DRF's single-object ``destroy()`` and
+        ``BulkDestroyModelMixin``'s ``bulk_destroy()`` funnel every deletion
+        through, so overriding it here covers both with one check, exactly
+        like ``DesignViewSet.perform_destroy`` above.
+
+        1. Realized (D7, decision 2): refused unconditionally, regardless of
+           whether any design still references the row -- the row's whole
+           purpose from that point on is to survive forever.
+        2. Still referenced (decision 1): refused, naming the designs, so the
+           requester can go detach it from each one first rather than the
+           delete silently destroying their placements/feeds/rack-power.
+
+        An ORPHAN, unrealized ``PlannedRack`` -- referenced by nothing --
+        falls through both checks and deletes normally; that is decision 3's
+        whole point (manual cleanup via the list view's ``orphan`` filter,
+        nothing here does it automatically).
+        """
+        if instance.is_realized:
+            exc = APIException(_planned_rack_realized_rest_message(instance))
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc
+        if not instance.is_orphan:
+            exc = APIException(_planned_rack_referenced_rest_message(instance))
+            exc.status_code = status.HTTP_409_CONFLICT
+            raise exc
+        super().perform_destroy(instance)
+
+
+class TemplateGroupViewSet(NetBoxModelViewSet):
+    """A product pod: an ordered set of ``Template``s (PLAN-templates.md §2)."""
+
+    queryset = TemplateGroup.objects.prefetch_related("tags")
+    serializer_class = TemplateGroupSerializer
+    filterset_class = filtersets.TemplateGroupFilterSet
+
+
+# --- template extraction (PLAN-templates.md Sec 4/Phase 4, D18/D32, T4.1) ----
+#
+# Two DB-side callers -- "from a design's rack" and "from a real dcim.Rack" --
+# converge on the SAME pure conversion, ``stamping.compute_anchors``: neither
+# gather function below decides anchor/order itself, they only turn a
+# Django queryset/projection into the plain duck-typed items that function
+# already defines a contract for (position, u_height, face, is_full_depth).
+# See stamping.py's own module docstring for why that split exists (a pure,
+# DB-free function is unit-testable without a test database).
+#
+# ``_ExtractedItem``/``_ExtractedChild`` carry a few extra attributes
+# (device_type/device_role/tenant/planning_data/label/children) that
+# ``compute_anchors`` itself never reads -- it only looks at the four it
+# documents -- but that ride along so the caller can build the eventual
+# ``TemplatePlacement`` rows from the SAME object ``compute_anchors`` hands
+# back in its ``(item, anchor, order)`` / ``(item, reason)`` tuples, without a
+# second id-keyed lookup.
+
+
+class _ExtractedItem:
+    def __init__(self, *, position, u_height, face, is_full_depth,
+                 device_type, device_role, tenant, planning_data, label):
+        self.position = position
+        self.u_height = u_height
+        self.face = face
+        self.is_full_depth = is_full_depth
+        self.device_type = device_type
+        self.device_role = device_role
+        self.tenant = tenant
+        self.planning_data = planning_data
+        self.label = label
+        self.children = []  # list[_ExtractedChild] -- nested blades (D10).
+
+
+def _extracted_planning(placement, device, is_add):
+    """The planning fields a template takes from one projected slot: an add's
+    own ``planning_data``; a real device's custom fields (a move's planned
+    overrides on top); nothing for a slot that is neither."""
+    if placement is not None and is_add:
+        return placement.planning_data
+    if device is not None:
+        overrides = placement.planning_data if placement is not None else None
+        return planning_fields.planning_data_from_device(device, overrides)
+    return None
+
+
+def _tray_item(device_type, role, tenant, label, planning_data):
+    """A template item for a device in the non-racked tray -- a zero-U PDU or
+    a server parked unmounted alike: it is anchored to the tray and goes back
+    there when stamped, whatever its height."""
+    if device_type is None:
+        return None, f"{label}: in the non-racked tray with no device type, skipped."
+    return _ExtractedItem(
+        position=None, u_height=device_type.u_height or 0, face="", is_full_depth=False,
+        device_type=device_type, device_role=role, tenant=tenant,
+        planning_data=planning_data, label=label,
+    ), None
+
+
+def _anchor_items(items, rack):
+    """``stamping.compute_anchors`` for the racked items -- with offsets, so
+    every device keeps its distance from its end of the rack, gaps included --
+    plus every position-less item anchored to the tray, whatever its height."""
+    racked = [it for it in items if it.position is not None]
+    tray = [it for it in items if it.position is None]
+    anchored, islands = stamping.compute_anchors(
+        racked, rack.u_height,
+        starting_unit=rackinfo.rack_starting_unit(rack),
+        desc_units=rackinfo.rack_desc_units(rack),
+        with_offsets=True,
+    )
+    anchored = list(anchored) + [(it, "tray", n, 0) for n, it in enumerate(tray)]
+    return anchored, islands
+
+
+class _ExtractedChild:
+    def __init__(self, *, device_type, device_role, tenant, planning_data, target_bay_name):
+        self.device_type = device_type
+        self.device_role = device_role
+        self.tenant = tenant
+        self.planning_data = planning_data
+        self.target_bay_name = target_bay_name
+
+
+def _fmt_u_for_warning(position):
+    """A U position for a human-readable warning: ``U1``, not ``U1.0``, but
+    ``U1.5`` intact. A small local mirror of projection.py's private
+    ``_fmt_u`` -- not imported, because that function is private to a module
+    this one already depends on for other reasons, and this is only ever
+    used inside a warning string, never compared against anything."""
+    if position == position.to_integral_value():
+        return f"U{int(position)}"
+    return f"U{position.normalize()}"
+
+
+def _island_warning(item, reason):
+    """One line naming the device an island (or full-depth face-conflict)
+    ``compute_anchors`` could not place, for the response's ``warnings``
+    list (D32: never drop one silently, never silently reattach it)."""
+    label = item.label or str(item.device_type)
+    return f"{label} ({item.device_type}) at {_fmt_u_for_warning(item.position)}: {reason}"
+
+
+def _write_template(*, name, description, u_height, group, anchored, islands):
+    """
+    Create the ``Template`` row and its ``TemplatePlacement``s from
+    ``compute_anchors``'s own output. Runs entirely inside the caller's
+    transaction -- a ``ValidationError`` from any row's ``full_clean()``
+    (e.g. a bad blade/bay combination) must roll back the whole thing, not
+    leave a half-built template behind.
+
+    NOTE (survey Sec 6): every ``TemplatePlacement`` this creates carries
+    PROTECT foreign keys to ``device_type``/``device_role``/``tenant`` --
+    extracting a template from a rack therefore blocks future deletion of
+    those DCIM rows for as long as the template exists. This is invisible at
+    extraction time; there is no code-level guard for it here (it is a
+    property of the model, not something this function can or should work
+    around), just this note for whoever next touches template deletion UX.
+
+    Returns ``(template, warnings)``.
+    """
+    template = Template(name=name, description=description, u_height=u_height, group=group)
+    template.full_clean()
+    template.save()
+
+    warnings = [_island_warning(item, reason) for item, reason in islands]
+
+    for entry in anchored:
+        item, anchor, order = entry[:3]
+        offset = entry[3] if len(entry) > 3 else 0
+        tp = TemplatePlacement(
+            template=template,
+            device_type=item.device_type,
+            device_role=item.device_role,
+            tenant=item.tenant,
+            planning_data=item.planning_data,
+            face=item.face,
+            anchor=anchor,
+            order=order,
+            offset=offset,
+            label=item.label,
+        )
+        tp.full_clean()
+        tp.save()
+        for child in item.children:
+            child_tp = TemplatePlacement(
+                template=template,
+                device_type=child.device_type,
+                device_role=child.device_role,
+                tenant=child.tenant,
+                planning_data=child.planning_data,
+                parent_placement=tp,
+                target_bay_name=child.target_bay_name,
+            )
+            child_tp.full_clean()
+            child_tp.save()
+
+    return template, warnings
+
+
+def _gather_design_rack_items(design, rack):
+    """
+    Source 1 (PLAN-templates.md D18/D32): build extraction items from what
+    ``rack`` will LOOK LIKE under ``design`` -- its PROJECTED state, not
+    merely this design's own ``kind=add`` placements. D18 read literally
+    would drop the real devices already standing in the rack, which is
+    wrong for "our standard rack": it includes what is already there.
+
+    Reuses ``projection.project_rack`` rather than re-querying
+    ``DesignPlacement`` by hand -- this is what makes baseline/inherited
+    state, apply markers, and the planned/real rack duality (D27/D28) fall
+    out for free, exactly as ``_occupied_from_elevation`` above already
+    relies on for ``preview-template``.
+
+    Occupying states only (``_OCCUPYING_SLOT_STATES``): EXISTING, ADD,
+    MOVE_IN. A vacating slot (MOVE_OUT_GHOST/REMOVE) is not part of what the
+    rack will look like and contributes nothing.
+
+    A full-depth device is emitted TWICE in the elevation (once per face,
+    ``project_rack``'s own ``_append`` helper) -- only the MOUNTED copy
+    (``opposite_face`` False) is taken here, so it becomes exactly one
+    extraction item, matching ``compute_anchors``'s own full-depth handling
+    (it treats a full-depth item as occupying both faces internally; handing
+    it two separate items would double-count it).
+
+    Chassis/blades (D10): a slot's ``bays`` list is populated by
+    ``projection.py``'s ``_attach_bays``/``_attach_planned_chassis_bays``
+    from ACTUAL ``DeviceBay``/``DeviceBayTemplate`` rows, never from
+    ``device_type.subdevice_role`` alone (D32's false-positive trap,
+    ``projection.py:2295-2299``'s own documented 2306-false-positive
+    dataset) -- consuming ``bays`` here inherits that correctness for free.
+
+    Role/tenant: ``placement.resolved_role()``/``resolved_tenant()`` when a
+    placement produced the slot (covers both a plain 'add' and a 'move'
+    override correctly), else the real device's own ``role``/``tenant`` for
+    a plain EXISTING slot this design never touched.
+
+    ``planning_data`` (the deployment's placement fields): an 'add' slot's own
+    values; for a real device -- untouched, or moved with planned overrides --
+    its custom fields read back through each field's ``target``, the override
+    on top (``_extracted_planning``). A template placement is validated as an
+    'add' (``TemplatePlacement.clean()``).
+
+    Returns ``(items, warnings)`` -- ``items`` duck-type
+    ``stamping.compute_anchors``'s contract.
+    """
+    elevation = projection.project_rack(design, rack)
+    items = []
+    warnings = []
+
+    for slot in itertools.chain(elevation.front, elevation.rear):
+        if slot["opposite_face"]:
+            continue
+        if slot["state"] not in _OCCUPYING_SLOT_STATES:
+            continue
+        if slot["u_position"] is None:
+            continue
+
+        device_type = slot["device_type"]
+        if device_type is None:
+            # A template placement's device_type is a required (PROTECT) FK
+            # -- there is nothing to build a row from, so this slot is
+            # skipped and reported rather than crashing full_clean() later.
+            warnings.append(
+                f"Skipped a slot at {_fmt_u_for_warning(Decimal(str(slot['u_position'])))} "
+                f"with no device type."
+            )
+            continue
+
+        placement = slot.get("placement")
+        device = slot.get("device")
+        if placement is not None:
+            role = placement.resolved_role()
+            tenant = placement.resolved_tenant()
+        elif device is not None:
+            role = device.role
+            tenant = device.tenant
+        else:
+            role, tenant = None, None
+
+        planning_data = _extracted_planning(
+            placement, device, slot["state"] == projection.ProjectedSlotState.ADD)
+
+        item = _ExtractedItem(
+            position=slot["u_position"],
+            u_height=slot["u_height"],
+            face=slot["face"],
+            is_full_depth=bool(device_type.is_full_depth),
+            device_type=device_type,
+            device_role=role,
+            tenant=tenant,
+            planning_data=planning_data,
+            label=slot.get("label") or "",
+        )
+
+        for bay in slot.get("bays") or ():
+            if not bay.get("occupied"):
+                continue
+            child_type = bay.get("device_type")
+            if child_type is None:
+                continue
+            child_placement = bay.get("placement")
+            child_device = bay.get("device")
+            if child_placement is not None:
+                child_role = child_placement.resolved_role()
+                child_tenant = child_placement.resolved_tenant()
+            elif child_device is not None:
+                child_role = child_device.role
+                child_tenant = child_device.tenant
+            else:
+                child_role, child_tenant = None, None
+            child_planning_data = _extracted_planning(
+                child_placement, child_device,
+                child_placement is not None
+                and child_placement.kind == DesignPlacementKindChoices.KIND_ADD)
+            item.children.append(_ExtractedChild(
+                device_type=child_type,
+                device_role=child_role,
+                tenant=child_tenant,
+                planning_data=child_planning_data,
+                target_bay_name=bay["name"],
+            ))
+
+        items.append(item)
+
+    # The non-racked tray: a 0U device there (a PDU) travels with the
+    # template -- stamping puts every 0U item back into the target rack's tray
+    # (stamping.compute_stamp), where it binds itself to a feed.
+    for slot in elevation.non_racked:
+        if slot["state"] not in _OCCUPYING_SLOT_STATES:
+            continue
+        device_type = slot.get("device_type")
+        label = slot.get("label") or (device_type or "a device")
+        placement = slot.get("placement")
+        device = slot.get("device")
+        if placement is not None:
+            role, tenant = placement.resolved_role(), placement.resolved_tenant()
+        elif device is not None:
+            role, tenant = device.role, device.tenant
+        else:
+            role, tenant = None, None
+        item, warning = _tray_item(
+            device_type, role, tenant, label,
+            _extracted_planning(
+                placement, device, slot["state"] == projection.ProjectedSlotState.ADD),
+        )
+        if item is not None:
+            items.append(item)
+        if warning:
+            warnings.append(warning)
+
+    return items, warnings
+
+
+def _gather_real_rack_items(rack):
+    """
+    Source 2 (PLAN-templates.md D18): build extraction items from a real
+    ``dcim.Rack``'s ACTUAL devices, reading ``device.role``/``device.tenant``
+    directly, and each device's planning fields from its own custom fields
+    (``planning_fields.planning_data_from_device``).
+
+    ``rackinfo.rack_devices(rack)`` is the plugin-standard "which kind of
+    rack" chokepoint (never a bare ``rack.devices``), even though this
+    source is documented to always be a real ``dcim.Rack`` -- consistent
+    with every other reader in this codebase.
+
+    ``position__isnull=False`` is the correct "at a U" filter: core forbids
+    a child (blade) device from carrying a position or a face at all
+    (``dcim.Device.clean()``), so this filter already, structurally,
+    excludes every bay child -- no separate ``parent_bay__isnull`` guard is
+    needed here (unlike the tray query in ``projection.py``, which needs one
+    because it deliberately selects position-less rows and must not also
+    catch bay children).
+
+    Blades are found via a SECOND query keyed off the parent devices already
+    collected, not via ``device_type.subdevice_role`` (D32's false-positive
+    trap -- ``projection.py:2295-2299`` documents 2306 false positives from
+    that check alone in one real dataset): a device is only ever treated as
+    a chassis here because an ACTUAL child device's ``parent_bay`` points at
+    it, i.e. a real ``dcim.DeviceBay`` row exists and is occupied.
+
+    A child device whose own ``rack`` is THIS rack (position-less) but whose
+    ``parent_bay``'s device is NOT one of the rack-mounted devices just
+    collected has a chassis living somewhere else entirely -- core allows
+    this (unusual, generally bad data), and it cannot be represented (a
+    template's nested placement always addresses a chassis IN THE SAME
+    template). Skipped and reported rather than silently dropped or
+    synthesizing an out-of-rack parent.
+
+    Returns ``(items, warnings)``.
+    """
+    warnings = []
+
+    rack_mounted = list(
+        rackinfo.rack_devices(rack)
+        .filter(position__isnull=False)
+        .select_related("device_type", "role", "tenant")
+    )
+    rack_mounted_ids = {d.pk for d in rack_mounted}
+
+    children_by_parent = {}
+    if rack_mounted_ids:
+        for child in Device.objects.filter(
+            parent_bay__device_id__in=rack_mounted_ids
+        ).select_related("device_type", "role", "tenant", "parent_bay"):
+            children_by_parent.setdefault(child.parent_bay.device_id, []).append(child)
+
+    orphans = (
+        rackinfo.rack_devices(rack)
+        .filter(position__isnull=True, parent_bay__isnull=False)
+        .exclude(parent_bay__device_id__in=rack_mounted_ids)
+        .select_related("device_type", "parent_bay", "parent_bay__device")
+    )
+    for orphan in orphans:
+        chassis = orphan.parent_bay.device
+        warnings.append(
+            f"{orphan.name or orphan.device_type} is installed in a bay of "
+            f"{chassis} (in rack {chassis.rack}), which is not this rack -- "
+            f"its chassis cannot be represented in this template, skipped."
+        )
+
+    items = []
+    # The rack's tray: 0U devices (PDUs) travel with the template, see
+    # _gather_design_rack_items.
+    for tray_device in (
+        rackinfo.rack_devices(rack)
+        .filter(position__isnull=True, parent_bay__isnull=True)
+        .select_related("device_type", "role", "tenant")
+    ):
+        item, warning = _tray_item(
+            tray_device.device_type, tray_device.role, tray_device.tenant,
+            tray_device.name or str(tray_device.device_type),
+            planning_fields.planning_data_from_device(tray_device),
+        )
+        if item is not None:
+            items.append(item)
+        if warning:
+            warnings.append(warning)
+
+    for device in rack_mounted:
+        device_type = device.device_type
+        item = _ExtractedItem(
+            position=device.position,
+            u_height=device_type.u_height or 1,
+            face=device.face or DeviceFaceChoices.FACE_FRONT,
+            is_full_depth=bool(device_type.is_full_depth),
+            device_type=device_type,
+            device_role=device.role,
+            tenant=device.tenant,
+            planning_data=planning_fields.planning_data_from_device(device),
+            label=device.name or "",
+        )
+        for child in children_by_parent.get(device.pk, []):
+            item.children.append(_ExtractedChild(
+                device_type=child.device_type,
+                device_role=child.role,
+                tenant=child.tenant,
+                planning_data=planning_fields.planning_data_from_device(child),
+                target_bay_name=child.parent_bay.name,
+            ))
+        items.append(item)
+
+    return items, warnings
+
+
+class TemplateViewSet(NetBoxModelViewSet):
+    """A reusable rack layout with no site (PLAN-templates.md §2). Stamping
+    (Phase 3) is a separate task and is not implemented here."""
+
+    queryset = Template.objects.select_related("group").prefetch_related("tags")
+    serializer_class = TemplateSerializer
+    filterset_class = filtersets.TemplateFilterSet
+
+    @action(detail=False, methods=["post"], url_path="from-design")
+    def from_design(self, request):
+        """
+        Build a new ``Template`` by snapshotting what a DESIGN's rack will
+        LOOK LIKE once that design is realized (PLAN-templates.md Sec 4,
+        D18/D32, T4.1) -- its projected EXISTING/ADD/MOVE_IN state, not
+        merely this design's own ``kind=add`` placements: "our standard
+        rack" includes the devices already standing in it.
+
+        ``rack`` uses the namespaced key ``models.rack_key()`` defines
+        (D27), the same vocabulary ``preview-template`` speaks. A malformed
+        key, an unknown design, or an unknown rack are each a 400 naming the
+        offending field, never a 500.
+
+        Refused (400) when ``rack`` resolves to a ``PlannedRack`` (D32): a
+        planned rack has no devices by definition, so extracting from one
+        could only ever produce an empty template.
+
+        A chassis and its blades (D10) become nested ``TemplatePlacement``
+        rows (``parent_placement``/``target_bay_name``), found via ACTUAL
+        ``DeviceBay``/``DeviceBayTemplate`` rows, never
+        ``device_type.subdevice_role`` alone (D32).
+
+        Islands -- a device with dead air on both sides, touching neither
+        physical end of the rack -- cannot round-trip through anchor+order
+        (D17 stores no gaps). They are left OUT of the template and named,
+        one line each, in the response's ``warnings`` list; never silently
+        dropped without a trace and never silently reattached to an end.
+
+        Performs a WRITE (creates a ``Template`` and its
+        ``TemplatePlacement`` rows), unlike ``preview-template``. Requires
+        ``view`` on the design (reading its projection) and the ordinary
+        ``add`` permission on ``Template`` (enforced by this viewset like
+        any other create).
+
+        Returns ``{"template_id", "placement_count", "warnings": [...]}``
+        (201) or a field-keyed 400.
+
+        URL name: plugins-api:netbox_rack_design-api:template-from-design
+        Path:     /api/plugins/rack-design/templates/from-design/
+        """
+        body = ExtractTemplateFromDesignSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        design_qs = Design.objects.all()
+        if request.user.is_authenticated:
+            design_qs = design_qs.restrict(request.user, "view")
+        design = design_qs.filter(pk=data["design"]).first()
+        if design is None:
+            return Response(
+                {"design": ["Design does not exist."]}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            _kind, _pk, rack = resolve_rack_from_id(data["rack"])
+        except ValueError as exc:
+            return Response({"rack": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+        if rack is None:
+            return Response(
+                {"rack": ["Rack does not exist."]}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        # A planned rack is saved like a real one: from what the design plans
+        # in it (it used to be refused as "no devices yet", which stopped being
+        # true once planned racks could be filled).
+
+        group = None
+        group_id = data.get("group_id")
+        if group_id is not None:
+            group = TemplateGroup.objects.filter(pk=group_id).first()
+            if group is None:
+                return Response(
+                    {"group_id": ["Template group does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        items, warnings = _gather_design_rack_items(design, rack)
+        anchored, islands = _anchor_items(items, rack)
+
+        try:
+            with transaction.atomic():
+                template, island_warnings = _write_template(
+                    name=data["name"], description=data.get("description", ""),
+                    u_height=rack.u_height, group=group,
+                    anchored=anchored, islands=islands,
+                )
+        except ValidationError as exc:
+            return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+
+        warnings.extend(island_warnings)
+        return Response(
+            {
+                "template_id": template.pk,
+                "placement_count": len(anchored),
+                "warnings": warnings,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=["post"], url_path="from-rack")
+    def from_rack(self, request):
+        """
+        Build a new ``Template`` from a real ``dcim.Rack``'s ACTUAL devices
+        (PLAN-templates.md Sec 4, D18, T4.1), reading
+        ``device.role``/``device.tenant`` directly. Always a plain
+        ``dcim.Rack`` pk -- there is no namespaced-key ambiguity to resolve
+        here (a ``PlannedRack`` has no devices at all).
+
+        A chassis and its blades (D10) become nested ``TemplatePlacement``
+        rows, found via ACTUAL ``DeviceBay`` rows, never
+        ``device_type.subdevice_role`` alone (D32). Every extracted item's
+        ``planning_data`` is ``None`` -- a real device has no counterpart to
+        this plugin's config-declared placement fields at all (survey Sec
+        3); the planner fills them in afterward in the template editor.
+
+        Islands -- same treatment as ``from-design`` above: left out of the
+        template, named in the response's ``warnings``, never silently
+        dropped or reattached.
+
+        Performs a WRITE. Requires the ordinary ``add`` permission on
+        ``Template``.
+
+        Returns ``{"template_id", "placement_count", "warnings": [...]}``
+        (201) or a field-keyed 400.
+
+        URL name: plugins-api:netbox_rack_design-api:template-from-rack
+        Path:     /api/plugins/rack-design/templates/from-rack/
+        """
+        body = ExtractTemplateFromRackSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+
+        rack = Rack.objects.filter(pk=data["rack_id"]).first()
+        if rack is None:
+            return Response(
+                {"rack_id": ["Rack does not exist."]}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        group = None
+        group_id = data.get("group_id")
+        if group_id is not None:
+            group = TemplateGroup.objects.filter(pk=group_id).first()
+            if group is None:
+                return Response(
+                    {"group_id": ["Template group does not exist."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        items, warnings = _gather_real_rack_items(rack)
+        anchored, islands = _anchor_items(items, rack)
+
+        try:
+            with transaction.atomic():
+                template, island_warnings = _write_template(
+                    name=data["name"], description=data.get("description", ""),
+                    u_height=rack.u_height, group=group,
+                    anchored=anchored, islands=islands,
+                )
+        except ValidationError as exc:
+            return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+
+        warnings.extend(island_warnings)
+        return Response(
+            {
+                "template_id": template.pk,
+                "placement_count": len(anchored),
+                "warnings": warnings,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TemplatePlacementViewSet(NetBoxModelViewSet):
+    """One device within a ``Template`` (PLAN-templates.md §2, D8/D9)."""
+
+    queryset = TemplatePlacement.objects.select_related(
+        "template", "device_type", "device_role", "tenant", "parent_placement"
+    ).prefetch_related("tags")
+    serializer_class = TemplatePlacementSerializer
+    filterset_class = filtersets.TemplatePlacementFilterSet
+
+
 class DesignPowerFeedViewSet(NetBoxModelViewSet):
     """A design's PLANNED power feeds -- the REST twin of the new UI views."""
 
     queryset = DesignPowerFeed.objects.select_related(
-        "design", "rack"
+        "design", "rack", "planned_rack__location"
     ).prefetch_related("tags", "bound_placements")
     serializer_class = DesignPowerFeedSerializer
     filterset_class = filtersets.DesignPowerFeedFilterSet
@@ -3176,9 +5424,11 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
 
     Endpoints:
       GET  /api/plugins/rack-design/hidden-design-racks/?design_id=<id>
-           -> {"design_id": <id>, "hidden_rack_ids": [...]}
+           -> {"design_id": <id>, "hidden_rack_ids": [...],
+               "hidden_planned_rack_ids": [...]}
       POST /api/plugins/rack-design/hidden-design-racks/toggle/
-           body {"design_id", "rack_id"} -> hide/show one rack
+           body {"design_id", "rack_id" | "planned_rack_id"} -> hide/show one
+           rack (a planned rack hides like a real one)
       POST /api/plugins/rack-design/hidden-design-racks/show-all/
            body {"design_id"} -> clear all hidden rows for the design
     """
@@ -3187,8 +5437,15 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
 
     def _hidden_ids(self, user, design_id):
         return list(
-            HiddenDesignRack.objects.filter(user=user, design_id=design_id)
+            HiddenDesignRack.objects.filter(user=user, design_id=design_id, rack__isnull=False)
             .values_list("rack_id", flat=True)
+        )
+
+    def _hidden_planned_ids(self, user, design_id):
+        return list(
+            HiddenDesignRack.objects.filter(
+                user=user, design_id=design_id, planned_rack__isnull=False)
+            .values_list("planned_rack_id", flat=True)
         )
 
     def list(self, request):
@@ -3202,6 +5459,7 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
         return Response({
             "design_id": int(design_id),
             "hidden_rack_ids": self._hidden_ids(request.user, design_id),
+            "hidden_planned_rack_ids": self._hidden_planned_ids(request.user, design_id),
         })
 
     @action(detail=False, methods=["post"], url_path="toggle")
@@ -3216,21 +5474,29 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
         body = HiddenRackToggleSerializer(data=request.data)
         body.is_valid(raise_exception=True)
         design_id = body.validated_data["design_id"]
-        rack_id = body.validated_data["rack_id"]
+        rack_id = body.validated_data.get("rack_id")
+        planned_rack_id = body.validated_data.get("planned_rack_id")
 
         if not Design.objects.filter(pk=design_id).exists():
             return Response(
                 {"design_id": ["Design does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not Rack.objects.filter(pk=rack_id).exists():
+        if rack_id is not None and not Rack.objects.filter(pk=rack_id).exists():
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if planned_rack_id is not None and not PlannedRack.objects.filter(
+                pk=planned_rack_id).exists():
+            return Response(
+                {"planned_rack_id": ["Planned rack does not exist."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         hidden, created = HiddenDesignRack.objects.get_or_create(
-            user=request.user, design_id=design_id, rack_id=rack_id
+            user=request.user, design_id=design_id,
+            rack_id=rack_id, planned_rack_id=planned_rack_id,
         )
         if created:
             resulting = True
@@ -3242,8 +5508,10 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
         return Response({
             "design_id": design_id,
             "rack_id": rack_id,
+            "planned_rack_id": planned_rack_id,
             "hidden": resulting,
             "hidden_rack_ids": self._hidden_ids(request.user, design_id),
+            "hidden_planned_rack_ids": self._hidden_planned_ids(request.user, design_id),
         })
 
     @action(detail=False, methods=["post"], url_path="show-all")
@@ -3256,7 +5524,8 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
         HiddenDesignRack.objects.filter(
             user=request.user, design_id=design_id
         ).delete()
-        return Response({"design_id": design_id, "hidden_rack_ids": []})
+        return Response({"design_id": design_id, "hidden_rack_ids": [],
+                         "hidden_planned_rack_ids": []})
 
 
 class PlacementFieldsView(views.APIView):

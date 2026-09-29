@@ -14,8 +14,9 @@ from rest_framework import status
 from utilities.testing import APITestCase, TestCase
 
 from ..choices import DesignPlacementKindChoices
-from ..models import Design, DesignPlacement
+from ..models import DesignPlacement
 from ..projection import ProjectedSlotState, project_rack
+from .utils import make_design
 
 
 def _full_depth_type(manufacturer, model="FD Type", slug="fd-type", u_height=2):
@@ -49,7 +50,7 @@ class FullDepthProjectionTest(TestCase):
         cls.fd_type = _full_depth_type(cls.mf)
         cls.hd_type = _half_depth_type(cls.mf)
         cls.rack = Rack.objects.create(name="Rack 1", site=cls.site)
-        cls.design = Design.objects.create(title="FD design", site=cls.site)
+        cls.design = make_design(title="FD design", site=cls.site)
 
     def _fd_device(self, name, position, face="front"):
         return Device.objects.create(
@@ -198,7 +199,7 @@ class FullDepthSaveLayoutTest(APITestCase):
         cls.role = DeviceRole.objects.create(name="Role 1", slug="role-1")
         cls.fd_type = _full_depth_type(cls.mf)
         cls.rack = Rack.objects.create(name="Rack 1", site=cls.site)
-        cls.design = Design.objects.create(title="FD layout", site=cls.site)
+        cls.design = make_design(title="FD layout", site=cls.site)
         cls.device = Device.objects.create(
             name="fd-1",
             site=cls.site,

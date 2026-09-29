@@ -7,13 +7,26 @@ from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from netbox.tables import NetBoxTable, columns
 
-from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from .models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+)
 
 __all__ = (
     "DesignGroupTable",
     "DesignTable",
     "DesignPlacementTable",
     "DesignPowerFeedTable",
+    "PlannedRackTable",
+    "TemplateGroupTable",
+    "TemplateTable",
+    "TemplatePlacementTable",
     "ElevationTable",
     "ChainHealthTable",
 )
@@ -36,7 +49,9 @@ class DesignGroupTable(NetBoxTable):
 
 class DesignTable(NetBoxTable):
     title = tables.Column(linkify=True)
-    site = tables.Column(linkify=True)
+    # M9 (PLAN-multi-site.md): `Design.sites` is a M2M; ManyToManyColumn
+    # renders the comma-separated list with each Site linkified.
+    sites = columns.ManyToManyColumn(linkify_item=True)
     status = columns.ChoiceFieldColumn()
     group = tables.Column(linkify=True)
     placement_count = columns.LinkedCountColumn(
@@ -48,10 +63,10 @@ class DesignTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = Design
         fields = (
-            "pk", "id", "title", "site", "status", "version", "sequence",
+            "pk", "id", "title", "sites", "status", "version", "sequence",
             "group", "placement_count", "summary", "created", "last_updated", "actions",
         )
-        default_columns = ("title", "site", "status", "version", "sequence", "group", "placement_count")
+        default_columns = ("title", "sites", "status", "version", "sequence", "group", "placement_count")
 
 
 class ElevationTable(tables.Table):
@@ -245,6 +260,7 @@ class DesignPowerFeedTable(NetBoxTable):
     design = tables.Column(linkify=True)
     rack = tables.Column(linkify=True)
     name = tables.Column(linkify=True)
+    power_panel = tables.Column(linkify=True, verbose_name=_("Power panel"))
     phase = columns.ChoiceFieldColumn()
     supply = columns.ChoiceFieldColumn()
     derated_watts = tables.Column(
@@ -259,11 +275,88 @@ class DesignPowerFeedTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = DesignPowerFeed
         fields = (
-            "pk", "id", "design", "rack", "name", "voltage", "amperage",
+            "pk", "id", "design", "rack", "name", "power_panel", "voltage", "amperage",
             "phase", "supply", "derated_watts", "bound_count",
             "created", "last_updated", "actions",
         )
         default_columns = (
             "design", "rack", "name", "voltage", "amperage", "phase",
             "derated_watts", "bound_count",
+        )
+
+
+class PlannedRackTable(NetBoxTable):
+    """A rack that does not exist in NetBox yet (PLAN-templates.md §1)."""
+
+    name = tables.Column(linkify=True)
+    location = tables.Column(linkify=True)
+    realized_rack = tables.Column(linkify=True, verbose_name=_("Realized rack"))
+    is_realized = columns.BooleanColumn(verbose_name=_("Realized"))
+    # T1.9 decision 3: manual cleanup relies on being able to SEE which rows
+    # are dead weight from the plain list, without opening each one. Both are
+    # plain Python properties on the model (not DB-annotated), which is fine
+    # for a list this small and keeps ``PlannedRack.orphaned()``'s query logic
+    # in exactly one place rather than duplicating it as queryset annotations.
+    is_orphan = columns.BooleanColumn(verbose_name=_("Orphan"))
+    matches_existing_rack = columns.BooleanColumn(verbose_name=_("Shadows a real rack"))
+
+    class Meta(NetBoxTable.Meta):
+        model = PlannedRack
+        fields = (
+            "pk", "id", "name", "location", "u_height", "realized_rack",
+            "is_realized", "is_orphan", "matches_existing_rack",
+            "description", "comments", "created", "last_updated", "actions",
+        )
+        default_columns = (
+            "name", "location", "u_height", "realized_rack", "is_realized",
+            "is_orphan", "matches_existing_rack",
+        )
+
+
+class TemplateGroupTable(NetBoxTable):
+    name = tables.Column(linkify=True)
+
+    class Meta(NetBoxTable.Meta):
+        model = TemplateGroup
+        fields = ("pk", "id", "name", "description", "created", "last_updated", "actions")
+        default_columns = ("name", "description")
+
+
+class TemplateTable(NetBoxTable):
+    name = tables.Column(linkify=True)
+    group = tables.Column(linkify=True)
+    placement_count = columns.LinkedCountColumn(
+        viewname="plugins:netbox_rack_design:templateplacement_list",
+        url_params={"template_id": "pk"},
+        verbose_name=_("Placements"),
+    )
+
+    class Meta(NetBoxTable.Meta):
+        model = Template
+        fields = (
+            "pk", "id", "name", "group", "order", "u_height", "placement_count",
+            "description", "created", "last_updated", "actions",
+        )
+        default_columns = ("name", "group", "order", "u_height", "placement_count")
+
+
+class TemplatePlacementTable(NetBoxTable):
+    # A placement has no name of its own, so the ID links to it -- otherwise
+    # the list offered no way to its page but Edit.
+    id = tables.Column(linkify=True, verbose_name=_("ID"))
+    template = tables.Column(linkify=True)
+    device_type = tables.Column(linkify=True)
+    device_role = tables.Column(linkify=True)
+    tenant = tables.Column(linkify=True)
+    parent_placement = tables.Column(linkify=True, verbose_name=_("Parent (chassis)"))
+
+    class Meta(NetBoxTable.Meta):
+        model = TemplatePlacement
+        fields = (
+            "pk", "id", "template", "device_type", "device_role", "tenant",
+            "label", "anchor", "offset", "order", "face", "parent_placement",
+            "target_bay_name", "created", "last_updated", "actions",
+        )
+        default_columns = (
+            "id", "template", "device_type", "device_role", "label", "anchor", "offset", "order",
         )

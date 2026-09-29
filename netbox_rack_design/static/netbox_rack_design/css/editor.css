@@ -628,6 +628,13 @@
     font-size: 0.8125rem;
 }
 
+/* A rail number field (e.g. burn-in hours) collapsed to its spinner and hid
+   the value it holds; give it room for a few digits. */
+.nbx-rd-toolbar-field input[type="number"] {
+    width: 6rem;
+    min-width: 6rem;
+}
+
 /* ---- Editor shell: push/collapse tool drawer + rack workspace ----------- */
 /* A flex row. The drawer is the left column (content-sized: it grows wider as
    more sections open); the rack workspace takes the rest. When the drawer is
@@ -1613,9 +1620,17 @@
    block width (flex-grow from a 8.5rem basis) so the strip tracks the rack
    block exactly like the power bar above it -- hiding a face narrows the block,
    and the chips narrow with it instead of staying a fixed island. */
-.nbx-rd-dist-pdu {
+/* One column per feed leg; the leg's PDU blocks stack inside it so a1/b1
+   and a2/b2 sit level with each other across the two columns. */
+.nbx-rd-dist-leg {
     display: flex;
     flex: 1 1 8.5rem;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.nbx-rd-dist-pdu {
+    display: flex;
     min-width: 0;
     flex-direction: column;
     gap: 0.2rem;
@@ -1658,6 +1673,112 @@
 }
 .nbx-rd-dist-critical .nbx-rd-dist-label,
 .nbx-rd-dist-overload .nbx-rd-dist-label { color: #fff; }
+/* ---- Bank ZONE strip (hangs off each face grid's LEFT edge) ------------- */
+/* One narrow bar per PDU, split into that PDU's banks at the U boundaries the
+   distribution engine assigned -- so the segment breaks ARE the bank
+   boundaries, and you can read straight off the rack which U to drag a device
+   to for it to land on a different bank. The LEFT edge because the right one
+   is the displacement stripe's. No text: each segment is a gauge filling from
+   the floor up with the bank's load/breaker ratio, colored by state like the
+   chips above, and the numbers live in its hover tooltip. */
+.nbx-rd-bank-strip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: calc(100% + 4px);
+    display: flex;
+    gap: 2px;
+    z-index: 4;
+}
+.nbx-rd-bank-col {
+    position: relative;
+    width: 12px;                            /* = BANK_COL_W in power_heatmap.js */
+}
+/* Feed letter above the column, in the feed's chip color (see
+   .nbx-rd-feedhead-*), so the two leg columns can be told apart at a glance. */
+.nbx-rd-bank-col-label {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: help;
+}
+/* Zones ABUT -- every unit is owned by some bank, so a gap here would read as
+   "these U are unserved". Adjacent borders are what marks the boundary.
+   The background is a visible TRACK, not the page surface: the unfilled part
+   of a lightly-loaded bank still has to show that bank's extent. On white it
+   read as nothing, so the fill looked like a stub floating in space and the
+   boundaries -- the whole point of the strip -- were invisible. */
+.nbx-rd-bank-seg {
+    position: absolute;
+    left: 0;
+    right: 0;
+    overflow: hidden;
+    border: 1px solid var(--tblr-border-color-active, #9da5ae);
+    border-radius: 2px;
+    background: var(--tblr-bg-surface-secondary, #e9ecef);
+    cursor: help;
+}
+.nbx-rd-bank-fill {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--tblr-green, #2fb344);
+}
+/* PDU name written up the column from the floor of that PDU's lowest bank. */
+/* The bank's own number, pinned to the top of its zone segment. Horizontal
+   (the PDU tag below it is vertical), so the two labels never read as one
+   string, and above the fill so it stays legible on a full bank. */
+.nbx-rd-bank-no {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 1px;
+    z-index: 1;                             /* over the fill */
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 8px;
+    text-align: center;
+    color: #fff;
+    text-shadow: 0 0 2px #000, 0 0 2px #000;
+    pointer-events: none;
+}
+.nbx-rd-bank-pdu-tag {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 3px;
+    z-index: 1;                             /* over the fill */
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 10px;
+    color: #fff;
+    text-shadow: 0 0 2px #000, 0 0 2px #000;
+    pointer-events: none;
+    white-space: nowrap;
+}
+/* First bank of the NEXT PDU up the same leg column: a heavy dark rule marks
+   where one PDU's zones end and the next one's begin. */
+.nbx-rd-bank-seg.nbx-rd-bank-seg-pdu-start {
+    border-bottom: 4px solid var(--tblr-body-color, #1d273b);
+}
+.nbx-rd-bank-seg.nbx-rd-dist-warn .nbx-rd-bank-fill {
+    background: var(--tblr-yellow, #f59f00);
+}
+.nbx-rd-bank-seg.nbx-rd-dist-critical .nbx-rd-bank-fill {
+    background: var(--tblr-red, #d63939);
+}
+.nbx-rd-bank-seg.nbx-rd-dist-overload .nbx-rd-bank-fill {
+    background: #b01919;
+}
+
 .nbx-rd-dist-alarm {
     flex: 0 0 auto;                         /* never stretches with the columns */
     align-self: flex-start;
@@ -1864,4 +1985,47 @@
 }
 .nbx-rd-feed-inherited-tag {
     font-style: italic;
+}
+
+/* ---- Stamped blades (PLAN-templates.md D10/T4.2) ----------------------- */
+/* A chassis stamped from a template carries its blades right on the tile --
+   they have no unit/grid position of their own (a blade is bay-addressed),
+   so this small list is the only visible trace of them until Save. */
+.nbx-rd-stamped-blades {
+    list-style: none;
+    margin: 0.15rem 0 0;
+    padding: 0;
+    font-size: 0.72rem;
+    line-height: 1.3;
+}
+.nbx-rd-stamped-blade {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.nbx-rd-stamped-blade > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1 1 auto;
+}
+.nbx-rd-stamped-blade-remove {
+    flex: 0 0 auto;
+}
+
+
+/* The Role select, lit up when a palette drop was refused for want of a role
+   (rack.js rdFlagRoleSelect). Loud on purpose: it has to be findable at a
+   glance by someone mid-gesture. */
+.nbx-rd-needs-role {
+    outline: 3px solid var(--bs-warning, #f59f00);
+    outline-offset: 2px;
+    border-radius: 4px;
+    animation: nbx-rd-needs-role-pulse 0.65s ease-in-out 3;
+}
+@keyframes nbx-rd-needs-role-pulse {
+    0%, 100% { outline-color: var(--bs-warning, #f59f00); }
+    50% { outline-color: transparent; }
 }

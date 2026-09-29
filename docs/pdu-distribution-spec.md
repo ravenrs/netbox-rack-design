@@ -131,16 +131,30 @@ Per planned device (`check_power_consumption()`):
 1. **Skip non-consumers** — roles `{cable-management, patch-panel, pdu,
    unmanageable-pdu, rack-mount-boxes, rack-mount-kit}`; a `blade-server` with no
    bank connection.
-2. **Per power port**, read `allocated_draw`. Then:
-   - **Cabled** (`PowerPort → PowerOutlet` on a PDU **in this rack**): bank from
-     the outlet name `"<bank>/<port>"`, PDU/leg from the binding → charge to that
-     PDU+bank.
-   - **Uncabled** (planned) — and a device whose cabling leads OUT of this rack:
-     look up the device's U position in the §2.1 map for each leg → charge there.
-     A device MOVED here still carries its cabling to the source rack's PDU until
-     the design is implemented, so that cabling names a PDU this topology does not
-     contain; treating it as uncabled is what makes the draw follow the device
-     across racks instead of disappearing from both.
+2. **Per power port**, read `allocated_draw`. Then, **first check whether the
+   design is moving this device** (`moved`, §7.1 — true exactly when the
+   projected slot's state is `move_in`):
+   - **Moved** — by U position, unconditionally, **ignoring any existing
+     cabling**: look up the device's new U position in the §2.1 map for each leg
+     → charge there. Cabling is ground truth only for a device nobody is
+     touching; the moment a design relocates a device, the cable will be
+     re-run as part of implementing that design, so the old outlet says
+     nothing about where the power will actually come from. This is a general
+     rule, not just a same-rack one — it also covers the case of a device moved
+     in **from another rack**, which still carries cabling to the *source*
+     rack's PDU until the design is implemented; that cabling names a PDU this
+     topology does not even contain, so charging by U position is what makes
+     the draw follow the device across racks instead of disappearing from both.
+   - **Not moved, cabled** (`PowerPort → PowerOutlet` on a PDU **in this
+     rack**): bank from the outlet name `"<bank>/<port>"`, PDU/leg from the
+     binding → charge to that PDU+bank. This holds **even when the outlet's
+     bank disagrees with what the device's U position would imply** — real
+     cabling does not always follow the tidy U-slice split (§2.1), and
+     overriding it for an untouched device would misreport a rack nobody
+     asked to change.
+   - **Not moved, uncabled** (planned, never cabled) — look up the device's U
+     position in the §2.1 map for each leg → charge there, same as the moved
+     case above.
 3. **Active vs planned split** — status `planned` charges `planned_power`; else
    `allocated_power`. Both accumulate per bank (committed vs projected).
 4. **Redundancy is "full", never split** — a device's draw is charged **in full
@@ -410,12 +424,19 @@ for distribution *behaviour* only.
 
 ### 6.4 `DesignRackPower` (rack custom-field override)
 
-Unchanged in shape/purpose: one row per `(design, rack)`, holding the planned
+Unchanged in shape/purpose: one row per `(design, rack)` (or `(design,
+planned_rack)` — PLAN-templates.md D25/D26) holding the planned
 `custom_fields` (e.g. `power_limitation`, `pdu_location`) merged **in-memory**
-over `rack.cf` before the distribution runs (never written to `dcim.Rack`). This
-merge only matters for `distribution_mode = "script"` — a `distribution_script`
-reads it through the `planning_fields` config bridge; the builtin tier ignores
-`rack.cf` entirely. Now populated via the `planning_fields`-driven rack dialog.
+over `rack.cf` before the distribution runs (never written to `dcim.Rack`). For
+a `PlannedRack`, `rack.cf` is always `{}`, so this row is the ONLY source, not
+an override of something already there. This merge only matters for
+`distribution_mode = "script"` — a `distribution_script` reads it through the
+`planning_fields` config bridge, or directly off `rack.cf`; the builtin tier
+ignores `rack.cf` entirely. `apply_rack_power_override` (`distribution.py`)
+patches BOTH `rack.cf` and `rack.custom_field_data` with the merged result (the
+latter because `planning_fields._read_cf` prefers it), so either access
+pattern sees the same effective values, for either rack kind. Now populated via
+the `planning_fields`-driven rack dialog.
 
 **Design chains merge oldest-first** (see [Design chains](design-chains.md)).
 `DesignRackPower.effective_custom_fields(design, rack)` resolves the merge a
@@ -483,10 +504,24 @@ are resolved and uniform.
 
 `generate_distribution(elevation, *, mode=None)` builds, per rack:
 
-- **`rack`** — the planned `dcim.Rack`; the built-in/script reads `rack.u_height`,
-  `rack.cf` (the cf **value dict** — not `.custom_fields`, a manager), and
-  `rack.devices.all()` for real PDUs. Effective cf = real `rack.cf` merged with
-  `DesignRackPower` (§6.4).
+- **`rack`** — the planned rack, passed through **unchanged**: either a real
+  `dcim.Rack` or a `PlannedRack` (PLAN-templates.md D30 — a rack that does not
+  exist in NetBox yet; stamping a template into one places PDUs, so this is a
+  live path, not a theoretical one). A `distribution_script` may safely read
+  `rack.name`, `rack.u_height`, `rack.location`, `rack.site`, `rack.pk`, and
+  `rack.cf` (the cf **value dict** — not `.custom_fields`, a manager) on
+  EITHER kind — for a `PlannedRack`, `rack.cf` is always `{}` (rack-power
+  custom fields are registered against `dcim.rack`'s content type, not
+  `plannedrack`'s), so `DesignRackPower.effective_custom_fields()` merged in by
+  `apply_rack_power_override` (§6.4) is the ONLY source there, never an
+  override of something already present. `rack.devices` is NOT part of the
+  contract — a `PlannedRack` has no such manager and raises; the built-in and
+  the shipped example scripts instead discover PDUs via the `devices` list
+  below and `distribution._collect_pdus` / `rackinfo.rack_devices`, both of
+  which already degrade cleanly for a planned rack. See `distribution.py`'s
+  module docstring for the full contract, including the private-script
+  compatibility argument for why the engine passes the rack through unchanged
+  rather than via a proxy or an engine-level guard.
 - **`devices`** (`devices_from_elevation`) — planned consumers **plus planned PDU
   adds**. Each PDU entry carries:
   - `role = pdu`, `device = None` (planned) or the real device;
@@ -495,8 +530,12 @@ are resolved and uniform.
     §6.2) — uniform `{voltage, amperage, phase, supply, name, leg, source}`;
   - `custom_fields` — resolved per §6.5.3 (from `power_source_device.cf` live,
     or fallback to manual `power_config.custom_fields`, or `{}`).
-  Consumers carry identity, `u_position`/`face`, `draw_w`/`draw_known`, and
-  `power_ports` (each `allocated_draw` + outlet peer where cabled).
+  Consumers carry identity, `u_position`/`face`, `draw_w`/`draw_known`,
+  `power_ports` (each `allocated_draw` + outlet peer where cabled), and
+  **`moved`** — a boolean, true exactly when the projected slot's state is
+  `move_in`. §2.2 keys the cabled-vs-U-position decision off this flag: a
+  moved device is always attributed by its new U position, regardless of any
+  cabling it still carries.
 
 The engine never queries `dcim` for writes and never mutates its inputs.
 
@@ -595,6 +634,10 @@ planned), bank/leg, breaker, override applied, and every graceful fallback.
       `power_bank_count` = distinct banks.
 - [ ] Feed-leg comes from the **binding** (bound feed), not device-name parsing;
       redundancy falls out of two bindings.
+- [ ] A device the design **moves** (`moved` is true) is attributed by its new
+      U position, ignoring any cabling it still carries — including a device
+      moved in from another rack. A device that is **not** moved keeps
+      cabling-based attribution even where it disagrees with its U position.
 - [ ] Per-bank `max_power = pdu_input_draw / bank_count`; `allocated > max` →
       `overload` + rack alarm + warning; active vs planned tracked separately.
 - [ ] `distribution_mode = "none"` (default) reproduces today's per-device

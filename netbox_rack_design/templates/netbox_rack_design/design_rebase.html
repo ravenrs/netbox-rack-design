@@ -21,8 +21,10 @@ Context:
       <p>
         {% blocktrans trimmed with title=object %}
           Re-point <strong>{{ title }}</strong>'s baseline at a different
-          approved design. Only an approved design may be chosen, and a
-          change that would create a cycle in the lineage is rejected.
+          design: an approved one, or a new version of the plan it is based
+          on (even while that version is still a draft), so the old version
+          can be released. A change that would create a cycle in the lineage
+          is rejected.
         {% endblocktrans %}
       </p>
       <form method="post">

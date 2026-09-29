@@ -37,6 +37,58 @@ the plugin config key ``distribution_mode`` (read via ``get_plugin_config``):
     that differs from the built-in (direction, ceilings, PSU schemes) -- never
     for feed *data*, which always comes from the binding.
 
+The ``rack`` a script receives (PLAN-templates.md D30): the planned world
+includes racks that do not exist in NetBox yet (:class:`~netbox_rack_design.
+models.PlannedRack`, projected the moment a template is stamped into one --
+that is a live path, not a theoretical one, since stamping places PDUs and
+``devices`` becomes non-empty for real). ``rack`` is EITHER a real
+``dcim.Rack`` OR a ``PlannedRack``, passed through **unchanged** -- the engine
+does not wrap it in a proxy, and does not skip script mode for a planned rack
+(skipping would silently blank out the heatmap for the exact case D30 calls
+out: a greenfield rack whose PDUs were just stamped in from a template). A
+script's own device/PDU discovery should go through the shared helpers this
+module and :mod:`netbox_rack_design.rackinfo` already provide
+(:func:`devices_from_elevation`'s ``devices`` list, :func:`_collect_pdus`,
+:func:`rackinfo.rack_devices`) -- those are already planned-rack-safe, which is
+exactly how the shipped ``distribution_example.py`` /
+``distribution_advanced_example.py`` work unchanged for both rack kinds today.
+
+**The contract for whatever a script reads directly off ``rack`` itself:**
+
+* Safe on both kinds: ``rack.name``, ``rack.u_height``, ``rack.location``,
+  ``rack.site``, ``rack.pk``.
+* Safe on both kinds, but note the difference: ``rack.cf`` -- for a real rack
+  this is its stored custom-field values; for a ``PlannedRack`` it is ALWAYS
+  ``{}``, because rack-power custom fields are registered against
+  ``dcim.rack``'s content type, not ``plannedrack``'s. Read it anyway (never
+  hardcode a branch on rack kind) -- :func:`apply_rack_power_override` merges
+  :meth:`~netbox_rack_design.models.DesignRackPower.effective_custom_fields`
+  over it (and over ``rack.custom_field_data``, the same generic path
+  ``planning_fields.read_planning_fields`` reads) BEFORE the script runs, in
+  "script" mode only, so the merged value is what a script sees either way --
+  this is the ONLY source of ``power_limitation``/``pdu_location`` for a
+  planned rack, never an override of something already there.
+* NOT part of the contract, and will raise: ``rack.devices`` (and any other
+  ``dcim.Rack``-only manager/relation). ``PlannedRack`` has no such attribute
+  at all -- it has no ``dcim.Rack`` row for one to point at. A script that
+  needs "every device/PDU already in this rack" should read the ``devices``
+  list this module hands it, or call :func:`rackinfo.rack_devices` (which
+  degrades to an empty, chainable queryset for a planned rack, matching what
+  a freshly-stamped greenfield rack actually has).
+* A script that must branch on rack kind explicitly (rather than just reading
+  the safe attributes above) can call
+  :func:`netbox_rack_design.rackinfo.is_planned`.
+
+A raising script is caught by :func:`generate_distribution_status` and
+surfaced as ``state: "failed"`` with the exception type/message -- loud, never
+silent -- but the message will name whatever attribute the script actually
+touched, not "this rack is planned", so this contract is what turns that into
+an actionable fix rather than a support ticket. This also governs a
+deployment's own PRIVATE ``distribution_script``, which cannot be edited from
+here: a script written only against the safe attributes above, or through the
+shared helpers, keeps working unchanged for a planned rack with no code
+change on the deployment's side.
+
 The ``devices`` the script receives are the planned consumers built by
 :func:`devices_from_elevation` -- the same planned world the projection already
 computed (adds applied, removes dropped, moves at their target). Each entry
@@ -54,6 +106,8 @@ import re
 
 from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
+
+from . import rackinfo
 
 logger = logging.getLogger("netbox_rack_design.distribution")
 
@@ -217,11 +271,16 @@ def devices_from_elevation(elevation):
     handing over the raw ``dcim.Device`` for scripts that walk real cabling.
 
     Each entry: ``{name, role, status, u_position, face, draw_w, draw_known,
-    power_ports, device, device_type, power_config, feed, feed_source}``.
+    power_ports, device, device_type, power_config, feed, feed_source, moved,
+    preferred_feed_legs}``. ``preferred_feed_legs`` is a planning-hint list of
+    lowercase leg letters (e.g. ``["c", "d"]``) from the placement, or
+    ``None`` for automatic attribution (see ``_legs_for_native``).
     ``device`` is the real ``dcim.Device`` for an existing/moved device, or
     ``None`` for a planned add. ``feed``/``feed_source`` are resolved from the
     placement's ``bound_feed`` (docs/pdu-distribution-spec.md §6.2) -- ``None``
-    when the slot has no placement or the placement is unbound.
+    when the slot has no placement or the placement is unbound. ``moved`` is
+    ``True`` only for a ``move_in`` slot: the design relocates this device, so
+    its existing cabling is stale and must not be trusted for attribution.
     """
     out = []
     seen = set()
@@ -258,6 +317,10 @@ def devices_from_elevation(elevation):
                 # or there is no placement (a plain existing/uninvolved device).
                 "feed": feed,
                 "feed_source": feed_source,
+                "moved": slot.get("state") == "move_in",
+                # Planning hint from DesignPlacement.preferred_feed_legs; getattr
+                # with a default keeps this safe even before that field exists.
+                "preferred_feed_legs": getattr(placement, "preferred_feed_legs", None) if placement else None,
             })
     with_custom_fields = sum(1 for entry in out if entry.get("custom_fields"))
     with_feed = sum(1 for entry in out if entry.get("feed") is not None)
@@ -288,9 +351,13 @@ def apply_rack_power_override(elevation):
     When the merge is non-empty, sets
     ``elevation.rack.__dict__["cf"] = {**rack.cf, **custom_fields}`` --
     ``Rack.cf`` is a ``cached_property``, so overriding the instance
-    ``__dict__`` shadows it for the lifetime of this in-memory object only.
-    Never persisted; never touches ``dcim``. A no-op when no override exists
-    anywhere in the chain (mirrors the ``DoesNotExist`` no-op this replaced).
+    ``__dict__`` shadows it for the lifetime of this in-memory object only --
+    AND ``elevation.rack.custom_field_data`` to the same merged dict, so a
+    script reading either access pattern sees the same effective values (see
+    ``planning_fields._read_cf``, which prefers ``custom_field_data`` and
+    would otherwise never observe this merge). Never persisted; never touches
+    ``dcim``. A no-op when no override exists anywhere in the chain (mirrors
+    the ``DoesNotExist`` no-op this replaced).
     """
     from .models import DesignRackPower
 
@@ -305,6 +372,19 @@ def apply_rack_power_override(elevation):
 
     merged = {**rack.cf, **custom_fields}
     rack.__dict__["cf"] = merged
+    # Also refresh the raw stored field, not only the cached `.cf` property.
+    # `planning_fields._read_cf` (the generic resolver behind
+    # `read_planning_fields`, which the shipped example scripts use for
+    # `power_limitation`/`pdu_location`) prefers `custom_field_data` over
+    # `.cf` for query-cost reasons, and would otherwise never see this merge
+    # at all -- for a real rack it would silently read the UNMERGED stored cf,
+    # and for a `PlannedRack` it would always read an empty dict (planned
+    # racks carry no rack-power custom fields of their own; see this module's
+    # docstring). Setting the instance attribute directly is safe and
+    # in-memory only, exactly like the `.cf` override above: it never touches
+    # the database, and works identically for a real ``dcim.Rack`` and a
+    # ``PlannedRack`` (both are plain model fields, not managers).
+    rack.custom_field_data = merged
     logger.debug(
         "distribution.apply_rack_power_override: rack=%r design=%r merged keys=%s",
         getattr(rack, "name", None), getattr(elevation.design, "pk", None),
@@ -430,7 +510,7 @@ def _collect_pdus(rack, devices):
     by_device_pk = {d["device"].pk: d for d in devices if d.get("device") is not None}
     pdus = {}
 
-    for dev in rack.devices.all():
+    for dev in rackinfo.rack_devices(rack):
         try:
             role = (dev.role.slug if dev.role else "").lower()
             if role not in PDU_ROLE_SLUGS:
@@ -561,26 +641,43 @@ def _unit_to_bank(rack, pdus, *, reversed_direction=False):
 
 def _legs_for_native(device, unit_map, pdus):
     """The ``(pdu, bank)`` refs a device charges (docs/pdu-distribution-spec.md
-    §2.2/§2.3):
+    §2.2/§2.3). A design plans a FUTURE state, so the general rule is: a device
+    the design MOVES is attributed by its NEW U position, ignoring its
+    existing cabling (which will be re-plugged when the design is
+    implemented); a device that stays put keeps cabling-based attribution.
 
-    * **Cabled** (a real device's PowerPort -> PowerOutlet on a PDU) **in this
-      rack**: charge the outlet's bank directly, one ref per cabling -- full-
-      per-leg redundancy falls out naturally (2 cablings -> 2 full charges).
-    * **Uncabled** (planned or unconnected) -- and a device whose cabling
-      leads OUT of this rack: attributed by U position via ``unit_map`` --
-      leg ``a`` only for a single PSU, ``a``+``b`` (never split) for 2+ PSUs.
-      A leg absent from ``unit_map`` (fewer than 2 bound feeds in the rack) is
-      silently skipped -- robust to any feed count.
+    * **Cabled and not moved** (a real device's PowerPort -> PowerOutlet on a
+      PDU **in this rack**): charge the outlet's bank directly, one ref per
+      cabling -- full-per-leg redundancy falls out naturally (2 cablings -> 2
+      full charges). This wins even when the outlet's bank differs from what
+      the device's U position would imply -- real cabling does not always
+      follow the tidy U-slice split.
+    * **Uncabled, moved, or a device whose cabling leads OUT of this rack**:
+      attributed by U position via ``unit_map``. If the device carries a
+      non-empty ``preferred_feed_legs`` (a planning hint set on the
+      placement -- e.g. ``["c", "d"]``), those exact legs are charged
+      instead of the automatic heuristic below; this override takes
+      precedence whenever present. Otherwise, automatic attribution charges
+      the first leg (single PSU) or first two legs (2+ PSUs) in sorted
+      order -- ``a`` (+``b``) when the rack's legs are lettered that way,
+      same as before. A leg absent from ``unit_map`` (fewer than 2 bound
+      feeds in the rack, or an override naming a feed this rack doesn't
+      have) is silently skipped -- robust to any feed count.
 
-    A device MOVED into this rack still carries its cabling to the source
-    rack's PDU until the design is implemented, so those refs name PDUs that
-    are not part of this topology. Treating that like no cabling is what makes
-    the draw follow the device across racks instead of vanishing from both.
+    A device MOVED into this rack from another rack still carries its cabling
+    to the source rack's PDU until the design is implemented, so those refs
+    name PDUs that are not part of this topology -- this is just a special
+    case of the general moved rule above (the ``moved`` flag already forces
+    position-based attribution before the cross-rack/unresolvable check would
+    even matter), and it's what makes the draw follow the device across racks
+    instead of vanishing from both.
     """
-    cabled = [
-        ref for ref in _cabled_bank_refs(device.get("device"))
-        if ref[0] in pdus and ref[1] in pdus[ref[0]]["banks"]
-    ]
+    cabled = []
+    if not device.get("moved"):
+        cabled = [
+            ref for ref in _cabled_bank_refs(device.get("device"))
+            if ref[0] in pdus and ref[1] in pdus[ref[0]]["banks"]
+        ]
     if cabled:
         return cabled
     unit = device.get("u_position")
@@ -589,13 +686,23 @@ def _legs_for_native(device, unit_map, pdus):
     except (TypeError, ValueError):
         return []
     psu_count = len(device.get("power_ports") or [])
-    preferred = ["a", "b"] if psu_count >= 2 else ["a"]
+    override = [leg for leg in (device.get("preferred_feed_legs") or []) if isinstance(leg, str)]
+    if override:
+        # Explicit planning hint wins outright -- no heuristic, no fallback.
+        # A leg the rack doesn't have is just filtered out below.
+        preferred = override
+    else:
+        # Automatic: charge the first N legs in sorted order, N matching the
+        # device's redundancy (1 leg for a single PSU, 2 for 2+ PSUs). Using
+        # sorted(unit_map) rather than a hardcoded ["a", "b"] means this
+        # naturally reaches ``a``/``b`` on a two-feed rack (byte-identical to
+        # the old hardcoded heuristic there) while still landing on whatever
+        # legs actually exist for any other feed count/naming. It deliberately
+        # stays conservative -- only ever the first one or two legs -- and
+        # never reaches into c/d/... on its own; that's what the explicit
+        # ``preferred_feed_legs`` override above is for.
+        preferred = sorted(unit_map)[:2 if psu_count >= 2 else 1]
     legs = [leg for leg in preferred if leg in unit_map]
-    if not legs and unit_map:
-        # Leg letters come from the feed NAMES ("Feed B" -> b), so a rack can
-        # legitimately have no ``a`` leg at all. Charge the legs it does have
-        # rather than dropping the device's draw on the floor.
-        legs = sorted(unit_map)[:len(preferred)]
     refs = []
     for leg in legs:
         ref = unit_map.get(leg, {}).get(unit)
@@ -807,7 +914,7 @@ def _omitted_pdu_reasons(rack, devices):
     """
     by_device_pk = {d["device"].pk: d for d in devices if d.get("device") is not None}
     out = []
-    for dev in rack.devices.all():
+    for dev in rackinfo.rack_devices(rack):
         role = (dev.role.slug if dev.role else "").lower()
         if role not in PDU_ROLE_SLUGS:
             continue

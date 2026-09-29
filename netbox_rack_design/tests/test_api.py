@@ -9,9 +9,11 @@ from dcim.models import (
     Device,
     DeviceRole,
     DeviceType,
+    Location,
     Manufacturer,
     PowerFeed,
     PowerOutlet,
+    PowerOutletTemplate,
     PowerPanel,
     PowerPort,
     Rack,
@@ -42,8 +44,9 @@ from ..models import (
     FavoriteDeviceType,
     FavoriteSet,
     HiddenDesignRack,
+    PlannedRack,
 )
-from .utils import api_token_header, create_dcim_environment
+from .utils import api_token_header, create_dcim_environment, make_design
 
 
 class DesignGroupTest(APIViewTestCases.APIViewTestCase):
@@ -82,9 +85,9 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         cls.site = site
         cls.racks = env["racks"]
 
-        Design.objects.create(title="Design 1", site=site)
-        Design.objects.create(title="Design 2", site=site)
-        Design.objects.create(title="Design 3", site=site)
+        make_design(title="Design 1", site=site)
+        make_design(title="Design 2", site=site)
+        make_design(title="Design 3", site=site)
 
         tags = create_tags("Alpha", "Bravo", "Charlie")
 
@@ -99,20 +102,20 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         cls.create_data = [
             {
                 "title": "Design 4",
-                "site": site.pk,
+                "sites": [site.pk],
                 "status": DesignStatusChoices.STATUS_DRAFT,
                 "racks": [r.pk for r in cls.racks],
                 "tags": [t.pk for t in tags],
             },
             {
                 "title": "Design 5",
-                "site": site.pk,
+                "sites": [site.pk],
                 "status": DesignStatusChoices.STATUS_DRAFT,
                 "racks": [cls.racks[0].pk],
             },
             {
                 "title": "Design 6",
-                "site": site.pk,
+                "sites": [site.pk],
                 "status": DesignStatusChoices.STATUS_DRAFT,
             },
         ]
@@ -120,7 +123,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_get_design_returns_racks(self):
         """A serialized Design exposes its scoped racks as brief Rack reprs."""
         self.add_permissions("netbox_rack_design.view_design")
-        design = Design.objects.create(title="Scoped", site=self.site)
+        design = make_design(title="Scoped", site=self.site)
         design.racks.add(*self.racks)
 
         url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[design.pk])
@@ -136,7 +139,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         )
         data = {
             "title": "Created with racks",
-            "site": self.site.pk,
+            "sites": [self.site.pk],
             "status": DesignStatusChoices.STATUS_DRAFT,
             "racks": [r.pk for r in self.racks],
         }
@@ -153,7 +156,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         self.add_permissions(
             "netbox_rack_design.view_design", "netbox_rack_design.change_design"
         )
-        design = Design.objects.create(title="Freeze flag", site=self.site)
+        design = make_design(title="Freeze flag", site=self.site)
         url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[design.pk])
 
         response = self.client.get(url, **self.header)
@@ -185,8 +188,8 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         """DELETE a design another design is based on -> 409, body carries
         the explanation, the design still exists."""
         self.add_permissions("netbox_rack_design.delete_design")
-        parent = Design.objects.create(title="API parent", site=self.site)
-        child = Design.objects.create(
+        parent = make_design(title="API parent", site=self.site)
+        child = make_design(
             title="API child", site=self.site, based_on=parent,
         )
         url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[parent.pk])
@@ -206,7 +209,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_allowed_when_no_children(self):
         """DELETE a design with no children -> 204, it is gone."""
         self.add_permissions("netbox_rack_design.delete_design")
-        lonely = Design.objects.create(title="API lonely", site=self.site)
+        lonely = make_design(title="API lonely", site=self.site)
         url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[lonely.pk])
         response = self.client.delete(url, **self.header)
         self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
@@ -225,8 +228,8 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         """DELETE a root that another version points its ``root`` at -> 409,
         body carries the explanation, both designs still exist."""
         self.add_permissions("netbox_rack_design.delete_design")
-        root = Design.objects.create(title="API root", site=self.site)
-        v2 = Design.objects.create(
+        root = make_design(title="API root", site=self.site)
+        v2 = make_design(
             title="API root", site=self.site, root=root, version=2,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -240,8 +243,8 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_allowed_for_non_root_version(self):
         """DELETE a non-root version (its own ``versions`` is empty) -> 204."""
         self.add_permissions("netbox_rack_design.delete_design")
-        root = Design.objects.create(title="API root2", site=self.site)
-        v2 = Design.objects.create(title="API root2", site=self.site, root=root, version=2)
+        root = make_design(title="API root2", site=self.site)
+        v2 = make_design(title="API root2", site=self.site, root=root, version=2)
         url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[v2.pk])
         response = self.client.delete(url, **self.header)
         self.assertHttpStatus(response, status.HTTP_204_NO_CONTENT)
@@ -251,9 +254,9 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
         """A design that is both a root-with-versions AND has a child ->
         409 whose body mentions both reasons, not just the first found."""
         self.add_permissions("netbox_rack_design.delete_design")
-        root = Design.objects.create(title="API both", site=self.site)
-        v2 = Design.objects.create(title="API both", site=self.site, root=root, version=2)
-        child = Design.objects.create(
+        root = make_design(title="API both", site=self.site)
+        v2 = make_design(title="API both", site=self.site, root=root, version=2)
+        child = make_design(
             title="API both child", site=self.site, based_on=root,
         )
         url = reverse("plugins-api:netbox_rack_design-api:design-detail", args=[root.pk])
@@ -306,7 +309,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_chain_for_unchained_design_is_empty_and_resolves(self):
         self.add_permissions("netbox_rack_design.view_design")
-        design = Design.objects.create(title="Lone", site=self.site)
+        design = make_design(title="Lone", site=self.site)
         response = self.client.get(self._chain_url(design), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(response.data["ancestors"], [])
@@ -316,14 +319,14 @@ class DesignChainActionsTest(APITestCase):
 
     def test_chain_three_deep_reports_ancestors_oldest_first_and_resolves(self):
         self.add_permissions("netbox_rack_design.view_design")
-        a = Design.objects.create(
+        a = make_design(
             title="A", site=self.site, status=DesignStatusChoices.STATUS_APPROVED
         )
-        b = Design.objects.create(
+        b = make_design(
             title="B", site=self.site, based_on=a,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        c = Design.objects.create(title="C", site=self.site, based_on=b)
+        c = make_design(title="C", site=self.site, based_on=b)
 
         response = self.client.get(self._chain_url(c), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
@@ -340,11 +343,11 @@ class DesignChainActionsTest(APITestCase):
 
     def test_chain_refused_by_a_non_approved_ancestor(self):
         self.add_permissions("netbox_rack_design.view_design")
-        a = Design.objects.create(
+        a = make_design(
             title="Draft ancestor", site=self.site,
             status=DesignStatusChoices.STATUS_DRAFT,
         )
-        b = Design.objects.create(title="B", site=self.site, based_on=a)
+        b = make_design(title="B", site=self.site, based_on=a)
 
         response = self.client.get(self._chain_url(b), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
@@ -356,7 +359,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertEqual([row["id"] for row in response.data["ancestors"]], [a.pk])
 
     def test_chain_without_view_permission_denied(self):
-        design = Design.objects.create(title="No perm", site=self.site)
+        design = make_design(title="No perm", site=self.site)
         response = self.client.get(self._chain_url(design), **self.header)
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
 
@@ -364,7 +367,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_derive_from_approved_parent_succeeds(self):
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent", site=self.site, group=None,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -373,12 +376,14 @@ class DesignChainActionsTest(APITestCase):
         child = Design.objects.get(pk=response.data["id"])
         self.assertEqual(child.based_on_id, parent.pk)
         self.assertEqual(child.status, DesignStatusChoices.STATUS_DRAFT)
-        self.assertEqual(child.site_id, parent.site_id)
+        # PLAN-multi-site.md M5: a derived design starts with the parent's
+        # own sites (`Design.site_id` no longer exists -- `sites` is a M2M).
+        self.assertEqual(set(child.sites.all()), set(parent.sites.all()))
 
     def test_derive_copies_parents_rack_scope_as_a_snapshot(self):
         # G6: the child must open onto the parent's racks, not an empty scope.
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent with racks", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -393,7 +398,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_derive_from_parent_with_no_racks_succeeds_with_empty_scope(self):
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent no racks", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -407,7 +412,7 @@ class DesignChainActionsTest(APITestCase):
         # Later racks added to the parent must NOT retroactively appear on
         # the child -- the child owns its own scope once derived (G6).
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent snapshot", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -427,7 +432,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_derive_from_draft_parent_refused(self):
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Draft parent", site=self.site,
             status=DesignStatusChoices.STATUS_DRAFT,
         )
@@ -436,7 +441,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertFalse(Design.objects.filter(based_on=parent).exists())
 
     def test_derive_without_add_permission_denied(self):
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent2", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -446,7 +451,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_derive_with_explicit_title_is_honoured(self):
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent3", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -459,7 +464,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_derive_with_omitted_title_keeps_generated_default(self):
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent4", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -470,7 +475,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_derive_with_blank_title_rejected(self):
         self.add_permissions("netbox_rack_design.add_design")
-        parent = Design.objects.create(
+        parent = make_design(
             title="Parent5", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -484,7 +489,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_new_version_with_add_permission_succeeds(self):
         self.add_permissions("netbox_rack_design.add_design")
-        root = Design.objects.create(
+        root = make_design(
             title="Root", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         response = self.client.post(self._new_version_url(root), {}, **self.header)
@@ -496,7 +501,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_new_version_with_only_view_permission_denied(self):
         self.add_permissions("netbox_rack_design.view_design")
-        root = Design.objects.create(
+        root = make_design(
             title="Root2", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         response = self.client.post(self._new_version_url(root), {}, **self.header)
@@ -504,7 +509,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_new_version_with_no_body_keeps_source_title(self):
         self.add_permissions("netbox_rack_design.add_design")
-        root = Design.objects.create(
+        root = make_design(
             title="Keep my title", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -515,7 +520,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_new_version_with_blank_title_rejected(self):
         self.add_permissions("netbox_rack_design.add_design")
-        root = Design.objects.create(
+        root = make_design(
             title="Root3", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         response = self.client.post(
@@ -529,7 +534,7 @@ class DesignChainActionsTest(APITestCase):
         # from a design in ANY status, since approval makes a version
         # necessary, not valid.
         self.add_permissions("netbox_rack_design.add_design")
-        draft = Design.objects.create(title="Draft root", site=self.site)
+        draft = make_design(title="Draft root", site=self.site)
         response = self.client.post(self._new_version_url(draft), {}, **self.header)
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
         clone = Design.objects.get(pk=response.data["id"])
@@ -538,7 +543,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_new_version_clones_placements_and_feeds(self):
         self.add_permissions("netbox_rack_design.add_design")
-        source = Design.objects.create(
+        source = make_design(
             title="With content", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -562,15 +567,15 @@ class DesignChainActionsTest(APITestCase):
 
     def test_rebase_to_approved_target_succeeds(self):
         self.add_permissions("netbox_rack_design.change_design")
-        old_parent = Design.objects.create(
+        old_parent = make_design(
             title="Old parent", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        new_parent = Design.objects.create(
+        new_parent = make_design(
             title="New parent", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child", site=self.site, based_on=old_parent,
         )
         response = self.client.post(
@@ -583,11 +588,11 @@ class DesignChainActionsTest(APITestCase):
 
     def test_rebase_to_draft_target_refused(self):
         self.add_permissions("netbox_rack_design.change_design")
-        draft_target = Design.objects.create(
+        draft_target = make_design(
             title="Draft target", site=self.site,
             status=DesignStatusChoices.STATUS_DRAFT,
         )
-        child = Design.objects.create(title="Child2", site=self.site)
+        child = make_design(title="Child2", site=self.site)
         response = self.client.post(
             self._rebase_url(child), {"based_on": draft_target.pk},
             format="json", **self.header,
@@ -596,14 +601,29 @@ class DesignChainActionsTest(APITestCase):
         child.refresh_from_db()
         self.assertIsNone(child.based_on_id)
 
+    def test_rebase_onto_a_draft_new_version_of_the_parent_succeeds(self):
+        """Same rule as the Re-base page: another version of the current
+        parent's own plan is a valid target whatever its status -- the step
+        that lets a frozen parent be replaced by its new version."""
+        self.add_permissions("netbox_rack_design.change_design")
+        parent = make_design(title="Frozen", site=self.site,
+                             status=DesignStatusChoices.STATUS_APPROVED)
+        v2 = make_design(title="Frozen", site=self.site, root=parent, version=2)
+        child = make_design(title="Child3", site=self.site, based_on=parent)
+        response = self.client.post(
+            self._rebase_url(child), {"based_on": v2.pk}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        child.refresh_from_db()
+        self.assertEqual(child.based_on_id, v2.pk)
+
     def test_rebase_onto_a_cycle_refused(self):
         """Reuses Design's own cycle guard via full_clean() -- not
         re-implemented in the viewset."""
         self.add_permissions("netbox_rack_design.change_design")
-        a = Design.objects.create(
+        a = make_design(
             title="A2", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        b = Design.objects.create(
+        b = make_design(
             title="B2", site=self.site, based_on=a,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -616,11 +636,11 @@ class DesignChainActionsTest(APITestCase):
         self.assertIsNone(a.based_on_id)
 
     def test_rebase_without_change_permission_denied(self):
-        target = Design.objects.create(
+        target = make_design(
             title="Target3", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        child = Design.objects.create(title="Child3", site=self.site)
+        child = make_design(title="Child3", site=self.site)
         response = self.client.post(
             self._rebase_url(child), {"based_on": target.pk},
             format="json", **self.header,
@@ -637,7 +657,7 @@ class DesignChainActionsTest(APITestCase):
 
     def test_existing_rack_id_actions_still_return_200(self):
         self.add_permissions("netbox_rack_design.view_design")
-        design = Design.objects.create(title="Regression guard", site=self.site)
+        design = make_design(title="Regression guard", site=self.site)
         rack = self.racks[0]
 
         rack_power_url = reverse(
@@ -703,7 +723,7 @@ class DesignConflictsActionTest(APITestCase):
         # Parent: approved, then IMPLEMENTED -- an implemented ancestor is
         # exactly what makes the child's chain "ancestor_implemented"
         # (test_views.py's DesignEditorPeerConflictContextTest precedent).
-        cls.parent = Design.objects.create(title="Parent IDS-1000", site=cls.site)
+        cls.parent = make_design(title="Parent IDS-1000", site=cls.site)
         cls.parent.racks.add(cls.rack)
         DesignPlacement.objects.create(
             design=cls.parent, kind=DesignPlacementKindChoices.KIND_ADD,
@@ -715,7 +735,7 @@ class DesignConflictsActionTest(APITestCase):
         cls.parent.status = DesignStatusChoices.STATUS_IMPLEMENTED
         cls.parent.save()
 
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Child IDS-2000", site=cls.site, based_on=cls.parent,
         )
         cls.child.racks.add(cls.rack)
@@ -728,7 +748,7 @@ class DesignConflictsActionTest(APITestCase):
         # A PEER (not in the child's lineage) claiming the SAME unit as the
         # child's own add -- a peer_slot_claim, symmetric to and reported
         # completely apart from the parent/child chain above.
-        cls.peer = Design.objects.create(title="Peer IDS-9000", site=cls.site)
+        cls.peer = make_design(title="Peer IDS-9000", site=cls.site)
         cls.peer.racks.add(cls.rack)
         cls.peer_add = DesignPlacement.objects.create(
             design=cls.peer, kind=DesignPlacementKindChoices.KIND_ADD,
@@ -766,7 +786,7 @@ class DesignConflictsActionTest(APITestCase):
 
     def test_clean_design_returns_empty_list(self):
         self.add_permissions("netbox_rack_design.view_design")
-        clean = Design.objects.create(title="Clean design", site=self.site)
+        clean = make_design(title="Clean design", site=self.site)
         clean.racks.add(self.rack)
         response = self.client.get(self._conflicts_url(clean), **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
@@ -861,7 +881,7 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
         device_type = env["device_type"]
         rack = env["racks"][1]  # empty rack, free U slots
 
-        design = Design.objects.create(title="Design 1", site=site)
+        design = make_design(title="Design 1", site=site)
 
         DesignPlacement.objects.create(
             design=design,
@@ -943,7 +963,7 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
         site = Site.objects.create(name="Stale API Site", slug="stale-api-site")
         rack = Rack.objects.create(name="Stale API Rack", site=site)
         device = create_test_device("Stale API Device", site=site)
-        design = Design.objects.create(title="Stale API design", site=site)
+        design = make_design(title="Stale API design", site=site)
         move = DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_MOVE,
@@ -984,7 +1004,7 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
         )
         rack = Rack.objects.create(name="Chain Rack", site=site)
 
-        parent_design = Design.objects.create(title="Chain Parent", site=site)
+        parent_design = make_design(title="Chain Parent", site=site)
         upstream_add = DesignPlacement.objects.create(
             design=parent_design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -995,7 +1015,7 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
         )
         parent_design.status = DesignStatusChoices.STATUS_APPROVED
         parent_design.save()
-        child_design = Design.objects.create(
+        child_design = make_design(
             title="Chain Child", site=site, based_on=parent_design
         )
 
@@ -1041,7 +1061,7 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
         )
         rack = Rack.objects.create(name="Chain Bay Rack", site=site)
 
-        parent_design = Design.objects.create(title="Chain Bay Parent", site=site)
+        parent_design = make_design(title="Chain Bay Parent", site=site)
         upstream_chassis = DesignPlacement.objects.create(
             design=parent_design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1053,7 +1073,7 @@ class DesignPlacementTest(APIViewTestCases.APIViewTestCase):
         )
         parent_design.status = DesignStatusChoices.STATUS_APPROVED
         parent_design.save()
-        child_design = Design.objects.create(
+        child_design = make_design(
             title="Chain Bay Child", site=site, based_on=parent_design
         )
 
@@ -1176,7 +1196,7 @@ class SaveLayoutTest(APITestCase):
         cls.device_type = env["device_type"]
         cls.device_role = env["device_role"]
         cls.tenant = env["tenant"]
-        cls.design = Design.objects.create(title="Layout design", site=cls.site)
+        cls.design = make_design(title="Layout design", site=cls.site)
 
     def _url(self, design):
         return reverse(
@@ -1299,7 +1319,7 @@ class SaveLayoutTest(APITestCase):
         superuser = User.objects.create_superuser(username="peer-apply-super")
         rack = self.racks[1]  # empty rack
 
-        creator = Design.objects.create(title="Peer creator IDS-9000", site=self.site)
+        creator = make_design(title="Peer creator IDS-9000", site=self.site)
         DesignPlacement.objects.create(
             design=creator,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1988,6 +2008,157 @@ class SaveLayoutTest(APITestCase):
         placement = DesignPlacement.objects.get(design=self.design)
         self.assertIsNone(placement.power_config)
 
+    # --- preferred_feed_legs (power projection override) ---------------------
+
+    def test_brand_new_add_persists_preferred_feed_legs(self):
+        """A brand-new add carrying preferred_feed_legs persists it."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front",
+                     "preferred_feed_legs": ["b"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.preferred_feed_legs, ["b"])
+
+    def test_reposition_existing_add_sets_preferred_feed_legs(self):
+        """Repositioning an existing add can also set preferred_feed_legs."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front",
+                     "preferred_feed_legs": ["c", "d"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(existing_add.preferred_feed_legs, ["c", "d"])
+
+    def test_add_without_preferred_feed_legs_leaves_it_null(self):
+        """An 'add' item that omits preferred_feed_legs persists it as NULL."""
+        self._grant_all()
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 10, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertIsNone(placement.preferred_feed_legs)
+
+    def test_reposition_add_omitting_preferred_feed_legs_does_not_clobber(self):
+        """An 'add' reposition that omits the key preserves a previously
+        stored override (same idempotent-omission contract as power_config)."""
+        self._grant_all()
+        rack = self.racks[0]
+        existing_add = DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_rack=rack,
+            target_position=5,
+            target_face="front",
+            preferred_feed_legs=["a", "b"],
+        )
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "add", "placement_id": existing_add.pk,
+                     "u_position": 9, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        existing_add.refresh_from_db()
+        self.assertEqual(existing_add.preferred_feed_legs, ["a", "b"])
+
+    def test_move_persists_preferred_feed_legs(self):
+        """A move item carrying preferred_feed_legs persists it onto the
+        move placement, the same as planning_data."""
+        self._grant_all()
+        device = self.devices[0]
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 10,
+                     "face": "front", "preferred_feed_legs": ["b"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_MOVE)
+        self.assertEqual(placement.preferred_feed_legs, ["b"])
+
+    def test_move_omitting_preferred_feed_legs_does_not_clobber(self):
+        """A follow-up move save that omits the key preserves a previously
+        stored override."""
+        self._grant_all()
+        device = self.devices[0]
+        rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 10,
+                     "face": "front", "preferred_feed_legs": ["a", "b"]},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        placement = DesignPlacement.objects.get(design=self.design)
+        self.assertEqual(placement.preferred_feed_legs, ["a", "b"])
+
+        # Second save, same move, key omitted -> override must survive.
+        payload2 = self._payload([
+            {
+                "rack_id": rack.pk,
+                "front": [
+                    {"kind": "move", "device_id": device.pk, "u_position": 11,
+                     "face": "front"},
+                ],
+            },
+        ])
+        response2 = self.client.post(self._url(self.design), payload2, format="json", **self.header)
+        self.assertHttpStatus(response2, status.HTTP_200_OK)
+        placement.refresh_from_db()
+        self.assertEqual(placement.preferred_feed_legs, ["a", "b"])
+        self.assertEqual(float(placement.target_position), 11.0)
+
     # --- slice 2d: multi-rack save round-trip (the conservative-guard contract)
 
     def _multi_rack_payload(self, rack_a, rack_b, add_position=5):
@@ -2188,6 +2359,219 @@ class SaveLayoutTest(APITestCase):
         )
 
 
+class SaveLayoutPlannedRackTest(APITestCase):
+    """save-layout into a ``PlannedRack`` bucket (``rack_id="p:<pk>"``).
+
+    Regression for the 2026-09-22 bug report: a planned rack can be created
+    and drawn in the editor, but save-layout unconditionally refused every
+    "p:<pk>" bucket with "Rack does not exist." and persisted nothing. This
+    pins the fix: a planned-rack bucket reconciles through the SAME
+    ``_reconcile_item``/``_resolve_target`` path a real rack uses, writing
+    ``target_planned_rack`` instead of ``target_rack``.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device_type = env["device_type"]
+        cls.location = Location.objects.create(
+            name="Planned Location", slug="planned-location", site=cls.site
+        )
+        cls.planned_rack = PlannedRack.objects.create(
+            name="Greenfield 1", location=cls.location, u_height=42
+        )
+        cls.design = make_design(title="Planned layout design", site=cls.site)
+        cls.design.planned_racks.add(cls.planned_rack)
+
+    def _url(self, design):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-save-layout",
+            kwargs={"pk": design.pk},
+        )
+
+    def _grant_all(self):
+        self.add_permissions(
+            "netbox_rack_design.change_design",
+            "netbox_rack_design.add_designplacement",
+            "netbox_rack_design.change_designplacement",
+            "netbox_rack_design.delete_designplacement",
+        )
+
+    def _payload(self, racks):
+        return {"design_id": self.design.pk, "racks": racks}
+
+    def test_add_into_planned_rack_persists_with_target_planned_rack(self):
+        """A catalog add into a "p:<pk>" bucket persists with
+        target_planned_rack set and target_rack null -- this is the exact
+        drop-a-device-into-a-planned-rack-then-Save flow from the bug
+        report."""
+        self._grant_all()
+        payload = self._payload([
+            {
+                "rack_id": f"p:{self.planned_rack.pk}",
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 1)
+        placement = placements.first()
+        self.assertEqual(placement.kind, DesignPlacementKindChoices.KIND_ADD)
+        self.assertEqual(placement.target_planned_rack_id, self.planned_rack.pk)
+        self.assertIsNone(placement.target_rack_id)
+        self.assertEqual(float(placement.target_position), 1.0)
+
+    def test_identical_resubmit_is_idempotent(self):
+        """A second, unchanged submit of the same planned-rack add is a no-op
+        (304), same contract a real rack gets."""
+        self._grant_all()
+        item = {
+            "rack_id": f"p:{self.planned_rack.pk}",
+            "front": [
+                {"kind": "add", "device_type_id": self.device_type.pk,
+                 "u_position": 1, "face": "front"},
+            ],
+        }
+        first = self.client.post(
+            self._url(self.design), self._payload([item]), format="json", **self.header
+        )
+        self.assertHttpStatus(first, status.HTTP_200_OK)
+        add = DesignPlacement.objects.get(design=self.design)
+
+        resubmit = self._payload([
+            {
+                "rack_id": f"p:{self.planned_rack.pk}",
+                "front": [
+                    {"kind": "add", "placement_id": add.pk,
+                     "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        second = self.client.post(
+            self._url(self.design), resubmit, format="json", **self.header
+        )
+        self.assertHttpStatus(second, status.HTTP_304_NOT_MODIFIED)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
+
+    def test_dropping_item_from_payload_deletes_the_placement(self):
+        """Cancelling the add (sending ``cancel: true`` with its placement_id)
+        deletes the placement, same as a real rack's cancel flow."""
+        self._grant_all()
+        item = {
+            "rack_id": f"p:{self.planned_rack.pk}",
+            "front": [
+                {"kind": "add", "device_type_id": self.device_type.pk,
+                 "u_position": 1, "face": "front"},
+            ],
+        }
+        self.client.post(
+            self._url(self.design), self._payload([item]), format="json", **self.header
+        )
+        add = DesignPlacement.objects.get(design=self.design)
+
+        cancel_payload = self._payload([
+            {
+                "rack_id": f"p:{self.planned_rack.pk}",
+                "front": [
+                    {"kind": "add", "placement_id": add.pk, "cancel": True,
+                     "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(
+            self._url(self.design), cancel_payload, format="json", **self.header
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_unknown_planned_rack_pk_still_errors(self):
+        """A well-formed "p:<pk>" naming NO PlannedRack row still errors
+        "Rack does not exist." -- only the blanket refusal goes away."""
+        self._grant_all()
+        missing_pk = self.planned_rack.pk + 9999
+        payload = self._payload([
+            {
+                "rack_id": f"p:{missing_pk}",
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("errors", response.data)
+        self.assertEqual(
+            response.data["errors"][0]["detail"], "Rack does not exist."
+        )
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_planned_rack_outside_design_scope_is_refused(self):
+        """A planned rack not in the design's sites is refused, mirroring how
+        an out-of-scope real rack is refused (site-scope validation, the same
+        check ``target_rack`` gets)."""
+        self._grant_all()
+        other_site = Site.objects.create(name="Other Site", slug="other-site")
+        other_location = Location.objects.create(
+            name="Other Location", slug="other-location", site=other_site
+        )
+        outside_planned = PlannedRack.objects.create(
+            name="Outside scope", location=other_location, u_height=42
+        )
+        payload = self._payload([
+            {
+                "rack_id": f"p:{outside_planned.pk}",
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
+
+    def test_mixed_real_and_planned_rack_buckets_both_save(self):
+        """A single submit with one real-rack bucket and one planned-rack
+        bucket saves both."""
+        self._grant_all()
+        real_rack = self.racks[0]
+        payload = self._payload([
+            {
+                "rack_id": real_rack.pk,
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 20, "face": "front"},
+                ],
+            },
+            {
+                "rack_id": f"p:{self.planned_rack.pk}",
+                "front": [
+                    {"kind": "add", "device_type_id": self.device_type.pk,
+                     "u_position": 1, "face": "front"},
+                ],
+            },
+        ])
+        response = self.client.post(self._url(self.design), payload, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+
+        placements = DesignPlacement.objects.filter(design=self.design)
+        self.assertEqual(placements.count(), 2)
+        real_add = placements.get(target_rack_id=real_rack.pk)
+        self.assertIsNone(real_add.target_planned_rack_id)
+        planned_add = placements.get(target_planned_rack_id=self.planned_rack.pk)
+        self.assertIsNone(planned_add.target_rack_id)
+
+
 def _plugins_config(**overrides):
     """Build a PLUGINS_CONFIG dict for the plugin with the given naming overrides."""
     cfg = {
@@ -2276,7 +2660,7 @@ class RecomputeDistributionTest(APITestCase):
         pdu2_input = PowerPort.objects.create(device=cls.pdu2, name="Input")
         Cable(a_terminations=[pdu2_input], b_terminations=[cls.feed2]).save()
 
-        cls.design = Design.objects.create(title="Dist design", site=cls.site)
+        cls.design = make_design(title="Dist design", site=cls.site)
 
     def _url(self):
         return reverse(
@@ -2392,9 +2776,18 @@ class RecomputeDistributionTest(APITestCase):
         self.assertHttpStatus(resp, status.HTTP_200_OK)
 
         # Only the requested rack came back; the editor keeps its own numbers
-        # for the rest rather than being handed nulls.
-        self.assertEqual(list(resp.data["distributions"].keys()), [str(self.rack.pk)])
-        self.assertEqual(list(resp.data["power"].keys()), [str(self.rack.pk)])
+        # for the rest rather than being handed nulls. Each real rack is filed
+        # under BOTH its legacy bare-pk key and the namespaced "r:<pk>" form
+        # (T1.4d, PLAN-templates.md D27) -- see recompute_distribution's own
+        # docstring for why the legacy key is kept alongside it.
+        self.assertEqual(
+            sorted(resp.data["distributions"].keys()),
+            sorted([str(self.rack.pk), f"r:{self.rack.pk}"]),
+        )
+        self.assertEqual(
+            sorted(resp.data["power"].keys()),
+            sorted([str(self.rack.pk), f"r:{self.rack.pk}"]),
+        )
         # ...and it reflects the move that was described in the OTHER rack.
         self.assertEqual(self._bank2_load(resp.data), 1000)
         self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 0)
@@ -2417,9 +2810,14 @@ class RecomputeDistributionTest(APITestCase):
             with self.subTest(project_racks=label):
                 resp = self.client.post(self._url(), body, format="json", **self.header)
                 self.assertHttpStatus(resp, status.HTTP_200_OK)
+                # Each real rack under BOTH its legacy bare-pk key and the
+                # namespaced "r:<pk>" form (T1.4d, PLAN-templates.md D27).
                 self.assertEqual(
                     sorted(resp.data["distributions"].keys()),
-                    sorted([str(self.rack.pk), str(self.rack2.pk)]),
+                    sorted([
+                        str(self.rack.pk), str(self.rack2.pk),
+                        f"r:{self.rack.pk}", f"r:{self.rack2.pk}",
+                    ]),
                 )
 
     def test_recompute_returns_live_rack_power_summary(self):
@@ -2491,6 +2889,137 @@ class RecomputeDistributionTest(APITestCase):
         self.assertHttpStatus(resp, status.HTTP_403_FORBIDDEN)
 
 
+@override_settings(PLUGINS_CONFIG=_plugins_config(distribution_mode="builtin"))
+class RecomputeDistributionPlannedRackTest(APITestCase):
+    """
+    recompute-distribution for a ``PlannedRack`` (2026-09-23 bug report): the
+    action's per-rack loop filed every planned rack under ``None`` (see the
+    now-stale comment it carried -- "this action does not project a planned
+    rack yet"), so the editor's power bar and per-bank chips only ever
+    refreshed on a full page reload for a planned rack, never live like a
+    real rack. ``save-layout`` and the five power actions already learned to
+    handle a planned rack (commits 1d129b6/c62a81f); this action must project
+    one exactly like a real rack.
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = Site.objects.create(name="Dist Site P", slug="dist-site-p")
+        cls.mfr = Manufacturer.objects.create(name="Mfr DP", slug="mfr-dp")
+        cls.location = Location.objects.create(
+            name="Loc DP", slug="loc-dp", site=cls.site,
+        )
+        cls.planned_rack = PlannedRack.objects.create(
+            name="Planned R DP", location=cls.location, u_height=12,
+        )
+        # A second, REAL rack for the mixed-payload test.
+        cls.rack = Rack.objects.create(name="Rack DP", site=cls.site, u_height=10)
+
+        cls.pdu_role = DeviceRole.objects.create(name="PDU DP", slug="pdu")
+        cls.pdu_type = DeviceType.objects.create(
+            manufacturer=cls.mfr, model="Planned PDU DP", slug="planned-pdu-dp",
+            u_height=0,
+        )
+        PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="1/1")
+        PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="2/1")
+
+        cls.design = make_design(title="Dist design P", site=cls.site)
+
+        # A planned feed bound to the PLANNED rack (230V/16A single-phase),
+        # and a planned PDU add bound to it -- the "Copy from rack" ->
+        # bind-PDU-to-feed -> Save path the bug report walks through.
+        cls.feed = DesignPowerFeed.objects.create(
+            design=cls.design, planned_rack=cls.planned_rack, name="Feed DP",
+            voltage=230, amperage=16, phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        cls.pdu_placement = DesignPlacement.objects.create(
+            design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=cls.pdu_type, device_role=cls.pdu_role,
+            target_planned_rack=cls.planned_rack, target_position=None,
+            proposed_name="pdu-dp-1", planned_power_feed=cls.feed,
+        )
+
+    def _url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-recompute-distribution",
+            kwargs={"pk": self.design.pk},
+        )
+
+    def test_planned_rack_returns_non_null_distribution_and_power(self):
+        """A planned rack with a bound PDU must come back with a non-null
+        ``power``/``distributions`` entry under its ``"p:<pk>"`` key -- before
+        the fix these were both ``None`` (the bug's exact signature)."""
+        self.add_permissions("netbox_rack_design.view_design")
+        key = f"p:{self.planned_rack.pk}"
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk,
+             "racks": [{"rack_id": key, "front": [], "rear": [], "other": []}]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+
+        self.assertIsNotNone(resp.data["power"][key])
+        self.assertGreater(resp.data["power"][key]["capacity_w"], 0)
+
+        self.assertIsNotNone(
+            resp.data["distributions"][key],
+            resp.data["distribution_status"][key],
+        )
+        self.assertIn("pdu-dp-1", resp.data["distributions"][key]["pdus"])
+
+        # Read-only: nothing persisted.
+        self.assertEqual(DesignPlacement.objects.filter(design=self.design).count(), 1)
+
+    def test_mixed_real_and_planned_racks_each_keyed_separately(self):
+        """One real rack + one planned rack in the same request: each comes
+        back non-null under its OWN key, and the real rack's legacy bare-pk
+        alias is still present alongside its namespaced form."""
+        self.add_permissions("netbox_rack_design.view_design")
+        planned_key = f"p:{self.planned_rack.pk}"
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk, "racks": [
+                {"rack_id": planned_key, "front": [], "rear": [], "other": []},
+                {"rack_id": self.rack.pk, "front": [], "rear": [], "other": []},
+            ]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+
+        self.assertIsNotNone(resp.data["power"][planned_key])
+        self.assertIsNotNone(resp.data["distributions"][planned_key])
+
+        # Real rack: both the namespaced AND the legacy bare-pk key, both
+        # non-null -- real-rack behaviour is unchanged by this fix.
+        real_key = f"r:{self.rack.pk}"
+        self.assertIsNotNone(resp.data["power"][real_key])
+        self.assertIsNotNone(resp.data["power"][str(self.rack.pk)])
+        self.assertEqual(resp.data["power"][real_key], resp.data["power"][str(self.rack.pk)])
+
+        # Only the real rack gets a bare-pk alias -- a planned rack has none
+        # (D28: separate pk sequences, no bare-int form to begin with).
+        self.assertNotIn(str(self.planned_rack.pk), resp.data["power"])
+
+    def test_unknown_planned_rack_key_returns_nulls_not_an_error(self):
+        """A stale/unknown ``"p:<pk>"`` key is reported as null, exactly like
+        an unknown real-rack pk -- never a 500 or a 400."""
+        self.add_permissions("netbox_rack_design.view_design")
+        unknown_key = "p:999999"
+        resp = self.client.post(
+            self._url(),
+            {"design_id": self.design.pk,
+             "racks": [{"rack_id": unknown_key, "front": [], "rear": [], "other": []}]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+        self.assertIsNone(resp.data["power"][unknown_key])
+        self.assertIsNone(resp.data["distributions"][unknown_key])
+        self.assertIsNone(resp.data["distribution_status"][unknown_key])
+
+
 class PreviewNameTest(APITestCase):
     """
     Tests for the DesignViewSet preview-name action (Phase 2).
@@ -2510,13 +3039,88 @@ class PreviewNameTest(APITestCase):
         cls.device_type = env["device_type"]
         cls.device_role = env["device_role"]
         cls.tenant = env["tenant"]
-        cls.design = Design.objects.create(title="DC-Preview", site=cls.site)
+        cls.design = make_design(title="DC-Preview", site=cls.site)
 
     def _url(self, design=None):
         return reverse(
             "plugins-api:netbox_rack_design-api:design-preview-name",
             kwargs={"pk": (design or self.design).pk},
         )
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
+    def test_preview_into_a_planned_rack_is_named(self):
+        """A tile dropped into a planned rack gets a name like any other.
+
+        The editor sends the rack key it drew the tile in -- ``"p:<pk>"``
+        for a planned rack (D28/D31, frame.js serverRackId). This action
+        resolved ``target_rack`` in ``dcim.Rack`` only, so that key 400'd
+        and the tile landed UNNAMED, saving a placement with an empty
+        ``proposed_name`` (user report 2026-09-22).
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        location = Location.objects.create(
+            name="Preview planned loc", slug="preview-planned-loc", site=self.site)
+        planned = PlannedRack.objects.create(
+            name="Preview planned", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+
+        body = {
+            "kind": "add", "device_type": self.device_type.pk,
+            "target_rack": f"p:{planned.pk}", "target_position": 10,
+            "target_face": "front", "index": 1,
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["name"], "a planned rack must still name its tiles")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(
+        naming_mode="template", naming_template="{device.rack.name}-{n}"))
+    def test_preview_template_token_reads_the_planned_rack_name(self):
+        """``{device.rack.name}`` resolves to the PLANNED rack's own name."""
+        self.add_permissions("netbox_rack_design.view_design")
+        location = Location.objects.create(
+            name="Preview planned loc 2", slug="preview-planned-loc-2", site=self.site)
+        planned = PlannedRack.objects.create(
+            name="R9", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+
+        body = {
+            "kind": "add", "device_type": self.device_type.pk,
+            "target_rack": f"p:{planned.pk}", "target_position": 10,
+            "target_face": "front", "index": 1,
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "R9-1")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(
+        naming_mode="template", naming_template="{device.cf[responsible]}-{n:02d}",
+        placement_fields=[{"key": "responsible", "label": "Responsible",
+                           "type": "text", "target": "cf.responsible", "rail": True}]))
+    def test_preview_template_reads_the_planning_values_the_tile_carries(self):
+        """``{device.cf[...]}`` reads the add's planning values.
+
+        The editor's rail puts them on a fresh drop, but the preview never
+        received them, so a template naming devices by a planning field
+        rendered the token empty (``AMS1--03``, found recording Part 5).
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {
+            "kind": "add", "device_type": self.device_type.pk,
+            "target_rack": self.racks[0].pk, "target_position": 10,
+            "target_face": "front", "index": 1,
+            "planning_data": {"responsible": "net-team"},
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "net-team-01")
+
+    def test_preview_unknown_planned_rack_still_400s(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {"kind": "add", "device_type": self.device_type.pk,
+                "target_rack": "p:999999", "index": 1}
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
 
     @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
     def test_preview_add_returns_sequence_name(self):
@@ -2588,6 +3192,26 @@ class PreviewNameTest(APITestCase):
         response = self.client.post(self._url(), body, format="json", **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(response.data["name"], "Device Role 1-")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(
+        naming_mode="template", naming_template="{device.rack.name}-{n:02d}"))
+    def test_move_preview_without_index_counts_pending_adds(self):
+        """The move dialog's "Set a new name" preview sends no ``index`` (only
+        a palette add has one). In template mode ``{n}`` then fell back to the
+        SAVED placement count, so with three unsaved adds on screen the
+        suggestion was "-01" -- the name the first add already holds
+        (found recording the naming video, 2026-09-25). Without an index the
+        counter must start after the session's pending names too."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        body = {
+            "kind": "move", "device": self.devices[0].pk,
+            "target_rack": rack.pk, "target_position": 20, "target_face": "front",
+            "pending_names": [f"{rack.name}-01", f"{rack.name}-02", f"{rack.name}-03"],
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], f"{rack.name}-04")
 
     @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
     def test_pending_names_prevent_same_session_duplicates(self):
@@ -2701,7 +3325,7 @@ class RerunNamingActionTest(APITestCase):
         # Design A: the design whose placements we rename. Two placements --
         # one colliding with peer B's claimed name, one clean (P9: only the
         # colliding one may ever change).
-        cls.design = Design.objects.create(title="IDS-1", site=cls.site)
+        cls.design = make_design(title="IDS-1", site=cls.site)
         cls.design.racks.add(cls.racks[1])
         cls.colliding = DesignPlacement.objects.create(
             design=cls.design,
@@ -2723,7 +3347,7 @@ class RerunNamingActionTest(APITestCase):
         # Peer B: a DRAFT design (default status) that also scopes rack[1]
         # and claims the SAME name as `colliding` -- this is what the panel's
         # "Re-run naming" button would have been rendered from.
-        cls.peer = Design.objects.create(title="IDS-2", site=cls.site)
+        cls.peer = make_design(title="IDS-2", site=cls.site)
         cls.peer.racks.add(cls.racks[1])
         DesignPlacement.objects.create(
             design=cls.peer,
@@ -2914,14 +3538,14 @@ class RerunNamingActionTest(APITestCase):
         # mode's "<title>-<n>" independently computes the SAME fresh name for
         # both sides, no matter how many times either re-runs (P11's
         # accepted consequence).
-        shared_a = Design.objects.create(title="Shared", site=self.site)
+        shared_a = make_design(title="Shared", site=self.site)
         shared_a.racks.add(self.racks[1])
         placement_a = DesignPlacement.objects.create(
             design=shared_a, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=self.device_type, target_rack=self.racks[1],
             target_position=30, proposed_name="Shared-1",
         )
-        shared_b = Design.objects.create(title="Shared", site=self.site)
+        shared_b = make_design(title="Shared", site=self.site)
         shared_b.racks.add(self.racks[1])
         DesignPlacement.objects.create(
             design=shared_b, kind=DesignPlacementKindChoices.KIND_ADD,
@@ -2961,7 +3585,7 @@ class DesignRackScopeTest(APITestCase):
         cls.racks = env["racks"]
         cls.devices = env["devices"]
         cls.device_type = env["device_type"]
-        cls.design = Design.objects.create(title="Scope design", site=cls.site)
+        cls.design = make_design(title="Scope design", site=cls.site)
 
         # A rack in a DIFFERENT site -- adding it must be rejected.
         cls.other_site = Site.objects.create(name="Site 2", slug="site-2")
@@ -3001,8 +3625,74 @@ class DesignRackScopeTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(self.design.racks.count(), 1)
 
-    def test_add_rack_cross_site_rejected(self):
-        """A rack from another site is rejected (same-site rule), scope unchanged."""
+    def test_remove_planned_rack_detaches_it_from_the_design(self):
+        """A planned rack must be removable from a design's scope.
+
+        Deleting a ``PlannedRack`` is refused while any design still plans
+        across it, and the refusal says "Remove it from each design's
+        planning scope first" -- so that has to be possible. It was not:
+        this action only ever looked in ``dcim.Rack`` (user report
+        2026-09-22), and nothing else in the UI or API detaches one.
+        """
+        self.add_permissions("netbox_rack_design.change_design")
+        location = Location.objects.create(
+            name="Remove planned loc", slug="remove-planned-loc", site=self.site)
+        planned = PlannedRack.objects.create(
+            name="Remove me", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+
+        response = self.client.post(
+            self._remove_url(self.design),
+            {"rack_id": f"p:{planned.pk}"},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertNotIn(planned, self.design.planned_racks.all())
+        self.assertTrue(PlannedRack.objects.filter(pk=planned.pk).exists(),
+                        "detaching from one design never deletes the shared rack")
+
+    def test_remove_planned_rack_with_placements_asks_first(self):
+        """Its placements are as destructive to drop as a real rack's."""
+        self.add_permissions("netbox_rack_design.change_design")
+        location = Location.objects.create(
+            name="Remove planned loc 2", slug="remove-planned-loc-2", site=self.site)
+        planned = PlannedRack.objects.create(
+            name="Held rack", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type,
+            target_planned_rack=planned,
+            target_position=10,
+            target_face="front",
+        )
+
+        first = self.client.post(
+            self._remove_url(self.design), {"rack_id": f"p:{planned.pk}"},
+            format="json", **self.header)
+        self.assertHttpStatus(first, status.HTTP_409_CONFLICT)
+        self.assertEqual(first.data["affected_count"], 1)
+        self.assertIn(planned, self.design.planned_racks.all())
+
+        confirmed = self.client.post(
+            self._remove_url(self.design),
+            {"rack_id": f"p:{planned.pk}", "confirm": True},
+            format="json", **self.header)
+        self.assertHttpStatus(confirmed, status.HTTP_200_OK)
+        self.assertEqual(confirmed.data["deleted_count"], 1)
+        self.assertNotIn(planned, self.design.planned_racks.all())
+
+    def test_add_rack_from_a_new_site_widens_the_design(self):
+        """A rack of a site the design does not cover yet brings its site along.
+
+        A design covers one or more sites (M1), and the editor's Add-rack
+        panel is where a planner reaches for a rack -- so picking one across
+        the hall is how a design BECOMES multi-site (user ruling
+        2026-09-22). Refusing here left no way to widen a design from the
+        editor at all.
+        """
         self.add_permissions("netbox_rack_design.change_design")
         response = self.client.post(
             self._add_url(self.design),
@@ -3010,8 +3700,26 @@ class DesignRackScopeTest(APITestCase):
             format="json",
             **self.header,
         )
-        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
-        self.assertNotIn(self.foreign_rack, self.design.racks.all())
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertIn(self.foreign_rack, self.design.racks.all())
+        self.assertIn(self.other_site, self.design.sites.all(),
+                      "the rack's site must join the design's scope")
+        self.assertIn(self.site, self.design.sites.all(),
+                      "the sites it already had stay")
+
+    def test_add_rack_to_a_frozen_design_never_widens_it(self):
+        """The freeze covers the site scope as much as the rack scope."""
+        self.add_permissions("netbox_rack_design.change_design")
+        frozen = make_design(title="Frozen scope", site=self.site,
+                             status=DesignStatusChoices.STATUS_APPROVED)
+        response = self.client.post(
+            self._add_url(frozen),
+            {"rack_id": self.foreign_rack.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_409_CONFLICT)
+        self.assertNotIn(self.other_site, frozen.sites.all())
 
     def test_add_rack_nonexistent_rejected(self):
         """A non-existent rack_id → 400."""
@@ -3192,7 +3900,7 @@ class HiddenDesignRackTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Visibility design", site=cls.site)
+        cls.design = make_design(title="Visibility design", site=cls.site)
         cls.design.racks.set(cls.racks)
 
     def setUp(self):
@@ -3338,6 +4046,69 @@ class HiddenDesignRackTest(APITestCase):
                 (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
             )
 
+    # -- planned racks hide like real ones -----------------------------------
+
+    def _planned(self):
+        location = Location.objects.create(name="Vis hall", slug="vis-hall", site=self.site)
+        planned = PlannedRack.objects.create(name="Vis P1", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+        return planned
+
+    def test_a_planned_rack_toggles_like_a_real_one(self):
+        planned = self._planned()
+        body = {"design_id": self.design.pk, "planned_rack_id": planned.pk}
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["hidden"])
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [planned.pk])
+        self.assertEqual(response.data["hidden_rack_ids"], [])
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertFalse(response.data["hidden"])
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [])
+
+    def test_a_planned_and_a_real_rack_with_the_same_pk_stay_apart(self):
+        planned = self._planned()
+        real = self.racks[0]
+        self.client.post(self._toggle_url(), {"design_id": self.design.pk, "rack_id": real.pk},
+                         format="json", **self.header)
+        response = self.client.post(
+            self._toggle_url(), {"design_id": self.design.pk, "planned_rack_id": planned.pk},
+            format="json", **self.header)
+        self.assertEqual(response.data["hidden_rack_ids"], [real.pk])
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [planned.pk])
+
+    def test_show_all_clears_planned_racks_too(self):
+        planned = self._planned()
+        HiddenDesignRack.objects.create(user=self.user, design=self.design, planned_rack=planned)
+        HiddenDesignRack.objects.create(user=self.user, design=self.design, rack=self.racks[0])
+        response = self.client.post(self._show_all_url(), {"design_id": self.design.pk},
+                                    format="json", **self.header)
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [])
+        self.assertFalse(HiddenDesignRack.objects.filter(user=self.user).exists())
+
+    def test_toggle_needs_exactly_one_rack(self):
+        planned = self._planned()
+        for body in ({"design_id": self.design.pk},
+                     {"design_id": self.design.pk, "rack_id": self.racks[0].pk,
+                      "planned_rack_id": planned.pk}):
+            response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+            self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_the_editor_renders_a_hidden_planned_rack_hidden(self):
+        planned = self._planned()
+        HiddenDesignRack.objects.create(user=self.user, design=self.design, planned_rack=planned)
+        self.user.is_superuser = True
+        self.user.save()
+        self.client.force_login(self.user)
+        html = self.client.get(
+            reverse("plugins:netbox_rack_design:design_editor_default",
+                    kwargs={"pk": self.design.pk}), follow=True,
+        ).content.decode()
+        self.assertIn(f'data-rd-visi-toggle="p-{planned.pk}"', html)
+        self.assertRegex(html, rf'nbx-rd-rack-block[^"]*hidden[^"]*"[^>]*data-rack-id="p-{planned.pk}"')
+
 
 class DesignPowerFeedAPITest(APIViewTestCases.APIViewTestCase):
     """Planned feeds through the REST API, the twin of the new UI views."""
@@ -3351,7 +4122,7 @@ class DesignPowerFeedAPITest(APIViewTestCases.APIViewTestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         rack = env["racks"][0]
-        design = Design.objects.create(title="Feed API Design", site=env["site"])
+        design = make_design(title="Feed API Design", site=env["site"])
         design.racks.set([rack])
 
         for name in ("Feed A", "Feed B", "Feed C"):
@@ -3401,7 +4172,7 @@ class DesignPowerFeedAPITest(APIViewTestCases.APIViewTestCase):
             "netbox_rack_design.add_designpowerfeed", "netbox_rack_design.view_designpowerfeed"
         )
         rack = DesignPowerFeed.objects.first().rack
-        design = Design.objects.create(
+        design = make_design(
             title="Approved feed design", site=rack.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -3492,8 +4263,8 @@ class DesignApplyAPITest(APITestCase):
         cls.site = env["site"]
         rack = env["racks"][0]
 
-        cls.design_visible = Design.objects.create(title="Apply Design Visible", site=cls.site)
-        cls.design_hidden = Design.objects.create(title="Apply Design Hidden", site=cls.site)
+        cls.design_visible = make_design(title="Apply Design Visible", site=cls.site)
+        cls.design_hidden = make_design(title="Apply Design Hidden", site=cls.site)
 
         cls.device_visible = create_test_device(
             "Apply Device Visible", site=cls.site, rack=rack, position=10, face="front",
@@ -4304,7 +5075,7 @@ class RackPowerTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Power design", site=cls.site)
+        cls.design = make_design(title="Power design", site=cls.site)
 
     def _url(self, design=None):
         return reverse(
@@ -4439,7 +5210,7 @@ class PowerSourceTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Source design", site=cls.site)
+        cls.design = make_design(title="Source design", site=cls.site)
 
     def _url(self, design=None):
         return reverse(
@@ -4548,7 +5319,7 @@ class FeedsActionTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Feeds design", site=cls.site)
+        cls.design = make_design(title="Feeds design", site=cls.site)
 
     def _url(self, design=None):
         return reverse(
@@ -4599,7 +5370,7 @@ class FeedsActionTest(APITestCase):
         """A DesignPowerFeed belonging to another design is not returned."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        other_design = Design.objects.create(title="Other design", site=self.site)
+        other_design = make_design(title="Other design", site=self.site)
         DesignPowerFeed.objects.create(
             design=other_design, rack=rack, name="Feed X",
         )
@@ -4668,11 +5439,11 @@ class FeedsActionTest(APITestCase):
         marked inherited and naming the owning design."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        ancestor = Design.objects.create(
+        ancestor = make_design(
             title="Ancestor", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child", site=self.site, based_on=ancestor,
         )
         ancestor_feed = DesignPowerFeed.objects.create(
@@ -4700,11 +5471,11 @@ class FeedsActionTest(APITestCase):
         planned feed does not appear."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        ancestor = Design.objects.create(
+        ancestor = make_design(
             title="Draft ancestor", site=self.site,
             status=DesignStatusChoices.STATUS_DRAFT,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child", site=self.site, based_on=ancestor,
         )
         DesignPowerFeed.objects.create(design=ancestor, rack=rack, name="Feed A")
@@ -4719,11 +5490,11 @@ class FeedsActionTest(APITestCase):
         """An implemented ancestor also refuses the whole chain."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        ancestor = Design.objects.create(
+        ancestor = make_design(
             title="Implemented ancestor", site=self.site,
             status=DesignStatusChoices.STATUS_IMPLEMENTED,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child", site=self.site, based_on=ancestor,
         )
         DesignPowerFeed.objects.create(design=ancestor, rack=rack, name="Feed A")
@@ -4739,15 +5510,15 @@ class FeedsActionTest(APITestCase):
         their planned feeds, oldest ancestor first."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        a = Design.objects.create(
+        a = make_design(
             title="A", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        b = Design.objects.create(
+        b = make_design(
             title="B", site=self.site, based_on=a,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        c = Design.objects.create(title="C", site=self.site, based_on=b)
+        c = make_design(title="C", site=self.site, based_on=b)
         feed_a = DesignPowerFeed.objects.create(design=a, rack=rack, name="Feed A")
         feed_b = DesignPowerFeed.objects.create(design=b, rack=rack, name="Feed B")
 
@@ -4766,11 +5537,11 @@ class FeedsActionTest(APITestCase):
         an ancestor's feed for the same rack does not duplicate them."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        ancestor = Design.objects.create(
+        ancestor = make_design(
             title="Ancestor", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child", site=self.site, based_on=ancestor,
         )
         own_feed = DesignPowerFeed.objects.create(
@@ -4801,11 +5572,11 @@ class FeedsActionTest(APITestCase):
         chain -- it is scoped purely to the rack, unrelated to any design."""
         self.add_permissions("netbox_rack_design.view_design")
         rack = self.racks[0]
-        ancestor = Design.objects.create(
+        ancestor = make_design(
             title="Ancestor", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        child = Design.objects.create(
+        child = make_design(
             title="Child", site=self.site, based_on=ancestor,
         )
         power_panel = PowerPanel.objects.create(site=self.site, name="Panel 1")
@@ -4844,7 +5615,7 @@ class CopyFeedsActionTest(APITestCase):
         cls.racks = env["racks"]
         cls.source = cls.racks[0]
         cls.target = cls.racks[1]
-        cls.design = Design.objects.create(title="Copy feeds design", site=cls.site)
+        cls.design = make_design(title="Copy feeds design", site=cls.site)
         panel = PowerPanel.objects.create(site=cls.site, name="CF Panel")
         for suffix, amps in (("A", 32), ("B", 16)):
             PowerFeed.objects.create(
@@ -5080,7 +5851,7 @@ class PlannedFeedActionTest(APITestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Planned feed design", site=cls.site)
+        cls.design = make_design(title="Planned feed design", site=cls.site)
 
     def _url(self, design=None):
         return reverse(
@@ -5304,7 +6075,7 @@ class SaveLayoutBayTest(APITestCase):
         cls.racks = env["racks"]
         cls.role = env["device_role"]
         mfr = env["device_type"].manufacturer
-        cls.design = Design.objects.create(title="Bay layout", site=cls.site)
+        cls.design = make_design(title="Bay layout", site=cls.site)
 
         cls.chassis_type = DeviceType.objects.create(
             manufacturer=mfr, model="SL-Chassis", slug="sl-chassis", u_height=2,
@@ -5689,7 +6460,7 @@ class SaveLayoutFeedBindingTest(APITestCase):
         cls.site = env["site"]
         cls.racks = env["racks"]
         cls.device_type = env["device_type"]
-        cls.design = Design.objects.create(title="Feed binding design", site=cls.site)
+        cls.design = make_design(title="Feed binding design", site=cls.site)
 
         power_panel = PowerPanel.objects.create(site=cls.site, name="Panel 1")
         cls.real_feed = PowerFeed.objects.create(
@@ -5899,7 +6670,7 @@ class SaveLayoutChainTest(APITestCase):
         cls.device = env["devices"][0]  # real, at Rack1/U1/front
         cls.device_type = env["device_type"]
 
-        cls.parent = Design.objects.create(title="Network sweep IDS-1000", site=cls.site)
+        cls.parent = make_design(title="Network sweep IDS-1000", site=cls.site)
         cls.parent.racks.add(cls.rack)
         # An ancestor-PLANNED identity (no real device yet).
         cls.upstream_add = DesignPlacement.objects.create(
@@ -5923,7 +6694,7 @@ class SaveLayoutChainTest(APITestCase):
         cls.parent.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent.save()
 
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Server build IDS-2000", site=cls.site, based_on=cls.parent,
         )
         cls.child.racks.add(cls.rack)
@@ -5985,6 +6756,28 @@ class SaveLayoutChainTest(APITestCase):
         self.upstream_move.refresh_from_db()
         self.assertEqual(self.upstream_move.design_id, self.parent.pk)
         self.assertEqual(float(self.upstream_move.target_position), 15.0)
+
+    def test_untouched_inherited_move_of_a_real_device_saves_nothing(self):
+        """An inherited move of a REAL device, left where the parent put it,
+        is not this design's move.
+
+        The editor posts it as kind="existing" at U15; the device's real
+        position is U1, so the server promoted it into the CHILD's own move.
+        Every sibling derived from the same parent then "planned" the
+        parent's move itself -- false peer conflicts between siblings, and
+        the tile relabelled with the child's title (found recording Part 14).
+        """
+        self._grant_all()
+        for extra in ({}, {"placement_id": self.upstream_move.pk}):
+            item = {"kind": "existing", "device_id": self.device.pk,
+                    "u_position": 15, "face": "front", **extra}
+            payload = self._payload(self.child, [{"rack_id": self.rack.pk, "front": [item]}])
+            response = self.client.post(self._url(), payload, format="json", **self.header)
+            self.assertIn(response.status_code,
+                          (status.HTTP_200_OK, status.HTTP_304_NOT_MODIFIED), response.data)
+            self.assertFalse(
+                DesignPlacement.objects.filter(design=self.child).exists(),
+                f"an untouched inherited move became the child's own ({extra})")
 
     def test_move_of_inherited_planned_identity_creates_base_placement_move(self):
         # Dragging the inherited tile for the ancestor's planned (device-less)
@@ -6085,7 +6878,7 @@ class ApplyActionTest(APITestCase):
         )
 
     def _design_with_add(self, title, *, position=10, name="apply-srv-1", approve=True):
-        design = Design.objects.create(title=title, site=self.site)
+        design = make_design(title=title, site=self.site)
         DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -6100,6 +6893,37 @@ class ApplyActionTest(APITestCase):
             design.status = DesignStatusChoices.STATUS_APPROVED
             design.save()
         return design
+
+    def test_dry_run_lists_the_racks_and_feeds_it_would_create(self):
+        """The response listed devices only, so automation reading the dry
+        run could not tell that applying also builds a rack and its supply."""
+        from dcim.models import Location, PowerPanel
+
+        from ..models import DesignPowerFeed, PlannedRack
+        self.add_permissions("netbox_rack_design.view_design")
+        location = Location.objects.create(name="API loc", slug="api-loc", site=self.site)
+        panel = PowerPanel.objects.create(site=self.site, name="API-PP")
+        planned = PlannedRack.objects.create(name="API R9", location=location, u_height=42)
+        design = make_design(title="Row", site=self.site)
+        design.planned_racks.add(planned)
+        DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, device_role=self.device_role,
+            target_planned_rack=planned, target_position=10, target_face="front",
+            proposed_name="api-srv-9")
+        DesignPowerFeed.objects.create(
+            design=design, planned_rack=planned, name="API R9-A",
+            voltage=230, amperage=32, power_panel=panel)
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+
+        response = self.client.get(self._url(design), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            [(r["name"], r["created"]) for r in response.data["racks"]], [("API R9", True)])
+        self.assertEqual(
+            [(f["name"], f["power_panel"], f["existing"]) for f in response.data["feeds"]],
+            [("API R9-A", panel.pk, None)])
 
     def test_get_dry_run_with_view_permission_writes_nothing(self):
         # A view-only user is deliberately NOT given dcim.add_device here: the

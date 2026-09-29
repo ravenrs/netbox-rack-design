@@ -135,7 +135,7 @@ class EditorZoomPlacementTestCase(unittest.TestCase):
             "role": role["id"], "manufacturer": mfr["id"], "site": site["id"],
         }
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"zoom-{suffix}", "site": site["id"],
+            "title": f"zoom-{suffix}", "sites": [site["id"]],
             "racks": [src_rack["id"], dst_rack["id"]]})
         cls._design_id = design["id"]
         cls._src_rack = src_rack["id"]

@@ -23,6 +23,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 BASE = os.environ.get("RD_BASE", "http://127.0.0.1:8000").rstrip("/")
 USER = os.environ.get("RD_USER", "rd_shot")
 PASS = os.environ.get("RD_PASS", "ShotPass12345!")
@@ -310,7 +312,7 @@ class EditorTrayTestCase(unittest.TestCase):
         cls._dt_id = dt["id"]
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"tray-{suffix}", "site": site["id"],
+            "title": f"tray-{suffix}", "sites": [site["id"]],
             "racks": [rack_with_tray["id"], rack_without_tray["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
@@ -410,6 +412,7 @@ class EditorTrayTestCase(unittest.TestCase):
     def setUp(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.console_errors = []
         self.page.on(

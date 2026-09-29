@@ -22,6 +22,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 BASE = os.environ.get("RD_BASE", "http://127.0.0.1:8000").rstrip("/")
 USER = os.environ.get("RD_USER", "rd_shot")
 PASS = os.environ.get("RD_PASS", "ShotPass12345!")
@@ -128,7 +130,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
             "title": f"e2e-bays-{uuid.uuid4().hex[:8]}",
-            "site": chassis["site"]["id"],
+            "sites": [chassis["site"]["id"]],
             "status": "draft",
             "racks": [cls.rack_pk],
         })
@@ -161,6 +163,7 @@ class EditorBayE2ETestCase(unittest.TestCase):
     def setUp(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1700, "height": 1000})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.console_errors = []
         self.page.on(

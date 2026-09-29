@@ -23,8 +23,9 @@ from dcim.models import (
 from django.test import TestCase, override_settings
 
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
-from ..models import Design, DesignPlacement, DesignPowerFeed
+from ..models import DesignPlacement, DesignPowerFeed
 from ..projection import project_rack
+from .utils import make_design
 
 
 def _cfg(**over):
@@ -75,7 +76,7 @@ class PowerProjectionTier1TestCase(TestCase):
             name="pwr-unknown", device_type=cls.dt_unknown, site=cls.site,
             rack=cls.rack, position=2, face="front", status="active", role=cls.role)
 
-        cls.design = Design.objects.create(title="PWR plan", site=cls.site)
+        cls.design = make_design(title="PWR plan", site=cls.site)
 
     def _elev(self):
         return project_rack(self.design, self.rack)
@@ -218,7 +219,7 @@ class PowerProjectionTier1TestCase(TestCase):
 
     @override_settings(PLUGINS_CONFIG=_cfg(power_capacity_default_w=1000))
     def test_planned_feed_of_another_design_does_not_count(self):
-        other = Design.objects.create(title="PWR other", site=self.site)
+        other = make_design(title="PWR other", site=self.site)
         DesignPowerFeed.objects.create(
             design=other, rack=self.rack, name="Feed A", voltage=230, amperage=32)
         # This design plans no feeds -> still the flat fallback.
@@ -331,7 +332,7 @@ class BayPowerTestCase(TestCase):
         PowerPortTemplate.objects.create(
             device_type=cls.blade_type, name="PSU1", allocated_draw=150)
 
-        cls.design = Design.objects.create(title="Bay power", site=cls.site)
+        cls.design = make_design(title="Bay power", site=cls.site)
 
     def _chassis(self, device_type, position):
         return Device.objects.create(
@@ -415,7 +416,7 @@ class ChainCapacityTestCase(TestCase):
         cls.rack = Rack.objects.create(name="PWR Chain Rack", site=cls.site, u_height=42)
 
     def _design(self, title, *, based_on=None):
-        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+        return make_design(title=title, site=self.site, based_on=based_on)
 
     def _approve(self, design):
         design.status = DesignStatusChoices.STATUS_APPROVED
@@ -519,7 +520,7 @@ class ChainDistributionTestCase(TestCase):
         PowerOutletTemplate.objects.create(device_type=cls.pdu_type, name="2/1")
 
     def _design(self, title, *, based_on=None):
-        return Design.objects.create(title=title, site=self.site, based_on=based_on)
+        return make_design(title=title, site=self.site, based_on=based_on)
 
     def _approve(self, design):
         design.status = DesignStatusChoices.STATUS_APPROVED

@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from core.models import ObjectType
 from dcim.choices import PowerFeedPhaseChoices, PowerFeedSupplyChoices
-from dcim.models import Device, Rack, Site
+from dcim.models import Device, Location, Rack, Site
 from django.contrib.messages import get_messages
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -21,8 +21,9 @@ from ..models import (
     DesignPlacement,
     DesignPowerFeed,
     HiddenDesignRack,
+    PlannedRack,
 )
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 
 class DesignGroupTest(ViewTestCases.PrimaryObjectViewTestCase):
@@ -75,25 +76,25 @@ class DesignTest(ViewTestCases.PrimaryObjectViewTestCase):
         site = env["site"]
         racks = env["racks"]
 
-        Design.objects.create(title="Design 1", site=site)
-        Design.objects.create(title="Design 2", site=site)
-        Design.objects.create(title="Design 3", site=site)
+        make_design(title="Design 1", site=site)
+        make_design(title="Design 2", site=site)
+        make_design(title="Design 3", site=site)
 
         tags = create_tags("Alpha", "Bravo", "Charlie")
 
         cls.form_data = {
             "title": "Design X",
-            "site": site.pk,
+            "sites": [site.pk],
             "status": DesignStatusChoices.STATUS_DRAFT,
             "summary": "A new design",
             "racks": [r.pk for r in racks],
             "tags": [t.pk for t in tags],
         }
         cls.csv_data = (
-            "title,site,status",
-            f"Design 4,{site.name},{DesignStatusChoices.STATUS_DRAFT}",
-            f"Design 5,{site.name},{DesignStatusChoices.STATUS_DRAFT}",
-            f"Design 6,{site.name},{DesignStatusChoices.STATUS_DRAFT}",
+            "title,sites,status",
+            f"Design 4,{site.slug},{DesignStatusChoices.STATUS_DRAFT}",
+            f"Design 5,{site.slug},{DesignStatusChoices.STATUS_DRAFT}",
+            f"Design 6,{site.slug},{DesignStatusChoices.STATUS_DRAFT}",
         )
         cls.csv_update_data = (
             "id,summary",
@@ -124,8 +125,8 @@ class PlacementCountAnnotationTest(TestCase):
         rack = env["racks"][1]
 
         cls.group = DesignGroup.objects.create(name="Buildout")
-        cls.d1 = Design.objects.create(title="With placements", site=site, group=cls.group)
-        cls.d2 = Design.objects.create(title="Also grouped", site=site, group=cls.group)
+        cls.d1 = make_design(title="With placements", site=site, group=cls.group)
+        cls.d2 = make_design(title="Also grouped", site=site, group=cls.group)
 
         for u in (1, 2, 3):
             DesignPlacement.objects.create(
@@ -165,7 +166,7 @@ class DesignFormTest(TestCase):
     def _form_data(self, racks):
         return {
             "title": "Scoped",
-            "site": self.site.pk,
+            "sites": [self.site.pk],
             "status": DesignStatusChoices.STATUS_DRAFT,
             "racks": [r.pk for r in racks],
         }
@@ -200,13 +201,13 @@ class DesignFormFrozenRacksTest(TestCase):
     def _form_data(self, racks, status=DesignStatusChoices.STATUS_APPROVED, title="Approved"):
         return {
             "title": title,
-            "site": self.site.pk,
+            "sites": [self.site.pk],
             "status": status,
             "racks": [r.pk for r in racks],
         }
 
     def test_rack_scope_change_rejected_on_approved_design(self):
-        design = Design.objects.create(
+        design = make_design(
             title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         design.racks.set([self.racks[0]])
@@ -215,7 +216,7 @@ class DesignFormFrozenRacksTest(TestCase):
         self.assertIn("racks", form.errors)
 
     def test_rack_scope_unchanged_allowed_on_approved_design(self):
-        design = Design.objects.create(
+        design = make_design(
             title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         design.racks.set([self.racks[0]])
@@ -223,7 +224,7 @@ class DesignFormFrozenRacksTest(TestCase):
         self.assertTrue(form.is_valid(), form.errors)
 
     def test_rack_scope_change_allowed_on_draft_design(self):
-        design = Design.objects.create(title="Draft", site=self.site)
+        design = make_design(title="Draft", site=self.site)
         design.racks.set([self.racks[0]])
         form = DesignForm(
             data=self._form_data([self.racks[1]], status=DesignStatusChoices.STATUS_DRAFT),
@@ -234,7 +235,7 @@ class DesignFormFrozenRacksTest(TestCase):
     def test_status_change_allowed_on_approved_design(self):
         # Un-approving (the escape hatch) must still work when racks are
         # resubmitted unchanged.
-        design = Design.objects.create(
+        design = make_design(
             title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         design.racks.set([self.racks[0]])
@@ -245,7 +246,7 @@ class DesignFormFrozenRacksTest(TestCase):
         self.assertTrue(form.is_valid(), form.errors)
 
     def test_summary_and_link_editable_on_approved_design(self):
-        design = Design.objects.create(
+        design = make_design(
             title="Approved", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
         design.racks.set([self.racks[0]])
@@ -276,20 +277,20 @@ class DesignFormBasedOnTest(TestCase):
         cls.site = env["site"]
         cls.other_site = Site.objects.create(name="Other Site 2", slug="other-site-2")
 
-        cls.approved = Design.objects.create(
+        cls.approved = make_design(
             title="Approved Parent", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.draft = Design.objects.create(
+        cls.draft = make_design(
             title="Draft Parent", site=cls.site, status=DesignStatusChoices.STATUS_DRAFT,
         )
-        cls.approved_other_site = Design.objects.create(
+        cls.approved_other_site = make_design(
             title="Approved Elsewhere", site=cls.other_site, status=DesignStatusChoices.STATUS_APPROVED,
         )
 
     def _form_data(self, based_on=None, site=None, title="Child"):
         data = {
             "title": title,
-            "site": (site or self.site).pk,
+            "sites": [(site or self.site).pk],
             "status": DesignStatusChoices.STATUS_DRAFT,
         }
         if based_on is not None:
@@ -331,7 +332,7 @@ class DesignFormBasedOnTest(TestCase):
         # approved -> child (already saved), then try to re-point approved's
         # based_on at child: a 2-node cycle. Must come back as a form error on
         # `based_on`, never as an unhandled exception / 500.
-        child = Design.objects.create(
+        child = make_design(
             title="Child of approved",
             site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -357,7 +358,7 @@ class DesignPlacementTest(ViewTestCases.PrimaryObjectViewTestCase):
         device_type = env["device_type"]
         rack = env["racks"][1]  # empty rack with free U slots
 
-        design = Design.objects.create(title="Design 1", site=site)
+        design = make_design(title="Design 1", site=site)
         cls.design = design
         cls.device_type = device_type
         cls.rack = rack
@@ -429,7 +430,7 @@ class DesignPowerFeedTest(ViewTestCases.PrimaryObjectViewTestCase):
         env = create_dcim_environment()
         site = env["site"]
         rack = env["racks"][0]
-        design = Design.objects.create(title="Feed Design", site=site)
+        design = make_design(title="Feed Design", site=site)
         design.racks.set([rack])
 
         for name in ("Feed A", "Feed B", "Feed C"):
@@ -470,7 +471,7 @@ class DesignPowerFeedDerationTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.rack = env["racks"][0]
-        cls.design = Design.objects.create(title="Derate Design", site=env["site"])
+        cls.design = make_design(title="Derate Design", site=env["site"])
 
     def test_derated_watts_matches_the_projection(self):
         from netbox.config import get_config
@@ -501,7 +502,7 @@ class RenamedMoveRenderTest(TestCase):
         cls.site = env["site"]
         cls.rack = env["racks"][0]
         cls.device = env["devices"][0]  # "Device 1" @ U1
-        cls.design = Design.objects.create(title="Rename render", site=cls.site)
+        cls.design = make_design(title="Rename render", site=cls.site)
         cls.design.racks.set([cls.rack])
         DesignPlacement.objects.create(
             design=cls.design,
@@ -531,7 +532,90 @@ class RenamedMoveRenderTest(TestCase):
         # The identity-story hover data rides along: the device's real (old)
         # name + where it is going (user ruling 2026-07-10).
         self.assertIn(f'data-old-name="{self.device.name}"', content)
-        self.assertIn("data-moved-to=", content)
+        # A move_in tile is drawn AT its destination, so the useful half of
+        # the story is where the device is coming FROM (user ruling
+        # 2026-09-22). "To <this rack> · U<this unit>" merely repeated what
+        # the tile's own position already says.
+        self.assertIn("data-moved-from=", content)
+
+
+class MoveHoverOriginTest(TestCase):
+    """A move's hover data answers the question the tile cannot.
+
+    On the destination tile (``move_in``) that is the ORIGIN -- rack and
+    unit the device stands in today; on the vacated slot (``move_out_ghost``)
+    it stays the DESTINATION. Each end names the other end.
+    """
+
+    user_permissions = ("netbox_rack_design.view_design",)
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.rack = env["racks"][0]
+        cls.other_rack = env["racks"][1]
+        cls.device = env["devices"][0]  # "Device 1" @ U1 of cls.rack
+        cls.design = make_design(title="Move origin", site=cls.site)
+        cls.design.racks.set([cls.rack, cls.other_rack])
+        DesignPlacement.objects.create(
+            design=cls.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=cls.device,
+            target_rack=cls.other_rack,
+            target_position=20,
+            target_face="front",
+        )
+
+    def _content(self):
+        url = reverse(
+            "plugins:netbox_rack_design:design_elevation",
+            kwargs={"pk": self.design.pk},
+        )
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        return response.content.decode()
+
+    def test_move_in_names_the_origin_site_rack_and_unit(self):
+        """The origin carries its SITE too.
+
+        A design may span several sites, and rack names repeat across them
+        (every hall has an R101), so a bare rack name does not identify a
+        place (user ruling 2026-09-22).
+        """
+        content = self._content()
+        origin = (f'data-moved-from="{self.site.name} · {self.rack.name}'
+                  f' · U{int(self.device.position)}"')
+        self.assertIn(origin, content,
+                      "the destination tile must name the site, rack and unit it comes from")
+
+    def test_ghost_names_the_destination_site(self):
+        content = self._content()
+        self.assertIn(
+            f'data-moved-to="{self.site.name} · {self.other_rack.name} · U20"',
+            content, "the vacated slot must name the destination's site too")
+
+    def test_move_in_does_not_repeat_its_own_position(self):
+        """The destination tile carries the origin and nothing else.
+
+        Asserted per ELEMENT, not per document: the ghost at the other end
+        legitimately carries the very same "Rack 2 U20" string as its
+        destination, so a substring search over the whole page cannot tell
+        the two tiles apart.
+        """
+        content = self._content()
+        tags = [t for t in content.split("<") if "data-moved-from=" in t]
+        self.assertEqual(len(tags), 1, "expected exactly one move_in tile")
+        self.assertNotIn(
+            "data-moved-to=", tags[0],
+            "a move_in tile already sits at its destination; 'To <here>' is noise")
+        self.assertIn("data-old-name=", tags[0],
+                      "the origin belongs on the move_in tile")
+
+    def test_ghost_still_names_the_destination(self):
+        content = self._content()
+        self.assertIn(f'data-moved-to="{self.site.name} · {self.other_rack.name} · U20"',
+                      content, "the vacated slot must still say where the device went")
 
 
 class DisplacedElevationRenderTest(TestCase):
@@ -550,7 +634,7 @@ class DisplacedElevationRenderTest(TestCase):
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][0]
         cls.old_device = env["devices"][0]  # Device 1 @ Rack1/U1/front
-        cls.design = Design.objects.create(title="Displaced elevation", site=cls.site)
+        cls.design = make_design(title="Displaced elevation", site=cls.site)
         cls.design.racks.set([cls.rack])
         # OLD moves away (U1 -> U10) ...
         DesignPlacement.objects.create(
@@ -629,7 +713,7 @@ class DesignElevationViewTest(TestCase):
         cls.device1 = env["devices"][0]
         cls.device2 = env["devices"][1]
 
-        cls.design = Design.objects.create(title="Elevation Design", site=cls.site)
+        cls.design = make_design(title="Elevation Design", site=cls.site)
         # The read-only elevation walks design.racks (the planning scope), like
         # the editor; both scoped racks must therefore render side by side.
         cls.design.racks.set([cls.rack1, cls.rack2])
@@ -715,6 +799,10 @@ class DesignElevationViewTest(TestCase):
         response = self.client.get(self._url(self.design))
         self.assertHttpStatus(response, 200)
         content = response.content.decode()
+        # T1.5c (PLAN-templates.md D31): rack_block.html now identifies a
+        # rack in the DOM by the colon-free rack_key() form ("r-<pk>"), not
+        # the bare pk -- a real dcim.Rack and a PlannedRack can share a pk
+        # (D28), so the bare form is ambiguous. These are all real racks.
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rack-id="{rack.pk}"', content)
             self.assertIn(f"nbx-rd-grid-front-{rack.pk}", content)
@@ -766,7 +854,7 @@ class ElevationBrowserViewTest(TestCase):
         cls.rack2 = env["racks"][1]  # empty
 
         # Design 1 touches rack1 (add placement) -> one row.
-        cls.design1 = Design.objects.create(title="Browser Design 1", site=cls.site)
+        cls.design1 = make_design(title="Browser Design 1", site=cls.site)
         DesignPlacement.objects.create(
             design=cls.design1,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -778,7 +866,7 @@ class ElevationBrowserViewTest(TestCase):
         )
 
         # Design 2 touches BOTH rack2 and rack1 (two add placements) -> two rows.
-        cls.design2 = Design.objects.create(title="Browser Design 2", site=cls.site)
+        cls.design2 = make_design(title="Browser Design 2", site=cls.site)
         DesignPlacement.objects.create(
             design=cls.design2,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -873,7 +961,7 @@ class DesignEditorViewTest(TestCase):
         cls.device2 = env["devices"][1]
 
         cls.rack2 = env["racks"][1]  # also in scope (drives the switcher)
-        cls.design = Design.objects.create(title="Editor Design", site=cls.site)
+        cls.design = make_design(title="Editor Design", site=cls.site)
         # Both racks are part of the design's planning scope (design.racks).
         cls.design.racks.set([cls.rack1, cls.rack2])
 
@@ -1026,6 +1114,7 @@ class DesignEditorViewTest(TestCase):
         self.assertNotIn("nbx-rd-rack-switcher", content)
         # Both scoped racks render side by side, each with its own front grid +
         # per-rack JSON payload keyed by rack pk.
+        # T1.5c (D31): see test_elevation_renders_each_rack_with_both_faces.
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rack-id="{rack.pk}"', content)
             self.assertIn(f"nbx-rd-grid-front-{rack.pk}", content)
@@ -1226,7 +1315,36 @@ class DesignEditorViewTest(TestCase):
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rd-rack-row="{rack.pk}"', content)
             self.assertIn(f'data-rd-visi-toggle="{rack.pk}"', content)
-            self.assertIn(f'data-rd-remove-rack="{rack.pk}"', content)
+            # Remove carries the NAMESPACED key: the panel now lists planned
+            # racks too, and the two kinds keep separate pk sequences (D28).
+            self.assertIn(f'data-rd-remove-rack="r:{rack.pk}"', content)
+
+    def test_editor_design_racks_panel_lists_planned_racks_with_remove(self):
+        """A planned rack needs a way out of the design.
+
+        Deleting a ``PlannedRack`` is refused while a design still plans
+        across it, and says to remove it from each design's scope first --
+        so this panel lists it (with the remove control, and no hide toggle,
+        D25) instead of leaving that instruction impossible to follow
+        (user report 2026-09-22).
+        """
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        location = Location.objects.create(
+            name="Panel planned loc", slug="panel-planned-loc", site=self.site)
+        planned = PlannedRack.objects.create(
+            name="Panel planned", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+
+        response = self.client.get(self._url(self.design, self.rack1))
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        rows = response.context["scoped_rack_rows"]
+        self.assertEqual([r["planned"] for r in rows], [False, False, True])
+        self.assertIn(f'data-rd-remove-rack="p:{planned.pk}"', content)
+        self.assertNotIn(f'data-rd-visi-toggle="{planned.pk}"', content)
 
     def test_editor_renders_all_scoped_blocks_with_hidden_class(self):
         # Phase C renders EVERY scoped rack block (not just visible ones); blocks
@@ -1247,6 +1365,7 @@ class DesignEditorViewTest(TestCase):
         self.assertEqual([b["hidden"] for b in blocks], [False, True])
         # The hidden rack's block still renders (just visually hidden) so its
         # initRack controller runs and the toggle is reload-free.
+        # T1.5c (D31): dash-form rack_key(), see rack_dom_id.
         self.assertIn(f"rd-editor-data-{self.rack2.pk}", content)
         self.assertIn('class="nbx-rd-rack-block hidden"', content)
         # The visible rack's block is rendered without the hidden class.
@@ -1296,7 +1415,7 @@ class RackFloorAlignmentMarkupTest(TestCase):
         cls.site = env["site"]
         cls.rack1 = env["racks"][0]
         cls.rack2 = env["racks"][1]
-        cls.design = Design.objects.create(title="Floor Design", site=cls.site)
+        cls.design = make_design(title="Floor Design", site=cls.site)
         cls.design.racks.set([cls.rack1, cls.rack2])
 
     def _get(self, name, **kwargs):
@@ -1339,7 +1458,7 @@ class DesignPlannedFeedPanelTest(TestCase):
         cls.rack = env["racks"][0]
         cls.device_type = env["device_type"]
         cls.role = env["device_role"]
-        cls.design = Design.objects.create(title="Feed panel design", site=cls.site)
+        cls.design = make_design(title="Feed panel design", site=cls.site)
         cls.feed = DesignPowerFeed.objects.create(
             design=cls.design, rack=cls.rack, name="R101-A",
             voltage=230, amperage=32,
@@ -1378,7 +1497,7 @@ class DesignPlannedFeedPanelTest(TestCase):
         self.assertIn("pdu-a1", response.content.decode())
 
     def test_a_design_without_planned_feeds_says_so(self):
-        other = Design.objects.create(title="No feeds", site=self.site)
+        other = make_design(title="No feeds", site=self.site)
         response = self.client.get(
             reverse("plugins:netbox_rack_design:design", kwargs={"pk": other.pk}))
         self.assertHttpStatus(response, 200)
@@ -1405,10 +1524,10 @@ class DesignEditorDefaultRouteTest(TestCase):
         cls.site = env["site"]
         cls.rack1 = env["racks"][0]
         cls.rack2 = env["racks"][1]
-        cls.design = Design.objects.create(title="Default Route Design", site=cls.site)
+        cls.design = make_design(title="Default Route Design", site=cls.site)
         cls.design.racks.set([cls.rack2, cls.rack1])  # set out of order on purpose
 
-        cls.empty_design = Design.objects.create(title="Empty Scope Design", site=cls.site)
+        cls.empty_design = make_design(title="Empty Scope Design", site=cls.site)
 
     def _default_url(self, design):
         return reverse(
@@ -1427,6 +1546,7 @@ class DesignEditorDefaultRouteTest(TestCase):
             [b["rack"].pk for b in response.context["all_rack_blocks"]],
             [self.rack1.pk, self.rack2.pk],
         )
+        # T1.5c (D31): see test_elevation_renders_each_rack_with_both_faces.
         for rack in (self.rack1, self.rack2):
             self.assertIn(f'data-rack-id="{rack.pk}"', content)
             self.assertIn(f"rd-editor-data-{rack.pk}", content)
@@ -1490,7 +1610,7 @@ class DesignAffectedRacksTest(TestCase):
         cls.rack2 = env["racks"][1]  # targeted by an add placement
         cls.device1 = env["devices"][0]
 
-        cls.design = Design.objects.create(title="Affected Racks Design", site=cls.site)
+        cls.design = make_design(title="Affected Racks Design", site=cls.site)
         # add into rack2 -> rack2 is affected via target_rack
         DesignPlacement.objects.create(
             design=cls.design,
@@ -1537,7 +1657,7 @@ class DesignScopedRacksPanelTest(TestCase):
         cls.site = env["site"]
         cls.rack1 = env["racks"][0]
         cls.rack2 = env["racks"][1]
-        cls.design = Design.objects.create(title="Scoped Racks Design", site=cls.site)
+        cls.design = make_design(title="Scoped Racks Design", site=cls.site)
         cls.design.racks.set([cls.rack1, cls.rack2])
 
     def test_detail_context_includes_scoped_racks(self):
@@ -1578,7 +1698,7 @@ class RackDesignsPanelTest(TestCase):
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][1]  # empty rack with free U slots
 
-        cls.design = Design.objects.create(title="Panel Design", site=cls.site)
+        cls.design = make_design(title="Panel Design", site=cls.site)
         DesignPlacement.objects.create(
             design=cls.design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1620,7 +1740,7 @@ class FrozenDesignStillRendersTest(TestCase):
         cls.site = env["site"]
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][0]
-        cls.design = Design.objects.create(title="Frozen render design", site=cls.site)
+        cls.design = make_design(title="Frozen render design", site=cls.site)
         cls.design.racks.add(cls.rack)
         DesignPlacement.objects.create(
             design=cls.design,
@@ -1674,7 +1794,7 @@ class DesignPlacementFrozenWriteTest(TestCase):
         cls.site = env["site"]
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][1]
-        cls.design = Design.objects.create(title="Frozen placement design", site=cls.site)
+        cls.design = make_design(title="Frozen placement design", site=cls.site)
         cls.placement = DesignPlacement.objects.create(
             design=cls.design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -1741,7 +1861,7 @@ class DesignPowerFeedFrozenWriteTest(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.rack = env["racks"][0]
-        cls.design = Design.objects.create(title="Frozen feed design", site=cls.site)
+        cls.design = make_design(title="Frozen feed design", site=cls.site)
         cls.feed = DesignPowerFeed.objects.create(design=cls.design, rack=cls.rack, name="Feed A")
         cls.design.status = DesignStatusChoices.STATUS_APPROVED
         cls.design.save()
@@ -1795,11 +1915,11 @@ class DesignDeleteChildrenGuardTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.parent = Design.objects.create(title="Parent design", site=cls.site)
-        cls.child = Design.objects.create(
+        cls.parent = make_design(title="Parent design", site=cls.site)
+        cls.child = make_design(
             title="Child design", site=cls.site, based_on=cls.parent,
         )
-        cls.lonely = Design.objects.create(title="Lonely design", site=cls.site)
+        cls.lonely = make_design(title="Lonely design", site=cls.site)
 
     def test_delete_rejected_when_has_children(self):
         url = reverse(
@@ -1840,11 +1960,11 @@ class DesignBulkDeleteChildrenGuardTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.parent = Design.objects.create(title="Bulk parent design", site=cls.site)
-        cls.child = Design.objects.create(
+        cls.parent = make_design(title="Bulk parent design", site=cls.site)
+        cls.child = make_design(
             title="Bulk child design", site=cls.site, based_on=cls.parent,
         )
-        cls.lonely = Design.objects.create(title="Bulk lonely design", site=cls.site)
+        cls.lonely = make_design(title="Bulk lonely design", site=cls.site)
 
     def test_bulk_delete_rejected_when_selection_has_children(self):
         url = reverse("plugins:netbox_rack_design:design_bulk_delete")
@@ -1880,12 +2000,12 @@ class DesignDeleteVersionsGuardTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.root = Design.objects.create(title="Root design", site=cls.site)
-        cls.v2 = Design.objects.create(
+        cls.root = make_design(title="Root design", site=cls.site)
+        cls.v2 = make_design(
             title="Root design", site=cls.site, root=cls.root, version=2,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.lonely = Design.objects.create(title="Lonely root", site=cls.site)
+        cls.lonely = make_design(title="Lonely root", site=cls.site)
 
     def test_delete_rejected_when_has_versions(self):
         url = reverse(
@@ -1927,11 +2047,11 @@ class DesignBulkDeleteVersionsGuardTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.root = Design.objects.create(title="Bulk root design", site=cls.site)
-        cls.v2 = Design.objects.create(
+        cls.root = make_design(title="Bulk root design", site=cls.site)
+        cls.v2 = make_design(
             title="Bulk root design", site=cls.site, root=cls.root, version=2,
         )
-        cls.lonely = Design.objects.create(title="Bulk lonely root", site=cls.site)
+        cls.lonely = make_design(title="Bulk lonely root", site=cls.site)
 
     def test_bulk_delete_rejected_when_selection_has_versions(self):
         url = reverse("plugins:netbox_rack_design:design_bulk_delete")
@@ -1963,11 +2083,11 @@ class DesignDeleteBothReasonsGuardTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.root = Design.objects.create(title="Both-reasons root", site=cls.site)
-        cls.v2 = Design.objects.create(
+        cls.root = make_design(title="Both-reasons root", site=cls.site)
+        cls.v2 = make_design(
             title="Both-reasons root", site=cls.site, root=cls.root, version=2,
         )
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Both-reasons child", site=cls.site, based_on=cls.root,
         )
 
@@ -1991,10 +2111,10 @@ class DesignDeriveViewTest(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.approved = Design.objects.create(
+        cls.approved = make_design(
             title="Approved parent", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.draft = Design.objects.create(title="Draft parent", site=cls.site)
+        cls.draft = make_design(title="Draft parent", site=cls.site)
 
     def _url(self, design):
         return reverse("plugins:netbox_rack_design:design_derive", kwargs={"pk": design.pk})
@@ -2095,15 +2215,15 @@ class DesignNewVersionViewTest(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.approved = Design.objects.create(
+        cls.approved = make_design(
             title="Approved root", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.draft = Design.objects.create(title="Draft root", site=cls.site)
-        cls.parent_with_child = Design.objects.create(
+        cls.draft = make_design(title="Draft root", site=cls.site)
+        cls.parent_with_child = make_design(
             title="Parent with child", site=cls.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Child", site=cls.site, based_on=cls.parent_with_child,
         )
 
@@ -2177,11 +2297,11 @@ class DesignNewVersionButtonTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.approved = Design.objects.create(
+        cls.approved = make_design(
             title="Approved for button", site=cls.site,
             status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.draft = Design.objects.create(title="Draft for button", site=cls.site)
+        cls.draft = make_design(title="Draft for button", site=cls.site)
 
     def _url(self, design):
         return reverse("plugins:netbox_rack_design:design", kwargs={"pk": design.pk})
@@ -2224,7 +2344,7 @@ class DesignApplyViewTest(TestCase):
         return reverse("plugins:netbox_rack_design:design_apply", kwargs={"pk": design.pk})
 
     def _design_with_add(self, title, *, position=10, name="apply-view-srv", approve=True):
-        design = Design.objects.create(title=title, site=self.site)
+        design = make_design(title=title, site=self.site)
         DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -2248,6 +2368,24 @@ class DesignApplyViewTest(TestCase):
         response = self.client.get(self._url(design))
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "apply-view-srv")
+        # a unit is a whole number on screen: "U10", never "U10.0"
+        self.assertContains(response, "U10 front")
+        self.assertNotContains(response, "U10.0")
+
+    def test_confirm_page_names_the_configured_removal_status(self):
+        """The page said removals are "flagged for decommissioning" whatever
+        `removal_status` was configured to -- on an install that flags with
+        another status, the page a reviewer reads before pressing Apply
+        described something apply does not do."""
+        from django.test import override_settings
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Removal label")
+        with override_settings(PLUGINS_CONFIG={"netbox_rack_design": {"removal_status": "offline"}}):
+            response = self.client.get(self._url(design))
+        self.assertContains(response, "flagged <strong>Offline</strong>")
+        self.assertNotContains(response, "decommissioning")
 
     def test_get_with_problems_shows_them_and_hides_the_submit_button(self):
         self.add_permissions(
@@ -2307,14 +2445,14 @@ class DesignRebaseViewTest(TestCase):
     def setUpTestData(cls):
         env = create_dcim_environment()
         cls.site = env["site"]
-        cls.approved_a = Design.objects.create(
+        cls.approved_a = make_design(
             title="Approved A", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.approved_b = Design.objects.create(
+        cls.approved_b = make_design(
             title="Approved B", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.draft_target = Design.objects.create(title="Draft target", site=cls.site)
-        cls.child = Design.objects.create(
+        cls.draft_target = make_design(title="Draft target", site=cls.site)
+        cls.child = make_design(
             title="Child", site=cls.site, based_on=cls.approved_a,
         )
 
@@ -2334,6 +2472,30 @@ class DesignRebaseViewTest(TestCase):
         self.assertEqual(response.status_code, 200)  # re-renders the form with an error
         self.child.refresh_from_db()
         self.assertEqual(self.child.based_on_id, self.approved_a.pk)
+
+    def test_rebase_onto_a_draft_new_version_of_the_parent_completes_the_hand_over(self):
+        """The documented way to revise a frozen parent (design-chains.md):
+        New version -> re-base each child onto it -> old version to draft ->
+        approve the new one. Re-base offered approved designs only, and the
+        old version cannot leave approved while it has children, so the
+        hand-over deadlocked in the UI (found 2026-09-25). A draft version of
+        the child's CURRENT parent's own plan is now a valid target; an
+        unrelated draft still is not (test above)."""
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
+        v2 = make_design(title="Approved A", site=self.site, root=self.approved_a, version=2)
+
+        response = self.client.post(self._url(self.child), {"based_on": v2.pk})
+        self.assertEqual(response.status_code, 302)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, v2.pk)
+
+        # nothing depends on v1 any more: it may leave approved, v2 may take it
+        self.approved_a.status = DesignStatusChoices.STATUS_DRAFT
+        self.approved_a.full_clean()
+        self.approved_a.save()
+        v2.status = DesignStatusChoices.STATUS_APPROVED
+        v2.full_clean()
+        v2.save()
 
     def test_rebase_creating_a_cycle_is_refused(self):
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
@@ -2389,7 +2551,7 @@ class DesignEditorChainWidgetTest(TestCase):
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][0]
 
-        cls.parent = Design.objects.create(title="Network sweep IDS-1000", site=cls.site)
+        cls.parent = make_design(title="Network sweep IDS-1000", site=cls.site)
         cls.parent.racks.add(cls.rack)
         cls.upstream_add = DesignPlacement.objects.create(
             design=cls.parent,
@@ -2403,7 +2565,7 @@ class DesignEditorChainWidgetTest(TestCase):
         cls.parent.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent.save()
 
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Server build IDS-2000", site=cls.site, based_on=cls.parent,
         )
         cls.child.racks.add(cls.rack)
@@ -2421,7 +2583,7 @@ class DesignEditorChainWidgetTest(TestCase):
 
         # An unrelated, unchained design in the same scope for the "unchanged
         # payload" assertion.
-        cls.plain = Design.objects.create(title="Plain design", site=cls.site)
+        cls.plain = make_design(title="Plain design", site=cls.site)
         cls.plain.racks.add(cls.rack)
 
     def _editor_url(self, design):
@@ -2521,7 +2683,7 @@ class DesignEditorPeerConflictContextTest(TestCase):
         cls.device_type = env["device_type"]
         cls.rack = env["racks"][0]
 
-        cls.parent = Design.objects.create(title="Network sweep IDS-1000", site=cls.site)
+        cls.parent = make_design(title="Network sweep IDS-1000", site=cls.site)
         cls.parent.racks.add(cls.rack)
         cls.upstream_add = DesignPlacement.objects.create(
             design=cls.parent,
@@ -2535,7 +2697,7 @@ class DesignEditorPeerConflictContextTest(TestCase):
         cls.parent.status = DesignStatusChoices.STATUS_APPROVED
         cls.parent.save()
 
-        cls.child = Design.objects.create(
+        cls.child = make_design(
             title="Server build IDS-2000", site=cls.site, based_on=cls.parent,
         )
         cls.child.racks.add(cls.rack)
@@ -2552,7 +2714,7 @@ class DesignEditorPeerConflictContextTest(TestCase):
         # A PEER (not in the child's lineage) claiming the SAME unit as the
         # child's own add -- a peer_slot_claim, symmetric to (and rendered
         # completely apart from) the parent/child chain above.
-        cls.peer = Design.objects.create(title="Peer design IDS-9000", site=cls.site)
+        cls.peer = make_design(title="Peer design IDS-9000", site=cls.site)
         cls.peer.racks.add(cls.rack)
         cls.peer_add = DesignPlacement.objects.create(
             design=cls.peer,
@@ -2606,7 +2768,7 @@ class DesignEditorPeerConflictContextTest(TestCase):
         self.assertEqual(response.context["peer_conflict_rows"], [])
 
     def plain_design(self):
-        design = Design.objects.create(title="Unrelated design", site=self.site)
+        design = make_design(title="Unrelated design", site=self.site)
         design.racks.add(self.rack)
         return design
 
@@ -2715,33 +2877,33 @@ class DesignChainHealthViewTest(TestCase):
         cls.devices = env["devices"]
 
         # 1. Implemented parent -> child's chain is refused until re-based.
-        cls.implemented_parent = Design.objects.create(
+        cls.implemented_parent = make_design(
             title="Implemented parent", site=cls.site,
             status=DesignStatusChoices.STATUS_IMPLEMENTED,
         )
-        cls.child_of_implemented = Design.objects.create(
+        cls.child_of_implemented = make_design(
             title="Child of implemented", site=cls.site, based_on=cls.implemented_parent,
         )
 
         # 2. Draft (never-approved) parent -> chain refused the same way.
-        cls.draft_parent = Design.objects.create(title="Draft parent", site=cls.site)
-        cls.child_of_draft = Design.objects.create(
+        cls.draft_parent = make_design(title="Draft parent", site=cls.site)
+        cls.child_of_draft = make_design(
             title="Child of draft", site=cls.site, based_on=cls.draft_parent,
         )
 
         # 3. A healthy chain: approved parent, nothing wrong -- must NOT appear.
-        cls.approved_parent = Design.objects.create(
+        cls.approved_parent = make_design(
             title="Approved parent", site=cls.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
-        cls.healthy_child = Design.objects.create(
+        cls.healthy_child = make_design(
             title="Healthy child", site=cls.site, based_on=cls.approved_parent,
         )
 
         # 4. Unchained, otherwise-fine design -- must NOT appear.
-        cls.unchained = Design.objects.create(title="Unchained design", site=cls.site)
+        cls.unchained = make_design(title="Unchained design", site=cls.site)
 
         # 5. Stale placements: two inert rows (their real devices were deleted).
-        cls.stale_design = Design.objects.create(title="Stale design", site=cls.site)
+        cls.stale_design = make_design(title="Stale design", site=cls.site)
         cls.stale_move = DesignPlacement.objects.create(
             design=cls.stale_design,
             kind=DesignPlacementKindChoices.KIND_MOVE,
@@ -2892,8 +3054,13 @@ class DesignChainHealthViewTest(TestCase):
             views._chain_health_rows(self.user)
         baseline_queries = len(before.captured_queries)
 
+        # `site=` dropped (PLAN-multi-site.md M1: `sites` is a M2M,
+        # unsettable via `bulk_create`, which bypasses `save()`/M2M
+        # through-rows entirely) -- irrelevant to this test either way: these
+        # padding rows have no placements/refusals, so `_chain_health_rows`
+        # never selects them regardless of their site.
         Design.objects.bulk_create([
-            Design(title=f"Bulk design {i}", site=self.site, sequence=1000 + i)
+            Design(title=f"Bulk design {i}", sequence=1000 + i)
             for i in range(25)
         ])
 
@@ -2905,3 +3072,229 @@ class DesignChainHealthViewTest(TestCase):
         )
         # And it should be small in absolute terms, not just stable.
         self.assertLessEqual(baseline_queries, 6, before.captured_queries)
+
+
+class DesignEditorAddRackPanelContextTest(TestCase):
+    """PLAN-multi-site.md M8/P3: the editor's Site -> Location -> Rack
+    add_rack_form and its site_locations context, for one- and two-site
+    designs. The interactive (TomSelect) behaviour is covered end-to-end by
+    tests/e2e/test_editor_add_rack.py; this is the fast, DB-level check that
+    the context/markup the JS depends on is actually shaped right.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import Location
+
+        env = create_dcim_environment()
+        cls.site_a = env["site"]
+        cls.rack_a = env["racks"][0]
+
+        cls.site_b = Site.objects.create(name="Add-rack Site B", slug="add-rack-site-b")
+        cls.location_a = Location.objects.create(
+            site=cls.site_a, name="Loc A", slug="add-rack-loc-a")
+        cls.location_b = Location.objects.create(
+            site=cls.site_b, name="Loc B", slug="add-rack-loc-b")
+        cls.rack_b = Rack.objects.create(
+            site=cls.site_b, location=cls.location_b, name="Rack B", status="active")
+
+        cls.design_one = make_design(title="One-site editor design", site=cls.site_a)
+        cls.design_one.racks.set([cls.rack_a])
+
+        cls.design_two = make_design(title="Two-site editor design", sites=[cls.site_a, cls.site_b])
+        cls.design_two.racks.set([cls.rack_a, cls.rack_b])
+
+    def _url(self, design, rack):
+        return reverse(
+            "plugins:netbox_rack_design:design_editor",
+            kwargs={"pk": design.pk, "rack_id": rack.pk},
+        )
+
+    def test_one_site_design_add_site_prefilled_and_dependents_enabled(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design_one, self.rack_a))
+        self.assertHttpStatus(response, 200)
+        form = response.context["add_rack_form"]
+        self.assertIn("add_site", form.fields)
+        # Pre-filled, NOT restricted: the design's one site is a starting
+        # point. Reaching a rack in another site is how a design becomes
+        # multi-site (user ruling 2026-09-22), so the picker must still
+        # offer every site and carry no `id` pin on its remote list.
+        self.assertEqual(form.fields["add_site"].initial, self.site_a.pk)
+        # No `id` pin on the widget's remote list -- that pin is what used to
+        # make the picker unable to reach any site but the design's own.
+        # (The field's own queryset is not asserted: NetBox narrows a
+        # rendered DynamicModelChoiceField to its initial value on purpose,
+        # so reading it back here would test NetBox, not this scoping.)
+        self.assertNotIn("id", form.fields["add_site"].widget.static_params)
+        self.assertNotIn("disabled", form.fields["add_location"].widget.attrs)
+        self.assertNotIn("disabled", form.fields["add_rack"].widget.attrs)
+
+        content = response.content.decode()
+        self.assertNotIn("nbx-rd-add-site-chip", content,
+                         "Site is a live filter, never a fixed chip")
+        self.assertIn('id="id_add_site"', content)
+
+    def test_two_site_design_add_site_unfilled_and_dependents_disabled(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design_two, self.rack_a))
+        self.assertHttpStatus(response, 200)
+        form = response.context["add_rack_form"]
+        # Two sites already: nothing to pre-fill, so the planner picks one
+        # first and Location/Rack stay disabled until they do.
+        self.assertIsNone(form.fields["add_site"].initial)
+        self.assertNotIn("id", form.fields["add_site"].widget.static_params)
+        self.assertEqual(form.fields["add_location"].widget.attrs.get("disabled"), "disabled")
+        self.assertEqual(form.fields["add_rack"].widget.attrs.get("disabled"), "disabled")
+
+        content = response.content.decode()
+        self.assertNotIn("nbx-rd-add-site-chip", content)
+
+    def test_site_locations_grouped_per_site(self):
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.change_design",
+        )
+        response = self.client.get(self._url(self.design_two, self.rack_a))
+        self.assertHttpStatus(response, 200)
+        groups = {g["site_id"]: g for g in response.context["site_locations"]}
+        self.assertEqual(set(groups), {self.site_a.pk, self.site_b.pk})
+        self.assertEqual(groups[self.site_a.pk]["site"], self.site_a.name)
+        self.assertEqual(
+            [loc["id"] for loc in groups[self.site_a.pk]["locations"]],
+            [self.location_a.pk],
+        )
+        self.assertEqual(
+            [loc["id"] for loc in groups[self.site_b.pk]["locations"]],
+            [self.location_b.pk],
+        )
+
+
+class DesignPlannedRacksPanelTest(TestCase):
+    """The design page's Racks card lists the design's PLANNED racks too. It
+    used to read only ``design.racks`` (real racks), so a rack made with
+    Create rack -- R5, R6 -- was invisible on the design page, before Apply
+    and after it alike."""
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.change_design",
+        "netbox_rack_design.view_plannedrack",
+        "dcim.view_rack",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import Location
+
+        from ..models import PlannedRack
+
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.location = Location.objects.create(name="Hall 2", slug="hall-2", site=cls.site)
+        cls.design = make_design(title="Planned Racks Design", site=cls.site)
+        cls.planned = PlannedRack.objects.create(
+            name="PR-NEW", location=cls.location, u_height=42)
+        cls.real = Rack.objects.create(
+            name="PR-BUILT", site=cls.site, location=cls.location, u_height=42)
+        cls.realized = PlannedRack.objects.create(
+            name="PR-BUILT", location=cls.location, u_height=42, realized_rack=cls.real)
+        cls.design.planned_racks.add(cls.planned, cls.realized)
+
+    def _page(self):
+        url = reverse("plugins:netbox_rack_design:design", kwargs={"pk": self.design.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        return response.content.decode()
+
+    def test_a_planned_rack_is_listed_and_marked_planned(self):
+        content = self._page()
+        self.assertIn("PR-NEW", content)
+        self.assertIn("Hall 2", content)
+        self.assertIn(self.planned.get_absolute_url(), content)
+        self.assertIn("nbx-rd-racks-planned-badge", content)
+
+    def test_a_realized_planned_rack_links_to_the_real_rack(self):
+        content = self._page()
+        self.assertIn(self.real.get_absolute_url(), content,
+                      "once applied, the card must point at the rack that now exists")
+
+    def test_open_editor_is_also_in_the_page_header(self):
+        """Open editor sits in the page's own button row too, next to Edit --
+        not only in the Racks card, which is a long scroll down the page."""
+        content = self._page()
+        default_url = reverse("plugins:netbox_rack_design:design_editor_default",
+                              kwargs={"pk": self.design.pk})
+        self.assertIn("nbx-rd-header-open-editor", content)
+        self.assertIn(f'href="{default_url}"', content)
+
+
+class DeviceDeletedThroughTheUITest(TestCase):
+    """Deleting a device in the NetBox UI leaves its planned move stale and
+    listed -- not a silent, inert row (found recording the tutorial, Part 15:
+    core's request-time handler nulled the reference first)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device = env["devices"][0]
+        cls.design = make_design(title="UI delete plan", site=cls.site)
+
+    def test_the_move_of_a_device_deleted_in_the_ui_is_stale(self):
+        self.add_permissions("dcim.view_device", "dcim.delete_device")
+        move = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.device, target_rack=self.racks[1], target_position=7,
+        )
+        name = self.device.name
+        response = self.client.post(
+            reverse("dcim:device_delete", kwargs={"pk": self.device.pk}),
+            {"confirm": True},
+        )
+        self.assertHttpStatus(response, 302)
+        move.refresh_from_db()
+        self.assertIsNone(move.device_id)
+        self.assertTrue(move.stale)
+        self.assertEqual(move.stale_device_name, name)
+
+
+class GlobalSearchTest(TestCase):
+    """NetBox's global search renders every index's display_attrs through
+    ``_meta.get_field`` -- a property there is a 500 for any matching design or
+    planned rack (found recording the tutorial, Part 20: "Design has no field
+    named 'sites_display'")."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.core.management import call_command
+
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.design = make_design(title="Searchable greenfield plan", site=cls.site,
+                                 summary="greenfield row")
+        location = Location.objects.create(
+            name="Search loc", slug="search-loc", site=cls.site)
+        PlannedRack.objects.create(name="Searchable-R9", location=location, u_height=42)
+        call_command("reindex", "netbox_rack_design", verbosity=0)
+
+    def test_a_matching_design_renders_with_its_sites(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(reverse("search") + "?q=greenfield")
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn("Searchable greenfield plan", content)
+        self.assertIn(self.site.name, content)
+
+    def test_a_matching_planned_rack_renders(self):
+        self.add_permissions("netbox_rack_design.view_plannedrack")
+        response = self.client.get(reverse("search") + "?q=Searchable-R9")
+        self.assertHttpStatus(response, 200)
+        self.assertIn("Searchable-R9", response.content.decode())

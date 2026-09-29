@@ -47,6 +47,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 # ---------------------------------------------------------------------------
 # Configuration (matches dev/config.sh)
 # ---------------------------------------------------------------------------
@@ -492,7 +494,7 @@ class EditorAddSweepTestCase(unittest.TestCase):
         cls._dt_full3 = dt_full3
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"addsweep-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"addsweep-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -584,6 +586,7 @@ class EditorAddSweepTestCase(unittest.TestCase):
     def _load_editor(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(

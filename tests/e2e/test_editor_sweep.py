@@ -43,6 +43,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 # ---------------------------------------------------------------------------
 # Configuration (matches dev/config.sh)
 # ---------------------------------------------------------------------------
@@ -614,7 +616,7 @@ class EditorSweepTestCase(unittest.TestCase):
         cls._front_obstacle_reject_row = 8  # spans [8,16) -> includes rows 12-13
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"sweep-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"sweep-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -650,7 +652,7 @@ class EditorSweepTestCase(unittest.TestCase):
             cls._front_obstacle_reject_row = None  # no known obstacle on this path
             design = cls._api("POST", "/api/plugins/rack-design/designs/", {
                 "title": f"sweep-fallback-{uuid.uuid4()}",
-                "site": rack["site"]["id"], "racks": [rid]})
+                "sites": [rack["site"]["id"]], "racks": [rid]})
             cls._design_id = design["id"]
             cls.editor_url = (
                 f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rid}/")
@@ -769,6 +771,7 @@ class EditorSweepTestCase(unittest.TestCase):
     def _load_editor(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -1110,7 +1113,7 @@ class EditorSweepTestCase(unittest.TestCase):
         suffix = uuid.uuid4().hex[:8]
         a_u = 2
         design = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"reload-movein-{suffix}", "site": self._created["site"],
+            "title": f"reload-movein-{suffix}", "sites": [self._created["site"]],
             "racks": [self._rack_id]})
         extra_design_id = design["id"]
         try:
@@ -1268,7 +1271,7 @@ class EditorDensePackRejectTestCase(unittest.TestCase):
         cls._reject_target_gsy = cls._u_to_gsy(cls.DENSE_RACK_U_HEIGHT, 5, 2)
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"densepack-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"densepack-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -1365,6 +1368,7 @@ class EditorDensePackRejectTestCase(unittest.TestCase):
     def _load_editor(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -1594,7 +1598,7 @@ class EditorHatchOverlapNoPushTestCase(unittest.TestCase):
         cls._mover_target_gsy = cls._u_to_gsy(cls.RACK_U, 7, 8)
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"hatchoverlap-{suffix}", "site": site["id"],
+            "title": f"hatchoverlap-{suffix}", "sites": [site["id"]],
             "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
@@ -1692,6 +1696,7 @@ class EditorHatchOverlapNoPushTestCase(unittest.TestCase):
     def _load_editor(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -1949,7 +1954,7 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
         cls._clean_orig_gsy = cls._u_to_gsy(RACK_U_HEIGHT, 6, 6)
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"shadow-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"shadow-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -2046,6 +2051,7 @@ class EditorShadowOwnershipTestCase(unittest.TestCase):
     def _load_editor(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -2847,7 +2853,7 @@ class EditorDisplacementTestCase(unittest.TestCase):
         cls._free_gsy = cls._u_to_gsy(RACK_U_HEIGHT, 17, 4)
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"displace-{suffix}", "site": site["id"], "racks": [rack["id"]]})
+            "title": f"displace-{suffix}", "sites": [site["id"]], "racks": [rack["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/{rack['id']}/")
@@ -2944,6 +2950,7 @@ class EditorDisplacementTestCase(unittest.TestCase):
     def _load_editor(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -4461,7 +4468,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         cls._bghostfull_away_gsy = cls._u_to_gsy(6, 4)   # rows 18-21, free both faces
 
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"xrack-{suffix}", "site": site["id"],
+            "title": f"xrack-{suffix}", "sites": [site["id"]],
             "racks": [rack_a["id"], rack_b["id"], rack_c["id"]]})
         cls._design_id = design["id"]
         cls.editor_url = (
@@ -4561,6 +4568,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
     def _load_editor(self, url=None):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -5125,7 +5133,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
     def test_reloaded_move_in_rejected_homecoming_stays_move_in_not_existing(self):
         suffix = uuid.uuid4().hex[:8]
         design = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"xrack-reload-rej-{suffix}", "site": self._site_id,
+            "title": f"xrack-reload-rej-{suffix}", "sites": [self._site_id],
             "racks": [self._rack_a, self._rack_b]})
         reload_design_id = design["id"]
         reload_editor_url = (
@@ -5398,7 +5406,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         # kind 'existing', so it never exhibits the stale-kind contradiction.
         suffix = uuid.uuid4().hex[:8]
         design = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"xrack-homecome-redrag-{suffix}", "site": self._site_id,
+            "title": f"xrack-homecome-redrag-{suffix}", "sites": [self._site_id],
             "racks": [self._rack_a, self._rack_b]})
         reload_design_id = design["id"]
         reload_editor_url = (
@@ -5499,7 +5507,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
         # own design/placements. Deleted in `finally` regardless of outcome.
         suffix = uuid.uuid4().hex[:8]
         design = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"xrack-reload-{suffix}", "site": self._site_id,
+            "title": f"xrack-reload-{suffix}", "sites": [self._site_id],
             "racks": [self._rack_a, self._rack_b]})
         reload_design_id = design["id"]
         reload_editor_url = (
@@ -5598,7 +5606,7 @@ class EditorCrossRackSweepTestCase(unittest.TestCase):
     def test_saved_ghost_freed_rows_not_pushed_on_reload(self):
         suffix = uuid.uuid4().hex[:8]
         design = self._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"xrack-ghostpush-{suffix}", "site": self._site_id,
+            "title": f"xrack-ghostpush-{suffix}", "sites": [self._site_id],
             "racks": [self._rack_a, self._rack_b]})
         reload_design_id = design["id"]
         reload_editor_url = (

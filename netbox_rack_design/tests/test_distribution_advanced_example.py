@@ -176,3 +176,59 @@ class DistributionAdvancedExampleTestCase(TestCase):
         bank = dist["pdus"]["da-pdu-r1-1"]["banks"]["1"]
         self.assertEqual(bank["state"], "overload")
         self.assertTrue(dist["rack"]["alarm"])
+
+    # --- (e) moved-device attribution (delegates to distribution_example's
+    # shared _legs_for -- this file has no cabling branch of its own) --------
+
+    def test_moved_cabled_device_charged_by_new_u_position_not_stale_cabling(self):
+        srv_type = DeviceType.objects.create(
+            manufacturer=self.pdu_type.manufacturer, model="DA Srv Moved",
+            slug="da-srv-moved", u_height=1, is_full_depth=False)
+        srv_role = DeviceRole.objects.create(name="DA Server Mv", slug="da-server-mv")
+        srv = Device.objects.create(
+            name="da-moved-srv", device_type=srv_type, site=self.site,
+            rack=self.rack, position=9, face="front", status="active",
+            role=srv_role)
+        pp = PowerPort.objects.create(device=srv, name="PSU1", allocated_draw=250)
+        # Cabled to bank 2, but the design moves it to unit 2 (default bottom
+        # direction, units 1-5 = bank 1).
+        outlet = PowerOutlet.objects.get(device=self.pdu_a, name="2/1")
+        Cable(a_terminations=[pp], b_terminations=[outlet]).save()
+
+        entry = {
+            "name": "da-moved-srv", "role": "da-server-mv", "status": "active",
+            "u_position": 2, "face": "front", "draw_w": 250.0, "draw_known": True,
+            "power_ports": [{"name": "PSU1", "draw": 250, "connected": "2/1"}],
+            "device": srv, "device_type": srv_type, "moved": True,
+        }
+        dist = build(self.rack, [entry])
+        self.assertEqual(
+            dist["pdus"]["da-pdu-r1-1"]["banks"]["1"]["allocated_power"], 250)
+        self.assertEqual(
+            dist["pdus"]["da-pdu-r1-1"]["banks"]["2"]["allocated_power"], 0)
+
+    def test_unmoved_cabled_device_still_charged_by_outlet_bank(self):
+        srv_type = DeviceType.objects.create(
+            manufacturer=self.pdu_type.manufacturer, model="DA Srv Stay",
+            slug="da-srv-stay", u_height=1, is_full_depth=False)
+        srv_role = DeviceRole.objects.create(name="DA Server St", slug="da-server-st")
+        srv = Device.objects.create(
+            name="da-stay-srv", device_type=srv_type, site=self.site,
+            rack=self.rack, position=2, face="front", status="active",
+            role=srv_role)
+        pp = PowerPort.objects.create(device=srv, name="PSU1", allocated_draw=250)
+        # Cabled to bank 2, even though unit 2 (default bottom) implies bank 1.
+        outlet = PowerOutlet.objects.get(device=self.pdu_a, name="2/1")
+        Cable(a_terminations=[pp], b_terminations=[outlet]).save()
+
+        entry = {
+            "name": "da-stay-srv", "role": "da-server-st", "status": "active",
+            "u_position": 2, "face": "front", "draw_w": 250.0, "draw_known": True,
+            "power_ports": [{"name": "PSU1", "draw": 250, "connected": "2/1"}],
+            "device": srv, "device_type": srv_type, "moved": False,
+        }
+        dist = build(self.rack, [entry])
+        self.assertEqual(
+            dist["pdus"]["da-pdu-r1-1"]["banks"]["2"]["allocated_power"], 250)
+        self.assertEqual(
+            dist["pdus"]["da-pdu-r1-1"]["banks"]["1"]["allocated_power"], 0)

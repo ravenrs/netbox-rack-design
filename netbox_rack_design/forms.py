@@ -8,6 +8,7 @@ from dcim.models import (
     DeviceType,
     Location,
     Manufacturer,
+    PowerPanel,
     Rack,
     Site,
 )
@@ -23,19 +24,34 @@ from tenancy.models import Tenant
 from utilities.forms.fields import (
     CSVChoiceField,
     CSVModelChoiceField,
+    CSVModelMultipleChoiceField,
     DynamicModelChoiceField,
     DynamicModelMultipleChoiceField,
 )
 from utilities.forms.rendering import FieldSet
 
-from .choices import DesignPlacementKindChoices, DesignStatusChoices
-from .models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from .choices import DesignPlacementKindChoices, DesignStatusChoices, TemplatePlacementAnchorChoices
+from .models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+)
+from .planning_forms import PlanningFieldsFormMixin
 
 __all__ = (
     "DesignGroupForm",
     "DesignForm",
     "DesignPlacementForm",
     "DesignPowerFeedForm",
+    "PlannedRackForm",
+    "TemplateGroupForm",
+    "TemplateForm",
+    "TemplatePlacementForm",
     "DesignGroupImportForm",
     "DesignImportForm",
     "DesignPlacementImportForm",
@@ -44,6 +60,14 @@ __all__ = (
     "DesignBulkEditForm",
     "DesignPlacementBulkEditForm",
     "DesignPowerFeedBulkEditForm",
+    "PlannedRackBulkEditForm",
+    "PlannedRackImportForm",
+    "TemplateImportForm",
+    "TemplateGroupImportForm",
+    "TemplatePlacementImportForm",
+    "TemplateBulkEditForm",
+    "TemplateGroupBulkEditForm",
+    "TemplatePlacementBulkEditForm",
     "DesignGroupFilterForm",
     "DesignFilterForm",
     "DesignPlacementFilterForm",
@@ -91,39 +115,79 @@ class DesignEditorPaletteForm(forms.Form):
 
 class DesignEditorAddRackForm(forms.Form):
     """
-    Drives the editor's "Add rack" panel: a Location chooser and a Rack chooser,
-    both NetBox-native, API-backed searchable selects (DynamicModelChoiceField →
+    Drives the editor's "Add rack" panel: a Site → Location → Rack chain of
+    NetBox-native, API-backed searchable selects (DynamicModelChoiceField →
     APISelect → TomSelect with remote load). Like DesignEditorPaletteForm these
     are transient UI controls (NOT bound to a model); the panel JS reads the
     rack field's value and POSTs it to the design's add-rack endpoint.
 
-    Scoping (set per-design in __init__):
-      • both fields are limited to the design's site (site_id query param);
-      • the rack chooser is additionally chained to the chosen location
-        (location_id=$add_location) so picking a location narrows the racks.
+    Scoping (PLAN-multi-site.md M8, set per-design in __init__):
+      • ``add_site`` is a live picker over EVERY site, not just the design's
+        own (user ruling 2026-09-22). A design covers one or more sites (M1)
+        and this panel is the only place a planner reaches for a rack, so
+        picking one across the hall is how a design becomes multi-site --
+        the add-rack endpoint adds the rack's site to the design. With
+        exactly one site so far it is pre-selected via ``initial``, which is
+        a starting point, not a restriction.
+      • ``add_location`` is chained to the chosen site (site_id=$add_site);
+      • ``add_rack`` is chained to both the chosen site and the chosen location
+        (site_id=$add_site, location_id=$add_location), so picking a location
+        narrows the racks further.
+    Location and Rack start out ``disabled`` in the rendered widget attrs; the
+    editor JS (editor_panels.js) removes the attribute once ``add_site`` has a
+    value and re-disables + clears both whenever ``add_site`` changes -- the
+    dynamic query params above already make TomSelect reload/clear a field's
+    OWN options when a dependency changes, but they don't touch the HTML
+    ``disabled`` state, which is JS's job.
     Field names are prefixed ``add_`` so their rendered ids never collide with the
     palette form's selects on the same page.
     """
 
+    add_site = DynamicModelChoiceField(
+        queryset=Site.objects.all(),
+        required=True,
+        label=_("Site"),
+    )
     add_location = DynamicModelChoiceField(
         queryset=Location.objects.all(),
         required=False,
         label=_("Location"),
+        query_params={"site_id": "$add_site"},
     )
     add_rack = DynamicModelChoiceField(
         queryset=Rack.objects.all(),
         required=False,
         label=_("Rack"),
-        query_params={"location_id": "$add_location"},
+        query_params={"site_id": "$add_site", "location_id": "$add_location"},
     )
 
-    def __init__(self, *args, site_id=None, **kwargs):
+    def __init__(self, *args, sites=None, **kwargs):
         super().__init__(*args, **kwargs)
-        # Scope both choosers to the design's site (computed per-design in the
-        # view), keeping the static location_id chaining declared above.
-        if site_id is not None:
-            self.fields["add_location"].widget.add_query_param("site_id", site_id)
-            self.fields["add_rack"].widget.add_query_param("site_id", site_id)
+        # Location/Rack are chained to add_site via the query_params declared
+        # above; start them out HTML-disabled too so a design with more than
+        # one site can't be typed into before a site is picked (JS lifts the
+        # attribute once add_site has a value -- see editor_panels.js).
+        self.fields["add_location"].widget.attrs["disabled"] = "disabled"
+        self.fields["add_rack"].widget.attrs["disabled"] = "disabled"
+        # Pre-select the design's site when it has exactly one -- the common
+        # case, and it saves a click. Deliberately `initial` only: the field
+        # keeps its full `Site.objects.all()` queryset and an unpinned remote
+        # list, so the planner can pick ANY site and pull a rack from it (the
+        # add-rack endpoint then widens the design). Pinning the widget to
+        # the design's own sites was tried first and is what made this a
+        # dead end: a design created with one site could never reach a
+        # second one from the editor.
+        if sites is not None:
+            site_qs = sites.all() if hasattr(sites, "all") else sites
+            site_list = list(site_qs[:2])
+            if len(site_list) == 1:
+                site = site_list[0]
+                self.fields["add_site"].initial = site.pk
+                # A pre-filled site means Location/Rack start ENABLED: there
+                # is already a site to filter them by. Changing the site
+                # re-disables and clears both (editor_panels.js).
+                del self.fields["add_location"].widget.attrs["disabled"]
+                del self.fields["add_rack"].widget.attrs["disabled"]
 
 
 # ---------------------------------------------------------------------------
@@ -140,16 +204,21 @@ class DesignGroupForm(NetBoxModelForm):
 
 
 class DesignForm(NetBoxModelForm):
-    site = DynamicModelChoiceField(queryset=Site.objects.all())
+    # M9 (PLAN-multi-site.md): a design now covers one OR MORE sites. `racks`
+    # options are filtered live to whichever sites are chosen so far via
+    # query_params (chained on this field's value).
+    sites = DynamicModelMultipleChoiceField(
+        queryset=Site.objects.all(),
+        label=_("Sites"),
+    )
     group = DynamicModelChoiceField(queryset=DesignGroup.objects.all(), required=False)
     # Only an approved design is derivable (PLAN-design-chains.md §2.2): its
     # placements are frozen the moment it can be a parent, which is exactly
-    # what makes baselining on it safe. `query_params` additionally scopes the
-    # live picker to the chosen site (a chain across two sites is meaningless,
-    # since placements are site-scoped) and to approved status, mirroring the
-    # Python-side `queryset` restriction below so the API-backed widget agrees
-    # with what full_clean() will actually accept. The design being edited is
-    # excluded from its own options in __init__ (its pk isn't known here).
+    # what makes baselining on it safe. Left UNFILTERED by site (M5,
+    # PLAN-multi-site.md): the "child and parent must share at least one
+    # site" rule is validated below in clean() (and by `Design.clean()`),
+    # not enforced by narrowing the picker's options -- a design with several
+    # sites can legitimately base on a parent that shares only one of them.
     based_on = DynamicModelChoiceField(
         queryset=Design.objects.filter(status=DesignStatusChoices.STATUS_APPROVED),
         required=False,
@@ -161,17 +230,16 @@ class DesignForm(NetBoxModelForm):
         ),
         query_params={
             "status": DesignStatusChoices.STATUS_APPROVED,
-            "site_id": "$site",
         },
     )
     depends_on = DynamicModelMultipleChoiceField(queryset=Design.objects.all(), required=False)
     # Racks this design plans across. Options are filtered live to the chosen
-    # site via query_params (chained on the `site` field's value).
+    # sites via query_params (chained on the `sites` field's value).
     racks = DynamicModelMultipleChoiceField(
         queryset=Rack.objects.all(),
         required=False,
         label=_("Racks"),
-        query_params={"site_id": "$site"},
+        query_params={"site_id": "$sites"},
     )
 
     # `based_on` sits in the primary "Design" fieldset, not "Lineage &
@@ -181,7 +249,7 @@ class DesignForm(NetBoxModelForm):
     # `sequence`.
     fieldsets = (
         FieldSet(
-            "title", "site", "based_on", "status", "summary", "link", "racks",
+            "title", "sites", "based_on", "status", "summary", "link", "racks",
             name=_("Design"),
         ),
         FieldSet(
@@ -194,7 +262,7 @@ class DesignForm(NetBoxModelForm):
     class Meta:
         model = Design
         fields = (
-            "title", "site", "status", "summary", "link", "racks",
+            "title", "sites", "status", "summary", "link", "racks",
             "group", "based_on", "depends_on", "sequence",
             "description", "comments", "tags",
         )
@@ -206,40 +274,53 @@ class DesignForm(NetBoxModelForm):
             self.fields["based_on"].queryset = (
                 self.fields["based_on"].queryset.exclude(pk=self.instance.pk)
             )
+            # M9: seed the multi-select with the instance's current sites --
+            # a plain ModelForm only does this automatically for scalar
+            # fields, not for a hand-declared DynamicModelMultipleChoiceField
+            # that shadows the model's M2M.
+            self.fields["sites"].initial = list(
+                self.instance.sites.values_list("pk", flat=True)
+            )
 
     def clean(self):
         super().clean()
-        # Enforce the same-site rule at the FORM layer so it also holds on
+        # Enforce the same-sites rule at the FORM layer so it also holds on
         # CREATE. The model's clean() can't see the M2M before the instance is
         # saved (no pk → no through-rows), so a brand-new design would otherwise
         # skip this check. Keep the message consistent with Design.clean().
-        site = self.cleaned_data.get("site")
+        sites = self.cleaned_data.get("sites") or []
+        site_ids = {s.pk for s in sites}
         racks = self.cleaned_data.get("racks")
-        if site and racks:
-            offending = [rack for rack in racks if rack.site_id != site.pk]
+        if site_ids and racks:
+            offending = [rack for rack in racks if rack.site_id not in site_ids]
             if offending:
                 names = ", ".join(str(rack) for rack in offending)
                 self.add_error(
                     "racks",
-                    _("These racks are not in the design's site: %(names)s.")
+                    _("These racks are not in any of the design's sites: %(names)s.")
                     % {"names": names},
                 )
-        # A chain across two sites is meaningless -- a parent's placements are
-        # site-scoped, so a child in a different site could never actually
-        # inherit them. `Design.clean()` now enforces this too (unlike the
-        # `racks` M2M check above, `based_on` is a plain FK with no pk-timing
-        # gap, so the model check alone already covers every layer: API,
-        # GraphQL, bulk import, this form). Kept here anyway because it names
-        # both sites in the message, which is a materially better field-level
-        # error than the model's generic one.
+        # M5 (PLAN-multi-site.md): child and parent must share AT LEAST ONE
+        # site -- a parent's placements are site-scoped, so a child that
+        # shares none of the parent's sites could never actually inherit
+        # anything from it. `Design.clean()` enforces this too (a plain FK
+        # with no pk-timing gap, so the model check alone already covers
+        # every other layer: API, GraphQL, bulk import), but this form-level
+        # check names both sides' sites, which is a materially better
+        # field-level error than the model's generic one.
         based_on = self.cleaned_data.get("based_on")
-        if site and based_on and based_on.site_id != site.pk:
-            self.add_error(
-                "based_on",
-                _("The parent design's site (%(parent_site)s) does not match "
-                  "this design's site (%(site)s).")
-                % {"parent_site": based_on.site, "site": site},
-            )
+        if site_ids and based_on:
+            parent_site_ids = set(based_on.sites.values_list("pk", flat=True))
+            if not (site_ids & parent_site_ids):
+                self.add_error(
+                    "based_on",
+                    _("The parent design's sites (%(parent_sites)s) share no "
+                      "site with this design's sites (%(sites)s).")
+                    % {
+                        "parent_sites": ", ".join(str(s) for s in based_on.sites.all()),
+                        "sites": ", ".join(str(s) for s in sites),
+                    },
+                )
 
         # A design's `racks` scope is part of what was approved
         # (PLAN-design-chains.md §2.2/G4): `Design.clean()` enforces this too,
@@ -357,10 +438,15 @@ class DesignGroupImportForm(NetBoxModelImportForm):
 
 
 class DesignImportForm(NetBoxModelImportForm):
-    site = CSVModelChoiceField(
+    # M9 (PLAN-multi-site.md): a design covers one OR MORE sites; the CSV
+    # column carries a comma-separated list of site SLUGS (`CSVModelMultipleChoiceField`
+    # already splits on ',' -- see utilities.forms.fields.csv), e.g.
+    # "site-a,site-b". Slug rather than name to match the other multi-value
+    # CSV columns' convention of an unambiguous, URL-safe key.
+    sites = CSVModelMultipleChoiceField(
         queryset=Site.objects.all(),
-        to_field_name="name",
-        help_text="Assigned site (by name)",
+        to_field_name="slug",
+        help_text="Assigned sites (by slug, comma-separated)",
     )
     status = CSVChoiceField(choices=DesignStatusChoices, required=False)
     group = CSVModelChoiceField(
@@ -373,7 +459,7 @@ class DesignImportForm(NetBoxModelImportForm):
     class Meta:
         model = Design
         fields = (
-            "title", "site", "status", "summary", "link",
+            "title", "sites", "status", "summary", "link",
             "group", "sequence", "description", "comments", "tags",
         )
 
@@ -440,6 +526,20 @@ class DesignBulkEditForm(NetBoxModelBulkEditForm):
     summary = forms.CharField(max_length=200, required=False)
     group = DynamicModelChoiceField(queryset=DesignGroup.objects.all(), required=False)
     description = forms.CharField(max_length=200, required=False)
+    # M9 (PLAN-multi-site.md): a plain M2M field, not add_sites/remove_sites.
+    # The generic BulkEditView already handles a bare M2M form field natively
+    # (bulk_views.py: it REPLACES the relation via `.set()` when a value is
+    # submitted, and leaves it untouched when left blank) -- exactly the
+    # "add or remove" affordance a picker with the object's *current* sites
+    # pre-selected gives an operator, without a custom `post_save_operations`
+    # override in views.py (out of scope for this change: only forms.py is
+    # touched here). Deliberately NOT in `nullable_fields` -- a design
+    # requires at least one site (M1), and the `_nullify` checkbox would let
+    # an operator clear it to zero; `Design.clean()` rejects that via
+    # `_m2m_values` before the M2M is actually written.
+    sites = DynamicModelMultipleChoiceField(
+        queryset=Site.objects.all(), required=False, label=_("Sites"),
+    )
 
     model = Design
     nullable_fields = ("summary", "group", "description")
@@ -591,17 +691,24 @@ class DesignPowerFeedForm(NetBoxModelForm):
         queryset=Rack.objects.all(),
         help_text=_("The rack this planned feed supplies."),
     )
+    power_panel = DynamicModelChoiceField(
+        queryset=PowerPanel.objects.all(),
+        required=False,
+        query_params={"site_id": "$rack__site"},
+        help_text=_("Where Apply creates the real power feed. Leave empty to use "
+                    "the site's panel when it has exactly one."),
+    )
 
     fieldsets = (
-        FieldSet("design", "rack", "name", "tags", name=_("Feed")),
+        FieldSet("design", "rack", "name", "power_panel", "tags", name=_("Feed")),
         FieldSet("voltage", "amperage", "phase", "supply", name=_("Electrical")),
     )
 
     class Meta:
         model = DesignPowerFeed
         fields = (
-            "design", "rack", "name", "voltage", "amperage", "phase", "supply",
-            "tags",
+            "design", "rack", "name", "power_panel", "voltage", "amperage", "phase",
+            "supply", "tags",
         )
 
 
@@ -646,3 +753,199 @@ class DesignPowerFeedFilterForm(NetBoxModelFilterSetForm):
         queryset=Rack.objects.all(), required=False, label="Rack")
     phase = forms.MultipleChoiceField(choices=PowerFeedPhaseChoices, required=False)
     supply = forms.MultipleChoiceField(choices=PowerFeedSupplyChoices, required=False)
+
+
+# ---------------------------------------------------------------------------
+# PlannedRack (PLAN-templates.md §1) -- a rack that does not exist in NetBox
+# yet. The model form plus a bulk-edit form: the list view renders NetBox's
+# "Edit Selected"/"Delete Selected" buttons for any table with a checkbox
+# column, so the views behind them have to exist or the form posts to a
+# `None` URL (user report 2026-09-22). No import form yet.
+# ---------------------------------------------------------------------------
+
+
+class PlannedRackForm(NetBoxModelForm):
+    location = DynamicModelChoiceField(
+        queryset=Location.objects.all(),
+        help_text=_(
+            "Required: identity is (location, name), the same uniqueness "
+            "dcim.Rack itself enforces -- see PlannedRack's docstring."
+        ),
+    )
+
+    fieldsets = (
+        FieldSet("name", "location", "u_height", "tags", name=_("Planned rack")),
+        FieldSet("description", "comments", name=_("Notes")),
+    )
+
+    class Meta:
+        model = PlannedRack
+        fields = (
+            "name", "location", "u_height", "description", "comments", "tags",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Templates (PLAN-templates.md §2) -- a reusable rack layout with no site.
+# Stamping (Phase 3) is not implemented yet, so these forms cover only the
+# ordinary create/edit path.
+# ---------------------------------------------------------------------------
+
+
+class PlannedRackImportForm(NetBoxModelImportForm):
+    location = CSVModelChoiceField(
+        queryset=Location.objects.all(), to_field_name="name",
+        help_text=_("Location (by name) -- with the name, this is the rack's identity"),
+    )
+
+    class Meta:
+        model = PlannedRack
+        fields = ("name", "location", "u_height", "description", "comments", "tags")
+
+
+class TemplateGroupImportForm(NetBoxModelImportForm):
+    class Meta:
+        model = TemplateGroup
+        fields = ("name", "description", "tags")
+
+
+class TemplateImportForm(NetBoxModelImportForm):
+    group = CSVModelChoiceField(
+        queryset=TemplateGroup.objects.all(), to_field_name="name", required=False,
+        help_text=_("Template group (by name)"),
+    )
+
+    class Meta:
+        model = Template
+        fields = ("name", "group", "order", "u_height", "description", "tags")
+
+
+class TemplatePlacementImportForm(NetBoxModelImportForm):
+    template = CSVModelChoiceField(
+        queryset=Template.objects.all(), to_field_name="name",
+        help_text=_("Template (by name)"),
+    )
+    device_type = CSVModelChoiceField(
+        queryset=DeviceType.objects.all(), to_field_name="model",
+        help_text=_("Device type (by model)"),
+    )
+    device_role = CSVModelChoiceField(
+        queryset=DeviceRole.objects.all(), to_field_name="name", required=False,
+        help_text=_("Device role (by name)"),
+    )
+    tenant = CSVModelChoiceField(
+        queryset=Tenant.objects.all(), to_field_name="name", required=False,
+        help_text=_("Tenant (by name)"),
+    )
+    anchor = CSVChoiceField(
+        choices=TemplatePlacementAnchorChoices,
+        help_text=_("Which end of the rack the placement is measured from"),
+    )
+
+    class Meta:
+        model = TemplatePlacement
+        fields = (
+            "template", "device_type", "device_role", "tenant", "anchor",
+            "offset", "order", "face", "tags",
+        )
+
+
+class PlannedRackBulkEditForm(NetBoxModelBulkEditForm):
+    """Only the fields a batch can sensibly share.
+
+    ``name`` and ``location`` are deliberately absent: together they are the
+    model's identity (D4), and setting one name across a selection would
+    collide by definition. ``u_height`` is a physical fact worth fixing in
+    bulk when a whole row was drafted at the wrong height.
+    """
+
+    model = PlannedRack
+    u_height = forms.IntegerField(required=False, label=_("U height"))
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = ("description",)
+
+
+class TemplateGroupBulkEditForm(NetBoxModelBulkEditForm):
+    model = TemplateGroup
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = ("description",)
+
+
+
+class TemplateBulkEditForm(NetBoxModelBulkEditForm):
+    model = Template
+    group = DynamicModelChoiceField(queryset=TemplateGroup.objects.all(), required=False)
+    u_height = forms.IntegerField(required=False, label=_("U height"))
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = ("group", "description")
+
+
+class TemplatePlacementBulkEditForm(NetBoxModelBulkEditForm):
+    model = TemplatePlacement
+    device_role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
+    tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False)
+    description = forms.CharField(required=False, max_length=200)
+
+    nullable_fields = ("device_role", "tenant", "description")
+
+
+class TemplateGroupForm(NetBoxModelForm):
+    fieldsets = (
+        FieldSet("name", "description", "tags", name=_("Template group")),
+    )
+
+    class Meta:
+        model = TemplateGroup
+        fields = ("name", "description", "tags")
+
+
+class TemplateForm(NetBoxModelForm):
+    group = DynamicModelChoiceField(queryset=TemplateGroup.objects.all(), required=False)
+
+    fieldsets = (
+        FieldSet("name", "group", "order", "u_height", "tags", name=_("Template")),
+        FieldSet("description", name=_("Notes")),
+    )
+
+    class Meta:
+        model = Template
+        fields = ("name", "group", "order", "u_height", "description", "tags")
+
+
+class TemplatePlacementForm(PlanningFieldsFormMixin, NetBoxModelForm):
+    template = DynamicModelChoiceField(queryset=Template.objects.all())
+    device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all())
+    device_role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
+    tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False)
+    # The chassis this blade goes into, scoped to the same template -- there is
+    # no cross-template case here, unlike DesignPlacement's ancestor-design
+    # variant (a template never references another template's rows, D10).
+    parent_placement = DynamicModelChoiceField(
+        queryset=TemplatePlacement.objects.all(),
+        required=False,
+        label=_("Parent (chassis) placement"),
+        query_params={"template_id": "$template"},
+    )
+
+    fieldsets = (
+        FieldSet(
+            "template", "device_type", "device_role", "tenant", "label", "tags",
+            name=_("Placement"),
+        ),
+        FieldSet("anchor", "offset", "order", "face", name=_("Rack slot")),
+        FieldSet("parent_placement", "target_bay_name", name=_("Device bay")),
+    )
+
+    class Meta:
+        model = TemplatePlacement
+        fields = (
+            "template", "device_type", "device_role", "tenant", "label",
+            "anchor", "offset", "order", "face", "parent_placement", "target_bay_name",
+            "tags",
+        )
+        widgets = {
+            "anchor": forms.Select(choices=TemplatePlacementAnchorChoices),
+        }

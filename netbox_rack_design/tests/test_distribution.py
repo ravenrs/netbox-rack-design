@@ -35,9 +35,9 @@ from ..distribution import (
     generate_distribution,
     generate_distribution_status,
 )
-from ..models import Design, DesignPlacement, DesignPowerFeed, DesignRackPower
+from ..models import DesignPlacement, DesignPowerFeed, DesignRackPower
 from ..projection import project_rack
-from .utils import create_dcim_environment
+from .utils import create_dcim_environment, make_design
 
 # Sentinel object a script can hand back so we can assert it is returned verbatim.
 SENTINEL_DISTRIBUTION = {"scheme": "test", "pdus": {}, "rack": {}}
@@ -103,7 +103,7 @@ class DistributionLoaderTestCase(TestCase):
         cls.device_role = env["device_role"]
         cls.devices = env["devices"]
 
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
         # One planned add so the elevation has at least one drawing consumer.
         cls.p_add = DesignPlacement.objects.create(
             design=cls.design,
@@ -222,6 +222,26 @@ class DistributionLoaderTestCase(TestCase):
         self.assertEqual(len(keys), len(set(keys)))
         self.assertTrue(all("draw_w" in d and "power_ports" in d for d in devices))
 
+    def test_moved_flag_false_for_existing_and_add_slots(self):
+        devices = devices_from_elevation(self._elevation())
+        add_entry = next(d for d in devices if d["name"] == "planned-sw1")
+        self.assertFalse(add_entry["moved"])
+        existing_entry = next(d for d in devices if d["name"] == "Device 1")
+        self.assertFalse(existing_entry["moved"])
+
+    def test_moved_flag_true_for_move_in_slot(self):
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0],
+            target_rack=self.racks[0],
+            target_position=20,
+            target_face="front",
+        )
+        devices = devices_from_elevation(self._elevation())
+        moved_entry = next(d for d in devices if d["device"] == self.devices[0])
+        self.assertTrue(moved_entry["moved"])
+
     # --- project_rack integration (Phase 2) -------------------------------
 
     @override_settings(PLUGINS_CONFIG=_plugins_config(distribution_mode="none"))
@@ -253,7 +273,7 @@ class DistributionStatusTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="Status", site=cls.site)
+        cls.design = make_design(title="Status", site=cls.site)
         DesignPlacement.objects.create(
             design=cls.design, kind=DesignPlacementKindChoices.KIND_ADD,
             device_type=env["device_type"], device_role=env["device_role"],
@@ -357,7 +377,7 @@ class PlannedPduPowerConfigTestCase(TestCase):
         cls.device_type = env["device_type"]
 
         cls.pdu_role = DeviceRole.objects.create(name="PDU", slug="pdu")
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
         # power_config is now the MANUAL cf bridge only -- no inline feed.
         cls.power_config = {
             "source": "manual",
@@ -434,7 +454,7 @@ class ApplyRackPowerOverrideTestCase(TestCase):
         env = create_dcim_environment()
         cls.site = env["site"]
         cls.racks = env["racks"]
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
         cls.rack_power = DesignRackPower.objects.create(
             design=cls.design,
             rack=cls.racks[0],
@@ -524,7 +544,7 @@ class BuildNativeTestCase(TestCase):
             phase=PowerFeedPhaseChoices.PHASE_SINGLE,
         )
 
-        cls.design = Design.objects.create(title="DC-Build", site=cls.site)
+        cls.design = make_design(title="DC-Build", site=cls.site)
 
     @classmethod
     def _make_real_pdu(cls, name, feed=None, rack=None):
@@ -776,10 +796,49 @@ class BuildNativeTestCase(TestCase):
             b_terminations=[pdu.poweroutlets.get(name="2/1")],
         ).save()
 
-        dist = build_native(self.racks[0], devices_from_elevation(self._elevation()))
+        entries = devices_from_elevation(self._elevation())
+        entry = next(d for d in entries if d["name"] == "cabled")
+        self.assertFalse(entry["moved"])
+
+        dist = build_native(self.racks[0], entries)
         banks = dist["pdus"]["rack1-pdu-1"]["banks"]
         self.assertEqual([d["name"] for d in banks["2"]["devices"]], ["cabled"])
         self.assertNotIn("cabled", [d["name"] for d in banks["1"]["devices"]])
+
+    def test_moved_device_within_rack_charged_by_new_position_not_stale_cabling(self):
+        """The within-rack twin of the cross-rack move test above: a device the
+        design MOVES stays cabled (until implemented) to its OLD outlet, but a
+        design plans a FUTURE state -- it will be re-plugged into whatever bank
+        serves its new position. ``moved=True`` must make position win, exactly
+        like the cross-rack case already does for an unresolvable ref."""
+        pdu = self._make_real_pdu("rack1-pdu-1", feed=self.feed_a)
+        dev = create_test_device(
+            "mover-intra", site=self.site, rack=self.racks[0], position=30, face="front")
+        port = PowerPort.objects.create(device=dev, name="psu1", allocated_draw=400)
+        # Cabled to outlet "2/1" = bank 2, but the design moves it to U5, which
+        # maps to bank 1 by position (same split as the guard test above).
+        Cable(
+            a_terminations=[port],
+            b_terminations=[pdu.poweroutlets.get(name="2/1")],
+        ).save()
+
+        DesignPlacement.objects.create(
+            design=self.design,
+            kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=dev,
+            target_rack=self.racks[0],
+            target_position=5,
+            target_face="front",
+        )
+
+        entries = devices_from_elevation(self._elevation())
+        entry = next(d for d in entries if d["name"] == "mover-intra")
+        self.assertTrue(entry["moved"])
+
+        dist = build_native(self.racks[0], entries)
+        banks = dist["pdus"]["rack1-pdu-1"]["banks"]
+        self.assertIn("mover-intra", [d["name"] for d in banks["1"]["devices"]])
+        self.assertNotIn("mover-intra", [d["name"] for d in banks["2"]["devices"]])
 
     def test_single_corded_device_charges_a_rack_with_only_a_b_leg(self):
         """Leg letters come from the feed NAMES, so a rack fed only by "Feed B"
@@ -798,6 +857,91 @@ class BuildNativeTestCase(TestCase):
             for d in bank["devices"]
         ]
         self.assertIn("single-corded", charged)
+
+    # --- preferred_feed_legs override (planning hint) -------------------------
+
+    @staticmethod
+    def _device_dict(*, u_position, psu_count, draw_w=100, preferred_feed_legs=None, moved=False):
+        """A bare planned-consumer dict (docs/pdu-distribution-spec.md §2),
+        built directly instead of via ``devices_from_elevation``/
+        ``DesignPlacement`` -- enough to exercise ``_legs_for_native``'s leg-
+        selection contract without depending on the model field a sibling
+        change is adding."""
+        return {
+            "name": "dev",
+            "role": "server",
+            "status": "planned",
+            "u_position": u_position,
+            "face": "front",
+            "draw_w": draw_w,
+            "draw_known": True,
+            "power_ports": [f"psu{i + 1}" for i in range(psu_count)],
+            "device": None,
+            "device_type": None,
+            "power_config": None,
+            "custom_fields": {},
+            "feed": None,
+            "feed_source": None,
+            "moved": moved,
+            "preferred_feed_legs": preferred_feed_legs,
+        }
+
+    @staticmethod
+    def _charged_legs(dist, unit):
+        """The set of ``feed_letter`` values whose banks charged ``unit``."""
+        legs = set()
+        for pdu in dist["pdus"].values():
+            for bank in pdu["banks"].values():
+                if any(d["ru"] == unit for d in bank["devices"]):
+                    legs.add(pdu["feed_letter"])
+        return legs
+
+    def test_preferred_feed_legs_override_charges_leg_b_for_single_psu(self):
+        """A single-PSU device can never reach leg B under the old hardcoded
+        ["a"] heuristic -- the override is the headline fix for that."""
+        self._make_real_pdu("rack1-pdu-a", feed=self.feed_a)
+        self._make_real_pdu("rack1-pdu-b", feed=self.feed_b)
+        device = self._device_dict(u_position=5, psu_count=1, preferred_feed_legs=["b"])
+        dist = build_native(self.racks[0], [device])
+        self.assertEqual(self._charged_legs(dist, 5), {"b"})
+
+    def test_preferred_feed_legs_override_reaches_c_and_d(self):
+        """A 4-leg rack: legs c/d are unreachable by the old hardcoded a/b
+        heuristic no matter the fallback -- this is the impossible-today case
+        the override exists for."""
+        feed_c = PowerFeed.objects.create(
+            power_panel=self.power_panel, name="Feed C", voltage=230, amperage=32,
+            phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        feed_d = PowerFeed.objects.create(
+            power_panel=self.power_panel, name="Feed D", voltage=230, amperage=32,
+            phase=PowerFeedPhaseChoices.PHASE_SINGLE,
+        )
+        self._make_real_pdu("rack1-pdu-a", feed=self.feed_a)
+        self._make_real_pdu("rack1-pdu-b", feed=self.feed_b)
+        self._make_real_pdu("rack1-pdu-c", feed=feed_c)
+        self._make_real_pdu("rack1-pdu-d", feed=feed_d)
+        device = self._device_dict(u_position=5, psu_count=2, preferred_feed_legs=["c", "d"])
+        dist = build_native(self.racks[0], [device])
+        self.assertEqual(self._charged_legs(dist, 5), {"c", "d"})
+
+    def test_preferred_feed_legs_override_skips_leg_the_rack_lacks(self):
+        self._make_real_pdu("rack1-pdu-a", feed=self.feed_a)
+        device = self._device_dict(u_position=5, psu_count=1, preferred_feed_legs=["z"])
+        # 'z' names no bound feed in this rack -- must be skipped, not raise.
+        dist = build_native(self.racks[0], [device])
+        self.assertEqual(self._charged_legs(dist, 5), set())
+
+    def test_none_or_empty_preferred_feed_legs_keeps_automatic_behavior(self):
+        """Regression guard: no override still reproduces today's a/b pick."""
+        self._make_real_pdu("rack1-pdu-a", feed=self.feed_a)
+        self._make_real_pdu("rack1-pdu-b", feed=self.feed_b)
+        dist_none = build_native(
+            self.racks[0], [self._device_dict(u_position=5, psu_count=2, preferred_feed_legs=None)])
+        dist_empty = build_native(
+            self.racks[0], [self._device_dict(u_position=5, psu_count=2, preferred_feed_legs=[])])
+        self.assertEqual(self._charged_legs(dist_none, 5), {"a", "b"})
+        self.assertEqual(self._charged_legs(dist_empty, 5), {"a", "b"})
 
     # --- apply_rack_power_override wiring (builtin ignores it entirely) ------
 

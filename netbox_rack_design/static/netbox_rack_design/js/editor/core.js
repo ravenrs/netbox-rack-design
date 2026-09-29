@@ -71,4 +71,51 @@ function createToast(level, title, message) {
 }
 
 
-export { getCsrfToken, createToast };
+// T1.5c (PLAN-templates.md D31): the DOM carries a rack's identity as the
+// colon-free "r-<pk>"/"p-<pk>" form (templatetags/rack_design.py's
+// rack_dom_id -- ":" is a CSS selector metacharacter, so the DOM avoids it
+// on principle even though no live selector site needs the guard today).
+// The SERVER speaks models.rack_key()'s colon form, "r:<pk>"/"p:<pk>"
+// (api/views.py's parse_rack_id/parse_real_rack_id accept that or a legacy
+// bare digit string/int -- never the dash form). Anything read off a DOM
+// attribute and then sent to the server -- a JSON payload field, a query
+// param -- must go through this translation first, or a well-formed
+// dash-form id would look "malformed" to the server instead of correctly
+// naming its rack. A bare digit string (no "r-"/"p-" prefix) passes through
+// unchanged: that shape is still legal (legacy real-rack pk) both in the
+// DOM (chassis's data-real-rack-id) and on the wire.
+function rackKeyToServer(domRackId) {
+    if (domRackId == null) { return domRackId; }
+    var s = String(domRackId);
+    if (s.slice(0, 2) === "r-" || s.slice(0, 2) === "p-") {
+        return s[0] + ":" + s.slice(2);
+    }
+    // A bare pk means a real rack, and it goes back out as a NUMBER, exactly
+    // as it did before planned racks existed. The server accepts the string
+    // form too, so this is not a correctness fix -- it keeps the wire format
+    // for real racks byte-identical to what every existing caller and test
+    // already expects. (test_editor_cross_rack_add asserts `[1637]`, not
+    // `['1637']`.) Same principle as the asymmetric DOM id: a real rack is
+    // untouched by the planned-rack work, so nothing that already worked has
+    // to change.
+    if (/^\d+$/.test(s)) { return parseInt(s, 10); }
+    return s;
+}
+
+// A handful of call sites hit core NetBox's OWN REST API directly (e.g.
+// /api/dcim/devices/?rack_id=), not this plugin's rack_key()-aware
+// endpoints -- core has no idea what a PlannedRack is and wants a plain
+// integer dcim.Rack pk. Returns that int for an "r-<pk>" (or legacy bare
+// digit) DOM id, or null for a "p-<pk>" one -- a planned rack can never
+// have a real device in it (T1.5c/D28), so callers should treat null as
+// "nothing to fetch," never guess at a pk.
+function rackDomIdToRealPk(domRackId) {
+    if (domRackId == null) { return null; }
+    var s = String(domRackId);
+    if (s.slice(0, 2) === "p-") { return null; }
+    var digits = (s.slice(0, 2) === "r-") ? s.slice(2) : s;
+    var n = parseInt(digits, 10);
+    return isNaN(n) ? null : n;
+}
+
+export { getCsrfToken, createToast, rackKeyToServer, rackDomIdToRealPk };

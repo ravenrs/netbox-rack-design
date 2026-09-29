@@ -29,7 +29,12 @@ Three modes are supported, selected by the plugin config key ``naming_mode``
       resolved from the placement (``{device.site.name}``,
       ``{device.device_type.model}``, ``{device.rack.name}``,
       ``{device.role.name}``, ``{device.tenant.name}``, ``{device.position}``,
-      ``{device.face}``, ``{device.name}``).
+      ``{device.face}``, ``{device.name}``). ``{device.rack.*}`` resolves the
+      same way whether the placement targets a real ``dcim.Rack`` or a
+      not-yet-built ``PlannedRack`` (PLAN-templates.md D29) -- a greenfield
+      rack stamped from a template is the primary case this exists for, not
+      an edge one. ``{device.rack.cf.*}`` is the one thing that legitimately
+      stays empty for a planned rack: it has no rack custom fields.
     * ``n`` -- the ordinal.
 
     Traversal is *safe*: a missing/blank attribute (or any
@@ -192,15 +197,25 @@ _FORMATTER = _SafeFormatter()
 class _DesignProxy:
     """
     Wraps a ``Design`` so ``{design.name}`` resolves to its ``title`` (the model
-    has no ``name`` field). All other attributes delegate to the real design.
+    has no ``name`` field), and ``{design.site}`` resolves to the PLACEMENT's
+    own site (PLAN-multi-site.md M4), not ``Design.site`` (the back-compat
+    property, ``None`` once a design has more than one -- M2). For a one-site
+    design the two agree, so the token is unchanged there; for a multi-site
+    design it now equals the target rack's site instead of going blank.
+    All other attributes delegate to the real design.
     """
 
-    def __init__(self, design):
+    def __init__(self, design, placement):
         self._design = design
+        self._placement = placement
 
     @property
     def name(self):
         return self._design.title
+
+    @property
+    def site(self):
+        return self._placement.site
 
     def __getattr__(self, item):
         return getattr(self._design, item)
@@ -234,11 +249,48 @@ class _AddDevicePlaceholderProxy:
 
     @property
     def site(self):
-        return self._placement.design.site
+        # PLAN-multi-site.md M4: a multi-site design has no single ``.site``
+        # (the back-compat property is ``None`` once a design has more than
+        # one), so this reads the PLACEMENT's own site first -- the target
+        # rack's (real or planned) site, validated to be one of the design's
+        # sites by DesignPlacement._validate_tray_target /
+        # _validate_planned_rack_target in models.py. Falls back to the
+        # design's own site when the placement has no target yet (the
+        # preview-name action builds a scratch, not-yet-targeted placement
+        # from a partial request body) -- ``None`` for a multi-site design
+        # there, same as before this phase. For a one-site design this is
+        # exactly the site the old ``design.site`` read resolved to either
+        # way, so the token is unchanged there.
+        return self._placement.site or self._placement.design.site
 
     @property
     def rack(self):
-        return self._placement.target_rack
+        """
+        The rack this device is heading into -- real or still only planned.
+
+        Deliberately NOT ``models.resolve_rack()``. That helper answers "which
+        real ``dcim.Rack`` should a DCIM reader look at", which is ``None`` for
+        an unrealized ``PlannedRack`` (D7) -- correct for a DCIM reader, wrong
+        for naming. Naming wants "the rack THIS PLACEMENT targets", real or
+        not, because a greenfield rack stamped from a template is exactly the
+        case where the rack belongs in the device name (PLAN-templates.md
+        D29): resolving through ``resolve_rack`` would render ``None`` (and
+        every ``{device.rack.*}`` token blank) for exactly the placements this
+        exists to name.
+
+        ``PlannedRack`` exposes the same ``name`` / ``location`` / ``site``
+        shape a ``dcim.Rack`` does (see its docstring in models.py), so
+        ``{device.rack.name}`` and ``{device.rack.site.name}`` resolve
+        unchanged either way. ``{device.rack.cf.*}`` is the one thing that
+        legitimately differs: a planned rack has no rack custom fields, so it
+        renders empty -- that is correct, not a gap, and no fallback is added
+        for it.
+
+        Exactly one of ``target_rack`` / ``target_planned_rack`` is set for an
+        'add' or 'move' (enforced in ``DesignPlacement.clean()``), so `or` is
+        safe here -- it is never the case that both resolve to a truthy rack.
+        """
+        return self._placement.target_rack or self._placement.target_planned_rack
 
     @property
     def position(self):
@@ -267,7 +319,11 @@ class _AddDevicePlaceholderProxy:
             target = field.get("target") or ""
             if not target.startswith("cf."):
                 continue
-            out[target[3:]] = data.get(field["key"])
+            value = data.get(field["key"])
+            # A real Device.cf hands back the field's Python value (a Site for
+            # an object field, a date for a date field); so must this.
+            cf = field.get("cf")
+            out[target[3:]] = cf.deserialize(value) if cf is not None and value is not None else value
         return out
 
 
@@ -304,7 +360,13 @@ class _MoveDeviceProxy:
 
     @property
     def rack(self):
-        return self._placement.target_rack
+        # Same reasoning as _AddDevicePlaceholderProxy.rack (PLAN-templates.md
+        # D29): resolve through BOTH target FKs, not through models.resolve_rack
+        # (which would answer None for an unrealized planned rack -- exactly
+        # the case a move into a freshly-created planned rack needs named).
+        # Kept consistent with the add proxy on purpose, per D29's own
+        # instruction to keep the two proxies in agreement.
+        return self._placement.target_rack or self._placement.target_planned_rack
 
     @property
     def position(self):
@@ -329,7 +391,7 @@ def _build_context(placement, n):
     else:
         device = _AddDevicePlaceholderProxy(placement)
     return {
-        "design": _DesignProxy(placement.design),
+        "design": _DesignProxy(placement.design, placement),
         "device": device,
         "n": n,
     }
@@ -572,14 +634,23 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
     """
     Read-only collision check: return ``True`` if ``name`` is already used in
     ``site`` -- either by a real ``dcim.Device``, or by another
-    ``DesignPlacement.proposed_name`` equal to ``name`` whose design targets
-    the same site (excluding ``exclude_placement``).
+    ``DesignPlacement.proposed_name`` equal to ``name`` whose own PLACEMENT
+    site (``DesignPlacement.site``, PLAN-multi-site.md M4) is ``site``
+    (excluding ``exclude_placement``). Callers always pass a placement's own
+    site (``placement.site``), never a design's -- a multi-site design has one
+    name space per site, so scoping by the design alone would treat a
+    same-named placement in a DIFFERENT one of the design's sites as a
+    collision.
 
     Performs no writes. Callers use this to WARN; the engine never resolves the
     collision itself.
 
-    Two queries, regardless of how many designs or how deep any chain is: a
-    ``dcim.Device`` existence check, and a ``DesignPlacement`` existence check.
+    ``design__sites=site`` narrows the candidate rows to designs that touch
+    ``site`` at all (one query, indexed) before the exact per-placement site
+    (which may differ from ``site`` for a multi-site design) is checked in
+    Python -- a placement's own site has no scalar column to filter by
+    directly (it is a property derived from whichever of ``target_rack`` /
+    ``target_planned_rack`` / a planned chassis parent is set).
     """
     if not name or site is None:
         return False
@@ -591,10 +662,12 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
     if Device.objects.filter(site=site, name=name).exists():
         return True
 
-    qs = DesignPlacement.objects.filter(design__site=site, proposed_name=name)
+    qs = DesignPlacement.objects.filter(design__sites=site, proposed_name=name).select_related(
+        "target_rack", "target_planned_rack__location",
+    )
     if exclude_placement is not None and exclude_placement.pk:
         qs = qs.exclude(pk=exclude_placement.pk)
-    return qs.exists()
+    return any(placement.site == site for placement in qs)
 
 
 def effective_name(placement):

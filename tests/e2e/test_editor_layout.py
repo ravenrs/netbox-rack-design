@@ -124,7 +124,7 @@ class EditorWorkspaceLayoutTestCase(unittest.TestCase):
             "role": role["id"], "manufacturer": mfr["id"], "site": site["id"],
         }
         design = cls._api("POST", "/api/plugins/rack-design/designs/", {
-            "title": f"layout-{suffix}", "site": site["id"],
+            "title": f"layout-{suffix}", "sites": [site["id"]],
             "racks": [short_rack["id"], tall_rack["id"]]})
         cls._design_id = design["id"]
         cls._short_rack = short_rack["id"]

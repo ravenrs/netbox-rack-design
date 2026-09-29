@@ -6,12 +6,25 @@ import strawberry
 import strawberry_django
 from netbox.graphql.types import NetBoxObjectType
 
-from ..models import Design, DesignGroup, DesignPlacement, DesignPowerFeed
+from ..models import (
+    Design,
+    DesignGroup,
+    DesignPlacement,
+    DesignPowerFeed,
+    PlannedRack,
+    Template,
+    TemplateGroup,
+    TemplatePlacement,
+)
 from .filters import (
     DesignFilter,
     DesignGroupFilter,
     DesignPlacementFilter,
     DesignPowerFeedFilter,
+    PlannedRackFilter,
+    TemplateFilter,
+    TemplateGroupFilter,
+    TemplatePlacementFilter,
 )
 
 if TYPE_CHECKING:
@@ -20,7 +33,9 @@ if TYPE_CHECKING:
         DeviceRoleType,
         DeviceType,
         DeviceTypeType,
+        LocationType,
         PowerFeedType,
+        PowerPanelType,
         RackType,
         SiteType,
     )
@@ -31,6 +46,10 @@ __all__ = (
     "DesignType",
     "DesignPlacementType",
     "DesignPowerFeedType",
+    "PlannedRackType",
+    "TemplateGroupType",
+    "TemplateType",
+    "TemplatePlacementType",
 )
 
 
@@ -41,15 +60,18 @@ class DesignGroupType(NetBoxObjectType):
 
 @strawberry_django.type(Design, fields="__all__", filters=DesignFilter, pagination=True)
 class DesignType(NetBoxObjectType):
-    # Cross-app FK: under object-level permissions a related object the GraphQL
-    # user cannot view resolves to null, so the field must be nullable (the
-    # established real-plugin pattern, e.g. netbox-bgp) even though site is
-    # required at the DB level.
-    site: Annotated["SiteType", strawberry.lazy("dcim.graphql.types")] | None
+    # M9 (PLAN-multi-site.md): `Design.sites` is now a M2M. A list field, unlike
+    # a nullable-FK field, simply omits any related Site the requesting user
+    # lacks 'view' on rather than needing the whole field to be Optional.
+    sites: list[Annotated["SiteType", strawberry.lazy("dcim.graphql.types")]]
     group: Annotated["DesignGroupType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     based_on: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     root: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     depends_on: list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]
+    # planned_racks (M2M to PlannedRack): declared explicitly like depends_on
+    # above rather than relying on PlannedRackType being registered elsewhere
+    # first, so this field's resolution never depends on import order.
+    planned_racks: list[Annotated["PlannedRackType", strawberry.lazy("netbox_rack_design.graphql.types")]]
 
     # --- design chains (PLAN-design-chains.md G9) ----------------------------
     # ``children`` is a reverse-relation property (Design.children), not a
@@ -101,6 +123,60 @@ class DesignPowerFeedType(NetBoxObjectType):
     # resolves to null.
     design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     rack: Annotated["RackType", strawberry.lazy("dcim.graphql.types")] | None
+    # planned_rack (D25/T1.8b): the planned-rack counterpart of ``rack`` --
+    # declared explicitly, like DesignPlacementType.target_planned_rack below,
+    # because ``fields="__all__"`` otherwise resolves a bare, fieldless
+    # DjangoModelType for it, which breaks the generated GraphQL tests.
+    planned_rack: Annotated[
+        "PlannedRackType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None
+    # power_panel: the panel a planned feed hangs from (migration 0024) --
+    # declared for the same reason as planned_rack above.
+    power_panel: Annotated["PowerPanelType", strawberry.lazy("dcim.graphql.types")] | None
+
+
+# A PLANNED rack. Queryable in its own right, and the nested target of
+# DesignPlacement.target_planned_rack and Design.planned_racks -- same
+# dual role as DesignPowerFeedType above.
+@strawberry_django.type(
+    PlannedRack,
+    fields="__all__",
+    filters=PlannedRackFilter,
+    pagination=True,
+)
+class PlannedRackType(NetBoxObjectType):
+    # Cross-app FKs are nullable for the same reason as DesignPowerFeedType's:
+    # under object-level permissions a related object the caller cannot view
+    # resolves to null.
+    location: Annotated["LocationType", strawberry.lazy("dcim.graphql.types")] | None
+    realized_rack: Annotated["RackType", strawberry.lazy("dcim.graphql.types")] | None
+
+
+# A product pod: an ordered set of Templates (PLAN-templates.md §2, D14).
+@strawberry_django.type(TemplateGroup, fields="__all__", filters=TemplateGroupFilter, pagination=True)
+class TemplateGroupType(NetBoxObjectType):
+    pass
+
+
+# A reusable rack layout with no site (PLAN-templates.md §2, D13/D14).
+@strawberry_django.type(Template, fields="__all__", filters=TemplateFilter, pagination=True)
+class TemplateType(NetBoxObjectType):
+    group: Annotated["TemplateGroupType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+
+
+# One device within a Template (PLAN-templates.md §2, D8/D9).
+@strawberry_django.type(TemplatePlacement, fields="__all__", filters=TemplatePlacementFilter, pagination=True)
+class TemplatePlacementType(NetBoxObjectType):
+    template: Annotated["TemplateType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+    device_type: Annotated["DeviceTypeType", strawberry.lazy("dcim.graphql.types")] | None
+    device_role: Annotated["DeviceRoleType", strawberry.lazy("dcim.graphql.types")] | None
+    tenant: Annotated["TenantType", strawberry.lazy("tenancy.graphql.types")] | None
+    # Same-template self-FK (D10) -- declared explicitly like
+    # DesignPlacementType.parent_placement, since fields="__all__" otherwise
+    # resolves it to a bare, fieldless DjangoModelType.
+    parent_placement: Annotated[
+        "TemplatePlacementType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None
 
 
 @strawberry_django.type(DesignPlacement, fields="__all__", filters=DesignPlacementFilter, pagination=True)
@@ -111,6 +187,17 @@ class DesignPlacementType(NetBoxObjectType):
     device_role: Annotated["DeviceRoleType", strawberry.lazy("dcim.graphql.types")] | None
     tenant: Annotated["TenantType", strawberry.lazy("tenancy.graphql.types")] | None
     target_rack: Annotated["RackType", strawberry.lazy("dcim.graphql.types")] | None
+    target_planned_rack: Annotated[
+        "PlannedRackType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None
+    # from_template (PLAN-templates.md §3, D20): provenance -- which Template
+    # this placement was stamped from, if any. Declared explicitly for the
+    # same reason as target_planned_rack above: fields="__all__" otherwise
+    # resolves it to a bare, fieldless DjangoModelType, which breaks the
+    # generated GraphQL tests for THIS type (not TemplateType's).
+    from_template: Annotated[
+        "TemplateType", strawberry.lazy("netbox_rack_design.graphql.types")
+    ] | None
     real_power_feed: Annotated["PowerFeedType", strawberry.lazy("dcim.graphql.types")] | None
     planned_power_feed: Annotated["DesignPowerFeedType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     power_source_device: Annotated["DeviceType", strawberry.lazy("dcim.graphql.types")] | None

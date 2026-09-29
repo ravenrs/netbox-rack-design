@@ -143,12 +143,31 @@ def _role_slug(placement):
     return (role.slug if role else "").lower()
 
 
+def _target_rack(placement):
+    """The rack this placement targets, real or still only planned.
+
+    ``target_rack`` / ``target_planned_rack`` are exactly the same two FKs
+    ``naming._AddDevicePlaceholderProxy.rack`` / ``_MoveDeviceProxy.rack``
+    resolve (PLAN-templates.md D29) -- this script bypasses that proxy
+    (``build_name`` reads placement fields directly, not through
+    ``generate_name``'s template context), so it needs the same ``or`` here
+    too, or a device dropped into a freshly-created planned rack would get an
+    empty site slug and rack token instead of falling back to the real
+    device's rack. ``PlannedRack`` exposes ``.name`` and ``.site`` with the
+    same shape as ``dcim.Rack`` (see its docstring in models.py), so nothing
+    downstream needs to branch on which kind this is.
+    """
+    return (
+        placement.target_rack
+        or placement.target_planned_rack
+        or (placement.device.rack if placement.device else None)
+    )
+
+
 def _site_slug(placement):
     """Lowercased site name from the target rack (falling back to the real
     device's site). Empty string when unknown."""
-    rack = placement.target_rack or (
-        placement.device.rack if placement.device else None
-    )
+    rack = _target_rack(placement)
     site = rack.site if (rack and rack.site) else (
         placement.device.site if placement.device else None
     )
@@ -157,9 +176,7 @@ def _site_slug(placement):
 
 def _rack_token(placement):
     """A compact, punctuation-free rack token for embedding in a name."""
-    rack = placement.target_rack or (
-        placement.device.rack if placement.device else None
-    )
+    rack = _target_rack(placement)
     name = rack.name if rack else ""
     return re.sub(r"[^0-9a-z]", "", name.lower())
 
@@ -169,7 +186,7 @@ def build_name(placement):
 
     Rules (all generic -- adjust to your convention):
 
-    1. **PDUs** (role slug contains ``pdu``): ``<site>-pdu-r<rack>-a1/b1/...``
+    1. **PDUs** (role slug contains ``pdu``): ``<site>-pdu-<rack>-a1/b1/...``
        -- A/B phase pairs.
     2. **Everything else**: ``<site>-<role>-<n>`` -- a flat family counter,
        falling back to the device-type slug when no role is set so the name is
@@ -180,7 +197,7 @@ def build_name(placement):
 
     # Rule 1 -- PDUs: phase-paired slots per rack.
     if "pdu" in role:
-        prefix = f"{site}-pdu-r{_rack_token(placement)}-"
+        prefix = f"{site}-pdu-{_rack_token(placement)}-"
         return prefix + _next_pdu_slot(placement, prefix)
 
     # Rule 2 -- general: <site>-<role|type>-<n>.
