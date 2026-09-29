@@ -35,8 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
 
-    # The declared min_version/max_version range (4.4.0 - 4.6.99) is only honest if
-    # CI tests BOTH ends of it plus the minor in between, so NetBox is a matrix
+    # The declared min_version/max_version range (4.4.0 - 4.7.99) is only honest if
+    # CI tests BOTH ends of it plus the minors in between, so NetBox is a matrix
     # dimension. Deliberately a sparse `include` rather than a full cross product:
     # the newest NetBox gets the whole Python sweep, the older ones only their
     # supported edges. fail-fast is off so one bad pair cannot mask the others.
@@ -55,8 +55,12 @@ jobs:
           - netbox-version: 'v4.6.8'
             python-version: '3.12'
           - netbox-version: 'v4.6.8'
+            python-version: '3.14'
+          - netbox-version: 'v4.7.1'
+            python-version: '3.12'
+          - netbox-version: 'v4.7.1'
             python-version: '3.13'
-          - netbox-version: 'v4.6.8'
+          - netbox-version: 'v4.7.1'
             python-version: '3.14'
 
     services:

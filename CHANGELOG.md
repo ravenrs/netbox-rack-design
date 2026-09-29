@@ -7,8 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [1.0.0] - 2026-09-29
 
+### Release Summary
+
+The first stable release. NetBox Rack Design now covers the whole planning
+loop — draft rack changes on top of live data, see their space and power
+effect down to each breaker bank, chain plans across teams, and apply them to
+NetBox as planned devices, racks and power feeds — and 1.0.0 marks its models,
+REST and GraphQL APIs as stable. New since 0.32: designs that span several
+sites; planned racks with their own planned power, which Apply builds
+(rack, feeds and cabling); templates that fit racks of any height, carry PDUs,
+chassis with blades and planning fields, and group into pods; planning fields
+typed by the device custom field they target and written onto the device on
+Apply; blades applied into chassis bays; planned racks that can be hidden in
+the editor; and NetBox 4.7 support (tested on 4.4.8, 4.5.10, 4.6.8 and 4.7.1).
+One breaking change, below. A full video course — a quick tour plus 20 parts —
+accompanies the release, linked from every docs section it covers.
+
+### **Breaking Changes**
+
+- **`Design.site` became `Design.sites`** (a design can now span several
+  sites). Migration `0023_design_sites` converts each design's single site
+  into the new many-to-many, reversibly. REST and GraphQL clients must read
+  and send `sites` (a list) instead of `site`; the `site_id` / `site` filters
+  keep working over the sites. Object-permission constraints written as
+  `{"site__slug": "…"}` for designs must become `{"sites__slug": "…"}`. See
+  **Upgrade notes** at the end of this section.
+
+### Added
+- **NetBox 4.7 support.** `max_version` is now 4.7.99, and CI tests NetBox
+  4.7.1 on Python 3.12, 3.13 and 3.14 alongside 4.4.8, 4.5.10 and 4.6.8.
+- **Planned power feeds filter by power panel** (`power_panel_id`), like
+  every other foreign key on the model.
+- **Templates keep gaps and fit racks of any height.** A template placement now stores an `offset` next to its anchor: the empty units between that end of the rack and the device. Saving a rack as a template anchors every device to the end of the half it sits in at its real distance, so a device with free units around it is kept — it used to be left out as an "island" ("a template cannot store a preserved gap") — and stamping puts every gap back, in a 42U rack and a 47U one alike. A new `tray` anchor puts a device back into the non-racked tray whatever its height, so a 1U server parked unmounted is saved too. Existing templates have offset 0 and stamp exactly as before. New migration `0025`. See [docs/templates.md](docs/templates.md#anchors-offsets-and-order-no-absolute-positions).
+- **A planned rack can be saved as a template.** It used to be refused as having "no devices yet", which stopped being true once planned racks could be filled; it is now saved from what the design plans in it.
+- **Templates carry planning fields.** A template placement's planning fields can now be seen and edited in NetBox: its form has one input per configured `placement_fields` entry, typed from the bound custom field (a number box, the choice set, an object picker), and its page lists them by label. Saving a rack as a template now also takes them from equipment already standing there — each real device's own custom fields (a move's planned values on top), from the editor and from `from-rack` alike — where only a design's own adds were copied before. A stamp carries them onto the new placements, and apply writes them to the devices. A device value the field would refuse (data older than its rules) is left out rather than failing the template. See [docs/templates.md](docs/templates.md#planning-fields).
+- **Apply installs planned blades into their bays.** A blade placement used to
+  stop apply with "blade placements cannot be applied yet". Apply now creates
+  each blade as a planned child device and installs it in its bay — a real
+  chassis's bay, a bay of a chassis planned in the same design (created first,
+  in the same run), or one an already-applied ancestor design built. The
+  confirmation page and the REST dry run name the chassis and bay. An occupied
+  or missing bay, an ancestor chassis not applied yet, or a user without
+  `dcim.change_devicebay` is listed as a problem before anything is written. A
+  second apply finds each blade in place, moves one whose bay changed, and
+  deletes one dropped from the design. See [docs/apply.md](docs/apply.md#blades).
+- **Planning fields take their custom field's own type.** A placement field
+  aimed at a device custom field now follows that field's definition — every
+  NetBox type: text, long text, integer (with its min/max), decimal, boolean,
+  date, date & time, URL, JSON, selection and multiple selection (from the
+  choice set, shown by label), object and multiple objects (picked from the
+  related type's REST list by search, stored as IDs). The field's regex and
+  bounds apply, and a value NetBox would refuse is refused when the placement
+  is saved. The editor renders the matching input, the hover card shows labels
+  and object names, the discovery endpoint publishes `choice_labels`,
+  `multiple`, `min`/`max`, `api_url` and `object_type`, and a naming template
+  gets NetBox's own Python value (`{device.cf[site]}` is the site). Previously
+  only text, number and a hand-copied choice list existed, so an integer
+  accepted `2.5`, a boolean or multi-object could not be set at all, and an
+  object field meant typing an ID. See
+  [docs/planning-fields.md](docs/planning-fields.md#custom-field-types).
+- **Apply creates the planned power feeds.** A design's planned feeds used to
+  live only inside the design, so a rack built by apply had no supply in DCIM.
+  Apply now creates each one as a real power feed in *planned* status on its
+  rack and cables the PDUs bound to it. A planned feed records its power panel.
+  The copy paths fill it in from the source feed, and it can also be set by
+  hand. Without one, apply falls back to the site's only panel, or refuses
+  with a message naming the feed. Re-applying reuses the same feed and cable,
+  and also cables PDUs that an earlier apply created before their feed existed.
+  New migration `0024`. See [docs/apply.md](docs/apply.md).
+
+- **Create a whole row of planned racks at once.** The editor's **Create rack**
+  form accepts NetBox's range patterns in the name — `R[1-4]` creates R1–R4,
+  `R[a-c]` creates Ra–Rc — using core's own `expand_alphanumeric_pattern`, the
+  same syntax `Et1/[1-48]` goes through when adding interfaces. A collision
+  anywhere in the expansion creates nothing and names the offender. The form
+  also gained an optional **Copy feeds from** picker that seeds each new rack's
+  planned power supply from an existing rack's feeds, giving every rack its own
+  copy named for itself (`R1-A`/`R1-B`, `R2-A`/`R2-B`, …). See
+  [docs/planned-racks.md](docs/planned-racks.md).
+- **PDUs bind themselves to a feed.** Adding a PDU to a rack that already has
+  feeds no longer opens the bind dialog: the PDU takes the feed its name's leg
+  letter points at (`…-a1` → `R1-A`), or the first feed no other PDU in that
+  rack has claimed. Real feeds rank above the design's own planned feeds, which
+  rank above inherited ones. Stamping a template full of PDUs across a row of
+  racks is now zero clicks instead of two per rack; the ⚡ button names the feed
+  each PDU took and still reopens the picker for an override. The dialog opens
+  by itself only when nothing could be picked — a greenfield rack whose planned
+  feeds don't exist yet. See
+  [docs/power-distribution.md](docs/power-distribution.md#automatic-binding).
 - **Multi-site designs.** A design can now span multiple sites, allowing a
   single plan to coordinate racks across a campus or multiple halls. Every
   site-scoped rule ("rack must be in the design's site") now reads "in one of
@@ -48,9 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as they do for anything else. Templates can also be built from what
   already exists — extracted from a rack in a design (its full projected
   layout, not only what this design itself added) or from any real rack in
-  DCIM — and each extraction reports, rather than silently drops, any
-  "island" device (dead air on both sides) that a template's anchor+order
-  shape cannot represent. See [docs/templates.md](docs/templates.md).
+  DCIM — every device keeping its distance from its end of the rack, gaps
+  included. See [docs/templates.md](docs/templates.md).
 - **Bank zones in the editor.** Each face grid now carries a narrow strip on
   its left edge, one column per feed leg, showing which U range every PDU
   bank serves and how full it is (same colours as the bank chips). A 4-PDU
@@ -89,6 +176,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Placements list finds a placement by its device's name.** Quick
+  search only matched the proposed name, so a removal or a keep-name move —
+  which has no proposed name — could not be found by the device it acts on.
+  It now also matches the device's name, and a stale placement's remembered
+  device name.
+- **Older versions of the plan you stand on are no longer "peer conflicts".**
+  After re-basing a design onto version 3 of its parent, the editor listed
+  every unit versions 1 and 2 plan as a peer conflict — they are the same
+  plan, superseded, not a competing one. The peer check now leaves out the
+  version family of every ancestor, not only the design's own.
+- **Planned racks can be hidden.** The editor's Racks panel had an eye only
+  for real racks, so a row of planned racks stayed on screen whether you
+  worked on it or not. Planned racks now hide and show the same way (per
+  user, kept across reloads); the `hidden-design-racks` API takes
+  `planned_rack_id` and returns `hidden_planned_rack_ids`.
+- **A template group no longer hands out the same name twice.** Applying a
+  pod named each member on its own, so two members both took the next free
+  index (`ams1-switch-8` in two racks). Apply now previews the whole group
+  in one request — one naming pass over every member.
+- **A full-depth device's rear hatch no longer flies in from the top.** On
+  every editor load the hatch was created at the top of the rack and slid to
+  its row; it is now placed without the slide.
+
+- **Apply now writes planning fields onto the device.** Values set through
+  `placement_fields` were stored on the placement, shown on hover and used by
+  naming, but apply created the device without them — nothing reached DCIM.
+  Apply now writes each value to the custom field (or native attribute) its
+  `target` names, after the custom fields' defaults. A move's successor keeps
+  the real device's own custom fields with the design's values on top, and a
+  value changed after an apply is written back on the next one. The pre-apply
+  check validated a new device against no custom fields at all, so a required
+  device custom field refused apply even when the design set it; it now checks
+  the values the device will carry. A `cf.` target that does not exist, or a
+  native target that is not a device attribute, is listed as a problem. See
+  [docs/planning-fields.md](docs/planning-fields.md#on-apply).
+
+- **A device moved in the editor says where it came from.** Its hover card showed "Was" but no "From" line until the design was saved and reloaded (the ghost it left already said "To"). A move made in the current session now shows "From <site> · <rack> · U<n>", and it disappears again when the device is dragged back home.
+
+- **NetBox's global search no longer fails with a server error when a design or planned rack matches.** The search indexes named two properties (`sites_display`, `is_realized`) as display attributes, but NetBox requires real fields. A design's sites and a planned rack's realized rack now show in the results.
+
+- **A device deleted in the NetBox UI now leaves its planned move or removal listed as stale.** During a web request NetBox's own delete handling nulled the reference first. The plugin's handler then found nothing, and the placement silently went inert instead of appearing under Stale placements. Only deletes made from code were caught.
+
+- **An ancestor that now occupies your unit is reported, as the design-chains guide says.** When a later-approved ancestor (or a re-base) puts hardware where a design had already planned a device, both tiles used to be drawn on top of each other with no word. The design's own tile now keeps its unit and carries the amber conflict marker, and a `unit_occupied` row in the Design conflicts panel names the ancestor. It never blocks Save.
+
+- **Saving a derived design no longer copies the parent's moves into it.** An inherited move of a real device, left where the approved parent put it, was saved as the child's own move. Sibling designs then flagged each other in peer conflicts for the parent's move, and the tile was renamed with the child's title.
+- **The GraphQL type for a planned power feed exposes its `power_panel`** (it resolved to a bare type and broke the query).
+
+- **A frozen parent's refusals read correctly for one child design.** "Compute Phase 2 (v1) are based on this design" is now "is based on this design … lose its baseline"; the same holds when un-approving and when deleting it.
+
+- **Saving a derived design no longer turns its parent's tray PDUs into moves.** An ancestor's planned tray device (a 0U PDU) reached the child's editor with face "front" instead of the tray's blank face, so the editor took the untouched PDU for one moved out of "front" and saved a move placement for it in the child. That move had no feed, so the PDU lost its binding in the child and in every plan built on it, and a sibling design drew it at U1 over whatever sat there. Tray slots now always carry no face.
+- **Stamping a template places its blades for any user.** Before placing a chassis's blades, the editor read the chassis type's bay templates through the REST API as the current user. A user who may not view them, or who may only view some device types, got an empty answer, and every blade was dropped with "no such bay on the stamped chassis". The editor now filters blades only against a bay list it actually received. Anything else is left to the save, which validates each blade's bay against the chassis type on the server.
+- **A stamped chassis looks like a hand-placed one.** Its tile listed every stamped blade under the name ("slot1: … Blade"), which read as part of the device's name, and kept the template's source name in the attribute the rear-face shadow and hover card read — so the rear hatch showed the source rack's device name. The tile now shows only the stamped name everywhere, and its hover card lists the bays the way a saved chassis's does.
+- **A stamped rack's power bar counts what the stamp added.** Stamped tiles carried 0 W, so the bar read "0 W" under a stamped rack whose bank chips (computed on the server) were already full. The editor now looks up each stamped device type's draw the way the catalog does, adds a chassis's blades to it, and the bar and heatmap update at once.
+- **Save as template keeps the PDUs in the non-racked tray.** Saving a rack as a template (from the editor, or `from-rack` over the API) skipped every device without a U position, so a zero-U PDU was silently dropped ("saved (0 devices)" with the PDUs gone) — although stamping has always put 0U items back into the target rack's tray, where they bind themselves to its feeds. Both paths now save them.
+
+- **A planned rack's delete refusal reads correctly for one design.** It said "Q3 Expansion (v1) still plan across it".
+
+- **Two PSUs pinned to the same feed leg are refused in the Planning attributes dialog.** The server never accepted a duplicate leg, and the editor's live power recompute then dropped the device's draw without a word.
+
+- **A naming template can read a planning field on a fresh drop.** `{device.cf[responsible]}` now names the tile with the value the toolbar gave it; the preview used to leave the token empty.
+
+- **The Apply page names the removal status apply will really set.** It said
+  removals are "flagged for decommissioning" whatever `removal_status` was
+  configured to.
+- **A frozen parent can be replaced by its new version again.** The documented
+  hand-over (New version → re-base the children → old version to draft →
+  approve the new one) deadlocked: Re-base only offered approved designs, and
+  the old version cannot leave *approved* while it has children. Re-base (page
+  and API) now also accepts another version of the design's current parent,
+  whatever its status; the children show "ancestor not approved" until the new
+  version is approved.
+- **The Apply page says which racks and power feeds it will build.** It listed
+  devices only, so a design that creates a planned rack and its supply looked
+  like it created neither. It now has a *Racks* row (created as planned, or
+  which existing rack is adopted) and a *Power feeds* row (on which panel,
+  created or reused, PDUs cabled), and the message after Apply counts them.
+  The REST `apply` action's response (dry run and run) gains the same two
+  lists, `racks` and `feeds`.
+- **A move's rename suggestion no longer repeats an unsaved add's name in
+  template mode.** The *Set a new name* preview counted only saved placements,
+  so with three unsaved drops on screen `{n}` came out as `01` again. It now
+  counts the session's unsaved names too.
+- **A rack created by apply is *planned*, not *active*.** It came out with
+  NetBox's default status, which claims a cabinet that is not standing in the
+  hall yet. A rack apply *adopts* is real and keeps its status.
+- **Apply no longer fails with a 500 on data NetBox refuses to save.** An add
+  planned without a role, or a device whose custom field already held an
+  invalid value in DCIM, used to crash in the middle of the write. Apply now
+  lists both on the confirmation page, naming the device. The editor refuses a
+  drop while the Role dropdown is empty and highlights it. Anything NetBox
+  still refuses during the write rolls the whole run back and shows as a
+  problem.
+- **A move-out ghost says where the device went, even before you save.** The
+  hover card reads `data-moved-to`, which the server stamps only on a ghost it
+  rendered — so a ghost created by a drag in the current session carried no
+  data at all and showed no card whatsoever. It now takes the device's identity
+  and its live destination from the body tile wherever that tile currently
+  sits, in the same `<site> · <rack> · U<n>` shape a reloaded ghost shows, and
+  re-reads it on every refresh so moving the device a second time updates the
+  answer.
 - **A planned rack could be drawn on but never saved into.** Dropping a
   device into a rack the design had planned (**Create rack**) and pressing
   Save answered *"Rack does not exist."* and persisted nothing: the save
@@ -191,6 +378,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Migration `0026_hiddendesignrack_planned_rack`** lets a per-user hidden
+  rack row point at a planned rack (`rack` becomes nullable; exactly one of
+  `rack` / `planned_rack` is set). Existing rows are untouched.
 - **Migration `0023_design_sites`** converts the single `Design.site` FK into
   a many-to-many `Design.sites` relationship, backfilling each existing
   design with its single site. The migration is reversible.
