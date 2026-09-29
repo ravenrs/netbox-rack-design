@@ -477,25 +477,17 @@
               <div class="list-group list-group-flush nbx-rd-design-racks-list" id="nbx-rd-design-racks-list">
                 {% for row in scoped_rack_rows %}
                 <div class="list-group-item nbx-rd-design-rack-row{% if row.hidden %} is-hidden{% endif %}"
-                     data-rd-rack-row="{{ row.rack.pk }}"{% if row.planned %} data-rd-rack-planned="1"{% endif %}>
-                  {% if row.planned %}
-                  {# A planned rack has no per-user hide toggle (D25): it has  #}
-                  {# no device row, so there is nothing to hide FROM. The      #}
-                  {# badge keeps the row's shape and says why.                 #}
-                  <span class="nbx-rd-visi-toggle text-warning"
-                        title="{% trans 'This rack does not exist in NetBox yet' %}">
-                    <i class="mdi mdi-progress-wrench" aria-hidden="true"></i>
-                  </span>
-                  {% else %}
+                     data-rd-rack-row="{{ row.key|rack_dom_id }}"{% if row.planned %} data-rd-rack-planned="1"{% endif %}>
+                  {# One eye for every rack, planned ones too; the id is the #}
+                  {# block's data-rack-id (bare pk, or p-<pk> when planned). #}
                   <button type="button"
                           class="nbx-rd-visi-toggle"
-                          data-rd-visi-toggle="{{ row.rack.pk }}"
+                          data-rd-visi-toggle="{{ row.key|rack_dom_id }}"
                           aria-pressed="{{ row.hidden|yesno:'false,true' }}"
                           title="{% trans 'Toggle visibility' %}"
                           aria-label="{% trans 'Toggle visibility' %}">
                     <i class="mdi {% if row.hidden %}mdi-eye-off-outline{% else %}mdi-eye-outline{% endif %}" aria-hidden="true"></i>
                   </button>
-                  {% endif %}
                   <span class="nbx-rd-design-rack-name">
                     {{ row.rack.name }}
                     {% if row.planned %}<span class="badge text-bg-warning ms-1">{% trans "Planned" %}</span>{% endif %}

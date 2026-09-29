@@ -170,8 +170,12 @@ class EditorRackVisibilityTestCase(unittest.TestCase):
         self.page.wait_for_timeout(1200)
         self.page.add_style_tag(
             content="#djDebug,#djDebugToolbarHandle{display:none !important}")
-        self.page.click("[data-rd-section-toggle='racks']")
-        self.page.wait_for_timeout(300)
+        # The drawer remembers it was open (a reload inside one test), so
+        # open it only when it is closed.
+        toggle = self.page.locator("[data-rd-section-toggle='racks']")
+        if toggle.get_attribute("aria-expanded") != "true":
+            toggle.click()
+            self.page.wait_for_timeout(300)
 
     def _block_visible(self, rack_id):
         """Is this rack's block on screen? (reads the DOM, not the class)"""
@@ -237,6 +241,37 @@ class EditorRackVisibilityTestCase(unittest.TestCase):
         self.page.wait_for_timeout(700)
         self.assertTrue(self._block_visible(a), "'All' must reveal rack A")
         self.assertTrue(self._block_visible(b), "'All' must reveal rack B")
+
+    def test_a_planned_rack_hides_and_shows_like_a_real_one(self):
+        """Planned racks get the same eye: a row of racks not yet in NetBox
+        fills the screen as much as real ones (they used to have none)."""
+        tag = uuid.uuid4().hex[:8]
+        location = self._api("POST", "/api/dcim/locations/", {
+            "name": f"e2e-vis-{tag}", "slug": f"e2e-vis-{tag}",
+            "site": self.rack_a["site"]["id"], "status": "active"})
+        planned = self._api("POST", "/api/plugins/rack-design/planned-racks/", {
+            "name": f"E2E-VP-{tag}", "location": location["id"], "u_height": 42})
+        self._api("PATCH", f"/api/plugins/rack-design/designs/{self._design_id}/",
+                  {"planned_racks": [planned["id"]]})
+        dom_id = f"p-{planned['id']}"
+        try:
+            self._open_editor()
+            self.assertTrue(self._block_visible(dom_id), "the planned rack should start visible")
+            self._click_eye(dom_id)
+            self.assertFalse(self._block_visible(dom_id),
+                             "the planned rack must disappear when its eye is clicked")
+            self.assertTrue(self._block_visible(self.rack_a["id"]),
+                            "hiding a planned rack must not touch a real one")
+            self._open_editor()
+            self.assertFalse(self._block_visible(dom_id), "it must stay hidden across a reload")
+            self._click_eye(dom_id)
+            self.assertTrue(self._block_visible(dom_id), "one click must show it again")
+        finally:
+            self._show_all()
+            self._api("PATCH", f"/api/plugins/rack-design/designs/{self._design_id}/",
+                      {"planned_racks": []})
+            self._api("DELETE", f"/api/plugins/rack-design/planned-racks/{planned['id']}/")
+            self._api("DELETE", f"/api/dcim/locations/{location['id']}/")
 
 
 if __name__ == "__main__":

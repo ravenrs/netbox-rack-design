@@ -84,25 +84,25 @@ class NamingExampleTestCase(TestCase):
 
     def test_pdu_phase_pairs_sequence(self):
         p = self._add(self.pdu_type, self.pdu_role, position=None)
-        self.assertEqual(build_name(p), "ams1-pdu-rr42-a1")
+        self.assertEqual(build_name(p), "ams1-pdu-r42-a1")
         # Simulate the a1..b2 fill via injected pending siblings.
         for pending, expect in (
-            (["ams1-pdu-rr42-a1"], "ams1-pdu-rr42-b1"),
-            (["ams1-pdu-rr42-a1", "ams1-pdu-rr42-b1"], "ams1-pdu-rr42-a2"),
-            (["ams1-pdu-rr42-a1", "ams1-pdu-rr42-b1", "ams1-pdu-rr42-a2"],
-             "ams1-pdu-rr42-b2"),
+            (["ams1-pdu-r42-a1"], "ams1-pdu-r42-b1"),
+            (["ams1-pdu-r42-a1", "ams1-pdu-r42-b1"], "ams1-pdu-r42-a2"),
+            (["ams1-pdu-r42-a1", "ams1-pdu-r42-b1", "ams1-pdu-r42-a2"],
+             "ams1-pdu-r42-b2"),
         ):
             p._rd_pending_names = pending
             self.assertEqual(build_name(p), expect)
 
     def test_pdu_continues_from_existing_devices(self):
         # Real a1/b1 already exist -> the next PDU is a2, not a1.
-        for nm in ("ams1-pdu-rr42-a1", "ams1-pdu-rr42-b1"):
+        for nm in ("ams1-pdu-r42-a1", "ams1-pdu-r42-b1"):
             Device.objects.create(
                 name=nm, device_type=self.pdu_type, role=self.pdu_role,
                 site=self.site, status="active")
         p = self._add(self.pdu_type, self.pdu_role, position=None)
-        self.assertEqual(build_name(p), "ams1-pdu-rr42-a2")
+        self.assertEqual(build_name(p), "ams1-pdu-r42-a2")
 
     # --- through the engine (script mode end-to-end) -----------------------
 

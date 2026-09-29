@@ -130,12 +130,126 @@ function readPlacementFieldInputs(scope, selector) {
     // `select, input` rather than the bare class: NetBox's TomSelect
     // enhancement copies a select's classes onto the wrapper <div> it
     // inserts, which would otherwise match here and read as a blank field.
-    scope.querySelectorAll("select" + selector + ", input" + selector).forEach(function (input) {
-        var key = input.getAttribute("data-field-key");
-        var value = (input.value || "").trim();
-        if (key && value !== "") { out[key] = value; }
-    });
+    scope.querySelectorAll("select" + selector + ", input" + selector + ", textarea" + selector)
+        .forEach(function (input) {
+            var key = input.getAttribute("data-field-key");
+            if (!key) { return; }
+            if (input.multiple) {
+                var picked = Array.prototype.map.call(input.selectedOptions, function (o) {
+                    return o.value;
+                }).filter(function (v) { return v !== ""; });
+                if (picked.length) { out[key] = picked; }
+                return;
+            }
+            var value = (input.value || "").trim();
+            if (value !== "") { out[key] = value; }
+        });
     return out;
+}
+
+// Put a stored value back into a rendered planning input. Handles the shapes
+// a bound custom field stores: a list (multi-select / multi-object), a
+// boolean, a number, an ISO date-time (a datetime-local input takes
+// "YYYY-MM-DDTHH:MM"), a JSON object.
+function setPlacementFieldInput(input, value) {
+    if (value == null) { return; }
+    if (input.multiple) {
+        var wanted = (Array.isArray(value) ? value : [value]).map(String);
+        Array.prototype.forEach.call(input.options, function (o) {
+            o.selected = wanted.indexOf(o.value) !== -1;
+        });
+        return;
+    }
+    if (typeof value === "boolean") { input.value = value ? "true" : "false"; return; }
+    if (input.type === "datetime-local") { input.value = String(value).slice(0, 16); return; }
+    if (typeof value === "object") { input.value = JSON.stringify(value); return; }
+    input.value = String(value);
+}
+
+// Names of related objects picked in this session, by field key and id, so
+// an in-session hover card shows "AMS1" rather than an id before any reload.
+var objectPickLabels = {};
+
+// An object / multi-object field is a <select> whose options are fetched from
+// the field's REST list (`api_url`), filtered by the search box beside it.
+// The stored value is the object id, exactly as NetBox stores it.
+function wireObjectPickers(scope, current) {
+    if (!scope) { return; }
+    scope.querySelectorAll("select[data-api-url]").forEach(function (sel) {
+        var key = sel.getAttribute("data-field-key");
+        var url = sel.getAttribute("data-api-url");
+        var search = sel.parentNode.querySelector("[data-rd-object-search]");
+        var stored = current && current[key] != null ? current[key] : null;
+        var storedIds = stored == null ? [] : (Array.isArray(stored) ? stored : [stored]).map(String);
+        objectPickLabels[key] = objectPickLabels[key] || {};
+
+        function load(q) {
+            var keep = Array.prototype.filter.call(sel.options, function (o) {
+                return o.selected && o.value !== "";
+            }).map(function (o) { return o.value; });
+            if (!keep.length) { keep = storedIds; }
+            var params = "brief=true&limit=50" + (q ? "&q=" + encodeURIComponent(q) : "");
+            var requests = [fetch(url + "?" + params, { credentials: "same-origin" })
+                .then(function (r) { return r.ok ? r.json() : { results: [] }; })];
+            if (keep.length) {
+                requests.push(fetch(url + "?brief=true&limit=" + keep.length + "&"
+                        + keep.map(function (id) { return "id=" + encodeURIComponent(id); }).join("&"),
+                    { credentials: "same-origin" })
+                    .then(function (r) { return r.ok ? r.json() : { results: [] }; }));
+            }
+            Promise.all(requests).then(function (pages) {
+                var seen = {};
+                var rows = [];
+                pages.forEach(function (page) {
+                    (page.results || []).forEach(function (obj) {
+                        if (seen[obj.id]) { return; }
+                        seen[obj.id] = true;
+                        rows.push(obj);
+                    });
+                });
+                var html = sel.multiple ? "" : '<option value="">—</option>';
+                html += rows.map(function (obj) {
+                    var text = String(obj.display || obj.name || obj.id);
+                    objectPickLabels[key][String(obj.id)] = text;
+                    var safe = text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+                    var on = keep.indexOf(String(obj.id)) !== -1 ? " selected" : "";
+                    return '<option value="' + obj.id + '"' + on + ">" + safe + "</option>";
+                }).join("");
+                sel.innerHTML = html;
+            });
+        }
+        var timer = null;
+        if (search) {
+            search.addEventListener("input", function () {
+                clearTimeout(timer);
+                timer = setTimeout(function () { load(search.value.trim()); }, 250);
+            });
+        }
+        load("");
+    });
+}
+
+// What a hover card shows for one value, matching the server's
+// planning_fields.display_value.
+function planningDisplay(f, value) {
+    var labels = f.choice_labels || {};
+    if (f.type === "boolean") {
+        return (value === true || value === "true") ? "Yes" : "No";
+    }
+    if (f.type === "select" || f.type === "choice") { return String(labels[value] || value); }
+    if (f.type === "multiselect") {
+        return (Array.isArray(value) ? value : [value]).map(function (v) {
+            return String(labels[v] || v);
+        }).join(", ");
+    }
+    if (f.type === "object" || f.type === "multiobject") {
+        var names = objectPickLabels[f.key] || {};
+        return (Array.isArray(value) ? value : [value]).map(function (v) {
+            return names[String(v)] || "#" + v;
+        }).join(", ");
+    }
+    if (typeof value === "object") { return JSON.stringify(value); }
+    return String(value);
 }
 
 // ---- The palette rail's sticky defaults ---------------------------------
@@ -154,6 +268,7 @@ function renderPlacementRail() {
             + '<label class="form-label small mb-0 text-nowrap">' + safeLabel + "</label>"
             + planningFieldInputHtml(f, "nbx-rd-placement-rail-field") + "</div>";
     }).join("");
+    wireObjectPickers(placementRailEl, {});
 }
 
 // The rail's current selections, as the planning_data blob a fresh add
@@ -442,6 +557,102 @@ function looksLikePdu(roleSlug, roleName, proposedName, typeLabel) {
 function guessFeedFromName(name) {
     var m = /([a-zA-Z])(\d+)\s*$/.exec((name || "").trim());
     return m ? (m[1].toLowerCase() + m[2]) : "";
+}
+
+// ---- Auto-bind a freshly added PDU to a feed --------------------------
+//
+// Binding every PDU by hand is the single most repetitive gesture in the
+// editor: stamp a ToR template across ten racks and that is twenty trips
+// through the bind dialog, each one picking the only sensible answer. So an
+// added PDU binds ITSELF whenever the rack already has feeds, and the dialog
+// only opens when the choice is genuinely ambiguous (no feeds, or none left).
+// The ⚡ button stays, so any automatic choice is one click from being
+// overridden.
+
+// The leg letter a FEED name carries: "R1-A" -> "a", "ams1-r3 b2" -> "b".
+// A separator before the letter is required, so a name that merely happens
+// to end in a letter ("E2E Feed 4f2a1b") is not read as a leg.
+function feedLegLetter(name) {
+    var m = /[-_ ]([a-z])\d*\s*$/i.exec(String(name || "").trim());
+    return m ? m[1].toLowerCase() : "";
+}
+
+// Which feeds the rack's other PDUs have already claimed. `peers` is the
+// caller's live widget list (rack.js passes its `state` widgets); each entry
+// contributes whichever of the two binding fields it carries.
+function takenFeedIds(peers) {
+    var taken = { real: {}, planned: {} };
+    (peers || []).forEach(function (w) {
+        if (!w) { return; }
+        if (w.real_power_feed_id != null) { taken.real[w.real_power_feed_id] = true; }
+        if (w.planned_power_feed_id != null) { taken.planned[w.planned_power_feed_id] = true; }
+    });
+    return taken;
+}
+
+// The feed an added PDU should take, or null to hand the choice back to the
+// user. Real feeds rank above the design's own planned feeds, which rank
+// above feeds inherited from an ancestor design -- but a leg-letter match
+// beats all of that, because "-a1 goes on feed A" is what the planner means
+// even when a redundant PDU already sits on that leg.
+function pickFeedForPdu(pduName, data, peers) {
+    var taken = takenFeedIds(peers);
+    var candidates = [];
+    ((data && data.real) || []).forEach(function (f) {
+        candidates.push({ source: "real", feed: f, rank: 0 });
+    });
+    ((data && data.planned) || []).forEach(function (f) {
+        candidates.push({ source: "planned", feed: f, rank: f.inherited ? 2 : 1 });
+    });
+    if (!candidates.length) { return null; }
+    candidates.sort(function (a, b) { return a.rank - b.rank; });
+
+    var wanted = (guessFeedFromName(pduName) || "").charAt(0);
+    if (wanted) {
+        var matched = candidates.filter(function (c) {
+            return feedLegLetter(c.feed.name) === wanted;
+        });
+        if (matched.length) {
+            var free = matched.filter(function (c) { return !taken[c.source][c.feed.id]; });
+            return free.length ? free[0] : matched[0];
+        }
+    }
+    var untaken = candidates.filter(function (c) { return !taken[c.source][c.feed.id]; });
+    return untaken.length ? untaken[0] : null;
+}
+
+// Bind `widget` to the rack's obvious feed. Resolves with the chosen
+// {source, feed} or null -- a falsy result is the caller's signal to open
+// showPduPowerDialog instead. Never rejects: a failed fetch is just "no
+// automatic answer", same as a rack without feeds.
+function autoBindPduFeed(widget, content, ctx) {
+    var rackId = (ctx || {}).rackId;
+    var peers = (ctx || {}).peers || [];
+    return fetchFeeds(rackId).then(function (data) {
+        var picked = pickFeedForPdu(widget.proposed_name || widget.label, data, peers);
+        if (!picked) {
+            rdTrace("feed.autobind.none", { rackId: rackId, pduName: widget.proposed_name });
+            return null;
+        }
+        if (picked.source === "real") {
+            widget.real_power_feed_id = picked.feed.id;
+            widget.planned_power_feed_id = null;
+        } else {
+            widget.planned_power_feed_id = picked.feed.id;
+            widget.real_power_feed_id = null;
+        }
+        var btn = content && content.querySelector
+            ? content.querySelector(".nbx-rd-power-btn") : null;
+        if (btn) {
+            btn.classList.add("has-config");
+            btn.title = "PDU power — bound to " + picked.feed.name + " (click to change)";
+        }
+        rdTrace("feed.autobind.bind", {
+            rackId: rackId, pduName: widget.proposed_name,
+            feedId: picked.feed.id, feedName: picked.feed.name, feedSource: picked.source,
+        });
+        return picked;
+    }).catch(function () { return null; });
 }
 
 // Every rack currently rendered in the editor, for the "copy from rack"
@@ -893,19 +1104,53 @@ function showPduPowerDialog(widget, content, ctx) {
 // distribution-spec.md §5): `type` in {number, text, choice}. Never a
 // hardcoded cf name -- `f.key` drives both the DOM lookup and the
 // custom_fields dict key written on confirm.
+// A placement field bound to a device custom field arrives with that field's
+// own NetBox type (integer, select, object, ...), so each gets the input that
+// type needs; the server coerces and validates whatever is submitted.
 function planningFieldInputHtml(f, cssClass) {
     var cls = cssClass || "nbx-rd-rackpower-field";
-    if (f.type === "choice") {
-        var opts = '<option value="">—</option>' + (f.choices || []).map(function (c) {
-            var safe = String(c).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-            return '<option value="' + safe + '">' + safe + "</option>";
+    function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"); }
+    var attrs = ' data-field-key="' + esc(f.key) + '"';
+    var labels = f.choice_labels || {};
+
+    if (f.type === "choice" || f.type === "select" || f.type === "multiselect") {
+        var multi = f.type === "multiselect";
+        var opts = (multi ? "" : '<option value="">—</option>') + (f.choices || []).map(function (c) {
+            return '<option value="' + esc(c) + '">' + esc(labels[c] || c) + "</option>";
         }).join("");
-        return '<select class="form-select form-select-sm ' + cls + '" data-field-key="'
-            + f.key + '">' + opts + "</select>";
+        return '<select class="form-select form-select-sm ' + cls + '"' + attrs
+            + (multi ? " multiple size=\"3\"" : "") + ">" + opts + "</select>";
     }
-    var type = f.type === "number" ? "number" : "text";
-    return '<input type="' + type + '" class="form-control form-control-sm ' + cls + '" data-field-key="'
-        + f.key + '">';
+    if (f.type === "boolean") {
+        return '<select class="form-select form-select-sm ' + cls + '"' + attrs + ">"
+            + '<option value="">—</option><option value="true">Yes</option>'
+            + '<option value="false">No</option></select>';
+    }
+    if (f.type === "object" || f.type === "multiobject") {
+        var many = f.type === "multiobject";
+        return '<div class="nbx-rd-object-pick d-flex flex-column gap-1">'
+            + '<input type="search" class="form-control form-control-sm" data-rd-object-search'
+            + ' placeholder="Search ' + esc(f.object_type || "objects") + "…\">"
+            + '<select class="form-select form-select-sm ' + cls + '"' + attrs
+            + ' data-api-url="' + esc(f.api_url || "") + '"' + (many ? " multiple size=\"3\"" : "")
+            + ">" + (many ? "" : '<option value="">—</option>') + "</select></div>";
+    }
+    if (f.type === "longtext" || f.type === "json") {
+        return '<textarea rows="2" class="form-control form-control-sm ' + cls + '"' + attrs
+            + (f.type === "json" ? ' placeholder="{&quot;key&quot;: &quot;value&quot;}"' : "")
+            + "></textarea>";
+    }
+    var type = "text";
+    var extra = "";
+    if (f.type === "number" || f.type === "decimal") { type = "number"; extra = ' step="any"'; }
+    if (f.type === "integer") { type = "number"; extra = ' step="1"'; }
+    if (f.min != null) { extra += ' min="' + f.min + '"'; }
+    if (f.max != null) { extra += ' max="' + f.max + '"'; }
+    if (f.type === "date") { type = "date"; }
+    if (f.type === "datetime") { type = "datetime-local"; }
+    if (f.type === "url") { type = "url"; }
+    return '<input type="' + type + '" class="form-control form-control-sm ' + cls + '"'
+        + attrs + extra + ">";
 }
 
 // ---- Manual per-PSU feed-leg override (this file's own feature) --------
@@ -1019,8 +1264,13 @@ function showPlacementFieldsDialog(widget, content, kind) {
     // dialog after a reload shows the stored values rather than the rail's.
     overlay.querySelectorAll(".nbx-rd-placement-field").forEach(function (input) {
         var key = input.getAttribute("data-field-key");
-        if (key && current[key] != null) { input.value = current[key]; }
+        if (key && current[key] != null && !input.hasAttribute("data-api-url")) {
+            setPlacementFieldInput(input, current[key]);
+        }
     });
+    // Object pickers fill themselves: the stored ids are fetched with the
+    // first page of results and come back selected.
+    wireObjectPickers(overlay, current);
     overlay.querySelectorAll(".nbx-rd-placement-leg-field").forEach(function (sel) {
         var idx = parseInt(sel.getAttribute("data-psu-index"), 10);
         if (currentLegs[idx]) { sel.value = currentLegs[idx]; }
@@ -1040,6 +1290,21 @@ function showPlacementFieldsDialog(widget, content, kind) {
                         - parseInt(b.getAttribute("data-psu-index"), 10);
                 })
                 .map(function (sel) { return sel.value || ""; });
+            // Two PSUs on one leg is not a plan the server accepts (the
+            // model rejects a duplicate leg), and the live recompute then
+            // dropped the device's draw without a word. Refuse it here.
+            var chosen = picked.filter(function (v) { return v !== ""; });
+            var dupError = overlay.querySelector(".nbx-rd-placement-leg-error");
+            if (chosen.length !== new Set(chosen).size) {
+                if (!dupError) {
+                    dupError = document.createElement("div");
+                    dupError.className = "nbx-rd-placement-leg-error text-danger small";
+                    dupError.textContent = "Each PSU needs a different feed leg.";
+                    overlay.querySelector(".nbx-rd-placement-power").appendChild(dupError);
+                }
+                return;
+            }
+            if (dupError) { dupError.remove(); }
             legsSet = picked.some(function (v) { return v !== ""; });
             if (legsSet) {
                 widget.preferred_feed_legs = picked;
@@ -1071,8 +1336,11 @@ function stampPlanningAttr(widget, content) {
     if (!content) { return; }
     var data = widget.planning_data || {};
     var pairs = PLACEMENT_FIELDS
-        .filter(function (f) { return data[f.key] !== undefined && data[f.key] !== ""; })
-        .map(function (f) { return [f.label || f.key, String(data[f.key])]; });
+        .filter(function (f) {
+            var v = data[f.key];
+            return v !== undefined && v !== null && v !== "" && !(Array.isArray(v) && !v.length);
+        })
+        .map(function (f) { return [f.label || f.key, planningDisplay(f, data[f.key])]; });
     if (pairs.length) {
         if (content.getAttribute("data-rd-planning-orig") === null) {
             // Remember what the server rendered before overwriting it, so
@@ -1419,6 +1687,7 @@ export {
     applyRailToMove,
     clearRailFromMove,
     looksLikePdu,
+    autoBindPduFeed,
     showPduPowerDialog,
     stampPlanningAttr,
     attachPlacementFieldsButton,

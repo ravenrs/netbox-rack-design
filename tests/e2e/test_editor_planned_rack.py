@@ -103,6 +103,8 @@ class EditorCreatePlannedRackTestCase(unittest.TestCase):
             raise unittest.SkipTest("no racks in this data")
         rack = racks[0]
         cls.site_id = rack["site"]["id"]
+        cls.rack_id = rack["id"]
+        cls.rack_name = rack["name"]
 
         # A dedicated Location under the rack's site -- the dialog's Location
         # dropdown is scoped to the design's own site (views._design_editor_
@@ -121,6 +123,19 @@ class EditorCreatePlannedRackTestCase(unittest.TestCase):
         cls._design_id = design["id"]
         cls.editor_url = (
             f"{BASE}/plugins/rack-design/designs/{cls._design_id}/editor/")
+
+        # Scope this real rack into the design AND give it a planned feed
+        # (T?, "copy feeds while creating"): the Create-rack dialog's "Copy
+        # feeds from" select only lists racks rendered in the workspace
+        # (racksInDom()), and copy-feeds needs something to actually clone.
+        cls._api(
+            "POST", f"/api/plugins/rack-design/designs/{cls._design_id}/add-rack/",
+            {"rack_id": cls.rack_id},
+        )
+        cls._api("POST", "/api/plugins/rack-design/planned-power-feeds/", {
+            "design": cls._design_id, "rack": cls.rack_id,
+            "name": f"{cls.rack_name}-A", "voltage": 230, "amperage": 16,
+        })
 
     @classmethod
     def _cleanup_class(cls):
@@ -279,6 +294,62 @@ class EditorCreatePlannedRackTestCase(unittest.TestCase):
         # The dialog must still be open -- a duplicate is a rejected request,
         # not a silent no-op that looks like success.
         self.assertTrue(self.page.is_visible(".nbx-rd-create-rack-modal"))
+
+    def test_dialog_shows_pattern_hint_and_copy_feeds_select(self):
+        """The two new pieces of UI: a hint that Name takes a NetBox range
+        pattern, and a "Copy feeds from" select listing this design's racks
+        (the real rack _provision scoped in and gave a planned feed)."""
+        self._open_create_rack_dialog()
+        hint = self.page.inner_text(".nbx-rd-create-rack-name + .form-text")
+        self.assertIn("R[1-4]", hint)
+        self.assertTrue(
+            self.page.is_visible(".nbx-rd-create-rack-copy-feeds"),
+            "the Copy feeds from select must be present",
+        )
+        options = self.page.eval_on_selector_all(
+            ".nbx-rd-create-rack-copy-feeds option", "els => els.map(e => e.textContent)")
+        self.assertIn(self.rack_name, options)
+
+    def test_pattern_name_creates_one_block_per_expanded_name(self):
+        base = f"e2e-pat-{uuid.uuid4().hex[:6]}"
+        pattern = f"{base}[1-3]"
+        self._open_create_rack_dialog()
+        self.page.fill(".nbx-rd-create-rack-name", pattern)
+        self.page.fill(".nbx-rd-create-rack-height", "10")
+        self.page.select_option(".nbx-rd-create-rack-location", str(self._location_id))
+        with self.page.expect_navigation(wait_until="networkidle", timeout=15000):
+            self.page.click("[data-rd-create-rack-submit]")
+        self.page.wait_for_selector(".grid-stack", timeout=30000)
+
+        for suffix in ("1", "2", "3"):
+            block = self.page.query_selector(
+                f'.nbx-rd-rack-block:has-text("{base}{suffix}")')
+            self.assertIsNotNone(
+                block, f"{base}{suffix} must appear in the workspace")
+            self.assertIn("Planned", block.inner_text())
+
+    def test_copy_feeds_on_create_gives_the_new_rack_its_own_feed_block(self):
+        rack_name = f"e2e-copyfeed-{uuid.uuid4().hex[:6]}"
+        self._open_create_rack_dialog()
+        self.page.fill(".nbx-rd-create-rack-name", rack_name)
+        self.page.fill(".nbx-rd-create-rack-height", "10")
+        self.page.select_option(".nbx-rd-create-rack-location", str(self._location_id))
+        self.page.select_option(".nbx-rd-create-rack-copy-feeds", str(self.rack_id))
+        with self.page.expect_navigation(wait_until="networkidle", timeout=15000):
+            self.page.click("[data-rd-create-rack-submit]")
+        self.page.wait_for_selector(".grid-stack", timeout=30000)
+
+        feeds = self._api(
+            "GET",
+            "/api/plugins/rack-design/planned-power-feeds/"
+            f"?design_id={self._design_id}",
+        )["results"]
+        matches = [f for f in feeds if f["name"] == f"{rack_name}-A"]
+        self.assertTrue(
+            matches,
+            f"the new rack must get its own copied feed named for itself; "
+            f"feeds were: {[f['name'] for f in feeds]}",
+        )
 
 
 if __name__ == "__main__":

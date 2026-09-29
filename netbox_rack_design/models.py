@@ -253,6 +253,25 @@ class Design(NetBoxModel):
         """The root design that groups this plan's versions (self if this is the root)."""
         return self.root or self
 
+    def rebase_targets(self):
+        """Designs this one may be re-based onto: any APPROVED design, plus any
+        other version of its current parent's own plan, whatever its status.
+
+        The second half is what makes a frozen parent replaceable
+        (design-chains.md, "The order of operations"): New version -> re-base
+        the children onto that draft -> the old version, now childless, may
+        leave approved -> approve the new one. With approved-only targets the
+        children could never move first, so the hand-over deadlocked. Until
+        the new version is approved the children render the chain as
+        refused ("ancestor not approved"), which is the honest state.
+        """
+        allowed = models.Q(status=DesignStatusChoices.STATUS_APPROVED)
+        if self.based_on_id:
+            plan_root = self.based_on.version_root
+            allowed |= models.Q(root=plan_root) | models.Q(pk=plan_root.pk)
+        qs = Design.objects.filter(allowed)
+        return qs.exclude(pk=self.pk) if self.pk else qs
+
     @property
     def site(self):
         """
@@ -267,6 +286,12 @@ class Design(NetBoxModel):
             return None
         sites = list(self.sites.all()[:2])
         return sites[0] if len(sites) == 1 else None
+
+    def get_sites_display(self):
+        """The ``sites`` M2M as display text: NetBox's global search renders a
+        ``display_attrs`` entry through ``get_<attr>_display()`` when the model
+        has one, and requires the attr itself to be a real field."""
+        return self.sites_display
 
     @property
     def sites_display(self):
@@ -455,11 +480,15 @@ class Design(NetBoxModel):
                 children = list(self.children)
                 if children:
                     names = ", ".join(str(d) for d in children)
+                    verb, own, them = (
+                        ("is", "its", "it") if len(children) == 1
+                        else ("are", "their", "them"))
                     raise ValidationError(
                         {"status": f"Cannot leave 'approved' status: {names} "
-                                   "are based on this design and would silently lose their "
-                                   "baseline. Use the New version button on this design to "
-                                   "create one and re-base them onto it instead."}
+                                   f"{verb} based on this design and would silently lose "
+                                   f"{own} baseline. Use the New version button on this "
+                                   f"design to create one and re-base {them} onto it "
+                                   "instead."}
                     )
 
         # At least one site is required (M1). Same M2M-timing caveat as every
@@ -1820,26 +1849,49 @@ class HiddenDesignRack(models.Model):
         on_delete=models.CASCADE,
         related_name="hidden_rack_states",
     )
+    # Exactly one of the two: a real rack or a planned one. A planned rack
+    # hides like any other -- a row of planned racks the planner is not
+    # working on fills the screen as much as real ones do.
     rack = models.ForeignKey(
         to="dcim.Rack",
         on_delete=models.CASCADE,
         related_name="+",
+        null=True,
+        blank=True,
+    )
+    planned_rack = models.ForeignKey(
+        to="netbox_rack_design.PlannedRack",
+        on_delete=models.CASCADE,
+        related_name="+",
+        null=True,
+        blank=True,
     )
     created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ("user", "design", "rack")
+        ordering = ("user", "design", "rack", "planned_rack")
         verbose_name = "hidden design rack"
         verbose_name_plural = "hidden design racks"
         constraints = [
             models.UniqueConstraint(
                 fields=("user", "design", "rack"),
+                condition=models.Q(rack__isnull=False),
                 name="%(app_label)s_%(class)s_unique_user_design_rack",
+            ),
+            models.UniqueConstraint(
+                fields=("user", "design", "planned_rack"),
+                condition=models.Q(planned_rack__isnull=False),
+                name="%(app_label)s_%(class)s_unique_user_design_planned_rack",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(rack__isnull=False, planned_rack__isnull=True)
+                           | models.Q(rack__isnull=True, planned_rack__isnull=False)),
+                name="%(app_label)s_%(class)s_one_rack",
             ),
         ]
 
     def __str__(self):
-        return f"{self.user}: {self.design} hides {self.rack}"
+        return f"{self.user}: {self.design} hides {self.rack or self.planned_rack}"
 
 
 class HiddenDesignChassis(models.Model):
@@ -1943,6 +1995,18 @@ class DesignPowerFeed(NetBoxModel):
     )
     # The feed's identity/leg, e.g. "Feed A" -- the bank/leg the bound PDUs sit on.
     name = models.CharField(max_length=100)
+    # Where the feed will hang in DCIM. dcim.PowerFeed cannot exist without a
+    # power panel, so Apply needs one to turn this row into a real feed. The
+    # copy paths ("Copy from rack", "Copy feeds from") fill it from the source
+    # feed; left empty, Apply falls back to the site's panel when it has
+    # exactly one, and otherwise lists the feed as a blocker.
+    power_panel = models.ForeignKey(
+        to="dcim.PowerPanel",
+        on_delete=models.SET_NULL,
+        related_name="+",
+        blank=True,
+        null=True,
+    )
     voltage = models.PositiveIntegerField(default=230)
     amperage = models.PositiveIntegerField(default=16)
     phase = models.CharField(
@@ -2840,6 +2904,15 @@ class TemplatePlacement(NetBoxModel):
         default=TemplatePlacementAnchorChoices.ANCHOR_TOP,
     )
     order = models.PositiveSmallIntegerField(default=0)
+    # Units of empty space between the anchor's end of the rack and this
+    # device: where the stamp starts looking for its slot. 0 packs it against
+    # the end (or the device before it); a saved rack keeps each device's real
+    # distance, so its gaps come back -- in a rack of any height.
+    offset = models.DecimalField(
+        max_digits=4, decimal_places=1, default=0,
+        help_text="Units of empty space between the anchor's end of the rack and "
+                  "this device. 0 packs it against that end.",
+    )
     label = models.CharField(max_length=100, blank=True)
     # The chassis this blade goes into, within THIS SAME template (D10). CASCADE
     # is safe -- unlike DesignPlacement's cross-design base_parent_placement,

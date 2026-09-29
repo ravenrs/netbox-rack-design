@@ -237,7 +237,7 @@ class DistributionExampleTestCase(TestCase):
         """Regression guard: no override still reproduces today's a/b pick."""
         dist_none = build(self.rack, [_consumer("srv4", 2, 500, psus=2, preferred_feed_legs=None)])
         dist_empty = build(self.rack, [_consumer("srv5", 2, 500, psus=2, preferred_feed_legs=[])])
-        for dist, name in ((dist_none, "srv4"), (dist_empty, "srv5")):
+        for dist, _name in ((dist_none, "srv4"), (dist_empty, "srv5")):
             self.assertEqual(dist["pdus"]["d-pdu-r1-1"]["banks"]["1"]["allocated_power"], 500)
             self.assertEqual(dist["pdus"]["d-pdu-r1-2"]["banks"]["1"]["allocated_power"], 500)
 

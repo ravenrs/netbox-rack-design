@@ -8,6 +8,7 @@ from dcim.models import (
     DeviceType,
     Location,
     Manufacturer,
+    PowerPanel,
     Rack,
     Site,
 )
@@ -40,6 +41,7 @@ from .models import (
     TemplateGroup,
     TemplatePlacement,
 )
+from .planning_forms import PlanningFieldsFormMixin
 
 __all__ = (
     "DesignGroupForm",
@@ -689,17 +691,24 @@ class DesignPowerFeedForm(NetBoxModelForm):
         queryset=Rack.objects.all(),
         help_text=_("The rack this planned feed supplies."),
     )
+    power_panel = DynamicModelChoiceField(
+        queryset=PowerPanel.objects.all(),
+        required=False,
+        query_params={"site_id": "$rack__site"},
+        help_text=_("Where Apply creates the real power feed. Leave empty to use "
+                    "the site's panel when it has exactly one."),
+    )
 
     fieldsets = (
-        FieldSet("design", "rack", "name", "tags", name=_("Feed")),
+        FieldSet("design", "rack", "name", "power_panel", "tags", name=_("Feed")),
         FieldSet("voltage", "amperage", "phase", "supply", name=_("Electrical")),
     )
 
     class Meta:
         model = DesignPowerFeed
         fields = (
-            "design", "rack", "name", "voltage", "amperage", "phase", "supply",
-            "tags",
+            "design", "rack", "name", "power_panel", "voltage", "amperage", "phase",
+            "supply", "tags",
         )
 
 
@@ -837,7 +846,7 @@ class TemplatePlacementImportForm(NetBoxModelImportForm):
         model = TemplatePlacement
         fields = (
             "template", "device_type", "device_role", "tenant", "anchor",
-            "order", "face", "tags",
+            "offset", "order", "face", "tags",
         )
 
 
@@ -906,7 +915,7 @@ class TemplateForm(NetBoxModelForm):
         fields = ("name", "group", "order", "u_height", "description", "tags")
 
 
-class TemplatePlacementForm(NetBoxModelForm):
+class TemplatePlacementForm(PlanningFieldsFormMixin, NetBoxModelForm):
     template = DynamicModelChoiceField(queryset=Template.objects.all())
     device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all())
     device_role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
@@ -926,7 +935,7 @@ class TemplatePlacementForm(NetBoxModelForm):
             "template", "device_type", "device_role", "tenant", "label", "tags",
             name=_("Placement"),
         ),
-        FieldSet("anchor", "order", "face", name=_("Rack slot")),
+        FieldSet("anchor", "offset", "order", "face", name=_("Rack slot")),
         FieldSet("parent_placement", "target_bay_name", name=_("Device bay")),
     )
 
@@ -934,7 +943,7 @@ class TemplatePlacementForm(NetBoxModelForm):
         model = TemplatePlacement
         fields = (
             "template", "device_type", "device_role", "tenant", "label",
-            "anchor", "order", "face", "parent_placement", "target_bay_name",
+            "anchor", "offset", "order", "face", "parent_placement", "target_bay_name",
             "tags",
         )
         widgets = {

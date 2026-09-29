@@ -1,7 +1,7 @@
 """FilterSets for NetBox Rack Design."""
 
 import django_filters
-from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, Location, PowerFeed, Rack, Site
+from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, Location, PowerFeed, PowerPanel, Rack, Site
 from django.db.models import Q
 from netbox.filtersets import BaseFilterSet, NetBoxModelFilterSet
 from tenancy.models import Tenant
@@ -201,7 +201,13 @@ class DesignPlacementFilterSet(NetBoxModelFilterSet):
     def search(self, queryset, name, value):
         if not value.strip():
             return queryset
-        return queryset.filter(Q(proposed_name__icontains=value))
+        # A removal or keep-name move has no proposed name -- only its device
+        # (or, once that device is deleted, the name it had).
+        return queryset.filter(
+            Q(proposed_name__icontains=value)
+            | Q(device__name__icontains=value)
+            | Q(stale_device_name__icontains=value)
+        )
 
 
 class PlannedRackFilterSet(NetBoxModelFilterSet):
@@ -275,6 +281,10 @@ class DesignPowerFeedFilterSet(NetBoxModelFilterSet):
     # ``DesignPlacementFilterSet.target_planned_rack_id``.
     planned_rack_id = django_filters.ModelMultipleChoiceFilter(
         queryset=PlannedRack.objects.all(), label="Planned rack (ID)"
+    )
+    # The panel a planned feed hangs from (migration 0024).
+    power_panel_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=PowerPanel.objects.all(), label="Power panel (ID)"
     )
 
     class Meta:

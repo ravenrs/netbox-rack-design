@@ -26,6 +26,7 @@ __all__ = (
     "GraphQLDescribedModelFilterBase",
     "API_TOKEN_PREFIX",
     "HAS_V2_API_TOKENS",
+    "custom_fields_for",
 )
 
 
@@ -51,3 +52,20 @@ try:  # NetBox 4.5+ ships the v2 token prefix ('nbt_')
 except ImportError:  # NetBox 4.4: Token.key IS the secret
     API_TOKEN_PREFIX = ""
     HAS_V2_API_TOKENS = False
+
+
+def custom_fields_for(model):
+    """The custom fields assigned to ``model``, as a list.
+
+    NetBox 4.4-4.6 return a queryset from ``CustomField.objects.get_for_model``;
+    4.7 returns a request-cached list of the ACTIVE fields only (a field whose
+    stored data is still being purged is hidden). Either way the caller gets a
+    list, and on a queryset the choice set and related object type come in the
+    same query.
+    """
+    from extras.models import CustomField
+
+    fields = CustomField.objects.get_for_model(model)
+    if hasattr(fields, "select_related"):
+        fields = fields.select_related("choice_set", "related_object_type")
+    return list(fields)

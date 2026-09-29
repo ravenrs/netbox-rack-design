@@ -247,6 +247,80 @@ class ComputeStampTests(unittest.TestCase):
         self.assertEqual(first_positions, second_positions)
         self.assertEqual(first[1], second[1])
 
+    # --- 0U items (a PDU/tray device) go to the tray, never a rack unit -----
+    #
+    # BUG (2026-09-23): a 0U ``u_height`` item was being walked through
+    # ``_find_slot`` like any other item and landed at a real position
+    # (typically the top of the scan), colliding with other 0U items that
+    # all "fit" at the same unit. A 0U device type belongs in the rack's
+    # NON-RACKED TRAY (``DesignPlacement.target_position = None``, no
+    # face -- see ``_RackSlotTarget``/save-layout's "other" bucket), not in
+    # a numbered unit.
+
+    def test_zero_height_item_lands_in_tray_not_a_unit(self):
+        items = [Item("PDU-2B", 0, anchor="bottom")]
+        occupied = {"front": [], "rear": []}
+
+        placements, unplaced = compute_stamp(items, occupied, 47)
+
+        self.assertEqual(unplaced, [])
+        self.assertEqual(len(placements), 1)
+        item, position, face = placements[0]
+        self.assertIsNone(position)
+        self.assertEqual(face, "")
+
+    def test_two_zero_height_items_do_not_collide(self):
+        # This is the exact bug signature reported live: two 0U PDU template
+        # placements (anchor="bottom", order 0/1) both landed at position
+        # 1.0/"front" and collided. Neither should ever get a real position.
+        items = [
+            Item("PDU-2B a", 0, anchor="bottom"),
+            Item("PDU-2B b", 0, anchor="bottom"),
+        ]
+        occupied = {"front": [], "rear": []}
+
+        placements, unplaced = compute_stamp(items, occupied, 47)
+
+        self.assertEqual(unplaced, [])
+        self.assertEqual(len(placements), 2)
+        for _item, position, face in placements:
+            self.assertIsNone(position)
+            self.assertEqual(face, "")
+
+    def test_zero_height_item_does_not_consume_a_unit(self):
+        # A 0U item and a 1U item anchored top must not fight over U47 -- the
+        # 0U item never enters the unit-packing walk at all.
+        items = [
+            Item("PDU-2B", 0, anchor="top"),
+            Item("1U switch", 1, anchor="top"),
+        ]
+        occupied = {"front": [], "rear": []}
+
+        placements, unplaced = compute_stamp(items, occupied, 47)
+
+        self.assertEqual(unplaced, [])
+        by_name = {item.name: (position, face) for item, position, face in placements}
+        self.assertIsNone(by_name["PDU-2B"][0])
+        self.assertEqual(by_name["1U switch"][0], 47)
+
+    def test_all_zero_height_items_in_a_tiny_rack_does_not_crash(self):
+        # Every item in the template is 0U -- the unit-packing walk never
+        # runs at all. Must not divide by zero or otherwise crash on an
+        # effectively-empty rack.
+        items = [
+            Item("PDU-2B a", 0, anchor="top"),
+            Item("PDU-2B b", 0, anchor="bottom"),
+        ]
+        occupied = {"front": [], "rear": []}
+
+        placements, unplaced = compute_stamp(items, occupied, 1, starting_unit=1)
+
+        self.assertEqual(unplaced, [])
+        self.assertEqual(len(placements), 2)
+        for _item, position, face in placements:
+            self.assertIsNone(position)
+            self.assertEqual(face, "")
+
     # --- D12: an unplaced item does not shift the others --------------------
 
     def test_unplaced_item_does_not_shift_subsequent_items(self):

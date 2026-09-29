@@ -260,6 +260,7 @@ class DesignPowerFeedTable(NetBoxTable):
     design = tables.Column(linkify=True)
     rack = tables.Column(linkify=True)
     name = tables.Column(linkify=True)
+    power_panel = tables.Column(linkify=True, verbose_name=_("Power panel"))
     phase = columns.ChoiceFieldColumn()
     supply = columns.ChoiceFieldColumn()
     derated_watts = tables.Column(
@@ -274,7 +275,7 @@ class DesignPowerFeedTable(NetBoxTable):
     class Meta(NetBoxTable.Meta):
         model = DesignPowerFeed
         fields = (
-            "pk", "id", "design", "rack", "name", "voltage", "amperage",
+            "pk", "id", "design", "rack", "name", "power_panel", "voltage", "amperage",
             "phase", "supply", "derated_watts", "bound_count",
             "created", "last_updated", "actions",
         )
@@ -340,6 +341,9 @@ class TemplateTable(NetBoxTable):
 
 
 class TemplatePlacementTable(NetBoxTable):
+    # A placement has no name of its own, so the ID links to it -- otherwise
+    # the list offered no way to its page but Edit.
+    id = tables.Column(linkify=True, verbose_name=_("ID"))
     template = tables.Column(linkify=True)
     device_type = tables.Column(linkify=True)
     device_role = tables.Column(linkify=True)
@@ -350,9 +354,9 @@ class TemplatePlacementTable(NetBoxTable):
         model = TemplatePlacement
         fields = (
             "pk", "id", "template", "device_type", "device_role", "tenant",
-            "label", "anchor", "order", "face", "parent_placement",
+            "label", "anchor", "offset", "order", "face", "parent_placement",
             "target_bay_name", "created", "last_updated", "actions",
         )
         default_columns = (
-            "template", "device_type", "device_role", "label", "anchor", "order",
+            "id", "template", "device_type", "device_role", "label", "anchor", "offset", "order",
         )

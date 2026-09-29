@@ -109,10 +109,12 @@ def _design_children_message(design):
     Only re-basing the dependents onto a different design actually severs
     the link, hence pointing at ``rebase``.
     """
-    names = ", ".join(str(child) for child in design.children)
+    children = [str(child) for child in design.children]
+    names = ", ".join(children)
+    verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
-        f"Cannot delete {design}: {names} are based on this design and "
-        "would silently lose their baseline. Re-base the dependent designs "
+        f"Cannot delete {design}: {names} {verb} based on this design and "
+        f"would silently lose {own} baseline. Re-base the dependent designs "
         "onto another design first."
     )
 
@@ -160,10 +162,12 @@ def _planned_rack_referenced_message(planned_rack):
     """HTML-door twin of ``_planned_rack_referenced_rest_message``
     (api/views.py) -- see that function's docstring for the full argument
     (T1.9 decision 1)."""
-    names = ", ".join(str(design) for design in planned_rack.referencing_designs())
+    designs = [str(design) for design in planned_rack.referencing_designs()]
+    names = ", ".join(designs)
+    verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
     return (
-        f"Cannot delete {planned_rack}: {names} still plan across it and "
-        "would silently lose their placements, planned power feeds and/or "
+        f"Cannot delete {planned_rack}: {names} still {verb} across it and "
+        f"would silently lose {own} placements, planned power feeds and/or "
         "rack power for this rack. Remove it from each design's planning "
         "scope first."
     )
@@ -251,10 +255,18 @@ class DesignView(generic.ObjectView):
             .select_related("site", "location")
             .order_by("name", "pk")
         )
+        # The racks made with Create rack. They live in their own M2M, and the
+        # card used to read only design.racks -- so R5/R6 never showed here.
+        scoped_planned_racks = (
+            instance.planned_racks.restrict(request.user, "view")
+            .select_related("location", "location__site", "realized_rack")
+            .order_by("name", "pk")
+        )
         return {
             "affected_racks": affected_racks,
             "affected_rack_count": len(affected_racks),
             "scoped_racks": scoped_racks,
+            "scoped_planned_racks": scoped_planned_racks,
             "planned_feeds": self._planned_feed_rows(instance),
             # Changes this design can no longer carry out because the device
             # they referenced was deleted from DCIM. Reported here because the
@@ -616,14 +628,14 @@ def _design_editor_context(request, design):
     )
     # VISIBLE racks = scope minus the current user's hidden rows for this design.
     # We store HIDDEN rows, so "no rows" => everything is visible.
+    hidden_rack_ids, hidden_planned_ids = [], []
     if request.user.is_authenticated:
-        hidden_rack_ids = list(
-            models.HiddenDesignRack.objects.filter(
-                user=request.user, design=design
-            ).values_list("rack_id", flat=True)
-        )
-    else:
-        hidden_rack_ids = []
+        for rack_id, planned_id in models.HiddenDesignRack.objects.filter(
+                user=request.user, design=design).values_list("rack_id", "planned_rack_id"):
+            if rack_id is not None:
+                hidden_rack_ids.append(rack_id)
+            else:
+                hidden_planned_ids.append(planned_id)
     # Render EVERY scoped rack block and flag the hidden ones so the "Design
     # racks" panel can show/hide them via a CSS class with no page reload.
     all_rack_blocks = [
@@ -633,18 +645,14 @@ def _design_editor_context(request, design):
         }
         for scoped_rack in scoped_racks
     ] + [
-        # A planned rack is never hidden (D25/HiddenDesignRack's own
-        # docstring, mirrored here for the same reason: it has no device row
-        # yet, so "you just added it" is the only useful default -- there is
-        # no per-user visibility row to look up for it at all).
-        {**_project_rack_bundle(design, planned_rack), "hidden": False}
+        # A planned rack hides like a real one (its own HiddenDesignRack row).
+        {**_project_rack_bundle(design, planned_rack),
+         "hidden": planned_rack.pk in hidden_planned_ids}
         for planned_rack in scoped_planned_racks
     ]
     # Rows for the "Design racks" panel: one per scoped rack with its current
     # shown/hidden state for this user, followed by the design's PLANNED
-    # racks. A planned rack still has no hide toggle (D25 -- it has no device
-    # row, so "you just added it" is the only useful default), but it does
-    # need the REMOVE action: deleting a PlannedRack is refused while any
+    # racks -- which hide the same way, and also need the REMOVE action: deleting a PlannedRack is refused while any
     # design still plans across it, and the refusal says to remove it from
     # each design's scope first -- which nothing could do until this row
     # existed (user report 2026-09-22). ``key`` is the namespaced rack id the
@@ -660,7 +668,7 @@ def _design_editor_context(request, design):
     ] + [
         {
             "rack": planned_rack,
-            "hidden": False,
+            "hidden": planned_rack.pk in hidden_planned_ids,
             "planned": True,
             "key": f"p:{planned_rack.pk}",
         }
@@ -1823,7 +1831,8 @@ class DesignRebaseForm(django_forms.Form):
     based_on = django_forms.ModelChoiceField(
         queryset=models.Design.objects.filter(status=DesignStatusChoices.STATUS_APPROVED),
         label="New base design",
-        help_text="Only an approved design may be a base (PLAN-design-chains.md §2.2).",
+        help_text="An approved design, or another version of this design's "
+                  "current parent (the step that replaces a frozen parent).",
     )
 
 
@@ -2034,6 +2043,7 @@ class DesignRebaseView(generic.ObjectView):
     def get(self, request, pk):
         design = self.get_object(pk=pk)
         form = DesignRebaseForm(initial={"based_on": design.based_on_id})
+        form.fields["based_on"].queryset = design.rebase_targets()
         return render(request, self.template_name, {
             "object": design,
             "form": form,
@@ -2043,6 +2053,7 @@ class DesignRebaseView(generic.ObjectView):
     def post(self, request, pk):
         design = self.get_object(pk=pk)
         form = DesignRebaseForm(request.POST)
+        form.fields["based_on"].queryset = design.rebase_targets()
         if form.is_valid():
             previous_based_on = design.based_on_id
             design.based_on = form.cleaned_data["based_on"]
@@ -2100,6 +2111,7 @@ class DesignApplyView(generic.ObjectView):
         result = apply_engine.plan(design, request.user)
         return render(request, self.template_name, {
             "object": design,
+            "removal_status_label": _removal_status_label(),
             "result": result,
             "return_url": design.get_absolute_url(),
         })
@@ -2113,11 +2125,13 @@ class DesignApplyView(generic.ObjectView):
                 f"Applied {design}: {len(result.created)} created, "
                 f"{len(result.updated)} updated, {len(result.removed)} flagged "
                 f"for removal, {len(result.deleted)} deleted, "
-                f"{len(result.reverted)} reverted.",
+                f"{len(result.reverted)} reverted"
+                + _apply_infra_summary(result) + ".",
             )
             return redirect(design.get_absolute_url())
         return render(request, self.template_name, {
             "object": design,
+            "removal_status_label": _removal_status_label(),
             "result": result,
             "return_url": design.get_absolute_url(),
         })
@@ -2127,6 +2141,33 @@ class DesignApplyView(generic.ObjectView):
 # Chain health report (standalone, non-model-bound) -- PLAN-design-chains.md
 # G4's reporting half.
 # ---------------------------------------------------------------------------
+
+
+def _removal_status_label():
+    """The display label of the configured `removal_status` -- what apply
+    really sets on a removed device (e.g. "Decommissioning", "Offline")."""
+    from dcim.choices import DeviceStatusChoices
+    value = get_plugin_config("netbox_rack_design", "removal_status") or ""
+    labels = {choice[0]: choice[1] for choice in DeviceStatusChoices.CHOICES}
+    return labels.get(value, value)
+
+
+def _apply_infra_summary(result):
+    """", 1 rack created, 2 power feeds created" -- the racks and supply an
+    apply built, which the device counts alone never mentioned."""
+    def count(n, word):
+        return f"{n} {word}{'' if n == 1 else 's'}"
+    parts = []
+    racks = sum(1 for r in result.resolved_racks if r.created)
+    adopted = len(result.resolved_racks) - racks
+    feeds = sum(1 for f in result.feeds if f.existing is None)
+    if racks:
+        parts.append(count(racks, "rack") + " created")
+    if adopted:
+        parts.append(count(adopted, "rack") + " adopted")
+    if feeds:
+        parts.append(count(feeds, "power feed") + " created")
+    return "".join(", " + p for p in parts)
 
 
 def _chain_refusal_map():

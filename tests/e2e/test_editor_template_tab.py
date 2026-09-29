@@ -152,6 +152,23 @@ class EditorTemplateTabTestCase(unittest.TestCase):
             })
             placement_ids.append(tp["id"])
 
+        # A 0U device type (a PDU) + a template stamping TWO of them, nothing
+        # else: the reproduction fixture for the tray-stamping bug (a
+        # position-less preview-template entry must land in the rack's tray,
+        # never at a numbered unit). face="front"/anchor="top" are sent like
+        # any other placement -- the server ignores them for a 0U type and
+        # returns position=null, face="" (verified live 2026-09-23).
+        pdu_type = cls._api("POST", "/api/dcim/device-types/", {
+            "manufacturer": mfr["id"], "model": f"E2E-Tmpl-PDU-{suffix}",
+            "slug": f"e2e-tmpl-pdu-{suffix}", "u_height": 0, "is_full_depth": False})
+        tray_template = cls._api("POST", "/api/plugins/rack-design/templates/", {
+            "name": f"E2E Tray Tmpl {suffix}", "u_height": 10})
+        for i in range(2):
+            cls._api("POST", "/api/plugins/rack-design/template-placements/", {
+                "template": tray_template["id"], "device_type": pdu_type["id"],
+                "anchor": "top", "order": i + 1, "face": "front",
+            })
+
         # A chassis + one blade (T4.2, PLAN-templates.md D10): the SAME
         # nested shape from-design/from-rack extract, built here by hand so
         # the stamp side can be driven without going through extraction.
@@ -204,10 +221,10 @@ class EditorTemplateTabTestCase(unittest.TestCase):
 
         cls._created = dict(
             manufacturer=mfr["id"], site=site["id"],
-            device_types=[dt["id"], chassis_type["id"], blade_type["id"]],
+            device_types=[dt["id"], chassis_type["id"], blade_type["id"], pdu_type["id"]],
             device_roles=[role["id"]],
             racks=[rack_large["id"], rack_tiny["id"], rack_extract["id"]],
-            templates=[template["id"], chassis_template["id"], *pod_member_ids],
+            templates=[template["id"], chassis_template["id"], tray_template["id"], *pod_member_ids],
             template_groups=[pod_group["id"]],
             placements=placement_ids,
         )
@@ -220,6 +237,8 @@ class EditorTemplateTabTestCase(unittest.TestCase):
         cls._role_id = role["id"]
         cls._chassis_template_id = chassis_template["id"]
         cls._chassis_template_name = chassis_template["name"]
+        cls._tray_template_id = tray_template["id"]
+        cls._tray_template_name = tray_template["name"]
         cls._pod_group_id = pod_group["id"]
         cls._pod_group_name = pod_group["name"]
         cls._pod_member_names = pod_member_names
@@ -338,8 +357,31 @@ class EditorTemplateTabTestCase(unittest.TestCase):
         return (f'[data-rd-template-kind="template"]'
                 f'[data-rd-template-id="{self._chassis_template_id}"]')
 
+    def _tray_template_card_selector(self):
+        return (f'[data-rd-template-kind="template"]'
+                f'[data-rd-template-id="{self._tray_template_id}"]')
+
     def _pod_group_card_selector(self):
         return f'[data-rd-template-kind="group"][data-rd-template-id="{self._pod_group_id}"]'
+
+    def _tray_tiles(self, rack_id):
+        # Same query shape as test_editor_tray.py's _tray_tile_labels: the
+        # tray host's id embeds the literal string "tray" and needs no
+        # face/geometry lookup.
+        return self.page.evaluate(
+            """(rackId) => {
+                const tray = document.getElementById('nbx-rd-grid-tray-' + rackId);
+                if (!tray) { return null; }
+                return Array.from(tray.querySelectorAll('.grid-stack-item'))
+                    .map(el => ({
+                        label: el.querySelector('.nbx-rd-label')?.textContent || '',
+                        state: (el.className.match(/nbx-rd-state-([a-z_]+)/) || [])[1] || '',
+                        y: el.getAttribute('gs-y'),
+                        h: el.getAttribute('gs-h'),
+                    }));
+            }""",
+            rack_id,
+        )
 
     def _save_button_disabled(self):
         return self.page.get_attribute("#rd-editor-save", "disabled") is not None
@@ -393,6 +435,99 @@ class EditorTemplateTabTestCase(unittest.TestCase):
         self.assertFalse(
             self._save_button_disabled(),
             "an unsaved stamp must arm Save exactly like a manual add")
+
+    def test_stamp_0u_items_land_in_the_tray_not_the_rack_grid(self):
+        """preview-template returns a 0U device's entry as
+        {"position": null, "face": ""}; stampTemplateItems must materialize
+        it exactly like a hand-dropped tray add (never a rack-grid tile at
+        some numbered unit, never stacked on a sibling 0U item)."""
+        self._open_templates_section()
+
+        self.page.drag_and_drop(
+            self._tray_template_card_selector(),
+            self._rack_block_selector(self._rack_large_id),
+        )
+        # The stamp is a server round trip (preview-template, then the bay
+        # and power lookups) -- wait for the tray adds, not a fixed sleep.
+        self.page.wait_for_function(
+            "(id) => document.querySelectorAll('#nbx-rd-grid-tray-' + id "
+            "+ ' .nbx-rd-state-add').length >= 2",
+            arg=self._rack_large_id, timeout=15000)
+
+        # BUG SIGNATURE: both PDUs land as rack-grid `.nbx-rd-state-add`
+        # tiles instead of tray tiles -- assert NONE do.
+        grid_tiles = self.page.query_selector_all(
+            f'{self._rack_block_selector(self._rack_large_id)} '
+            f'[id^="nbx-rd-grid-front-"] .nbx-rd-state-add, '
+            f'{self._rack_block_selector(self._rack_large_id)} '
+            f'[id^="nbx-rd-grid-rear-"] .nbx-rd-state-add')
+        self.assertEqual(
+            len(grid_tiles), 0,
+            "a 0U template item must never occupy a numbered rack unit")
+
+        tray_tiles = self._tray_tiles(self._rack_large_id)
+        self.assertIsNotNone(tray_tiles, "tray grid not found")
+        added = [t for t in tray_tiles if t["state"] == "add"]
+        self.assertEqual(
+            len(added), 2,
+            f"both 0U template placements must land in the tray as unsaved "
+            f"adds, got {tray_tiles}")
+        # Side by side, not stacked: distinct y rows.
+        ys = sorted(int(t["y"]) for t in added)
+        self.assertEqual(len(set(ys)), 2, f"tray tiles must not overlap: {tray_tiles}")
+
+        self.assertFalse(
+            self._save_button_disabled(),
+            "an unsaved tray stamp must arm Save exactly like a manual add")
+
+        violations = self.page.evaluate("() => window.__rdModel ? window.__rdModel.check() : []")
+        self.assertEqual(violations, [], f"invariant violations after tray stamp: {violations}")
+
+        # Cancel (the tile's own x) must remove it cleanly, like any tray add.
+        for _ in range(2):
+            btn = self.page.query_selector(
+                f'#nbx-rd-grid-tray-{self._rack_large_id} .nbx-rd-remove-btn')
+            self.assertIsNotNone(btn, "a cancel control must exist on each stamped tray tile")
+            btn.click()
+        remaining = self._tray_tiles(self._rack_large_id)
+        self.assertEqual(
+            [t for t in remaining if t["state"] == "add"], [],
+            "cancelled tray adds must leave no tile behind")
+
+    def test_stamp_0u_items_save_into_the_other_bucket(self):
+        """Saving a stamped 0U item must persist it as a real placement with
+        no rack position/face -- the same server contract a hand-dropped
+        tray device gets (save-layout's "other" bucket, spec §9)."""
+        self._open_templates_section()
+        self.page.drag_and_drop(
+            self._tray_template_card_selector(),
+            self._rack_block_selector(self._rack_large_id),
+        )
+        # The stamp is a server round trip (preview-template, then the bay
+        # and power lookups) -- wait for the tray adds, not a fixed sleep.
+        self.page.wait_for_function(
+            "(id) => document.querySelectorAll('#nbx-rd-grid-tray-' + id "
+            "+ ' .nbx-rd-state-add').length >= 2",
+            arg=self._rack_large_id, timeout=15000)
+        self.assertEqual(
+            len(self.page.query_selector_all(
+                f'#nbx-rd-grid-tray-{self._rack_large_id} .nbx-rd-state-add')),
+            2, "both 0U placements must be in the tray before Save")
+
+        with self.page.expect_navigation(wait_until="networkidle", timeout=20000):
+            self.page.click("#rd-editor-save")
+        self.page.wait_for_selector(".grid-stack", timeout=30000)
+
+        placements = self._api(
+            "GET",
+            f"/api/plugins/rack-design/placements/?design_id={self._design_id}",
+        )["results"]
+        adds = [p for p in placements if p.get("kind") == "add"
+                and p.get("target_rack", {}).get("id") == self._rack_large_id]
+        self.assertEqual(len(adds), 2, "the Save must persist both stamped tray devices")
+        for p in adds:
+            self.assertIsNone(p.get("target_position"), f"a tray placement must carry no position: {p}")
+            self.assertEqual(p.get("target_face"), "", f"a tray placement must carry no face: {p}")
 
     def test_save_persists_the_stamped_tiles(self):
         self._open_templates_section()
@@ -607,12 +742,15 @@ class EditorTemplateTabTestCase(unittest.TestCase):
             f'{self._rack_block_selector(self._rack_large_id)} .nbx-rd-state-add',
             timeout=15000)
 
-        # The blade never took a GridStack slot of its own (D10) -- it must
-        # show up as a row inside the CHASSIS tile, not a tile of its own.
-        blade_rows = self.page.query_selector_all(
-            f'{self._rack_block_selector(self._rack_large_id)} .nbx-rd-stamped-blade')
-        self.assertEqual(len(blade_rows), 1, "the chassis's one blade must be placed, not dropped")
-        self.assertIn("bay-a", blade_rows[0].inner_text())
+        # The blade never took a GridStack slot of its own (D10). The chassis
+        # tile shows only its own name; the blade rides on its bay rows (the
+        # hover card's data-bays-used / data-bay-occupants, as for a saved one).
+        content = self.page.query_selector(
+            f'{self._rack_block_selector(self._rack_large_id)} '
+            f'.nbx-rd-state-add .grid-stack-item-content')
+        self.assertEqual(content.get_attribute("data-bays-used"), "1",
+                         "the chassis's one blade must be placed, not dropped")
+        self.assertIn("bay-a", content.get_attribute("data-bay-occupants") or "")
 
         chassis_tiles = self.page.query_selector_all(
             f'{self._rack_block_selector(self._rack_large_id)} .nbx-rd-state-add')
@@ -845,6 +983,44 @@ class EditorTemplateTabTestCase(unittest.TestCase):
                 "already has", row_text,
                 "a group row targeting a rack that already carries this member "
                 "must show the existing-stamp note before Apply")
+        finally:
+            self._api("DELETE", f"/api/dcim/racks/{extra_rack['id']}/")
+
+    def test_group_apply_names_every_member_in_one_pass(self):
+        """A pod applied in one go gets distinct names across its members.
+
+        Each row's preview is per member (for the fit check); Apply used to
+        stamp those, so two members both took the next free index (R7 and R9
+        each got ams1-switch-8 in the templates video). Apply now previews
+        the whole group -- one naming pass over every member."""
+        extra_rack = self._api("POST", "/api/dcim/racks/", {
+            "name": f"E2E Tmpl Pod Names {uuid.uuid4().hex[:8]}",
+            "site": self._site_id, "status": "active", "u_height": LARGE_RACK_U,
+        })
+        self._api("PATCH", f"/api/plugins/rack-design/designs/{self._design_id}/", {
+            "racks": [
+                self._rack_large_id, self._rack_tiny_id, self._rack_extract_id,
+                extra_rack["id"],
+            ],
+        })
+        try:
+            self._open_templates_section()
+            self.page.click(self._pod_group_card_selector())
+            self.page.wait_for_selector(".nbx-rd-apply-group-table", timeout=10000)
+            self.page.wait_for_timeout(1500)  # the rows' own previews
+            self.page.click("[data-rd-apply-template-confirm]")
+            self.page.wait_for_function(
+                "() => document.querySelectorAll('.nbx-rd-rack-block "
+                ".nbx-rd-state-add').length >= 4", timeout=15000)
+
+            names = self.page.eval_on_selector_all(
+                ".nbx-rd-rack-block .nbx-rd-state-add .grid-stack-item-content",
+                "els => els.map(e => e.getAttribute('data-name') || '')")
+            self.assertEqual(len(names), 4, "one stamped device per member")
+            if not any(names):
+                self.skipTest("no naming engine configured on this server")
+            self.assertEqual(len(set(names)), len(names),
+                             f"members of one group apply must not share names: {names}")
         finally:
             self._api("DELETE", f"/api/dcim/racks/{extra_rack['id']}/")
 

@@ -35,6 +35,12 @@
 <div class="nbx-rd-rack-block{% if editable and b.hidden %} hidden{% endif %}"
      id="rd-rack-{{ rid }}"
      data-rack-id="{{ rid }}"
+     {# Name + site for the editor's own "where did it go?" label: a ghost of #}
+     {# an UNSAVED move has no server-rendered data-moved-to, so it builds    #}
+     {# the same "<site> - <rack> - U<n>" string slot_moved_to produces from  #}
+     {# whichever rack block the device now sits in (editor/rack.js).         #}
+     data-rack-name="{{ rack.name }}"
+     data-site-name="{% if rack.site %}{{ rack.site.name }}{% endif %}"
      data-u-height="{{ b.rack_meta.u_height }}"
      data-desc-units="{{ b.rack_meta.desc_units|yesno:'true,false' }}">
 

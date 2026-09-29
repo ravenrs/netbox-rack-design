@@ -18,11 +18,11 @@ class DesignIndex(SearchIndex):
         ("description", 500),
         ("comments", 5000),
     )
-    # M9 (PLAN-multi-site.md): `sites_display` (a joined string) rather than
-    # `site` -- the `site` property is None as soon as a design covers more
-    # than one site (M2), which would silently blank this column for any
-    # multi-site design's search result.
-    display_attrs = ("sites_display", "status", "version", "summary")
+    # M9 (PLAN-multi-site.md): the `sites` M2M, rendered through
+    # Design.get_sites_display() (a joined string). NetBox resolves every
+    # display attr with `_meta.get_field()`, so it must be a real field --
+    # the old `sites_display` property made every matching search a 500.
+    display_attrs = ("sites", "status", "version", "summary")
 
 
 class DesignGroupIndex(SearchIndex):
@@ -49,7 +49,9 @@ class PlannedRackIndex(SearchIndex):
         ("description", 500),
         ("comments", 5000),
     )
-    display_attrs = ("location", "u_height", "is_realized")
+    # `realized_rack`, the real field behind the `is_realized` property
+    # (a property here was a 500 -- see DesignIndex).
+    display_attrs = ("location", "u_height", "realized_rack")
 
 
 class TemplateGroupIndex(SearchIndex):

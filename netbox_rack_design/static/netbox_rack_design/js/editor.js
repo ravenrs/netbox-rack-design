@@ -33,6 +33,7 @@ import {
     setPowerHooks,
     postSaveToastKey,
     looksLikePdu,
+    autoBindPduFeed,
     showPduPowerDialog,
     showRackPowerDialog,
 } from "rd/power.js";
@@ -591,6 +592,7 @@ import { initRack, setRackHooks } from "rd/rack.js";
         // distribution engine over the unsaved layout. Read-only, never persists.
         recomputeDistribution: recomputeDistribution,
         looksLikePdu: looksLikePdu,
+        autoBindPduFeed: autoBindPduFeed,
         showPduPowerDialog: showPduPowerDialog,
         showRackPowerDialog: showRackPowerDialog,
         // The Racks panel (editor_panels.js) has to RELOAD to show a rack

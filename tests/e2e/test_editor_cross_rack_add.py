@@ -19,6 +19,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import clear_role, pick_role
+
 BASE = os.environ.get("RD_BASE", "http://127.0.0.1:8000").rstrip("/")
 USER = os.environ.get("RD_USER", "rd_shot")
 PASS = os.environ.get("RD_PASS", "ShotPass12345!")
@@ -202,8 +204,11 @@ class EditorCrossRackAddTestCase(unittest.TestCase):
             return null;
         }}""")
 
-    def _drop_a_planned_add(self, grid_id):
-        """Real-mouse palette drop of the first non-child type into `grid_id`."""
+    def _drop_a_planned_add(self, grid_id, with_role=True):
+        """Real-mouse palette drop of the first non-child type into `grid_id`.
+        Picks a role first, as a planner must (a role-less drop is refused)."""
+        if with_role:
+            pick_role(self.page)
         box = self.page.query_selector("#nbx-rd-palette-search")
         if not (box and box.is_visible()):
             self.page.click('[data-rd-section-toggle="device"]')
@@ -245,6 +250,36 @@ class EditorCrossRackAddTestCase(unittest.TestCase):
         return captured
 
     # -- the test -----------------------------------------------------------
+
+    def test_a_palette_drop_without_a_role_is_refused_with_a_warning(self):
+        """dcim.Device.role is required, so an add with no role can never be
+        applied -- Apply used to 500 on exactly that. The editor refuses the
+        drop outright instead, says why, and points at the Role select."""
+        ga = self._grid(self.rack_a)
+        clear_role(self.page)
+        before = len(self.page.query_selector_all(f"#{ga} .nbx-rd-state-add"))
+
+        self._drop_a_planned_add(ga, with_role=False)
+
+        after = len(self.page.query_selector_all(f"#{ga} .nbx-rd-state-add"))
+        self.assertEqual(after, before, "a role-less drop must not create an add tile")
+        toast = self.page.evaluate("""() => [...document.querySelectorAll('.toast')]
+            .map(t => t.innerText).join(' | ')""")
+        self.assertIn("role", toast.lower(), f"no warning naming the role: {toast!r}")
+        flagged = self.page.evaluate("""() => {
+            const sel = document.getElementById('id_device_role');
+            const wrap = sel && (sel.closest('.ts-wrapper') || sel.parentElement
+                                 .querySelector('.ts-wrapper') || sel);
+            return !!document.querySelector('.nbx-rd-needs-role');
+        }""")
+        self.assertTrue(flagged, "the Role select must be highlighted for the planner")
+
+        # Same gesture once a role is picked: it lands.
+        pick_role(self.page)
+        self._drop_a_planned_add(ga)
+        self.assertEqual(
+            len(self.page.query_selector_all(f"#{ga} .nbx-rd-state-add")), before + 1,
+            "with a role picked, the same drop must create the add")
 
     def test_a_planned_add_can_be_carried_into_another_rack(self):
         ga, gb = self._grid(self.rack_a), self._grid(self.rack_b)
@@ -290,6 +325,117 @@ class EditorCrossRackAddTestCase(unittest.TestCase):
                         "the moved add must keep the name it was given")
 
 
+    def test_the_ghost_of_an_unsaved_move_says_where_the_device_went(self):
+        """Hovering the move-out ghost must answer "where did it go?" for a
+        move made in THIS session, not only for one reloaded from the server:
+        the ghost is the only tile that can tell the planner that, and an
+        in-session ghost is the case they are looking at while they work."""
+        devices = self._api(
+            "GET", f"/api/dcim/devices/?rack_id={self.rack_a}&limit=50")["results"]
+        movable = next((d for d in devices if d.get("position")), None)
+        if movable is None:
+            self.skipTest("the source rack holds no positioned device to move")
+
+        ga, gb = self._grid(self.rack_a), self._grid(self.rack_b)
+        tile = self.page.query_selector(
+            f"#{ga} .grid-stack-item[data-rd-device-id] .grid-stack-item-content")
+        self.assertIsNotNone(tile, "no real-device tile in the source rack")
+        moved_name = tile.get_attribute("data-name")
+
+        tb = tile.bounding_box()
+        dst = self.page.query_selector("#" + gb).bounding_box()
+        self.assertLess(dst["x"], 1900, "the destination rack must be on screen")
+        self.page.mouse.move(tb["x"] + tb["width"] / 2, tb["y"] + tb["height"] / 2)
+        self.page.mouse.down()
+        self.page.mouse.move(tb["x"] + tb["width"] / 2 + 40, tb["y"] + tb["height"] / 2,
+                             steps=6)
+        self.page.mouse.move(dst["x"] + dst["width"] / 2, dst["y"] + 300, steps=30)
+        self.page.wait_for_timeout(600)
+        self.page.mouse.up()
+        self.page.wait_for_timeout(1800)
+
+        # A cross-rack move raises the "Name this move" dialog; it covers the
+        # whole editor, so nothing can be hovered until it is answered. Apply
+        # keeps the device's current name and commits the move.
+        apply_btn = self.page.query_selector(".modal.show button:has-text('Apply')")
+        if apply_btn:
+            apply_btn.click()
+            self.page.wait_for_timeout(900)
+
+        ghost = self.page.query_selector(
+            f"#rd-rack-{self.rack_a} .grid-stack-item.nbx-rd-state-move_out_ghost "
+            ".grid-stack-item-content")
+        self.assertIsNotNone(ghost, "the vacated origin shows no move-out ghost")
+
+        gb_box = ghost.bounding_box()
+        self.page.mouse.move(gb_box["x"] + gb_box["width"] / 2,
+                             gb_box["y"] + gb_box["height"] / 2)
+        self.page.wait_for_timeout(700)
+        card = self.page.evaluate("""() => {
+            const c = document.querySelector('.nbx-rd-hovercard');
+            return c ? {shown: getComputedStyle(c).display !== 'none', text: c.innerText} : null;
+        }""")
+        self.assertIsNotNone(card, "no hover card element in the page")
+        self.assertTrue(card["shown"], f"the ghost shows no hover card at all: {card}")
+        self.assertIn(moved_name, card["text"],
+                      f"the card must name the device that left: {card}")
+        self.assertIn("To", card["text"],
+                      f"the card must say where the device went: {card}")
+        dest_name = self._api("GET", f"/api/dcim/racks/{self.rack_b}/")["name"]
+        self.assertIn(dest_name, card["text"],
+                      f"the destination rack must be named: {card}")
+
+    def test_the_moved_device_of_an_unsaved_move_says_where_it_came_from(self):
+        """The other end of the same story: hovering the device at its new
+        slot must say where it came FROM, for a move made in THIS session.
+        It said nothing -- only a move reloaded from the server carried the
+        line (found in the tutorial video, Part 3: srv-204 moved R2 -> R1)."""
+        devices = self._api(
+            "GET", f"/api/dcim/devices/?rack_id={self.rack_a}&limit=50")["results"]
+        movable = next((d for d in devices if d.get("position")), None)
+        if movable is None:
+            self.skipTest("the source rack holds no positioned device to move")
+
+        ga, gb = self._grid(self.rack_a), self._grid(self.rack_b)
+        tile = self.page.query_selector(
+            f"#{ga} .grid-stack-item[data-rd-device-id] .grid-stack-item-content")
+        self.assertIsNotNone(tile, "no real-device tile in the source rack")
+        device_id = self.page.evaluate(
+            "(el) => el.closest('.grid-stack-item').getAttribute('data-rd-device-id')", tile)
+
+        tb = tile.bounding_box()
+        dst = self.page.query_selector("#" + gb).bounding_box()
+        self.page.mouse.move(tb["x"] + tb["width"] / 2, tb["y"] + tb["height"] / 2)
+        self.page.mouse.down()
+        self.page.mouse.move(tb["x"] + tb["width"] / 2 + 40, tb["y"] + tb["height"] / 2,
+                             steps=6)
+        self.page.mouse.move(dst["x"] + dst["width"] / 2, dst["y"] + 300, steps=30)
+        self.page.wait_for_timeout(600)
+        self.page.mouse.up()
+        self.page.wait_for_timeout(1800)
+        apply_btn = self.page.query_selector(".modal.show button:has-text('Apply')")
+        if apply_btn:
+            apply_btn.click()
+            self.page.wait_for_timeout(900)
+
+        body = self.page.query_selector(
+            f"#{gb} .grid-stack-item.nbx-rd-state-move_in[data-rd-device-id='{device_id}'] "
+            ".grid-stack-item-content")
+        self.assertIsNotNone(body, "the moved device is not in the destination rack")
+        bb = body.bounding_box()
+        self.page.mouse.move(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
+        self.page.wait_for_timeout(700)
+        card = self.page.evaluate("""() => {
+            const c = document.querySelector('.nbx-rd-hovercard');
+            return c ? {shown: getComputedStyle(c).display !== 'none', text: c.innerText} : null;
+        }""")
+        self.assertTrue(card and card["shown"], f"the moved device shows no hover card: {card}")
+        self.assertIn("From", card["text"],
+                      f"the card must say where the device came from: {card}")
+        src_name = self._api("GET", f"/api/dcim/racks/{self.rack_a}/")["name"]
+        self.assertIn(src_name, card["text"],
+                      f"the source rack must be named: {card}")
+
     def test_a_planned_blade_can_be_carried_into_another_chassis(self):
         """The same gesture one layer down: a chassis is a Frame with one
         Container (spec §2.6), so a planned blade crosses chassis columns exactly
@@ -318,6 +464,7 @@ class EditorCrossRackAddTestCase(unittest.TestCase):
             self.skipTest("fewer than two chassis columns with a free bay on screen")
         src, dst = cols[0], cols[1]
 
+        pick_role(self.page)   # a blade is a device: no role, no drop
         box = self.page.query_selector("#nbx-rd-palette-search")
         if not (box and box.is_visible()):
             self.page.click('[data-rd-section-toggle="device"]')

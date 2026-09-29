@@ -35,6 +35,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 # ---------------------------------------------------------------------------
 # Configuration (matches dev/config.sh)
 # ---------------------------------------------------------------------------
@@ -601,6 +603,7 @@ class EditorE2ETestCase(unittest.TestCase):
     def setUp(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1400, "height": 1200})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.console_errors = []
         self.page.on(

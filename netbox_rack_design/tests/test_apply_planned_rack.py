@@ -16,8 +16,8 @@ against it (including when the realized rack has since been deleted out from
 under it).
 """
 
+from dcim.choices import RackStatusChoices
 from dcim.models import Device, Location, Rack
-from django.core.exceptions import ValidationError
 from django.test import TestCase
 from users.models import User
 
@@ -104,6 +104,26 @@ class CreateOnApplyTestCase(PlannedRackApplyTestCase):
 
 class AdoptOnApplyTestCase(PlannedRackApplyTestCase):
 
+    def test_a_rack_created_by_apply_is_planned_not_active(self):
+        """Apply puts every device it creates into 'planned' status -- the
+        hardware is not there yet. The rack it creates for them is exactly as
+        un-built, so it is 'planned' too; it used to come out as NetBox's
+        default, 'active', i.e. claiming a cabinet that is standing in the
+        hall. (An ADOPTED rack is a real one and keeps its own status -- D5,
+        covered by test_existing_rack_same_location_name_is_adopted_unchanged.)"""
+        planned = PlannedRack.objects.create(
+            name="Greenfield R2", location=self.location, u_height=20,
+        )
+        design = self._design("Greenfield status")
+        self._add_planned(design, planned, 5, name="new-srv-2", face="front")
+        self._approve(design)
+
+        result = apply.run(design, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        planned.refresh_from_db()
+        self.assertEqual(planned.realized_rack.status, RackStatusChoices.STATUS_PLANNED)
+
     def test_existing_rack_same_location_name_is_adopted_unchanged(self):
         existing = Rack.objects.create(
             name="Shared R1", site=self.site, location=self.location, u_height=47,
@@ -151,8 +171,11 @@ class AdoptOnApplyTestCase(PlannedRackApplyTestCase):
         self._add_planned(design, planned, 40, name="wont-fit")
         self._approve(design)
 
-        with self.assertRaises(ValidationError):
-            apply.run(design, self.superuser)
+        # NetBox refuses U40 in a 10U rack on save. run() reports that as a
+        # problem (and rolls back) rather than letting it escape as a 500.
+        result = apply.run(design, self.superuser)
+        self.assertFalse(result.ok, result.problems)
+        self.assertTrue(result.problems, "the refusal must be reported")
 
         # All-or-nothing: nothing committed, not even the rack adoption.
         self.assertFalse(Device.objects.filter(name="wont-fit").exists())
@@ -238,3 +261,115 @@ class FrozenGuardTestCase(PlannedRackApplyTestCase):
         self.assertFalse(
             Rack.objects.filter(location=self.location, name="Frozen R1").exists()
         )
+
+
+class PlannedFeedApplyTestCase(PlannedRackApplyTestCase):
+    """A planned feed is part of the plan like the rack and the PDU on it --
+    Apply turns it into a real dcim.PowerFeed (planned, like everything else
+    Apply creates) and cables the PDU bound to it. It used to be skipped
+    outright: the design showed the supply, DCIM never got it."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from dcim.models import DeviceType, PowerPanel, PowerPortTemplate
+        cls.panel = PowerPanel.objects.create(site=cls.site, name="PP-1")
+        cls.pdu_type = DeviceType.objects.create(
+            manufacturer=cls.device_type.manufacturer, model="PDU-T",
+            slug="pdu-t", u_height=0)
+        PowerPortTemplate.objects.create(device_type=cls.pdu_type, name="input")
+
+    def _pdu_on(self, design, planned_rack, feed, name):
+        return DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.pdu_type, target_planned_rack=planned_rack,
+            target_position=None, target_face="", proposed_name=name,
+            device_role=self.device_role, planned_power_feed=feed,
+        )
+
+    def test_apply_creates_the_feed_planned_and_cables_its_pdu(self):
+        from dcim.choices import PowerFeedStatusChoices
+        from dcim.models import Cable, PowerFeed
+
+        from ..models import DesignPowerFeed
+
+        planned = PlannedRack.objects.create(
+            name="Feed R1", location=self.location, u_height=20)
+        design = self._design("Feeds")
+        feed = DesignPowerFeed.objects.create(
+            design=design, planned_rack=planned, name="Feed R1-A",
+            voltage=230, amperage=32, power_panel=self.panel)
+        self._pdu_on(design, planned, feed, "pdu-a1")
+        self._approve(design)
+
+        result = apply.run(design, self.superuser)
+        self.assertTrue(result.ok, result.problems)
+
+        planned.refresh_from_db()
+        real = PowerFeed.objects.get(power_panel=self.panel, name="Feed R1-A")
+        self.assertEqual(real.rack, planned.realized_rack)
+        self.assertEqual(real.status, PowerFeedStatusChoices.STATUS_PLANNED)
+        self.assertEqual((real.voltage, real.amperage), (230, 32))
+
+        pdu = Device.objects.get(name="pdu-a1")
+        port = pdu.powerports.get()
+        self.assertIsNotNone(port.cable, "the bound PDU must be cabled to its feed")
+        self.assertEqual(port.link_peers, [real])
+
+        # Re-applying must not duplicate the feed or the cable.
+        again = apply.run(design, self.superuser)
+        self.assertTrue(again.ok, again.problems)
+        self.assertEqual(PowerFeed.objects.filter(name="Feed R1-A").count(), 1)
+        self.assertEqual(Cable.objects.filter(pk=port.cable_id).count(), 1)
+
+    def test_the_apply_page_lists_the_rack_and_the_feed_it_will_create(self):
+        """The confirmation page listed devices only, so a design that also
+        builds a rack and its supply looked like it built neither -- the
+        page a reviewer reads before pressing Apply must say so (and the
+        toast after it must count them)."""
+        from django.urls import reverse
+
+        from ..models import DesignPowerFeed
+
+        planned = PlannedRack.objects.create(
+            name="Page R1", location=self.location, u_height=20)
+        design = self._design("Page")
+        feed = DesignPowerFeed.objects.create(
+            design=design, planned_rack=planned, name="Page R1-A",
+            voltage=230, amperage=32, power_panel=self.panel)
+        self._pdu_on(design, planned, feed, "page-pdu-a1")
+        self._approve(design)
+
+        self.client.force_login(self.superuser)
+        url = reverse("plugins:netbox_rack_design:design_apply", kwargs={"pk": design.pk})
+        page = self.client.get(url).content.decode()
+        self.assertIn("Racks", page)
+        self.assertIn("Page R1", page)
+        self.assertIn("Power feeds", page)
+        self.assertIn("Page R1-A", page)
+        self.assertIn("PP-1", page)
+
+        response = self.client.post(url, follow=True)
+        toast = " ".join(str(m) for m in response.context["messages"])
+        self.assertIn("1 rack created", toast)
+        self.assertIn("1 power feed created", toast)
+
+    def test_a_feed_with_no_panel_to_hang_on_is_a_blocker(self):
+        from dcim.models import PowerPanel
+
+        from ..models import DesignPowerFeed
+
+        PowerPanel.objects.create(site=self.site, name="PP-2")   # now ambiguous
+        planned = PlannedRack.objects.create(
+            name="Feed R2", location=self.location, u_height=20)
+        design = self._design("No panel")
+        DesignPowerFeed.objects.create(
+            design=design, planned_rack=planned, name="Feed R2-A")
+        self._add_planned(design, planned, 5, name="srv-x")
+        self._approve(design)
+
+        result = apply.plan(design, self.superuser)
+
+        self.assertFalse(result.ok, result.problems)
+        self.assertTrue(any("Feed R2-A" in p and "panel" in p.lower()
+                            for p in result.problems), result.problems)

@@ -2368,6 +2368,24 @@ class DesignApplyViewTest(TestCase):
         response = self.client.get(self._url(design))
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "apply-view-srv")
+        # a unit is a whole number on screen: "U10", never "U10.0"
+        self.assertContains(response, "U10 front")
+        self.assertNotContains(response, "U10.0")
+
+    def test_confirm_page_names_the_configured_removal_status(self):
+        """The page said removals are "flagged for decommissioning" whatever
+        `removal_status` was configured to -- on an install that flags with
+        another status, the page a reviewer reads before pressing Apply
+        described something apply does not do."""
+        from django.test import override_settings
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.change_design",
+        )
+        design = self._design_with_add("Removal label")
+        with override_settings(PLUGINS_CONFIG={"netbox_rack_design": {"removal_status": "offline"}}):
+            response = self.client.get(self._url(design))
+        self.assertContains(response, "flagged <strong>Offline</strong>")
+        self.assertNotContains(response, "decommissioning")
 
     def test_get_with_problems_shows_them_and_hides_the_submit_button(self):
         self.add_permissions(
@@ -2454,6 +2472,30 @@ class DesignRebaseViewTest(TestCase):
         self.assertEqual(response.status_code, 200)  # re-renders the form with an error
         self.child.refresh_from_db()
         self.assertEqual(self.child.based_on_id, self.approved_a.pk)
+
+    def test_rebase_onto_a_draft_new_version_of_the_parent_completes_the_hand_over(self):
+        """The documented way to revise a frozen parent (design-chains.md):
+        New version -> re-base each child onto it -> old version to draft ->
+        approve the new one. Re-base offered approved designs only, and the
+        old version cannot leave approved while it has children, so the
+        hand-over deadlocked in the UI (found 2026-09-25). A draft version of
+        the child's CURRENT parent's own plan is now a valid target; an
+        unrelated draft still is not (test above)."""
+        self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
+        v2 = make_design(title="Approved A", site=self.site, root=self.approved_a, version=2)
+
+        response = self.client.post(self._url(self.child), {"based_on": v2.pk})
+        self.assertEqual(response.status_code, 302)
+        self.child.refresh_from_db()
+        self.assertEqual(self.child.based_on_id, v2.pk)
+
+        # nothing depends on v1 any more: it may leave approved, v2 may take it
+        self.approved_a.status = DesignStatusChoices.STATUS_DRAFT
+        self.approved_a.full_clean()
+        self.approved_a.save()
+        v2.status = DesignStatusChoices.STATUS_APPROVED
+        v2.full_clean()
+        v2.save()
 
     def test_rebase_creating_a_cycle_is_refused(self):
         self.add_permissions("netbox_rack_design.view_design", "netbox_rack_design.change_design")
@@ -3132,3 +3174,127 @@ class DesignEditorAddRackPanelContextTest(TestCase):
             [loc["id"] for loc in groups[self.site_b.pk]["locations"]],
             [self.location_b.pk],
         )
+
+
+class DesignPlannedRacksPanelTest(TestCase):
+    """The design page's Racks card lists the design's PLANNED racks too. It
+    used to read only ``design.racks`` (real racks), so a rack made with
+    Create rack -- R5, R6 -- was invisible on the design page, before Apply
+    and after it alike."""
+
+    user_permissions = (
+        "netbox_rack_design.view_design",
+        "netbox_rack_design.change_design",
+        "netbox_rack_design.view_plannedrack",
+        "dcim.view_rack",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        from dcim.models import Location
+
+        from ..models import PlannedRack
+
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.location = Location.objects.create(name="Hall 2", slug="hall-2", site=cls.site)
+        cls.design = make_design(title="Planned Racks Design", site=cls.site)
+        cls.planned = PlannedRack.objects.create(
+            name="PR-NEW", location=cls.location, u_height=42)
+        cls.real = Rack.objects.create(
+            name="PR-BUILT", site=cls.site, location=cls.location, u_height=42)
+        cls.realized = PlannedRack.objects.create(
+            name="PR-BUILT", location=cls.location, u_height=42, realized_rack=cls.real)
+        cls.design.planned_racks.add(cls.planned, cls.realized)
+
+    def _page(self):
+        url = reverse("plugins:netbox_rack_design:design", kwargs={"pk": self.design.pk})
+        response = self.client.get(url)
+        self.assertHttpStatus(response, 200)
+        return response.content.decode()
+
+    def test_a_planned_rack_is_listed_and_marked_planned(self):
+        content = self._page()
+        self.assertIn("PR-NEW", content)
+        self.assertIn("Hall 2", content)
+        self.assertIn(self.planned.get_absolute_url(), content)
+        self.assertIn("nbx-rd-racks-planned-badge", content)
+
+    def test_a_realized_planned_rack_links_to_the_real_rack(self):
+        content = self._page()
+        self.assertIn(self.real.get_absolute_url(), content,
+                      "once applied, the card must point at the rack that now exists")
+
+    def test_open_editor_is_also_in_the_page_header(self):
+        """Open editor sits in the page's own button row too, next to Edit --
+        not only in the Racks card, which is a long scroll down the page."""
+        content = self._page()
+        default_url = reverse("plugins:netbox_rack_design:design_editor_default",
+                              kwargs={"pk": self.design.pk})
+        self.assertIn("nbx-rd-header-open-editor", content)
+        self.assertIn(f'href="{default_url}"', content)
+
+
+class DeviceDeletedThroughTheUITest(TestCase):
+    """Deleting a device in the NetBox UI leaves its planned move stale and
+    listed -- not a silent, inert row (found recording the tutorial, Part 15:
+    core's request-time handler nulled the reference first)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.device = env["devices"][0]
+        cls.design = make_design(title="UI delete plan", site=cls.site)
+
+    def test_the_move_of_a_device_deleted_in_the_ui_is_stale(self):
+        self.add_permissions("dcim.view_device", "dcim.delete_device")
+        move = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.device, target_rack=self.racks[1], target_position=7,
+        )
+        name = self.device.name
+        response = self.client.post(
+            reverse("dcim:device_delete", kwargs={"pk": self.device.pk}),
+            {"confirm": True},
+        )
+        self.assertHttpStatus(response, 302)
+        move.refresh_from_db()
+        self.assertIsNone(move.device_id)
+        self.assertTrue(move.stale)
+        self.assertEqual(move.stale_device_name, name)
+
+
+class GlobalSearchTest(TestCase):
+    """NetBox's global search renders every index's display_attrs through
+    ``_meta.get_field`` -- a property there is a 500 for any matching design or
+    planned rack (found recording the tutorial, Part 20: "Design has no field
+    named 'sites_display'")."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.core.management import call_command
+
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.design = make_design(title="Searchable greenfield plan", site=cls.site,
+                                 summary="greenfield row")
+        location = Location.objects.create(
+            name="Search loc", slug="search-loc", site=cls.site)
+        PlannedRack.objects.create(name="Searchable-R9", location=location, u_height=42)
+        call_command("reindex", "netbox_rack_design", verbosity=0)
+
+    def test_a_matching_design_renders_with_its_sites(self):
+        self.add_permissions("netbox_rack_design.view_design")
+        response = self.client.get(reverse("search") + "?q=greenfield")
+        self.assertHttpStatus(response, 200)
+        content = response.content.decode()
+        self.assertIn("Searchable greenfield plan", content)
+        self.assertIn(self.site.name, content)
+
+    def test_a_matching_planned_rack_renders(self):
+        self.add_permissions("netbox_rack_design.view_plannedrack")
+        response = self.client.get(reverse("search") + "?q=Searchable-R9")
+        self.assertHttpStatus(response, 200)
+        self.assertIn("Searchable-R9", response.content.decode())

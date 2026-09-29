@@ -250,6 +250,14 @@ class DesignPlacementFilterSetTest(TestCase, ChangeLoggedFilterSetTestMixin):
         params = {"q": "alpha"}
         self.assertEqual(self.filterset(params, self.queryset).qs.count(), 1)
 
+    def test_search_finds_a_removal_by_its_device_name(self):
+        """A removal (or a keep-name move) has no proposed name -- only its
+        device. Searching the Placements list for that device must find it
+        (found recording Part 17: "srv-110" found nothing)."""
+        removed = DesignPlacement.objects.get(kind=DesignPlacementKindChoices.KIND_REMOVE)
+        params = {"q": removed.device.name}
+        self.assertIn(removed, self.filterset(params, self.queryset).qs)
+
     def test_stale(self):
         params = {"stale": True}
         qs = self.filterset(params, self.queryset).qs

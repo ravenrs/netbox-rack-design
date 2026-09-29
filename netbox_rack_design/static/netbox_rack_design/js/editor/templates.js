@@ -155,8 +155,14 @@ export function setupTemplates(root) {
             credentials: "same-origin",
             headers: { "Accept": "application/json" },
         }).then(function (resp) {
-            return resp.ok ? resp.json() : { results: [] };
+            // A user who may not VIEW device-bay templates (a 403) tells us
+            // nothing about the bays. Answer "unknown" (null), never "no bays":
+            // the server validates every blade's bay name against the
+            // chassis type when the placement is saved, whatever the viewer
+            // may see (found recording the templates part as a scoped user).
+            return resp.ok ? resp.json() : null;
         }).then(function (data) {
+            if (data === null) { return null; }
             var map = {};
             (data.results || []).forEach(function (dt) {
                 var manuf = (dt.manufacturer && (dt.manufacturer.name || dt.manufacturer.display)) || "";
@@ -167,7 +173,7 @@ export function setupTemplates(root) {
                 };
             });
             return map;
-        }).catch(function () { return {}; });
+        }).catch(function () { return null; });
     }
 
     function entryToItem(entry, dtInfo) {
@@ -262,8 +268,14 @@ export function setupTemplates(root) {
             credentials: "same-origin",
             headers: { "Accept": "application/json" },
         }).then(function (resp) {
-            return resp.ok ? resp.json() : { results: [] };
+            // A user who may not VIEW device-bay templates (a 403) tells us
+            // nothing about the bays. Answer "unknown" (null), never "no bays":
+            // the server validates every blade's bay name against the
+            // chassis type when the placement is saved, whatever the viewer
+            // may see (found recording the templates part as a scoped user).
+            return resp.ok ? resp.json() : null;
         }).then(function (data) {
+            if (data === null) { return null; }
             var map = {};
             (data.results || []).forEach(function (bt) {
                 var dtId = bt.device_type && (bt.device_type.id != null ? bt.device_type.id : bt.device_type);
@@ -290,9 +302,16 @@ export function setupTemplates(root) {
         var missingBays = [];
         var items = (entries || []).map(function (entry) {
             var item = entryToItem(entry, dtInfo);
-            var knownBays = (bayNamesByDeviceType || {})[entry.device_type] || {};
+            // Only a type whose bay list actually came back can prove a bay
+            // missing. null (the request failed) or a type absent from the
+            // answer (object permissions hide its templates from this user)
+            // is "unknown": the blades go through, and the save validates
+            // each bay name against the chassis type server-side.
+            var knownBays = bayNamesByDeviceType ? bayNamesByDeviceType[entry.device_type] : null;
+            // For the stamped chassis's hover card ("2 of 8 used").
+            item.bays_total = knownBays ? Object.keys(knownBays).length : null;
             item.blades = (entry.blades || []).filter(function (b) {
-                if (knownBays[b.target_bay_name]) { return true; }
+                if (!knownBays || knownBays[b.target_bay_name]) { return true; }
                 missingBays.push(
                     (b.name || (dtInfo[b.device_type] || {}).model || ("device type " + b.device_type))
                         + " (bay “" + b.target_bay_name + "”)"
@@ -330,9 +349,11 @@ export function setupTemplates(root) {
 
     // Read-only POST to preview-template. Resolves to {ok, data} -- `data` is
     // the parsed body either way, so a 400's field errors are still visible.
-    function previewTemplate(templateId, rackKeys) {
+    function previewTemplate(templateId, rackKeys, groupId) {
         if (!previewTemplateUrl) { return Promise.resolve({ ok: false, data: null }); }
-        var body = { template: templateId, racks: rackKeys };
+        var body = groupId != null
+            ? { group: groupId, racks: rackKeys }
+            : { template: templateId, racks: rackKeys };
         var layout = currentLayout();
         if (layout) { body.layout = layout; }
         return fetch(previewTemplateUrl, {
@@ -420,7 +441,13 @@ export function setupTemplates(root) {
     }
 
     function fitSummary(entries) {
-        var positions = (entries || []).map(function (e) { return e.position; });
+        // A 0U item (a PDU) reports position=null -- it lands in the tray,
+        // never a unit (spec §9), so it contributes nothing to the U-span
+        // and must not turn Math.min/max.apply's argument list into
+        // [..., null, ...] (coerces to 0 and reports a bogus "U0").
+        var positions = (entries || [])
+            .map(function (e) { return e.position; })
+            .filter(function (p) { return p != null; });
         if (!positions.length) { return "OK"; }
         var lo = Math.min.apply(null, positions), hi = Math.max.apply(null, positions);
         return "U" + hi + (hi !== lo ? "–U" + lo : "") + " · OK";
@@ -510,13 +537,11 @@ export function setupTemplates(root) {
     // ---- Group dialog: one row per member template, each with ITS OWN -----
     // target rack select (D14: correspondence, not repetition). Each row's
     // preview runs independently (preview-template takes one template at a
-    // time) -- a known consequence is that the naming pass's de-duplication
-    // (D19's whole reason to batch it server-side) only covers ONE member's
-    // devices at a time, not the whole group, so a rare cross-member name
-    // collision is possible. It is not silent: every stamped tile still
-    // carries its own live name_collision warning + editable name field, the
-    // same surface a manual add's collision uses, so the planner sees and
-    // can fix it before Save.
+    // time) -- fine for the fit check, but not for names: two members
+    // previewed apart both got the next free index (R7 and R9 each stamped
+    // ams1-switch-8). So Apply previews the whole GROUP in one request
+    // (member i -> racks[i]): one continuous naming pass over every member,
+    // the de-duplication D19 batches server-side.
     function openGroupDialog(group) {
         setStatus("Loading group…");
         fetch(templatesUrl + "?group_id=" + encodeURIComponent(group.id), {
@@ -526,8 +551,11 @@ export function setupTemplates(root) {
             return resp.ok ? resp.json() : { results: [] };
         }).then(function (data) {
             setStatus("");
+            // (order, name): the server's own member order, so row i is the
+            // member the group preview gives racks[i].
             var members = (data.results || []).slice().sort(function (a, b) {
-                return (a.order || 0) - (b.order || 0);
+                return ((a.order || 0) - (b.order || 0))
+                    || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
             });
             if (!members.length) {
                 createToast("info", "Template group", "This group has no templates yet.");
@@ -613,13 +641,13 @@ export function setupTemplates(root) {
                     fitTd.className = "small text-muted";
                     previewTemplate(member.id, [key]).then(function (res) {
                         if (!res.ok) {
-                            rowState[idx] = { data: null, key: key };
+                            rowState[idx] = { data: null, key: key, member: member.id };
                             fitTd.textContent = previewErrorMessage(res.data);
                             fitTd.className = "small text-danger";
                             return;
                         }
                         var data = res.data || {};
-                        rowState[idx] = { data: data, key: key };
+                        rowState[idx] = { data: data, key: key, member: member.id };
                         var skipped = (data.skipped || []).find(function (s) { return s.rack === key; });
                         // Gap 1 (T3.6): the same "already_stamped" note the
                         // single-template dialog shows, per row, so a group
@@ -644,24 +672,23 @@ export function setupTemplates(root) {
             trs.forEach(function (tr) { tbody.appendChild(tr); });
 
             dlg.overlay.querySelector("[data-rd-apply-template-confirm]").addEventListener("click", function () {
-                var ids = [];
-                var chassisIds = [];
-                rowState.forEach(function (row) {
-                    if (row.data) {
-                        ids = ids.concat(deviceTypeIdsIn(row.data));
-                        chassisIds = chassisIds.concat(chassisDeviceTypeIdsIn(row.data));
+                var keys = rowState.map(function (row) { return row && row.key; });
+                if (keys.some(function (k) { return !k; })) { return; }
+                previewTemplate(null, keys, group.id).then(function (res) {
+                    if (!res.ok || !res.data) {
+                        createToast("danger", "Template group", previewErrorMessage(res.data));
+                        return null;
                     }
-                });
-                Promise.all([
-                    fetchDeviceTypeInfo(ids),
-                    fetchDeviceBayNames(chassisIds),
-                ]).then(function (results) {
-                    rowState.forEach(function (row) {
-                        if (!row.data || !row.key) { return; }
-                        var skipped = (row.data.skipped || []).some(function (s) { return s.rack === row.key; });
-                        if (skipped) { return; }
-                        var r = racks.find(function (x) { return x.key === row.key; });
-                        if (r) { stampRackEntries(r.domId, row.data[row.key], results[0], results[1]); }
+                    var data = res.data;
+                    return Promise.all([
+                        fetchDeviceTypeInfo(deviceTypeIdsIn(data)),
+                        fetchDeviceBayNames(chassisDeviceTypeIdsIn(data)),
+                    ]).then(function (results) {
+                        keys.forEach(function (key) {
+                            if ((data.skipped || []).some(function (s) { return s.rack === key; })) { return; }
+                            var r = racks.find(function (x) { return x.key === key; });
+                            if (r && data[key]) { stampRackEntries(r.domId, data[key], results[0], results[1]); }
+                        });
                     });
                 });
                 dlg.requestHide();

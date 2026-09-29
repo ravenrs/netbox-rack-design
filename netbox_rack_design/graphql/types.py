@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         DeviceTypeType,
         LocationType,
         PowerFeedType,
+        PowerPanelType,
         RackType,
         SiteType,
     )
@@ -129,6 +130,9 @@ class DesignPowerFeedType(NetBoxObjectType):
     planned_rack: Annotated[
         "PlannedRackType", strawberry.lazy("netbox_rack_design.graphql.types")
     ] | None
+    # power_panel: the panel a planned feed hangs from (migration 0024) --
+    # declared for the same reason as planned_rack above.
+    power_panel: Annotated["PowerPanelType", strawberry.lazy("dcim.graphql.types")] | None
 
 
 # A PLANNED rack. Queryable in its own right, and the nested target of

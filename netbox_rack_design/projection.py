@@ -262,6 +262,7 @@ class ProjectedElevation:
 # two call sites cannot silently disagree on what a chain kind is.
 CHAIN_CONFLICT_KINDS = {
     "ancestor_implemented", "ancestor_not_approved", "chain_broken", "bay_occupied",
+    "unit_occupied",
 }
 
 
@@ -1545,6 +1546,63 @@ def _bay_conflict(sink, entry, placement, seen):
     return reason
 
 
+def _unit_conflicts(*faces):
+    """Flag this design's own add / move-in that an ANCESTOR's hardware now
+    overlaps (docs/design-chains.md "Upstream conflicts": a later-approved
+    ancestor version, or a re-based lineage, puts inherited hardware where
+    this design had already planned something).
+
+    The rack-unit twin of ``_bay_conflict``: the own tile keeps its unit and
+    gets the conflict flag, and one ``unit_occupied`` entry per placement goes
+    to the persistent panel. Never the hard-collision path -- it never blocks
+    a save (§8.2). Without it both tiles were drawn on top of each other with
+    no word about it (found recording the tutorial, Part 15).
+    """
+    own_states = (ProjectedSlotState.ADD, ProjectedSlotState.MOVE_IN)
+    occupying = (ProjectedSlotState.EXISTING, ProjectedSlotState.ADD,
+                 ProjectedSlotState.MOVE_IN)
+    conflicts, seen = [], set()
+    for slots in faces:
+        inherited = [
+            s for s in slots
+            if s.get("inherited") and s["state"] in occupying
+            and s["u_position"] is not None
+        ]
+        if not inherited:
+            continue
+        for slot in slots:
+            placement = slot.get("placement")
+            if (slot.get("inherited") or slot["state"] not in own_states
+                    or placement is None or slot["u_position"] is None):
+                continue
+            low = float(slot["u_position"])
+            high = low + float(slot.get("u_height") or 1)
+            for other in inherited:
+                o_low = float(other["u_position"])
+                o_high = o_low + float(other.get("u_height") or 1)
+                if o_low >= high or low >= o_high:
+                    continue
+                occupant = other.get("display_label") or other.get("label") or "a device"
+                reason = f"{occupant} occupies this unit upstream."
+                slot["conflict"] = True
+                slot["conflict_reason"] = reason
+                if placement.pk in seen:
+                    break
+                seen.add(placement.pk)
+                conflicts.append(_conflict(
+                    "unit_occupied",
+                    severity="warning",
+                    slot=slot,
+                    placement=placement,
+                    source_design=getattr(other.get("placement"), "design", None),
+                    detail=f"U{_fmt_u(slot['u_position'])} is planned by this design, "
+                           f"but {occupant} now occupies it upstream. This design's "
+                           f"device is still shown -- move it, or re-base.",
+                ))
+                break
+    return conflicts
+
+
 def _overlay_planned_blades(design, slots_lists, baseline=None):
     """
     Fold this design's blade placements into the bay strips they target.
@@ -2592,9 +2650,10 @@ def _lineage_exclusion_ids(design):
     """
     excluded = {design.pk}
     try:
-        excluded.update(ancestor.pk for ancestor in design.baseline_chain())
+        ancestors = list(design.baseline_chain())
     except ValueError:
-        pass  # A cycle: already reported as `chain_broken` elsewhere.
+        ancestors = []  # A cycle: already reported as `chain_broken` elsewhere.
+    excluded.update(ancestor.pk for ancestor in ancestors)
 
     # Descendants: BFS over `children` (direct `based_on` pointers back at
     # this design). One query per depth level of design's OWN lineage tree --
@@ -2613,10 +2672,13 @@ def _lineage_exclusion_ids(design):
 
     from .models import Design
 
-    root = design.version_root
-    if root.pk is not None:
+    # Version families: this design's, and every ANCESTOR's -- a child
+    # re-based onto v3 of its parent must not see v1/v2 of that parent as
+    # peers; they are the same plan, superseded (found recording Part 15).
+    roots = {d.version_root.pk for d in [design, *ancestors] if d.version_root.pk is not None}
+    if roots:
         excluded.update(
-            Design.objects.filter(Q(root=root) | Q(pk=root.pk))
+            Design.objects.filter(Q(root_id__in=roots) | Q(pk__in=roots))
             .values_list("pk", flat=True)
         )
     return excluded
@@ -2953,6 +3015,12 @@ def project_rack(design, rack):
     def _append(slot, full_depth=False):
         # A position-less slot (e.g. a target-less add/move) is never face-mirrored.
         if slot["u_position"] is None:
+            # And carries no face: the tray is a list (spec §9.2). An inherited
+            # slot is built with _normalize_face, which turns a blank face into
+            # "front"; the editor then took an untouched inherited tray PDU for
+            # one moved out of "front" and saved a phantom move into the child,
+            # dropping its feed binding (found recording Part 14).
+            slot["face"] = ""
             non_racked.append(slot)
             return
         # Full-depth devices physically occupy BOTH faces, so a design slot for
@@ -3179,6 +3247,7 @@ def project_rack(design, rack):
     # bay layer -- peer detection today covers rack U slots only (§ P8 note in
     # `_peer_conflicts`), not chassis bays.
     peer_conflicts = _peer_conflicts(design, rack, adds + moves_removes, front, rear)
+    unit_conflicts = _unit_conflicts(front, rear)
     # The BAY layer, in the order the layers compose (G1): reality, minus the
     # parts an ancestor already invalidated; bay templates for a planned chassis;
     # the inherited blades; then this design's own.
@@ -3202,7 +3271,7 @@ def project_rack(design, rack):
         # Whatever the replay could not do, in the order it hit it: the §9.2
         # chain refusal first, per-slot problems from ``emit``, then peer
         # conflicts (a design outside this one's lineage/version group).
-        conflicts=baseline.conflicts + peer_conflicts,
+        conflicts=baseline.conflicts + unit_conflicts + peer_conflicts,
     )
     # Power projection (docs/power-projection-spec.md): fills per-slot draw and
     # the rack-level summary over the planned world just built above.

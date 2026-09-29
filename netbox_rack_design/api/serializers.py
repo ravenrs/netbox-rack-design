@@ -6,6 +6,7 @@ from dcim.api.serializers import (
     DeviceSerializer,
     DeviceTypeSerializer,
     LocationSerializer,
+    PowerPanelSerializer,
     RackSerializer,
     SiteSerializer,
 )
@@ -227,7 +228,7 @@ class TemplatePlacementSerializer(NetBoxModelSerializer):
         model = TemplatePlacement
         fields = (
             "id", "url", "display", "template", "device_type", "device_role",
-            "tenant", "planning_data", "face", "anchor", "order", "label",
+            "tenant", "planning_data", "face", "anchor", "offset", "order", "label",
             "parent_placement", "target_bay_name",
             "tags", "custom_fields", "created", "last_updated",
         )
@@ -396,13 +397,15 @@ class DesignPowerFeedSerializer(NetBoxModelSerializer):
     # became nullable in the first place.
     rack = RackSerializer(nested=True, required=False, allow_null=True)
     planned_rack = PlannedRackSerializer(nested=True, required=False, allow_null=True)
+    # Where Apply hangs the real dcim.PowerFeed (see the model field).
+    power_panel = PowerPanelSerializer(nested=True, required=False, allow_null=True)
     derated_watts = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = DesignPowerFeed
         fields = (
             "id", "url", "display", "design", "rack", "planned_rack", "name",
-            "voltage", "amperage", "phase", "supply", "derated_watts",
+            "power_panel", "voltage", "amperage", "phase", "supply", "derated_watts",
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "name")
@@ -735,6 +738,9 @@ class PreviewNameSerializer(serializers.Serializer):
         default=list,
         max_length=500,
     )
+    # The planning values the tile carries (the rail's, for a fresh drop), so
+    # a naming template can read {device.cf[...]} before anything is saved.
+    planning_data = serializers.DictField(required=False, allow_null=True)
 
 
 # ---------------------------------------------------------------------------
@@ -797,14 +803,29 @@ class CreatePlannedRackSerializer(serializers.Serializer):
     Body for POST .../designs/<pk>/create-planned-rack/ (PLAN-templates.md
     §1, the editor's "Create rack" dialog). Deliberately a plain input
     serializer, not ``PlannedRackSerializer`` itself: the dialog only ever
-    collects the three fields a planner types (name/height/location), never
-    ``realized_rack`` or the NetBoxModel bookkeeping fields, and reusing the
-    model serializer here would let a client set those by accident.
+    collects the fields a planner types (name/height/location/optional copy
+    source), never ``realized_rack`` or the NetBoxModel bookkeeping fields,
+    and reusing the model serializer here would let a client set those by
+    accident.
+
+    ``name`` accepts NetBox's own bracketed pattern syntax (``R[1-4]``,
+    ``utilities.forms.utils.expand_alphanumeric_pattern`` -- the same helper
+    interface creation uses), expanded by the view into one rack per
+    resulting name; a name with no brackets still names exactly one rack.
+
+    ``copy_feeds_from_rack_id`` is optional (the "copy feeds while
+    creating" half of this action): a rack key (``models.rack_key()`` form,
+    or a legacy bare pk for a real rack) this design may clone feeds from
+    for EVERY rack this request creates. Omitted or null means no feeds are
+    copied, exactly as before this field existed.
     """
 
     name = serializers.CharField(max_length=100)
     u_height = serializers.IntegerField()
     location_id = serializers.IntegerField()
+    copy_feeds_from_rack_id = serializers.CharField(
+        max_length=32, required=False, allow_null=True, allow_blank=True, default=None
+    )
 
 
 class ExtractTemplateFromDesignSerializer(serializers.Serializer):
@@ -855,7 +876,14 @@ class HiddenRackToggleSerializer(serializers.Serializer):
     """Body for POST .../hidden-design-racks/toggle/ (per-user view state)."""
 
     design_id = serializers.IntegerField()
-    rack_id = serializers.IntegerField()
+    rack_id = serializers.IntegerField(required=False)
+    planned_rack_id = serializers.IntegerField(required=False)
+
+    def validate(self, data):
+        if ("rack_id" in data) == ("planned_rack_id" in data):
+            raise serializers.ValidationError(
+                "Give exactly one of rack_id or planned_rack_id.")
+        return data
 
 
 class HiddenRackShowAllSerializer(serializers.Serializer):

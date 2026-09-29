@@ -145,18 +145,54 @@
         });
     }
 
+    // T1.5c (PLAN-templates.md D31): the DOM carries a rack's identity as
+    // "r-<pk>"/"p-<pk>" (colon-free -- ":" is a CSS selector metacharacter);
+    // the server speaks models.rack_key()'s colon form, "r:<pk>"/"p:<pk>",
+    // or a bare digit for a legacy real-rack pk. Duplicated from editor/
+    // core.js's rackKeyToServer rather than imported: editor_panels.js loads
+    // as its own standalone IIFE with no shared module boundary to core.js,
+    // and this is the one conversion the "Copy feeds from" picker needs.
+    function rackKeyToServer(domRackId) {
+        if (domRackId == null || domRackId === "") { return null; }
+        var s = String(domRackId);
+        if (s.slice(0, 2) === "r-" || s.slice(0, 2) === "p-") {
+            return s[0] + ":" + s.slice(2);
+        }
+        if (/^\d+$/.test(s)) { return s; }
+        return s;
+    }
+
+    // Every rack currently rendered in this design's editor, for the
+    // "Copy feeds from" selector -- the same {id, name} read straight off
+    // the live DOM that power.js's own racksInDom() (editor/power.js) uses
+    // for the rack-power dialog's "Copy from rack" row. Duplicated here for
+    // the same reason as rackKeyToServer above.
+    function racksInDom() {
+        return Array.prototype.slice.call(
+            document.querySelectorAll(".nbx-rd-rack-block")
+        ).map(function (b) {
+            var titleEl = b.querySelector(".nbx-rd-rack-block-title a");
+            return {
+                id: b.getAttribute("data-rack-id"),
+                name: titleEl ? titleEl.textContent.trim()
+                    : ("rack " + b.getAttribute("data-rack-id")),
+            };
+        });
+    }
+
+    function rackOptionsHtml(racks) {
+        return racks.map(function (r) {
+            var safe = String(r.name).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            return '<option value="' + r.id + '">' + safe + "</option>";
+        }).join("");
+    }
+
     function rackBlock(rackId) {
-        // T1.5c (PLAN-templates.md D31): this panel is real-rack-only by
-        // construction (scoped_rack_rows in views.py is built from
-        // design.racks only, never design.planned_racks -- D25), so rackId
-        // here is always a bare real dcim.Rack pk -- and that is exactly
-        // what rack_block.html writes into data-rack-id for a real rack.
-        // rack_dom_id (templatetags/rack_design.py) prefixes ONLY a planned
-        // rack ("p-<pk>") and keeps a real rack's pk bare, so this lookup
-        // must NOT prefix. It briefly did ("r-<pk>"), which matched nothing:
-        // the toggle then updated the row and the database but never the
-        // rack, so hiding appeared to do nothing and a rack that loaded
-        // hidden could not be shown again without a reload.
+        // rackId is the block's own data-rack-id (rack_dom_id): a real
+        // rack's BARE pk, a planned rack's "p-<pk>" -- the panel rows and
+        // eye buttons carry the same spelling, planned racks included. It
+        // must not be re-prefixed: an "r-<pk>" lookup once matched nothing,
+        // so hiding updated the row and the database but never the rack.
         return root.querySelector('.nbx-rd-rack-block[data-rack-id="' + rackId + '"]');
     }
     function rackRow(rackId) {
@@ -180,10 +216,16 @@
         }
     }
 
-    // Sync every row from a returned hidden_rack_ids set.
-    function syncFromHidden(hiddenIds) {
+    // Sync every row from a response's hidden sets (real racks by pk,
+    // planned racks by pk -> "p-<pk>", the rows' own spelling).
+    function syncFromHidden(data) {
         var hiddenSet = {};
-        (hiddenIds || []).forEach(function (id) { hiddenSet[String(id)] = true; });
+        ((data && data.hidden_rack_ids) || []).forEach(function (id) {
+            hiddenSet[String(id)] = true;
+        });
+        ((data && data.hidden_planned_rack_ids) || []).forEach(function (id) {
+            hiddenSet["p-" + id] = true;
+        });
         root.querySelectorAll("[data-rd-rack-row]").forEach(function (row) {
             var rid = row.getAttribute("data-rd-rack-row");
             applyVisibility(rid, !!hiddenSet[rid]);
@@ -341,7 +383,14 @@
                 + '<div class="modal-body">'
                 + '<div class="mb-2">'
                 + '<label class="form-label small mb-1">Name</label>'
-                + '<input type="text" class="form-control form-control-sm nbx-rd-create-rack-name" placeholder="e.g. R101">'
+                + '<input type="text" class="form-control form-control-sm nbx-rd-create-rack-name" placeholder="e.g. R101 or R[1-4]">'
+                // NetBox-style name patterns (utilities.forms.utils.
+                // expand_alphanumeric_pattern, the same helper interface
+                // creation uses): a bracketed range creates one rack per
+                // expanded name in a single submit.
+                + '<div class="form-text">Supports NetBox range patterns, e.g. '
+                + "<code>R[1-4]</code> creates R1–R4, or <code>R[a-c]</code> for R"
+                + "a–Rc.</div>"
                 + "</div>"
                 + '<div class="mb-2">'
                 + '<label class="form-label small mb-1">U height</label>'
@@ -368,6 +417,17 @@
                 + (singleSite ? locationOptionsHtml(singleSite.site_id) : "")
                 + "</select>"
                 + "</div>"
+                + '<div class="mb-2">'
+                + '<label class="form-label small mb-1">Copy feeds from</label>'
+                + '<select class="form-select form-select-sm nbx-rd-create-rack-copy-feeds">'
+                + '<option value="">(none)</option>'
+                + rackOptionsHtml(racksInDom())
+                + "</select>"
+                + '<div class="form-text">Optional -- seeds each new rack’s planned '
+                + "power supply from this rack's feeds (same as the rack power "
+                + "dialog's “Copy from rack”). Every rack this creates gets its "
+                + "own copy, named for itself.</div>"
+                + "</div>"
                 + '<div class="text-danger small nbx-rd-create-rack-error" style="display:none"></div>'
                 + "</div>"
                 + '<div class="modal-footer">'
@@ -382,6 +442,7 @@
             var siteSelect = overlay.querySelector(".nbx-rd-create-rack-site");
             var siteChip = overlay.querySelector(".nbx-rd-create-rack-site-chip");
             var locationSelect = overlay.querySelector(".nbx-rd-create-rack-location");
+            var copyFeedsSelect = overlay.querySelector(".nbx-rd-create-rack-copy-feeds");
             var errorEl = overlay.querySelector(".nbx-rd-create-rack-error");
             var submitBtn = overlay.querySelector("[data-rd-create-rack-submit]");
 
@@ -467,6 +528,15 @@
                     return;
                 }
 
+                // Optional: seed every rack this submit creates from an
+                // existing rack's feeds -- reuses DesignViewSet.copy_feeds's
+                // write via create-planned-rack's own copy_feeds_from_rack_id,
+                // converted to the server's colon form the same way power.js's
+                // rack-power dialog does.
+                var copyFeedsFromRackId = copyFeedsSelect && copyFeedsSelect.value
+                    ? rackKeyToServer(copyFeedsSelect.value)
+                    : null;
+
                 submitBtn.setAttribute("disabled", "disabled");
                 // Same reload contract as Add rack -- and the same question
                 // about unsaved edits before it.
@@ -475,8 +545,10 @@
                     saveLabel: "Save and create",
                     discardLabel: "Discard and create",
                 }, function () {
-                    return postJSON(createUrl,
-                                    { name: name, u_height: uHeight, location_id: locationId })
+                    return postJSON(createUrl, {
+                        name: name, u_height: uHeight, location_id: locationId,
+                        copy_feeds_from_rack_id: copyFeedsFromRackId,
+                    })
                         .then(function (response) {
                             if (response.status === 201) {
                                 if (modal) { modal.hide(); }
@@ -573,17 +645,18 @@
 
         // ---- Per-row visibility toggle (reload-free view state) ------------
         function onToggle(rackId) {
-            postJSON(API + "hidden-design-racks/toggle/", {
-                design_id: designId,
-                rack_id: parseInt(rackId, 10),
-            }).then(function (response) {
+            var planned = /^p-/.test(String(rackId));
+            var body = { design_id: designId };
+            body[planned ? "planned_rack_id" : "rack_id"] =
+                parseInt(String(rackId).replace(/^p-/, ""), 10);
+            postJSON(API + "hidden-design-racks/toggle/", body).then(function (response) {
                 if (!response.ok) {
                     return readError(response, "Could not change visibility.").then(function (msg) {
                         toast("danger", "Error", msg);
                     });
                 }
                 return response.json().then(function (data) {
-                    syncFromHidden(data.hidden_rack_ids);
+                    syncFromHidden(data);
                 });
             }).catch(function (err) {
                 toast("danger", "Error", String(err));
@@ -600,7 +673,7 @@
                         });
                     }
                     return response.json().then(function (data) {
-                        syncFromHidden(data.hidden_rack_ids || []);
+                        syncFromHidden(data);
                     });
                 }).catch(function (err) {
                     toast("danger", "Error", String(err));

@@ -410,6 +410,94 @@ class EditorPduPowerTestCase(unittest.TestCase):
         self.assertTrue(any(f["id"] == res["plannedFeedId"] for f in listed), listed)
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 
+    # --- auto-bind on add (no dialog, no per-PDU clicking) -----------------
+
+    def test_auto_bind_matches_feed_leg_from_pdu_name(self):
+        """A PDU added to a rack that already has feeds binds itself: the leg
+        letter in its name ("...-a1"/"...-b1") picks the feed whose name ends
+        in that letter, so stamping a template full of PDUs needs no clicks."""
+        suffix = uuid.uuid4().hex[:6]
+        for leg in ("A", "B"):
+            self._api(
+                "POST",
+                f"/api/plugins/rack-design/designs/{self._design_id}/planned-feed/", {
+                    "rack_id": self._rack_id, "name": f"E2E Auto {suffix}-{leg}",
+                    "voltage": 230, "amperage": 32,
+                    "phase": "single-phase", "supply": "ac"})
+        feeds = self._api(
+            "GET", f"/api/plugins/rack-design/designs/{self._design_id}/feeds/"
+            f"?rack_id={self._rack_id}")
+        by_name = {f["name"]: f["id"] for f in feeds["planned"]}
+        feed_a = by_name[f"E2E Auto {suffix}-A"]
+        feed_b = by_name[f"E2E Auto {suffix}-B"]
+
+        res = self.page.evaluate("""async () => {
+            const api = window.NbxRdEditor;
+            const mk = (name) => ({ proposed_name: name, role_slug: 'pdu', label: name });
+            const wa = mk('e2e-auto-pdu-r1-a1');
+            const wb = mk('e2e-auto-pdu-r1-b1');
+            await api.autoBindPduFeed(wa, document.createElement('div'), {rackId: String(RID)});
+            await api.autoBindPduFeed(wb, document.createElement('div'), {rackId: String(RID)});
+            return {
+                aPlanned: wa.planned_power_feed_id, aReal: wa.real_power_feed_id,
+                bPlanned: wb.planned_power_feed_id, bReal: wb.real_power_feed_id,
+                modals: document.querySelectorAll('.nbx-rd-feed-list').length,
+            };
+        }""".replace("RID", str(self._rack_id)))
+        self.assertEqual(res["aPlanned"], feed_a, res)
+        self.assertEqual(res["bPlanned"], feed_b, res)
+        self.assertIsNone(res["aReal"], res)
+        self.assertIsNone(res["bReal"], res)
+        self.assertEqual(res["modals"], 0, f"auto-bind must not open a bind dialog: {res}")
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    def test_auto_bind_falls_back_to_the_next_free_feed(self):
+        """A PDU whose name carries no leg letter takes the first feed no peer
+        PDU in the rack has taken yet -- two nameless PDUs land on two feeds."""
+        suffix = uuid.uuid4().hex[:6]
+        made = []
+        for leg in ("A", "B"):
+            made.append(self._api(
+                "POST",
+                f"/api/plugins/rack-design/designs/{self._design_id}/planned-feed/", {
+                    "rack_id": self._rack_id, "name": f"E2E Free {suffix}-{leg}",
+                    "voltage": 230, "amperage": 32,
+                    "phase": "single-phase", "supply": "ac"})["id"])
+
+        res = self.page.evaluate("""async () => {
+            const api = window.NbxRdEditor;
+            const peers = [];
+            const out = [];
+            for (const name of ['e2e-free-pdu-one', 'e2e-free-pdu-two']) {
+                const w = { proposed_name: name, role_slug: 'pdu', label: name };
+                await api.autoBindPduFeed(w, document.createElement('div'),
+                                          {rackId: String(RID), peers: peers});
+                peers.push(w);
+                out.push({real: w.real_power_feed_id, planned: w.planned_power_feed_id});
+            }
+            return { out, modals: document.querySelectorAll('.nbx-rd-feed-list').length };
+        }""".replace("RID", str(self._rack_id)))
+        first, second = res["out"]
+        bound = [b["real"] or b["planned"] for b in (first, second)]
+        self.assertTrue(all(bound), res)
+        self.assertNotEqual(bound[0], bound[1], f"two PDUs took the same feed: {res}")
+        self.assertEqual(res["modals"], 0, res)
+        self.assertEqual(self.errors, [], f"console errors: {self.errors}")
+
+    def test_auto_bind_reports_no_feed_so_the_dialog_can_open(self):
+        """A rack with nothing left to bind resolves falsy, which is the signal
+        finishAdd uses to fall back to the manual bind dialog."""
+        res = self.page.evaluate("""async () => {
+            const api = window.NbxRdEditor;
+            const w = { proposed_name: 'e2e-none-pdu-a1', role_slug: 'pdu', label: 'x' };
+            const bound = await api.autoBindPduFeed(w, document.createElement('div'),
+                                                    {rackId: 'r-999999'});
+            return { bound: !!bound, real: w.real_power_feed_id, planned: w.planned_power_feed_id };
+        }""")
+        self.assertFalse(res["bound"], res)
+        self.assertIsNone(res["real"], res)
+        self.assertIsNone(res["planned"], res)
+
     def _save_pdu_add(self, name, u_position, real_feed_id=None, planned_feed_id=None):
         role = self._api("GET", "/api/dcim/device-roles/?slug=pdu")["results"][0]
         item = {

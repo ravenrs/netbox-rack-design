@@ -794,6 +794,24 @@ class StalePlacementTestCase(TestCase):
         self.assertTrue(remove.stale)
         self.assertEqual(remove.stale_device_name, device_name)
 
+    def test_nulling_the_device_while_it_still_exists_flags_stale(self):
+        """NetBox core's own pre_delete handler (core/signals.py
+        handle_deleted_object) nulls every SET_NULL reference and saves it,
+        during a web request and BEFORE this plugin's receiver runs -- which
+        then found nothing to flag. Nulling the device of a move/remove while
+        that device still exists is exactly that step, and must flag it
+        (found recording the tutorial, Part 15)."""
+        move = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[1], target_rack=self.racks[1], target_position=6,
+        )
+        name = self.devices[1].name
+        move.device = None
+        move.save()
+        move.refresh_from_db()
+        self.assertTrue(move.stale)
+        self.assertEqual(move.stale_device_name, name)
+
     def test_unrelated_designs_and_add_placements_are_unaffected(self):
         other_design = make_design(title="Other plan", site=self.site)
         other_move = DesignPlacement.objects.create(

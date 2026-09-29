@@ -309,7 +309,8 @@ class ApplyMultiSiteTestCase(MultiSiteTestCase):
         design = self._design()
         DesignPlacement.objects.create(
             design=design, kind=DesignPlacementKindChoices.KIND_ADD,
-            device_type=self.device_type, target_rack=self.rack_b, target_position=5,
+            device_type=self.device_type, device_role=self.device_role,
+            target_rack=self.rack_b, target_position=5,
             target_face="front", proposed_name="ms-srv-noperm",
         )
         design.status = DesignStatusChoices.STATUS_APPROVED

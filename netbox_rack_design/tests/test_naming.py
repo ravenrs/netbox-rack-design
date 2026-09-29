@@ -651,7 +651,7 @@ class MoveResolvedAttributesTestCase(TestCase):
         # branch even though the source device's own role is not a PDU role.
         self.assertEqual(
             generate_name(self.p_move_pdu_override),
-            "site-1-pdu-rrack2-a1",
+            "site-1-pdu-rack2-a1",
         )
 
     @override_settings(

@@ -186,7 +186,7 @@ def build_name(placement):
 
     Rules (all generic -- adjust to your convention):
 
-    1. **PDUs** (role slug contains ``pdu``): ``<site>-pdu-r<rack>-a1/b1/...``
+    1. **PDUs** (role slug contains ``pdu``): ``<site>-pdu-<rack>-a1/b1/...``
        -- A/B phase pairs.
     2. **Everything else**: ``<site>-<role>-<n>`` -- a flat family counter,
        falling back to the device-type slug when no role is set so the name is
@@ -197,7 +197,7 @@ def build_name(placement):
 
     # Rule 1 -- PDUs: phase-paired slots per rack.
     if "pdu" in role:
-        prefix = f"{site}-pdu-r{_rack_token(placement)}-"
+        prefix = f"{site}-pdu-{_rack_token(placement)}-"
         return prefix + _next_pdu_slot(placement, prefix)
 
     # Rule 2 -- general: <site>-<role|type>-<n>.

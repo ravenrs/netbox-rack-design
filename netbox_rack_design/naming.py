@@ -319,7 +319,11 @@ class _AddDevicePlaceholderProxy:
             target = field.get("target") or ""
             if not target.startswith("cf."):
                 continue
-            out[target[3:]] = data.get(field["key"])
+            value = data.get(field["key"])
+            # A real Device.cf hands back the field's Python value (a Site for
+            # an object field, a date for a date field); so must this.
+            cf = field.get("cf")
+            out[target[3:]] = cf.deserialize(value) if cf is not None and value is not None else value
         return out
 
 

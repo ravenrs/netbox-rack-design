@@ -24,6 +24,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from tests.e2e.helpers import install_role_autopick
+
 BASE = os.environ.get("RD_BASE", "http://127.0.0.1:8000").rstrip("/")
 USER = os.environ.get("RD_USER", "rd_shot")
 PASS = os.environ.get("RD_PASS", "ShotPass12345!")
@@ -205,6 +207,7 @@ class EditorPowerTestCase(unittest.TestCase):
     def setUp(self):
         self.ctx = self._browser.new_context(
             storage_state=self._storage, viewport={"width": 1600, "height": 1400})
+        install_role_autopick(self.ctx)
         self.page = self.ctx.new_page()
         self.errors = []
         self.page.on(
@@ -611,6 +614,8 @@ class EditorPowerTestCase(unittest.TestCase):
                                     .map(t => t.textContent),
                                 segs: segs.map(s => ({
                                     bottom: s.style.bottom, height: s.style.height,
+                                    bank: (s.querySelector('.nbx-rd-bank-no') || {}).textContent
+                                          || null,
                                 })),
                             };
                         }),
@@ -653,6 +658,17 @@ class EditorPowerTestCase(unittest.TestCase):
                     self.assertEqual(
                         ranges[i][0], ranges[i - 1][1] + 1,
                         f"gap or overlap between segments: {ranges}")
+                # Every segment says WHICH bank it is (user report
+                # 2026-09-23): the strip showed where the zones are and
+                # which leg they belong to, but not whether a zone was
+                # bank 1 or bank 2 -- that lived only in the tooltip.
+                banks = [seg["bank"] for seg in col["segs"]]
+                self.assertTrue(
+                    all(b and b.strip() for b in banks),
+                    f"a zone segment carries no bank number: {col}")
+                self.assertEqual(
+                    sorted(b.strip() for b in banks), ["1", "2"],
+                    f"the two zones of a leg must read 1 and 2: {col}")
             self.assertEqual(seen_letters, {"A", "B"}, wrap)
         self.assertEqual(self.errors, [], f"console errors: {self.errors}")
 

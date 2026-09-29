@@ -628,6 +628,13 @@
     font-size: 0.8125rem;
 }
 
+/* A rail number field (e.g. burn-in hours) collapsed to its spinner and hid
+   the value it holds; give it room for a few digits. */
+.nbx-rd-toolbar-field input[type="number"] {
+    width: 6rem;
+    min-width: 6rem;
+}
+
 /* ---- Editor shell: push/collapse tool drawer + rack workspace ----------- */
 /* A flex row. The drawer is the left column (content-sized: it grows wider as
    more sections open); the rack workspace takes the rest. When the drawer is
@@ -1724,6 +1731,23 @@
     background: var(--tblr-green, #2fb344);
 }
 /* PDU name written up the column from the floor of that PDU's lowest bank. */
+/* The bank's own number, pinned to the top of its zone segment. Horizontal
+   (the PDU tag below it is vertical), so the two labels never read as one
+   string, and above the fill so it stays legible on a full bank. */
+.nbx-rd-bank-no {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 1px;
+    z-index: 1;                             /* over the fill */
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 8px;
+    text-align: center;
+    color: #fff;
+    text-shadow: 0 0 2px #000, 0 0 2px #000;
+    pointer-events: none;
+}
 .nbx-rd-bank-pdu-tag {
     position: absolute;
     left: 0;
@@ -1989,4 +2013,19 @@
 }
 .nbx-rd-stamped-blade-remove {
     flex: 0 0 auto;
+}
+
+
+/* The Role select, lit up when a palette drop was refused for want of a role
+   (rack.js rdFlagRoleSelect). Loud on purpose: it has to be findable at a
+   glance by someone mid-gesture. */
+.nbx-rd-needs-role {
+    outline: 3px solid var(--bs-warning, #f59f00);
+    outline-offset: 2px;
+    border-radius: 4px;
+    animation: nbx-rd-needs-role-pulse 0.65s ease-in-out 3;
+}
+@keyframes nbx-rd-needs-role-pulse {
+    0%, 100% { outline-color: var(--bs-warning, #f59f00); }
+    50% { outline-color: transparent; }
 }

@@ -724,6 +724,55 @@ class ChainProjectionTestCase(TestCase):
 
     # --- an ancestor add is baseline, not a planned add ---------------------
 
+    def test_an_inherited_tray_add_carries_no_face(self):
+        """An ancestor's tray add (a 0U PDU) reaches the child's tray with a
+        blank face, like any tray slot. It came through as "front", and the
+        editor then saved the untouched PDU as a move out of "front" -- a
+        phantom move that dropped its feed binding (found recording Part 14)."""
+        parent = self._design("Tray parent")
+        self._add(parent, None, name="pdu-a1", face="")
+        self._approve(parent)
+        child = self._design("Tray child", based_on=parent)
+
+        elevation = project_rack(child, self.racks[0])
+
+        tray = [s for s in elevation.non_racked if s.get("label") == "pdu-a1"]
+        self.assertEqual(len(tray), 1, elevation.non_racked)
+        self.assertEqual(tray[0]["face"], "")
+        self.assertTrue(tray[0].get("inherited"))
+
+    def test_ancestor_occupying_my_unit_marks_my_tile_and_reports_it(self):
+        """docs/design-chains.md "Upstream conflicts": an ancestor now puts
+        hardware where this design already planned something. The own tile
+        keeps its unit, gets the conflict flag, and a panel row names the
+        ancestor -- never two tiles silently drawn on top of each other
+        (found recording Part 15). A tile on a free unit is left alone."""
+        from netbox_rack_design.projection import CHAIN_CONFLICT_KINDS, flatten_conflicts
+
+        parent = self._design("Network v3")
+        self._add(parent, 10, name="sw-upstream")
+        self._approve(parent)
+        child = self._design("Compute child", based_on=parent)
+        mine = self._add(child, 10, name="srv-mine")
+        free = self._add(child, 12, name="srv-free")
+
+        result = project_rack(child, self.racks[0])
+
+        own_at10 = [s for s in self._at(result.front, 10) if s.get("placement") == mine]
+        self.assertEqual(len(own_at10), 1)
+        self.assertTrue(own_at10[0]["conflict"])
+        self.assertIn("sw-upstream", own_at10[0]["conflict_reason"])
+        own_at12 = [s for s in self._at(result.front, 12) if s.get("placement") == free]
+        self.assertFalse(own_at12[0]["conflict"])
+
+        rows = [c for c in result.conflicts if c["kind"] == "unit_occupied"]
+        self.assertEqual(len(rows), 1, result.conflicts)
+        self.assertEqual(rows[0]["placement"], mine)
+        self.assertEqual(rows[0]["source_design"], parent)
+        self.assertIn("unit_occupied", CHAIN_CONFLICT_KINDS)
+        flat = flatten_conflicts(self.racks[0], result.conflicts)
+        self.assertTrue(any(e["kind"] == "unit_occupied" for e in flat))
+
     def test_ancestor_add_appears_as_baseline_not_as_a_planned_add(self):
         a = self._design("Network sweep IDS-1000")
         upstream = self._add(a, 10, name="srv-a")
@@ -2475,7 +2524,11 @@ class PeerConflictProjectionTestCase(TestCase):
         self._add(child, 10, name="child-srv")
 
         result = project_rack(child, self.racks[1])
-        self.assertEqual(result.conflicts, [])
+        # Not a PEER conflict. It IS an upstream one -- the ancestor occupies
+        # the child's unit (docs/design-chains.md, `unit_occupied`).
+        self.assertEqual(
+            [c for c in result.conflicts if c["kind"].startswith("peer_")], [])
+        self.assertEqual([c["kind"] for c in result.conflicts], ["unit_occupied"])
 
     def test_descendant_claim_is_not_reported(self):
         parent = self._design("Parent IDS-7200")
@@ -2506,6 +2559,28 @@ class PeerConflictProjectionTestCase(TestCase):
 
         result = project_rack(root, self.racks[1])
         self.assertEqual(result.conflicts, [])
+
+    def test_older_versions_of_the_base_are_not_peers(self):
+        """A child re-based onto v3 of its parent does not see v1 and v2 as
+        peers: they are the SAME plan, superseded -- they claim the parent's
+        units by construction. Found recording Part 15: after the re-base the
+        editor listed every unit of v1 and v2 as a peer conflict."""
+        v1 = self._design("Base plan IDS-7450")
+        self._scope(v1, self.racks[1])
+        self._add(v1, 10, name="base-srv")
+        v2 = self._design("Base plan IDS-7450", root=v1, version=2)
+        self._scope(v2, self.racks[1])
+        self._add(v2, 10, name="base-srv")
+        v3 = self._approve(self._design("Base plan IDS-7450", root=v1, version=3))
+        self._scope(v3, self.racks[1])
+
+        child = self._design("Child of v3 IDS-7460", based_on=v3)
+        self._scope(child, self.racks[1])
+        self._add(child, 10, name="child-srv")
+
+        result = project_rack(child, self.racks[1])
+        self.assertEqual(
+            [c for c in result.conflicts if c["kind"].startswith("peer_")], [])
 
     def test_implemented_peer_is_not_reported(self):
         peer = self._design("Implemented peer IDS-7500")

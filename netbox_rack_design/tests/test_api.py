@@ -601,6 +601,21 @@ class DesignChainActionsTest(APITestCase):
         child.refresh_from_db()
         self.assertIsNone(child.based_on_id)
 
+    def test_rebase_onto_a_draft_new_version_of_the_parent_succeeds(self):
+        """Same rule as the Re-base page: another version of the current
+        parent's own plan is a valid target whatever its status -- the step
+        that lets a frozen parent be replaced by its new version."""
+        self.add_permissions("netbox_rack_design.change_design")
+        parent = make_design(title="Frozen", site=self.site,
+                             status=DesignStatusChoices.STATUS_APPROVED)
+        v2 = make_design(title="Frozen", site=self.site, root=parent, version=2)
+        child = make_design(title="Child3", site=self.site, based_on=parent)
+        response = self.client.post(
+            self._rebase_url(child), {"based_on": v2.pk}, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        child.refresh_from_db()
+        self.assertEqual(child.based_on_id, v2.pk)
+
     def test_rebase_onto_a_cycle_refused(self):
         """Reuses Design's own cycle guard via full_clean() -- not
         re-implemented in the viewset."""
@@ -3078,6 +3093,28 @@ class PreviewNameTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(response.data["name"], "R9-1")
 
+    @override_settings(PLUGINS_CONFIG=_plugins_config(
+        naming_mode="template", naming_template="{device.cf[responsible]}-{n:02d}",
+        placement_fields=[{"key": "responsible", "label": "Responsible",
+                           "type": "text", "target": "cf.responsible", "rail": True}]))
+    def test_preview_template_reads_the_planning_values_the_tile_carries(self):
+        """``{device.cf[...]}`` reads the add's planning values.
+
+        The editor's rail puts them on a fresh drop, but the preview never
+        received them, so a template naming devices by a planning field
+        rendered the token empty (``AMS1--03``, found recording Part 5).
+        """
+        self.add_permissions("netbox_rack_design.view_design")
+        body = {
+            "kind": "add", "device_type": self.device_type.pk,
+            "target_rack": self.racks[0].pk, "target_position": 10,
+            "target_face": "front", "index": 1,
+            "planning_data": {"responsible": "net-team"},
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], "net-team-01")
+
     def test_preview_unknown_planned_rack_still_400s(self):
         self.add_permissions("netbox_rack_design.view_design")
         body = {"kind": "add", "device_type": self.device_type.pk,
@@ -3155,6 +3192,26 @@ class PreviewNameTest(APITestCase):
         response = self.client.post(self._url(), body, format="json", **self.header)
         self.assertHttpStatus(response, status.HTTP_200_OK)
         self.assertEqual(response.data["name"], "Device Role 1-")
+
+    @override_settings(PLUGINS_CONFIG=_plugins_config(
+        naming_mode="template", naming_template="{device.rack.name}-{n:02d}"))
+    def test_move_preview_without_index_counts_pending_adds(self):
+        """The move dialog's "Set a new name" preview sends no ``index`` (only
+        a palette add has one). In template mode ``{n}`` then fell back to the
+        SAVED placement count, so with three unsaved adds on screen the
+        suggestion was "-01" -- the name the first add already holds
+        (found recording the naming video, 2026-09-25). Without an index the
+        counter must start after the session's pending names too."""
+        self.add_permissions("netbox_rack_design.view_design")
+        rack = self.racks[0]
+        body = {
+            "kind": "move", "device": self.devices[0].pk,
+            "target_rack": rack.pk, "target_position": 20, "target_face": "front",
+            "pending_names": [f"{rack.name}-01", f"{rack.name}-02", f"{rack.name}-03"],
+        }
+        response = self.client.post(self._url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(response.data["name"], f"{rack.name}-04")
 
     @override_settings(PLUGINS_CONFIG=_plugins_config(naming_mode="sequence"))
     def test_pending_names_prevent_same_session_duplicates(self):
@@ -3988,6 +4045,69 @@ class HiddenDesignRackTest(APITestCase):
                 response.status_code,
                 (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN),
             )
+
+    # -- planned racks hide like real ones -----------------------------------
+
+    def _planned(self):
+        location = Location.objects.create(name="Vis hall", slug="vis-hall", site=self.site)
+        planned = PlannedRack.objects.create(name="Vis P1", location=location, u_height=42)
+        self.design.planned_racks.add(planned)
+        return planned
+
+    def test_a_planned_rack_toggles_like_a_real_one(self):
+        planned = self._planned()
+        body = {"design_id": self.design.pk, "planned_rack_id": planned.pk}
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertTrue(response.data["hidden"])
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [planned.pk])
+        self.assertEqual(response.data["hidden_rack_ids"], [])
+
+        response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+        self.assertFalse(response.data["hidden"])
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [])
+
+    def test_a_planned_and_a_real_rack_with_the_same_pk_stay_apart(self):
+        planned = self._planned()
+        real = self.racks[0]
+        self.client.post(self._toggle_url(), {"design_id": self.design.pk, "rack_id": real.pk},
+                         format="json", **self.header)
+        response = self.client.post(
+            self._toggle_url(), {"design_id": self.design.pk, "planned_rack_id": planned.pk},
+            format="json", **self.header)
+        self.assertEqual(response.data["hidden_rack_ids"], [real.pk])
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [planned.pk])
+
+    def test_show_all_clears_planned_racks_too(self):
+        planned = self._planned()
+        HiddenDesignRack.objects.create(user=self.user, design=self.design, planned_rack=planned)
+        HiddenDesignRack.objects.create(user=self.user, design=self.design, rack=self.racks[0])
+        response = self.client.post(self._show_all_url(), {"design_id": self.design.pk},
+                                    format="json", **self.header)
+        self.assertEqual(response.data["hidden_planned_rack_ids"], [])
+        self.assertFalse(HiddenDesignRack.objects.filter(user=self.user).exists())
+
+    def test_toggle_needs_exactly_one_rack(self):
+        planned = self._planned()
+        for body in ({"design_id": self.design.pk},
+                     {"design_id": self.design.pk, "rack_id": self.racks[0].pk,
+                      "planned_rack_id": planned.pk}):
+            response = self.client.post(self._toggle_url(), body, format="json", **self.header)
+            self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+
+    def test_the_editor_renders_a_hidden_planned_rack_hidden(self):
+        planned = self._planned()
+        HiddenDesignRack.objects.create(user=self.user, design=self.design, planned_rack=planned)
+        self.user.is_superuser = True
+        self.user.save()
+        self.client.force_login(self.user)
+        html = self.client.get(
+            reverse("plugins:netbox_rack_design:design_editor_default",
+                    kwargs={"pk": self.design.pk}), follow=True,
+        ).content.decode()
+        self.assertIn(f'data-rd-visi-toggle="p-{planned.pk}"', html)
+        self.assertRegex(html, rf'nbx-rd-rack-block[^"]*hidden[^"]*"[^>]*data-rack-id="p-{planned.pk}"')
 
 
 class DesignPowerFeedAPITest(APIViewTestCases.APIViewTestCase):
@@ -6637,6 +6757,28 @@ class SaveLayoutChainTest(APITestCase):
         self.assertEqual(self.upstream_move.design_id, self.parent.pk)
         self.assertEqual(float(self.upstream_move.target_position), 15.0)
 
+    def test_untouched_inherited_move_of_a_real_device_saves_nothing(self):
+        """An inherited move of a REAL device, left where the parent put it,
+        is not this design's move.
+
+        The editor posts it as kind="existing" at U15; the device's real
+        position is U1, so the server promoted it into the CHILD's own move.
+        Every sibling derived from the same parent then "planned" the
+        parent's move itself -- false peer conflicts between siblings, and
+        the tile relabelled with the child's title (found recording Part 14).
+        """
+        self._grant_all()
+        for extra in ({}, {"placement_id": self.upstream_move.pk}):
+            item = {"kind": "existing", "device_id": self.device.pk,
+                    "u_position": 15, "face": "front", **extra}
+            payload = self._payload(self.child, [{"rack_id": self.rack.pk, "front": [item]}])
+            response = self.client.post(self._url(), payload, format="json", **self.header)
+            self.assertIn(response.status_code,
+                          (status.HTTP_200_OK, status.HTTP_304_NOT_MODIFIED), response.data)
+            self.assertFalse(
+                DesignPlacement.objects.filter(design=self.child).exists(),
+                f"an untouched inherited move became the child's own ({extra})")
+
     def test_move_of_inherited_planned_identity_creates_base_placement_move(self):
         # Dragging the inherited tile for the ancestor's planned (device-less)
         # add: the item carries the SAME placement_id the widget rendered (the
@@ -6751,6 +6893,37 @@ class ApplyActionTest(APITestCase):
             design.status = DesignStatusChoices.STATUS_APPROVED
             design.save()
         return design
+
+    def test_dry_run_lists_the_racks_and_feeds_it_would_create(self):
+        """The response listed devices only, so automation reading the dry
+        run could not tell that applying also builds a rack and its supply."""
+        from dcim.models import Location, PowerPanel
+
+        from ..models import DesignPowerFeed, PlannedRack
+        self.add_permissions("netbox_rack_design.view_design")
+        location = Location.objects.create(name="API loc", slug="api-loc", site=self.site)
+        panel = PowerPanel.objects.create(site=self.site, name="API-PP")
+        planned = PlannedRack.objects.create(name="API R9", location=location, u_height=42)
+        design = make_design(title="Row", site=self.site)
+        design.planned_racks.add(planned)
+        DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, device_role=self.device_role,
+            target_planned_rack=planned, target_position=10, target_face="front",
+            proposed_name="api-srv-9")
+        DesignPowerFeed.objects.create(
+            design=design, planned_rack=planned, name="API R9-A",
+            voltage=230, amperage=32, power_panel=panel)
+        design.status = DesignStatusChoices.STATUS_APPROVED
+        design.save()
+
+        response = self.client.get(self._url(design), **self.header)
+        self.assertHttpStatus(response, status.HTTP_200_OK)
+        self.assertEqual(
+            [(r["name"], r["created"]) for r in response.data["racks"]], [("API R9", True)])
+        self.assertEqual(
+            [(f["name"], f["power_panel"], f["existing"]) for f in response.data["feeds"]],
+            [("API R9-A", panel.pk, None)])
 
     def test_get_dry_run_with_view_permission_writes_nothing(self):
         # A view-only user is deliberately NOT given dcim.add_device here: the

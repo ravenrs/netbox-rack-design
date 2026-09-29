@@ -22,11 +22,11 @@ Context:
     <h5 class="card-header">{% trans "Apply design" %}</h5>
     <div class="card-body">
       <p>
-        {% blocktrans trimmed with title=object %}
+        {% blocktrans trimmed with title=object removal=removal_status_label %}
           Applying <strong>{{ title }}</strong> materializes its placements in
           DCIM: a planned device is created (or updated) for every add/move,
-          and the real device behind every remove is flagged for
-          decommissioning. The design's own status is not changed here.
+          and the real device behind every remove is flagged
+          <strong>{{ removal }}</strong>. The design's own status is not changed here.
         {% endblocktrans %}
       </p>
 
@@ -74,8 +74,10 @@ Context:
               {% for entry in result.created %}
                 <div>
                   {{ entry.name }}
-                  {% if entry.rack %}
-                    &rarr; {{ entry.rack }} U{{ entry.position }} {{ entry.face }}
+                  {% if entry.blade %}
+                    &rarr; {{ entry.where }}
+                  {% elif entry.rack %}
+                    &rarr; {{ entry.rack }} U{{ entry.position|floatformat:"-1" }} {{ entry.face }}
                   {% endif %}
                   {% if entry.recreated %}
                     <span class="badge text-bg-secondary">{% trans "recreated" %}</span>
@@ -86,6 +88,44 @@ Context:
               {% endfor %}
             </td>
           </tr>
+          {% if result.resolved_racks %}
+            <tr>
+              <td>{% trans "Racks" %}</td>
+              <td class="text-end">{{ result.resolved_racks|length }}</td>
+              <td>
+                {% for entry in result.resolved_racks %}
+                  <div>
+                    {{ entry.planned_rack.name }}
+                    <span class="text-muted">({{ entry.planned_rack.location }})</span>
+                    {% if entry.created or not entry.rack %}
+                      &rarr; {% trans "created, status planned" %}
+                    {% else %}
+                      &rarr; {% trans "adopts the existing rack" %} {{ entry.rack }}
+                    {% endif %}
+                  </div>
+                {% endfor %}
+              </td>
+            </tr>
+          {% endif %}
+          {% if result.feeds %}
+            <tr>
+              <td>{% trans "Power feeds" %}</td>
+              <td class="text-end">{{ result.feeds|length }}</td>
+              <td>
+                {% for entry in result.feeds %}
+                  <div>
+                    {{ entry.planned_feed.name }}
+                    <span class="text-muted">{% trans "on" %} {{ entry.power_panel }}</span>
+                    {% if entry.existing %}
+                      &rarr; {% trans "already exists, reused" %}
+                    {% else %}
+                      &rarr; {% trans "created, status planned; its PDUs cabled to it" %}
+                    {% endif %}
+                  </div>
+                {% endfor %}
+              </td>
+            </tr>
+          {% endif %}
           <tr>
             <td>{% trans "Update" %}</td>
             <td class="text-end">{{ result.updated|length }}</td>

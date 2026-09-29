@@ -3,6 +3,18 @@
 {% load plugins %}
 {% load i18n %}
 
+{# The editor is what people open a design FOR, so it gets a button in the  #}
+{# page's own row, next to Edit -- the one in the Racks card is a long      #}
+{# scroll down. NetBox renders extra_controls ahead of its standard buttons. #}
+{% block extra_controls %}
+  {% if perms.netbox_rack_design.change_design %}
+    <a href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=object.pk %}"
+       class="btn btn-primary nbx-rd-header-open-editor">
+      <i class="mdi mdi-pencil-ruler" aria-hidden="true"></i> {% trans "Open editor" %}
+    </a>
+  {% endif %}
+{% endblock %}
+
 {% block content %}
 <div class="row mb-3">
   <div class="col col-12 col-md-6">
@@ -268,9 +280,9 @@
     <div class="card">
       <h2 class="card-header">
         {% trans "Racks" %}
-        {% if scoped_racks or perms.netbox_rack_design.change_design %}
+        {% if scoped_racks or scoped_planned_racks or perms.netbox_rack_design.change_design %}
           <div class="card-actions">
-            {% if scoped_racks %}
+            {% if scoped_racks or scoped_planned_racks %}
             <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=object.pk %}"
                class="btn btn-ghost-primary btn-sm">
               <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "View elevation" %}
@@ -315,11 +327,44 @@
                 {% endif %}
               </td>
             </tr>
-          {% empty %}
+          {% endfor %}
+          {# Planned racks (Create rack) live in design.planned_racks, not      #}
+          {# design.racks. Once Apply has built one, the row points at the real #}
+          {# rack it became; until then, at the planned rack itself.            #}
+          {% for planned in scoped_planned_racks %}
+            <tr>
+              <td>
+                {% if planned.realized_rack %}
+                  {{ planned.realized_rack|linkify }}
+                  <span class="badge text-bg-success nbx-rd-racks-built-badge"
+                        title="{% trans 'Created (or adopted) by Apply from the planned rack' %} {{ planned.name }}">{% trans "Built by apply" %}</span>
+                {% else %}
+                  {{ planned|linkify }}
+                  <span class="badge text-bg-warning nbx-rd-racks-planned-badge"
+                        title="{% trans 'Does not exist in NetBox yet -- created (or an existing match adopted) when the design is applied.' %}">{% trans "Planned" %}</span>
+                {% endif %}
+              </td>
+              <td>{{ planned.location.site|linkify|placeholder }}</td>
+              <td>{{ planned.location|linkify|placeholder }}</td>
+              <td class="text-end">
+                <a href="{% url 'plugins:netbox_rack_design:design_elevation' pk=object.pk %}"
+                   class="btn btn-sm btn-outline-primary">
+                  <i class="mdi mdi-server" aria-hidden="true"></i> {% trans "View elevation" %}
+                </a>
+                {% if perms.netbox_rack_design.change_design %}
+                  <a href="{% url 'plugins:netbox_rack_design:design_editor_default' pk=object.pk %}"
+                     class="btn btn-sm btn-outline-secondary">
+                    <i class="mdi mdi-pencil" aria-hidden="true"></i> {% trans "Edit layout" %}
+                  </a>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          {% if not scoped_racks and not scoped_planned_racks %}
             <tr>
               <td colspan="4" class="text-muted">{% trans "No racks in scope yet" %}</td>
             </tr>
-          {% endfor %}
+          {% endif %}
         </tbody>
       </table>
     </div>
@@ -454,7 +499,7 @@
         </tbody>
       </table>
       <div class="card-footer text-muted small">
-        {% trans "Planned feeds exist only inside this design; no dcim.PowerFeed is ever written. Capacity is the breaker's watts derated by POWERFEED_DEFAULT_MAX_UTILIZATION, exactly as NetBox derates a real feed. Create them from a rack's power dialog in the editor, or manage them here and under Rack Design → Planned Power Feeds." %}
+        {% trans "Planned feeds live inside this design until it is applied: Apply creates each one as a real power feed in planned status, on its power panel, and cables the PDUs bound to it. Capacity is the breaker's watts derated by POWERFEED_DEFAULT_MAX_UTILIZATION, exactly as NetBox derates a real feed. Create them from a rack's power dialog in the editor, or manage them here and under Rack Design → Planned Power Feeds." %}
       </div>
     </div>
   </div>

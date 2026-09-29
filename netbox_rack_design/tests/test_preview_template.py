@@ -132,6 +132,79 @@ class PreviewTemplateTest(APITestCase):
             [e["template_placement"] for e in resp.data[key]], [item1.pk, item2.pk]
         )
 
+    # --- 0U device types (a PDU) stamp into the tray, not a rack unit --------
+    #
+    # BUG (verified live, 2026-09-23): a 0U ``TemplatePlacement`` (a PDU
+    # belonging in the rack's NON-RACKED TRAY) was coming back with
+    # ``position: 1.0``/``face: "front"`` -- a racked device at U1 -- and two
+    # such placements in the same template collided at the same unit.
+    # Reproduced here exactly as reported: two PDU-2B (u_height 0) rows,
+    # anchor="bottom", order 0/1, face="".
+
+    def test_zero_height_device_type_stamps_into_the_tray(self):
+        self._add_permission()
+        pdu_type = DeviceType.objects.create(
+            manufacturer=self.mfr, model="PDU-2B", slug="pt-pdu-2b",
+            u_height=0, is_full_depth=False,
+        )
+        template = Template.objects.create(name="Tray PDUs", u_height=10)
+        item1 = TemplatePlacement.objects.create(
+            template=template, device_type=pdu_type,
+            anchor=TemplatePlacementAnchorChoices.ANCHOR_BOTTOM, order=0, face="",
+        )
+        item2 = TemplatePlacement.objects.create(
+            template=template, device_type=pdu_type,
+            anchor=TemplatePlacementAnchorChoices.ANCHOR_BOTTOM, order=1, face="",
+        )
+        rack = Rack.objects.create(name="PT Rack Tray", site=self.site, u_height=10)
+
+        resp = self.client.post(
+            _url(self.design),
+            {"template": template.pk, "racks": [f"r:{rack.pk}"]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+        key = f"r:{rack.pk}"
+        self.assertEqual(resp.data["skipped"], [])
+        entries = resp.data[key]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(
+            [e["template_placement"] for e in entries], [item1.pk, item2.pk]
+        )
+        for entry in entries:
+            self.assertIsNone(entry["position"])
+            self.assertEqual(entry["face"], "")
+
+    def test_zero_height_device_type_does_not_block_a_normal_item(self):
+        # A 0U PDU and a 1U switch stamped together must not fight over the
+        # same unit -- the PDU never enters the unit-packing walk.
+        self._add_permission()
+        pdu_type = DeviceType.objects.create(
+            manufacturer=self.mfr, model="PDU-2B mix", slug="pt-pdu-2b-mix",
+            u_height=0, is_full_depth=False,
+        )
+        template = Template.objects.create(name="Tray PDU + switch", u_height=10)
+        pdu_item = TemplatePlacement.objects.create(
+            template=template, device_type=pdu_type,
+            anchor=TemplatePlacementAnchorChoices.ANCHOR_BOTTOM, order=0, face="",
+        )
+        switch_item = TemplatePlacement.objects.create(
+            template=template, device_type=self.device_type,
+            anchor=TemplatePlacementAnchorChoices.ANCHOR_BOTTOM, order=1, face="front",
+        )
+        rack = Rack.objects.create(name="PT Rack Tray Mix", site=self.site, u_height=10)
+
+        resp = self.client.post(
+            _url(self.design),
+            {"template": template.pk, "racks": [f"r:{rack.pk}"]},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_200_OK)
+        key = f"r:{rack.pk}"
+        by_tp = {e["template_placement"]: e for e in resp.data[key]}
+        self.assertIsNone(by_tp[pdu_item.pk]["position"])
+        self.assertEqual(by_tp[switch_item.pk]["position"], 1.0)
+
     # --- writes nothing -------------------------------------------------------
 
     def test_endpoint_writes_nothing(self):

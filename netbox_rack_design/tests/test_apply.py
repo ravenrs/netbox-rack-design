@@ -9,6 +9,8 @@ directly and ``save()`` to approve, bypassing ``full_clean()`` exactly the
 way the real approve action does.
 """
 
+from unittest import mock
+
 from core.models import ObjectType
 from dcim.choices import DeviceFaceChoices, DeviceStatusChoices
 from dcim.models import Device
@@ -48,8 +50,15 @@ class ApplyTestCase(TestCase):
         design.save()
         return design
 
+    # A real add carries a role (dcim.Device.role is required, and apply
+    # refuses an add without one), so that is the default here. Pass
+    # role=None explicitly to model an add whose Role was left empty.
+    _FIXTURE_ROLE = object()
+
     def _add(self, design, position, *, name="add-1", rack=None, device_type=None,
-              face="front", role=None, tenant=None):
+              face="front", role=_FIXTURE_ROLE, tenant=None):
+        if role is self._FIXTURE_ROLE:
+            role = self.device_role
         return DesignPlacement.objects.create(
             design=design,
             kind=DesignPlacementKindChoices.KIND_ADD,
@@ -175,43 +184,13 @@ class PreconditionTestCase(ApplyTestCase):
             result.problems,
         )
 
-    def test_bay_placement_reports_problem_not_skipped(self):
-        design = self._design("Has a blade")
-        chassis = self._add(design, 20, name="chassis-1")
-        blade = DesignPlacement.objects.create(
-            design=design,
-            kind=DesignPlacementKindChoices.KIND_ADD,
-            device_type=self.device_type,
-            parent_placement=chassis,
-            target_bay_name="bay1",
-            proposed_name="blade-1",
-        )
-        self._approve(design)
-
-        result = apply.plan(design, self.superuser)
-        self.assertFalse(result.ok)
-        self.assertTrue(
-            any("blade-1" in p and "blade placements cannot be applied yet" in p
-                for p in result.problems),
-            result.problems,
-        )
-        # Never silently dropped from the plan: the OTHER (non-bay) create is
-        # still reported normally alongside the problem.
-        self.assertEqual({c.placement.pk for c in result.created}, {chassis.pk})
-        self.assertNotIn(blade.pk, [c.placement.pk for c in result.created])
-
     def test_several_problems_reported_together(self):
         a = self._design("Unapproved ancestor for combo test")
         self._add(a, 10, name="srv-combo-a")  # never approved -> chain broken
 
         design = self._design("Combo", based_on=a)
         self._add(design, 11, name="srv-combo-b")
-        chassis = self._add(design, 30, name="chassis-combo")
-        DesignPlacement.objects.create(
-            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
-            device_type=self.device_type, parent_placement=chassis,
-            target_bay_name="bay1", proposed_name="blade-combo",
-        )
+        self._add(design, 1, name="srv-combo-clash")   # U1 holds Device 1
         design.status = DesignStatusChoices.STATUS_REJECTED
         design.save()
 
@@ -221,7 +200,7 @@ class PreconditionTestCase(ApplyTestCase):
         joined = " | ".join(result.problems)
         self.assertIn("rejected", joined)
         self.assertIn(str(a), joined)
-        self.assertIn("blade placements cannot be applied yet", joined)
+        self.assertIn("is occupied by", joined)
 
 
 # --- occupancy / naming pre-checks -------------------------------------------
@@ -481,6 +460,44 @@ class CleanupTestCase(ApplyTestCase):
         )
         self.assertEqual(DesignApply.objects.filter(design=design).count(), 0)
 
+    def test_two_of_three_placements_deleted_between_two_applies(self):
+        """Petr's case: apply a plan of three, send it back to draft, delete
+        two of the placements, approve and apply again. Each deleted one is
+        undone by kind -- the created device goes, the flagged device gets its
+        old status back -- and the one that stays is left exactly as it is."""
+        flagged = self.devices[1]
+        flagged.status = DeviceStatusChoices.STATUS_ACTIVE
+        flagged.save()
+        moved = self.devices[0]
+
+        design = self._design("Shrink two of three")
+        add = self._add(design, 10, name="shrink-add", role=self.device_role)
+        move = self._move(design, moved, 12, name="shrink-moved")
+        remove = self._remove(design, flagged)
+        self._approve(design)
+        first = apply.run(design, self.superuser)
+        self.assertTrue(first.ok, first.problems)
+        added_pk = Device.objects.get(name="shrink-add").pk
+        moved_copy_pk = Device.objects.get(name="shrink-moved").pk
+
+        design.status = DesignStatusChoices.STATUS_DRAFT
+        design.save()
+        add.delete()
+        remove.delete()
+        self._approve(design)
+
+        second = apply.run(design, self.superuser)
+        self.assertTrue(second.ok, second.problems)
+        self.assertEqual([e.device_name for e in second.deleted], ["shrink-add"])
+        self.assertEqual(len(second.reverted), 1)
+        self.assertFalse(Device.objects.filter(pk=added_pk).exists())
+        flagged.refresh_from_db()
+        self.assertEqual(flagged.status, DeviceStatusChoices.STATUS_ACTIVE)
+        self.assertTrue(Device.objects.filter(pk=moved_copy_pk).exists(),
+                        "the move that stayed in the plan is untouched")
+        self.assertEqual(list(DesignApply.objects.filter(design=design)
+                              .values_list("placement_id", flat=True)), [move.pk])
+
 
 # --- all-or-nothing ------------------------------------------------------------
 
@@ -488,19 +505,33 @@ class RollbackTestCase(ApplyTestCase):
 
     def test_mid_run_failure_rolls_everything_back(self):
         design = self._design("Rollback me")
-        # Valid: has a role, will succeed and be written first.
-        self._add(design, 10, name="ok-one", role=self.device_role)
-        # Invalid: no role, and nothing to carry a role over from -- Device.role
-        # is a required field, so full_clean() raises during _execute(), AFTER
-        # the first device has already been saved in the same transaction.
+        # Both placements are valid, so plan() passes and _execute() starts
+        # writing. The second device's save is then made to fail, AFTER the
+        # first has already been saved in the same transaction.
+        # (This used to lean on an add with no role to cause the failure --
+        # which was the bug itself: plan() now reports that up front.)
+        self._add(design, 10, name="ok-one")
         self._add(design, 11, name="bad-two")
         self._approve(design)
 
         pre_check = apply.plan(design, self.superuser)
-        self.assertTrue(pre_check.ok, pre_check.problems)  # plan() does not catch this
+        self.assertTrue(pre_check.ok, pre_check.problems)
 
-        with self.assertRaises(ValidationError):
-            apply.run(design, self.superuser)
+        real_save = Device.save
+
+        def failing_save(device, *args, **kwargs):
+            if device.name == "bad-two":
+                raise ValidationError({"name": ["forced mid-run failure"]})
+            return real_save(device, *args, **kwargs)
+
+        # Failing at save() -- the write itself -- which no pre-check can see.
+        # run() must undo "ok-one" too and report, never raise.
+        with mock.patch.object(Device, "save", failing_save):
+            result = apply.run(design, self.superuser)
+
+        self.assertFalse(result.ok, result.problems)
+        self.assertTrue(any("forced mid-run failure" in p for p in result.problems),
+                        result.problems)
 
         self.assertFalse(Device.objects.filter(name="ok-one").exists())
         self.assertFalse(Device.objects.filter(name="bad-two").exists())
@@ -563,3 +594,104 @@ class QueryBudgetTestCase(ApplyTestCase):
             len(large_ctx.captured_queries), len(small_ctx.captured_queries),
             "plan()'s query count must not scale with the number of placements",
         )
+
+
+class MissingRoleTestCase(ApplyTestCase):
+    """An `add` with no role cannot become a dcim.Device: Device.role is
+    required. That has to be reported as a blocker by plan(), not discovered
+    by full_clean() half-way through the write -- which surfaced as a raw
+    ValidationError 500 on the apply page."""
+
+    def test_plan_reports_an_add_with_no_role(self):
+        design = self._design()
+        self._add(design, 5, name="roleless-1", role=None)
+        self._approve(design)
+
+        result = apply.plan(design, self.superuser)
+
+        self.assertFalse(result.ok, result.problems)
+        self.assertTrue(
+            any("roleless-1" in p and "role" in p.lower() for p in result.problems),
+            result.problems,
+        )
+
+    def test_run_refuses_instead_of_raising(self):
+        design = self._design()
+        self._add(design, 6, name="roleless-2", role=None)
+        self._approve(design)
+
+        before = Device.objects.count()
+        result = apply.run(design, self.superuser)
+
+        self.assertFalse(result.ok, result.problems)
+        self.assertEqual(Device.objects.count(), before,
+                         "a refused apply must write nothing")
+        self.assertFalse(
+            Device.objects.filter(name="roleless-2").exists(),
+            "the role-less device must not have been created")
+
+    def test_an_add_that_does_carry_a_role_still_applies(self):
+        design = self._design()
+        self._add(design, 7, name="withrole-1", role=self.device_role)
+        self._approve(design)
+
+        result = apply.run(design, self.superuser)
+
+        self.assertTrue(result.ok, result.problems)
+        created = Device.objects.get(name="withrole-1")
+        self.assertEqual(created.role, self.device_role)
+
+
+class DryRunValidationTestCase(ApplyTestCase):
+    """plan() must find out, before anything is written, whatever NetBox's own
+    full_clean() will refuse -- for every device the apply will save, not only
+    the ones it creates. Found any later, it is a raw ValidationError 500
+    half-way through the write (a removal flag on a device whose custom field
+    already held an invalid value in DCIM did exactly that)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from extras.models import CustomField
+        cf = CustomField.objects.create(name="warranty_type", type="text")
+        cf.object_types.set([ObjectType.objects.get_for_model(Device)])
+        # Written straight to the row, bypassing validation -- exactly how the
+        # bad value got into DCIM in the first place.
+        Device.objects.filter(pk=cls.devices[1].pk).update(
+            custom_field_data={"warranty_type": False})
+
+    def test_plan_reports_a_device_netbox_would_refuse_to_save(self):
+        design = self._design()
+        self._remove(design, self.devices[1])
+        self._approve(design)
+
+        result = apply.plan(design, self.superuser)
+
+        self.assertFalse(result.ok, result.problems)
+        name = self.devices[1].name
+        self.assertTrue(
+            any(name in p and "warranty_type" in p for p in result.problems),
+            result.problems,
+        )
+
+    def test_run_refuses_instead_of_raising(self):
+        design = self._design()
+        self._remove(design, self.devices[1])
+        self._approve(design)
+        status_before = Device.objects.get(pk=self.devices[1].pk).status
+
+        result = apply.run(design, self.superuser)
+
+        self.assertFalse(result.ok, result.problems)
+        self.assertEqual(Device.objects.get(pk=self.devices[1].pk).status, status_before,
+                         "a refused apply must not have flagged the device")
+        self.assertEqual(DesignApply.objects.filter(design=design).count(), 0)
+
+    def test_a_valid_device_is_still_removed(self):
+        design = self._design()
+        self._remove(design, self.devices[0])
+        self._approve(design)
+
+        result = apply.run(design, self.superuser)
+
+        self.assertTrue(result.ok, result.problems)

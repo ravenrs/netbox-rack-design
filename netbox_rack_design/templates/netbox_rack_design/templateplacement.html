@@ -2,6 +2,7 @@
 {% load helpers %}
 {% load plugins %}
 {% load i18n %}
+{% load rack_design %}
 
 {% block content %}
 <div class="row mb-3">
@@ -35,6 +36,10 @@
           <td>{{ object.get_anchor_display }}</td>
         </tr>
         <tr>
+          <th scope="row">{% trans "Offset" %}</th>
+          <td>{{ object.offset|floatformat:"-1" }} U</td>
+        </tr>
+        <tr>
           <th scope="row">{% trans "Order" %}</th>
           <td>{{ object.order }}</td>
         </tr>
@@ -57,6 +62,23 @@
         </tr>
       </table>
     </div>
+    {% with rows=object.planning_data|planning_rows %}
+      {% if rows %}
+        {# The deployment's placement_fields (planning_fields.py): what a stamped #}
+        {# device carries onto its real custom fields when the design is applied. #}
+        <div class="card">
+          <h2 class="card-header">{% trans "Planning fields" %}</h2>
+          <table class="table table-hover attr-table">
+            {% for label, value in rows %}
+              <tr>
+                <th scope="row">{{ label }}</th>
+                <td>{{ value }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        </div>
+      {% endif %}
+    {% endwith %}
     {% include 'inc/panels/custom_fields.html' %}
     {% plugin_left_page object %}
   </div>

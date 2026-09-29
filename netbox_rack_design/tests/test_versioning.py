@@ -374,3 +374,48 @@ class NewVersionAtomicityTestCase(TestCase):
 
         self.assertEqual(Design.objects.count(), design_count)
         self.assertEqual(DesignPlacement.objects.count(), placement_count)
+
+
+class BasedOnRefusalWordingTestCase(TestCase):
+    """A frozen parent's refusals read as a sentence for one child and for
+    several ("Compute Phase 2 (v1) are based on this design" -- found
+    recording Part 14)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.site = create_dcim_environment()["site"]
+
+    def _parent_with(self, *child_titles):
+        parent = make_design("Wording parent", site=self.site,
+                             status=DesignStatusChoices.STATUS_APPROVED)
+        for title in child_titles:
+            make_design(title, site=self.site, based_on=parent)
+        return parent
+
+    def test_leaving_approved_with_one_child(self):
+        parent = self._parent_with("Only child")
+        parent.status = DesignStatusChoices.STATUS_DRAFT
+        with self.assertRaises(ValidationError) as ctx:
+            parent.full_clean()
+        message = " ".join(ctx.exception.message_dict["status"])
+        self.assertIn("is based on this design", message)
+        self.assertIn("lose its baseline", message)
+
+    def test_leaving_approved_with_two_children(self):
+        parent = self._parent_with("First child", "Second child")
+        parent.status = DesignStatusChoices.STATUS_DRAFT
+        with self.assertRaises(ValidationError) as ctx:
+            parent.full_clean()
+        message = " ".join(ctx.exception.message_dict["status"])
+        self.assertIn("are based on this design", message)
+        self.assertIn("lose their baseline", message)
+
+    def test_delete_refusals_with_one_child(self):
+        from ..api.views import _design_children_rest_message
+        from ..views import _design_children_message
+
+        parent = self._parent_with("Only child")
+        for message in (_design_children_message(parent),
+                        _design_children_rest_message(parent)):
+            self.assertIn("is based on this design", message)
+            self.assertIn("lose its baseline", message)

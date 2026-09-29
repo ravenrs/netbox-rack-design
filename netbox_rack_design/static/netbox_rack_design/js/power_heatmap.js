@@ -481,6 +481,16 @@
                     fill.style.height =
                         Math.max(0, Math.min(100, b.util || 0)).toFixed(1) + "%";
                     seg.appendChild(fill);
+                    // WHICH bank this zone is, at the top of its own segment
+                    // (user 2026-09-23): the strip already said WHERE the
+                    // zones are and which leg they belong to, but bank 1 vs
+                    // bank 2 lived only in the tooltip, so a planner could
+                    // see two zones without knowing which was which. The
+                    // PDU tag below names the PDU; this names the bank.
+                    var bankNo = document.createElement("span");
+                    bankNo.className = "nbx-rd-bank-no";
+                    bankNo.textContent = String(b.bank == null ? "?" : b.bank);
+                    seg.appendChild(bankNo);
                     if (pduStart) {
                         // The PDU's name, written up the column from the
                         // bottom of its lowest bank, over the fill: the

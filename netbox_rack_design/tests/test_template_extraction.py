@@ -171,22 +171,106 @@ class TemplateExtractionTest(APITestCase):
         existing_tp = top_level.get(device_role=self.role_a)
         self.assertEqual(existing_tp.tenant_id, self.tenant.pk)
 
-    def test_saving_planned_rack_as_template_is_refused(self):
-        """D32: a PlannedRack has no devices by definition, so it can only
-        ever produce an empty template -- refused with a message, not a 500."""
+    def test_a_tray_pdu_goes_into_the_template(self):
+        """A 0U device in the non-racked tray (a PDU) is saved with the
+        template: stamping puts every 0U item back into the target's tray."""
+        self._add_perms()
+        rack = Rack.objects.create(name="TE Rack Tray", site=self.site, u_height=10)
+        zero_u = DeviceType.objects.create(
+            manufacturer=self.mfr, model="TE PDU", slug="te-pdu", u_height=0)
+        design = make_design(title="TE Tray Design", site=self.site)
+        design.racks.add(rack)
+        from ..models import DesignPlacement
+        DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=zero_u, device_role=self.role_a, target_rack=rack,
+            proposed_name="te-pdu-a1",
+        )
+        DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, device_role=self.role_b,
+            target_rack=rack, target_position=1, target_face="front",
+            proposed_name="te-srv-1",
+        )
+
+        resp = self.client.post(
+            _from_design_url(),
+            {"design": design.pk, "rack": f"r:{rack.pk}", "name": "Tray Template"},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["placement_count"], 2)
+        self.assertEqual(resp.data["warnings"], [])
+        template = Template.objects.get(pk=resp.data["template_id"])
+        pdu = template.placements.get(device_type=zero_u)
+        self.assertEqual((pdu.face, pdu.device_role_id), ("", self.role_a.pk))
+
+    def test_a_real_racks_tray_pdu_goes_into_the_template(self):
+        """Same for a real rack's own 0U devices (from-rack)."""
+        self._add_perms()
+        rack = Rack.objects.create(name="TE Rack Real Tray", site=self.site, u_height=10)
+        zero_u = DeviceType.objects.create(
+            manufacturer=self.mfr, model="TE PDU 2", slug="te-pdu-2", u_height=0)
+        Device.objects.create(
+            name="real-pdu-a1", site=self.site, rack=rack, device_type=zero_u,
+            role=self.role_a)
+        Device.objects.create(
+            name="Bot", site=self.site, rack=rack, device_type=self.device_type,
+            role=self.role_b, position=1, face="front")
+
+        resp = self.client.post(
+            _from_rack_url(), {"rack_id": rack.pk, "name": "Real Tray Template"},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["placement_count"], 2, resp.data["warnings"])
+        template = Template.objects.get(pk=resp.data["template_id"])
+        self.assertTrue(template.placements.filter(device_type=zero_u).exists())
+
+    def test_a_unit_high_device_parked_in_the_tray_goes_back_to_the_tray(self):
+        """Where a device stood decides, not its height: a 1U server parked in
+        the tray is saved anchored to the tray, and stamps back into it."""
+        self._add_perms()
+        rack = Rack.objects.create(name="TE Rack Parked", site=self.site, u_height=10)
+        Device.objects.create(
+            name="parked-srv", site=self.site, rack=rack, device_type=self.device_type,
+            role=self.role_a)
+
+        resp = self.client.post(
+            _from_rack_url(), {"rack_id": rack.pk, "name": "Parked Template"},
+            format="json", **self.header,
+        )
+        self.assertHttpStatus(resp, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["placement_count"], 1)
+        placement = Template.objects.get(pk=resp.data["template_id"]).placements.get()
+        self.assertEqual(placement.anchor, "tray")
+        (_item, position, face), = stamping.compute_stamp(
+            [_StampItem(placement)], {"front": [], "rear": []}, 10)[0]
+        self.assertEqual((position, face), (None, ""))
+
+    def test_a_planned_rack_is_saved_from_what_the_design_plans_in_it(self):
+        """A planned rack holds the design's planned devices, so it saves like
+        a real one (it used to be refused as "no devices yet")."""
         self._add_perms()
         location = Location.objects.create(name="TE Loc", slug="te-loc", site=self.site)
         planned = PlannedRack.objects.create(name="TE Planned", location=location, u_height=10)
         design = make_design(title="TE Planned Design", site=self.site)
         design.planned_racks.add(planned)
+        from ..models import DesignPlacement
+        DesignPlacement.objects.create(
+            design=design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, device_role=self.role_a,
+            target_planned_rack=planned, target_position=1, target_face="front",
+            proposed_name="te-planned-1",
+        )
 
         resp = self.client.post(
             _from_design_url(),
             {"design": design.pk, "rack": f"p:{planned.pk}", "name": "Planned Template"},
             format="json", **self.header,
         )
-        self.assertHttpStatus(resp, status.HTTP_400_BAD_REQUEST)
-        self.assertFalse(Template.objects.filter(name="Planned Template").exists())
+        self.assertHttpStatus(resp, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["placement_count"], 1)
 
     # ------------------------------------------------------------------
     # Role / tenant
@@ -298,48 +382,37 @@ class TemplateExtractionTest(APITestCase):
     # Islands (D17/D32)
     # ------------------------------------------------------------------
 
-    def test_island_is_reported_as_warning_and_rest_round_trips(self):
+    def test_a_device_with_gaps_on_both_sides_keeps_its_distance(self):
+        """A device floating mid-rack is anchored to the end of the half it
+        sits in, at its real distance from it -- so the gap comes back, in a
+        rack of the same height and in a taller one (it used to be left out
+        as an "island")."""
         self._add_perms()
         rack = Rack.objects.create(name="TE Rack Island", site=self.site, u_height=10)
-        Device.objects.create(
-            name="TopEdge", site=self.site, rack=rack, device_type=self.device_type,
-            role=self.role_a, position=10, face="front",
-        )
-        Device.objects.create(
-            name="Island", site=self.site, rack=rack, device_type=self.device_type,
-            role=self.role_a, position=5, face="front",
-        )
-        Device.objects.create(
-            name="BottomEdge", site=self.site, rack=rack, device_type=self.device_type,
-            role=self.role_a, position=1, face="front",
-        )
+        for name, position in (("TopEdge", 10), ("Island", 5), ("BottomEdge", 1)):
+            Device.objects.create(
+                name=name, site=self.site, rack=rack, device_type=self.device_type,
+                role=self.role_a, position=position, face="front",
+            )
 
         resp = self.client.post(
             _from_rack_url(), {"rack_id": rack.pk, "name": "Island Template"},
             format="json", **self.header,
         )
         self.assertHttpStatus(resp, status.HTTP_201_CREATED)
-        warnings = resp.data.get("warnings", [])
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("Island", warnings[0])
-
+        self.assertEqual(resp.data.get("warnings", []), [])
         template = Template.objects.get(pk=resp.data["template_id"])
-        top_level = list(template.placements.all())
-        # The island is left OUT -- never silently dropped without a trace
-        # (the warning above) and never silently reattached to an end.
-        self.assertEqual(len(top_level), 2)
-        labels = {tp.label for tp in top_level}
-        self.assertEqual(labels, {"TopEdge", "BottomEdge"})
-        self.assertFalse(any("Island" == tp.label for tp in top_level))
+        island = template.placements.get(label="Island")
+        self.assertEqual((island.anchor, island.offset), ("bottom", Decimal(4)))
 
-        items = [_StampItem(tp) for tp in top_level]
-        placements, unplaced = stamping.compute_stamp(
-            items, {"front": [], "rear": []}, rack.u_height, starting_unit=1,
-        )
-        self.assertEqual(unplaced, [])
-        by_label = {stamp_item.tp.label: position for stamp_item, position, _face in placements}
-        self.assertEqual(by_label["TopEdge"], Decimal(10))
-        self.assertEqual(by_label["BottomEdge"], Decimal(1))
+        items = [_StampItem(tp) for tp in template.placements.all()]
+        for height, top in ((10, 10), (12, 12), (47, 47)):
+            placements, unplaced = stamping.compute_stamp(
+                items, {"front": [], "rear": []}, height, starting_unit=1)
+            self.assertEqual(unplaced, [])
+            by_label = {item.tp.label: position for item, position, _face in placements}
+            self.assertEqual(by_label, {"TopEdge": Decimal(top), "Island": Decimal(5),
+                                        "BottomEdge": Decimal(1)}, height)
 
     # ------------------------------------------------------------------
     # Empty rack
@@ -411,3 +484,4 @@ class _StampItem:
         self.is_full_depth = tp.device_type.is_full_depth
         self.face = tp.face if tp.face in ("front", "rear") else "front"
         self.anchor = tp.anchor
+        self.offset = tp.offset

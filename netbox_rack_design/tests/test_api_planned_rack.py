@@ -25,6 +25,154 @@ from ..models import DesignPlacement, DesignPowerFeed, PlannedRack
 from .utils import create_dcim_environment, make_design
 
 
+class CreatePlannedRackActionTest(APITestCase):
+    """
+    POST .../designs/<pk>/create-planned-rack/ -- the editor's "Create rack"
+    dialog. Covers the two features layered onto the existing single-rack
+    action: NetBox-style name-pattern expansion (``R[1-4]`` -> 4 racks) and
+    optional copy-feeds-on-create (seed each new rack's supply from an
+    existing rack in the same design, the same clone ``DesignViewSet.
+    copy_feeds`` performs for the rack-power dialog's "Copy from rack").
+    """
+
+    view_namespace = "plugins-api:netbox_rack_design"
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.racks = env["racks"]
+        cls.location = Location.objects.create(
+            name="Create Location", slug="create-location", site=cls.site
+        )
+        cls.design = make_design(title="Create planned rack design", site=cls.site)
+
+    def _url(self):
+        return reverse(
+            "plugins-api:netbox_rack_design-api:design-create-planned-rack",
+            kwargs={"pk": self.design.pk},
+        )
+
+    def test_plain_name_creates_one_rack_old_response_shape(self):
+        """A name with no brackets: one rack, the same response shape as
+        before this feature -- exactly ``rack_key``/``planned_rack_id``/
+        ``planned_rack_ids``, no ``planned_racks`` list."""
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        response = self.client.post(
+            self._url(),
+            {"name": "R101", "u_height": 42, "location_id": self.location.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        self.assertEqual(
+            sorted(response.data.keys()),
+            ["planned_rack_id", "planned_rack_ids", "rack_key"],
+        )
+        planned = PlannedRack.objects.get(name="R101", location=self.location)
+        self.assertEqual(response.data["planned_rack_id"], planned.pk)
+        self.assertEqual(response.data["rack_key"], f"p:{planned.pk}")
+        self.assertEqual(response.data["planned_rack_ids"], [planned.pk])
+        self.assertEqual(PlannedRack.objects.filter(location=self.location).count(), 1)
+
+    def test_pattern_name_creates_multiple_racks_in_order(self):
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        response = self.client.post(
+            self._url(),
+            {"name": "R[1-4]", "u_height": 42, "location_id": self.location.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        self.assertIn("planned_racks", response.data)
+        names = [entry["name"] for entry in response.data["planned_racks"]]
+        self.assertEqual(names, ["R1", "R2", "R3", "R4"])
+        for entry in response.data["planned_racks"]:
+            self.assertIn("rack_key", entry)
+            self.assertIn("planned_rack_id", entry)
+        self.assertEqual(
+            set(
+                PlannedRack.objects.filter(location=self.location)
+                .values_list("name", flat=True)
+            ),
+            {"R1", "R2", "R3", "R4"},
+        )
+        self.design.refresh_from_db()
+        self.assertEqual(self.design.planned_racks.count(), 4)
+
+    def test_malformed_pattern_returns_400_not_500(self):
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        response = self.client.post(
+            self._url(),
+            {"name": "R[9-8]", "u_height": 42, "location_id": self.location.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PlannedRack.objects.filter(location=self.location).count(), 0)
+
+    def test_collision_anywhere_in_expansion_creates_nothing(self):
+        """One of the expanded names already exists in this location -- the
+        whole batch is refused, and NONE of the others are created either."""
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        PlannedRack.objects.create(name="R3", location=self.location, u_height=42)
+        response = self.client.post(
+            self._url(),
+            {"name": "R[1-4]", "u_height": 42, "location_id": self.location.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("R3", str(response.data))
+        # Only the pre-existing R3 survives -- R1/R2/R4 were never created.
+        self.assertEqual(
+            set(
+                PlannedRack.objects.filter(location=self.location)
+                .values_list("name", flat=True)
+            ),
+            {"R3"},
+        )
+
+    def test_copy_feeds_on_create_gives_each_rack_its_own_feeds(self):
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        source = self.racks[0]
+        DesignPowerFeed.objects.create(
+            design=self.design, rack=source, name=f"{source.name}-A",
+            voltage=230, amperage=16,
+        )
+        response = self.client.post(
+            self._url(),
+            {
+                "name": "R[1-2]",
+                "u_height": 42,
+                "location_id": self.location.pk,
+                "copy_feeds_from_rack_id": str(source.pk),
+            },
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        r1 = PlannedRack.objects.get(name="R1", location=self.location)
+        r2 = PlannedRack.objects.get(name="R2", location=self.location)
+        feed1 = DesignPowerFeed.objects.get(design=self.design, planned_rack=r1)
+        feed2 = DesignPowerFeed.objects.get(design=self.design, planned_rack=r2)
+        # Each rack's copied feed is named for ITSELF, not the source or its
+        # sibling (mirrors copy_feeds's own name-retargeting).
+        self.assertEqual(feed1.name, "R1-A")
+        self.assertEqual(feed2.name, "R2-A")
+
+    def test_copy_feeds_omitted_creates_no_feeds(self):
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        response = self.client.post(
+            self._url(),
+            {"name": "R900", "u_height": 42, "location_id": self.location.pk},
+            format="json",
+            **self.header,
+        )
+        self.assertHttpStatus(response, status.HTTP_201_CREATED)
+        self.assertEqual(DesignPowerFeed.objects.filter(design=self.design).count(), 0)
+
+
 class PlannedRackAPITest(APIViewTestCases.APIViewTestCase):
     """Full CRUD through the REST API -- the standard suite."""
 

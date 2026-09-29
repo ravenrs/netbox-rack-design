@@ -513,3 +513,40 @@ class PlannedRackOrphanFilterTest(APITestCase):
         ids = {row["id"] for row in response.data["results"]}
         self.assertIn(self.referenced.pk, ids)
         self.assertNotIn(self.orphan.pk, ids)
+
+
+class PlannedRackReferencedMessageTest(DjangoTestCase):
+    """The delete refusal reads as a sentence for one design and for several.
+
+    It said "Q3 Expansion (v1) still plan across it" when one design held
+    the rack (found recording Part 9).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        env = create_dcim_environment()
+        cls.site = env["site"]
+        cls.location = Location.objects.create(
+            name="Msg Location", slug="msg-location", site=cls.site
+        )
+
+    def test_one_design_plans_and_loses_its_placements(self):
+        from ..api.views import _planned_rack_referenced_rest_message
+        from ..views import _planned_rack_referenced_message
+
+        pr = PlannedRack.objects.create(name="One", location=self.location, u_height=10)
+        make_design(title="Alone", site=self.site).planned_racks.add(pr)
+        for message in (_planned_rack_referenced_message(pr),
+                        _planned_rack_referenced_rest_message(pr)):
+            self.assertIn("still plans across it", message)
+            self.assertIn("lose its placements", message)
+
+    def test_several_designs_plan_and_lose_their_placements(self):
+        from ..views import _planned_rack_referenced_message
+
+        pr = PlannedRack.objects.create(name="Two", location=self.location, u_height=10)
+        make_design(title="First", site=self.site).planned_racks.add(pr)
+        make_design(title="Second", site=self.site).planned_racks.add(pr)
+        message = _planned_rack_referenced_message(pr)
+        self.assertIn("still plan across it", message)
+        self.assertIn("lose their placements", message)

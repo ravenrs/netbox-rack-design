@@ -95,7 +95,7 @@ class _FaceOccupancy:
         self._spans.append((start, height))
 
 
-def _find_slot(front, rear, is_full_depth, face, anchor, height, low, high):
+def _find_slot(front, rear, is_full_depth, face, anchor, height, low, high, offset=0):
     """Return the lowest unit of the first free slot for one item, scanning
     from the anchor, or ``None`` if none fits within ``[low, high]``
     inclusive-of-start (a slot's top edge must not exceed ``high + 1`` --
@@ -116,6 +116,11 @@ def _find_slot(front, rear, is_full_depth, face, anchor, height, low, high):
         # anywhere, regardless of occupancy.
         return None
 
+    # ``offset`` units of empty space are kept between the anchor's end and
+    # the item: the scan starts that far in (a template saved from a real
+    # rack keeps each device's distance from its end, gaps included).
+    offset = _as_decimal(offset or 0)
+
     if anchor == "top":
         # Scan every legal start from the top down. Slots are always a
         # multiple of 0.5U apart in practice, but rather than assume a step
@@ -124,13 +129,13 @@ def _find_slot(front, rear, is_full_depth, face, anchor, height, low, high):
         # complexity for a first cut. Half-U granularity is guaranteed by
         # the model field (max_digits=4, decimal_places=1), so stepping by
         # 0.5 is exact and never skips a legal position.
-        start = highest_start
+        start = highest_start - offset
         while start >= low:
             if all(f.is_free(start, height) for f in faces):
                 return start
             start -= _STEP
     else:  # anchor == "bottom"
-        start = low
+        start = low + offset
         while start <= highest_start:
             if all(f.is_free(start, height) for f in faces):
                 return start
@@ -181,8 +186,23 @@ def compute_stamp(items, occupied, u_height, *, starting_unit=1):
 
     for item in items:
         height = _as_decimal(item.u_height)
+
+        if height == 0 or getattr(item, "anchor", None) == "tray":
+            # A device that had no unit -- anchored to the tray, or a 0U type
+            # (a PDU, typically) -- belongs in the rack's
+            # NON-RACKED TRAY, not in a numbered unit -- it never competes
+            # for a slot, never collides with another 0U item, and never
+            # blocks (or is blocked by) anything ``_find_slot`` tracks.
+            # ``position=None``/``face=""`` mirrors how the rest of the
+            # plugin already represents a tray device: DesignPlacement's
+            # target_position=None case, and _RackSlotTarget's "a tray
+            # target carries no face" rule (api/views.py).
+            placements.append((item, None, ""))
+            continue
+
         start = _find_slot(
-            front, rear, item.is_full_depth, item.face, item.anchor, height, low, high
+            front, rear, item.is_full_depth, item.face, item.anchor, height, low, high,
+            getattr(item, "offset", 0),
         )
         if start is None:
             unplaced.append((item, "does not fit"))
@@ -311,7 +331,8 @@ def _peel_face(item_ids, info):
     return top_run, bottom_run, islands
 
 
-def compute_anchors(items, u_height, *, starting_unit=1, desc_units=False):
+def compute_anchors(items, u_height, *, starting_unit=1, desc_units=False,
+                    with_offsets=False):
     """Derive ``(anchor, order)`` per item such that feeding the result back
     through ``compute_stamp`` into an EMPTY rack of the same ``u_height`` /
     ``starting_unit`` reproduces the original absolute positions.
@@ -436,4 +457,25 @@ def compute_anchors(items, u_height, *, starting_unit=1, desc_units=False):
             )
         islands.append((item, reason))
 
-    return anchored, islands
+    if not with_offsets:
+        return anchored, islands
+
+    # With offsets nothing is an island: a device with free units on both
+    # sides is anchored to the end of the rack it is nearer (the half it sits
+    # in), ``offset`` units in -- its real distance from that end -- so the
+    # stamp puts it back with the gap intact, in a rack of any height. Runs
+    # touching an end keep offset 0 and their order, exactly as before.
+    out = [(item, anchor, order, Decimal(0)) for item, anchor, order in anchored]
+    next_order = {}
+    for _item, anchor, order in anchored:
+        next_order[anchor] = max(next_order.get(anchor, -1), order)
+    for item, _reason in sorted(
+            islands, key=lambda pair: min(info[id(pair[0])]["dtop"], info[id(pair[0])]["dbot"])):
+        entry = info[id(item)]
+        if entry["dtop"] < entry["dbot"]:
+            anchor, offset = physical_top_anchor, entry["dtop"]
+        else:
+            anchor, offset = physical_bottom_anchor, entry["dbot"]
+        next_order[anchor] = next_order.get(anchor, -1) + 1
+        out.append((item, anchor, next_order[anchor], offset))
+    return out, []

@@ -17,7 +17,7 @@ FK is still readable here, and because that pass writes only the FK column
 being nulled, the flag written below survives it.
 """
 
-from django.db.models.signals import pre_delete
+from django.db.models.signals import pre_delete, pre_save
 from django.dispatch import receiver
 
 from .choices import DesignPlacementKindChoices
@@ -48,6 +48,39 @@ def flag_placements_of_deleted_device(instance, **kwargs):
         # clean() tolerates only via the stale branch, and the device FK is
         # nulled by the collector immediately after this.
         placement.save()
+
+
+@receiver(pre_save, sender=DesignPlacement)
+def flag_placement_whose_device_is_nulled(instance, **kwargs):
+    """The same stamp when the device reference is nulled FIRST.
+
+    During a web request NetBox core's own pre_delete handler
+    (core/signals.py ``handle_deleted_object``) runs before the receiver above:
+    it nulls every SET_NULL reference to the device and saves it for the
+    changelog, so by the time the receiver above looks, no placement points at
+    the device any more and nothing was flagged -- the move silently went inert
+    (found recording the tutorial, Part 15). The device row still exists at
+    that moment, so its name is still readable.
+    """
+    if (
+        instance.pk is None
+        or instance.stale
+        or instance.device_id is not None
+        or instance.kind not in (
+            DesignPlacementKindChoices.KIND_MOVE,
+            DesignPlacementKindChoices.KIND_REMOVE,
+        )
+    ):
+        return
+    previous = (
+        DesignPlacement.objects.filter(pk=instance.pk)
+        .values_list("device_id", "device__name")
+        .first()
+    )
+    if previous is None or previous[0] is None:
+        return
+    instance.stale = True
+    instance.stale_device_name = (previous[1] or "")[:64]
 
 
 @receiver(pre_delete, sender=DesignPlacement)

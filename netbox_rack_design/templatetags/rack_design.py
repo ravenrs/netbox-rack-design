@@ -311,6 +311,21 @@ def _place_label(rack, position):
 
 
 @register.filter()
+def planning_rows(planning_data):
+    """``(label, value)`` rows for a stored ``planning_data`` blob, in the
+    configured order and read the way a person reads them (a choice's label,
+    an object's name). Unset fields are omitted."""
+    data = planning_data or {}
+    rows = []
+    for field in planning_fields.placement_field_schema():
+        value = data.get(field["key"])
+        if value in (None, "", []):
+            continue
+        rows.append((field["label"], planning_fields.display_value(field, value)))
+    return rows
+
+
+@register.filter()
 def slot_planning(slot):
     """The deployment's config-declared planning fields for a slot's hover card.
 
