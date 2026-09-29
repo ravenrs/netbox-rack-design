@@ -168,8 +168,12 @@ class EditorRackVisibilityTestCase(unittest.TestCase):
     def _open_editor(self):
         self.page.goto(self.editor_url, wait_until="networkidle")
         self.page.wait_for_timeout(1200)
+        # Both debug-toolbar ids, as test_editor_bays does: 4.4 renders the panel
+        # as #djDebug, newer NetBox wraps it in a full-page #djDebugRoot that
+        # swallows the clicks by itself.
         self.page.add_style_tag(
-            content="#djDebug,#djDebugToolbarHandle{display:none !important}")
+            content="#djDebug,#djDebugRoot,#djDebugToolbarHandle"
+                    "{display:none !important;pointer-events:none !important}")
         # The drawer remembers it was open (a reload inside one test), so
         # open it only when it is closed.
         toggle = self.page.locator("[data-rd-section-toggle='racks']")

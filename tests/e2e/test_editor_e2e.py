@@ -733,6 +733,9 @@ class EditorE2ETestCase(unittest.TestCase):
 
         before = chassis_bg()
         before_theme = theme_state()
+        # On newer NetBox the debug toolbar's full-page #djDebugRoot sits over
+        # the navbar, so a forced click on the toggle lands on it instead.
+        self._dismiss_debug_toolbar()
 
         # NetBox renders the colour-mode control several times (desktop + mobile
         # navbars, one button per direction). Click the visible ones until the
