@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-30
+
+### Release Summary
+
+A minor release that makes a placement readable and editable outside the
+editor. The placement's own page and the Placements table now show what the
+plan actually says — the proposed name, role, tenant, planning fields and
+power — and the placement's NetBox form edits the same things the editor
+does. No migrations, no breaking changes.
+
+### Added
+- **Planning fields on a placement's form and page.** The design placement's
+  NetBox edit form gets one typed input per configured `placement_fields`
+  entry (as the template placement form already had), plus Device role and
+  Tenant. The placement page lists every configured field, set or not; a
+  placement on an existing device shows the device's own custom-field value,
+  marked "(from the device)", until the design overrides it.
+- **Power card on the placement page**: the bound power feed (real or
+  planned), the device a planned PDU takes its custom fields from, and the
+  preferred feed legs.
+
+### Changed
+- **A placement is named by what it plans.** Its title and links read
+  `Add: ams1-server-1 (SRV-1U)`, and a renaming move
+  `Move: srv-110 → srv-111`, instead of only the device type.
+- **Placements table**: a linked **Placement** column opens the placement
+  (every other linked column led away from it), and Proposed name and Role
+  are default columns; Tenant is available.
+- The placement page shows a planned target rack, with a "planned" badge,
+  and the template a stamped placement came from.
+
 ## [1.0.0] - 2026-09-29
 
 ### Release Summary

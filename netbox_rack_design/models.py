@@ -972,6 +972,14 @@ class DesignPlacement(NetBoxModel):
         )
         if self.stale:
             return f"{self.get_kind_display()}: {label} (reference gone)"
+        # The planned name is what a person looks for: an add reads
+        # "Add: ams1-server-1 (SRV-1U)", a renaming move "Move: srv-110 -> srv-111".
+        name = self.proposed_name
+        if name and self.device_id:
+            if name != self.device.name:
+                return f"{self.get_kind_display()}: {label} \u2192 {name}"
+        elif name:
+            return f"{self.get_kind_display()}: {name} ({label})"
         return f"{self.get_kind_display()}: {label}"
 
     def get_absolute_url(self):

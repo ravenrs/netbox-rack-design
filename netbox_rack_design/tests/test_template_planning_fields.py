@@ -21,7 +21,7 @@ from rest_framework import status
 from utilities.testing import APITestCase
 
 from ..choices import DesignPlacementKindChoices
-from ..forms import TemplatePlacementForm
+from ..forms import DesignPlacementForm, TemplatePlacementForm
 from ..models import DesignPlacement, Template, TemplatePlacement
 from .utils import make_design
 
@@ -193,3 +193,47 @@ class TemplatePlacementFormTest(TestCase, _Fixture):
         self.assertIn("Planning fields", html)
         self.assertIn("Gold", html)
         self.assertIn("TP Staging", html)
+
+
+@override_settings(PLUGINS_CONFIG=_cfg())
+class DesignPlacementPlanningFormTest(TestCase, _Fixture):
+    """A design placement's own NetBox form and page carry the planning fields
+    too -- not only the editor."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.build()
+        cls.design = make_design(title="DP Form", site=cls.site)
+        cls.design.racks.add(cls.rack)
+
+    def test_saving_the_form_stores_the_values(self):
+        form = DesignPlacementForm(data={
+            "design": self.design.pk, "kind": "add", "device_type": self.device_type.pk,
+            "device_role": self.role.pk, "proposed_name": "dp-1",
+            "target_rack": self.rack.pk, "target_position": "3", "target_face": "front",
+            "pf_tier": "gold", "pf_burn_in": "12",
+        })
+        self.assertTrue(form.is_valid(), form.errors)
+        placement = form.save()
+        placement.refresh_from_db()
+        self.assertEqual(placement.planning_data, {"burn_in": 12, "tier": "gold"})
+        self.assertEqual(placement.device_role, self.role)
+
+    def test_the_page_lists_every_field_and_falls_back_to_the_device(self):
+        from users.models import User
+        self.client.force_login(User.objects.create_superuser(username="dp-admin"))
+        add = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, target_rack=self.rack, target_position=4,
+            target_face="front", planning_data={"tier": "gold"})
+        html = self.client.get(add.get_absolute_url()).content.decode()
+        self.assertIn("Hardware tier", html)
+        self.assertIn("Gold", html)
+        self.assertIn("Burn-in hours", html)  # unset, still listed
+        device = self._device("dp-dev", 6, tp_burn_in=48)
+        move = DesignPlacement.objects.create(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE, device=device,
+            target_rack=self.rack, target_position=8, target_face="front")
+        html = self.client.get(move.get_absolute_url()).content.decode()
+        self.assertIn("48", html)
+        self.assertIn("(from the device)", html)

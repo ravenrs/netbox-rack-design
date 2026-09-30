@@ -83,7 +83,7 @@ More in the [documentation](https://ravenrs.github.io/netbox-rack-design/).
 
 | Plugin Version | Minimum NetBox Version | Maximum NetBox Version | Python    |
 |----------------|------------------------|------------------------|-----------|
-| 1.0.x          | 4.4.0                  | 4.7.99                 | 3.12+     |
+| 1.0.0–1.1.x    | 4.4.0                  | 4.7.99                 | 3.12+     |
 | 0.16.0–0.32.x  | 4.4.0                  | 4.6.99                 | 3.12+     |
 | 0.15.x         | 4.4.0                  | 4.4.99                 | 3.12+     |
 

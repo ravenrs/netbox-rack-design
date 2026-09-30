@@ -326,6 +326,29 @@ def planning_rows(planning_data):
 
 
 @register.filter()
+def placement_planning(placement):
+    """``(label, value, from_device)`` for EVERY configured placement field.
+
+    The placement page lists them all, set or not, so a person sees which
+    fields the deployment plans with. The design's own value wins; failing
+    that, a placement that acts on a real device shows the device's current
+    custom field (``from_device`` True), the value it keeps unless the
+    design overrides it. ``None`` for a value that is unset everywhere.
+    """
+    planned = placement.planning_data or {}
+    rows = []
+    for field in planning_fields.placement_field_schema():
+        value = planned.get(field["key"])
+        from_device = False
+        if value in (None, "", []) and placement.device_id:
+            value = planning_fields.resolve_source(placement.device, field.get("target"))
+            from_device = value not in (None, "", [])
+        shown = None if value in (None, "", []) else planning_fields.display_value(field, value)
+        rows.append((field["label"], shown, from_device))
+    return rows
+
+
+@register.filter()
 def slot_planning(slot):
     """The deployment's config-declared planning fields for a slot's hover card.
 
