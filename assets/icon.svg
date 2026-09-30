@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="netbox-rack-design">
+  <title>netbox-rack-design</title>
+  <!-- Rack frame -->
+  <rect x="128" y="56" width="256" height="400" rx="30"
+        fill="none" stroke="#1C2A3A" stroke-width="18"/>
+  <!-- Mounting rail screw holes (top + bottom corners) -->
+  <circle cx="150" cy="84"  r="7" fill="#1C2A3A"/>
+  <circle cx="362" cy="84"  r="7" fill="#1C2A3A"/>
+  <circle cx="150" cy="428" r="7" fill="#1C2A3A"/>
+  <circle cx="362" cy="428" r="7" fill="#1C2A3A"/>
+
+  <!-- Existing devices (solid) -->
+  <rect x="160" y="118" width="192" height="54" rx="12" fill="#1C2A3A"/>
+  <rect x="160" y="192" width="192" height="54" rx="12" fill="#1C2A3A"/>
+  <rect x="160" y="340" width="192" height="54" rx="12" fill="#1C2A3A"/>
+
+  <!-- Planned change (dashed accent + plus) -->
+  <rect x="160" y="266" width="192" height="54" rx="12"
+        fill="#14B8C4" fill-opacity="0.15"
+        stroke="#14B8C4" stroke-width="8" stroke-dasharray="22 14" stroke-linecap="round"/>
+  <g fill="#14B8C4">
+    <rect x="238" y="289" width="36" height="8" rx="4"/>
+    <rect x="252" y="275" width="8" height="36" rx="4"/>
+  </g>
+</svg>
