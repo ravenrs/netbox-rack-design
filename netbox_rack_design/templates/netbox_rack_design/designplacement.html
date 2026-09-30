@@ -2,6 +2,7 @@
 {% load helpers %}
 {% load plugins %}
 {% load i18n %}
+{% load rack_design %}
 
 {% block content %}
 <div class="row mb-3">
@@ -30,6 +31,14 @@
           <td>{{ object.proposed_name|placeholder }}</td>
         </tr>
         <tr>
+          <th scope="row">{% trans "Device role" %}</th>
+          <td>{{ object.device_role|linkify|placeholder }}</td>
+        </tr>
+        <tr>
+          <th scope="row">{% trans "Tenant" %}</th>
+          <td>{{ object.tenant|linkify|placeholder }}</td>
+        </tr>
+        <tr>
           <th scope="row">{% trans "Stale" %}</th>
           <td>{% checkmark object.stale %}</td>
         </tr>
@@ -37,8 +46,31 @@
           <th scope="row">{% trans "Deleted device name" %}</th>
           <td>{{ object.stale_device_name|placeholder }}</td>
         </tr>
+        {% if object.from_template_id %}
+          <tr>
+            <th scope="row">{% trans "From template" %}</th>
+            <td>{{ object.from_template|linkify }}{% if object.from_template_version %} <span class="text-muted">v{{ object.from_template_version }}</span>{% endif %}</td>
+          </tr>
+        {% endif %}
       </table>
     </div>
+    {% with rows=object|placement_planning %}
+      {% if rows %}
+        {# The deployment's placement_fields (planning_fields.py): what apply #}
+        {# writes onto the real device's custom fields.                        #}
+        <div class="card">
+          <h2 class="card-header">{% trans "Planning fields" %}</h2>
+          <table class="table table-hover attr-table">
+            {% for label, value, from_device in rows %}
+              <tr>
+                <th scope="row">{{ label }}</th>
+                <td>{{ value|placeholder }}{% if from_device %} <span class="text-muted">{% trans "(from the device)" %}</span>{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        </div>
+      {% endif %}
+    {% endwith %}
     {% include 'inc/panels/custom_fields.html' %}
     {% plugin_left_page object %}
   </div>
@@ -48,7 +80,11 @@
       <table class="table table-hover attr-table">
         <tr>
           <th scope="row">{% trans "Target rack" %}</th>
-          <td>{{ object.target_rack|linkify|placeholder }}</td>
+          <td>
+            {% if object.target_planned_rack %}{{ object.target_planned_rack|linkify }}
+              <span class="badge text-bg-blue">{% trans "planned" %}</span>
+            {% else %}{{ object.target_rack|linkify|placeholder }}{% endif %}
+          </td>
         </tr>
         <tr>
           <th scope="row">{% trans "Target position" %}</th>
@@ -84,6 +120,37 @@
             {% else %}{{ object.target_bay_name|placeholder }}{% endif %}
           </td>
         </tr>
+      </table>
+    </div>
+    {% endif %}
+    {# Power: only for a row that carries any -- a planned PDU's feed and cf  #}
+    {# source, or a device's preferred feed legs.                              #}
+    {% if object.real_power_feed or object.planned_power_feed or object.power_source_device or object.preferred_feed_legs %}
+    <div class="card">
+      <h2 class="card-header">{% trans "Power" %}</h2>
+      <table class="table table-hover attr-table">
+        {% if object.real_power_feed or object.planned_power_feed %}
+          <tr>
+            <th scope="row">{% trans "Power feed" %}</th>
+            <td>
+              {% if object.real_power_feed %}{{ object.real_power_feed|linkify }}
+              {% else %}{{ object.planned_power_feed|linkify }}
+                <span class="badge text-bg-blue">{% trans "planned" %}</span>{% endif %}
+            </td>
+          </tr>
+        {% endif %}
+        {% if object.power_source_device %}
+          <tr>
+            <th scope="row">{% trans "Custom fields from" %}</th>
+            <td>{{ object.power_source_device|linkify }}</td>
+          </tr>
+        {% endif %}
+        {% if object.preferred_feed_legs %}
+          <tr>
+            <th scope="row">{% trans "Preferred feed legs" %}</th>
+            <td>{{ object.preferred_feed_legs|join:", "|upper }}</td>
+          </tr>
+        {% endif %}
       </table>
     </div>
     {% endif %}

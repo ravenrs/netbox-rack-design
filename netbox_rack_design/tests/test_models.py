@@ -401,6 +401,24 @@ class DesignPlacementTestCase(TestCase):
         cls.devices = env["devices"]
         cls.design = make_design(title="Plan", site=cls.site)
 
+    def test_str_carries_the_proposed_name(self):
+        """The planned name is what a person looks for in a title or a link."""
+        add = DesignPlacement(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_ADD,
+            device_type=self.device_type, proposed_name="ams1-server-1",
+        )
+        self.assertEqual(str(add), f"Add: ams1-server-1 ({self.device_type})")
+        rename = DesignPlacement(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0], proposed_name="renamed-1",
+        )
+        self.assertEqual(str(rename), f"Move: {self.devices[0]} → renamed-1")
+        keep = DesignPlacement(
+            design=self.design, kind=DesignPlacementKindChoices.KIND_MOVE,
+            device=self.devices[0], proposed_name=self.devices[0].name,
+        )
+        self.assertEqual(str(keep), f"Move: {self.devices[0]}")
+
     def test_add_requires_device_type(self):
         placement = DesignPlacement(
             design=self.design,

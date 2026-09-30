@@ -121,10 +121,17 @@ class ElevationTable(tables.Table):
 
 
 class DesignPlacementTable(NetBoxTable):
+    # The row's own link: every other linked column leads away (to the design,
+    # device, rack), so without this the detail page was reachable only by URL.
+    placement = tables.Column(
+        accessor="pk", linkify=True, verbose_name=_("Placement"), order_by=("proposed_name", "pk"),
+    )
     design = tables.Column(linkify=True)
     kind = columns.ChoiceFieldColumn()
     device = tables.Column(linkify=True)
     device_type = tables.Column(linkify=True)
+    device_role = tables.Column(linkify=True, verbose_name=_("Role"))
+    tenant = tables.Column(linkify=True)
     target_rack = tables.Column(linkify=True)
     # Device-bay targeting: available as optional columns so a blade placement is
     # readable in the list without opening it. Off by default -- most placements
@@ -147,18 +154,21 @@ class DesignPlacementTable(NetBoxTable):
     stale = columns.BooleanColumn(verbose_name=_("Device gone"))
     stale_device_name = tables.Column(verbose_name=_("Deleted device"))
 
+    def render_placement(self, record):
+        return str(record)
+
     class Meta(NetBoxTable.Meta):
         model = DesignPlacement
         fields = (
-            "pk", "id", "design", "kind", "device", "device_type", "proposed_name",
-            "target_rack", "target_position", "target_face",
+            "pk", "id", "placement", "design", "kind", "device", "device_type", "proposed_name",
+            "device_role", "tenant", "target_rack", "target_position", "target_face",
             "target_bay", "parent_placement", "target_bay_name", "base_placement",
             "base_parent_placement",
             "stale", "stale_device_name", "actions",
         )
         default_columns = (
-            "design", "kind", "device", "device_type", "target_rack", "target_position", "target_face",
-            "stale",
+            "placement", "design", "kind", "device", "device_type", "proposed_name", "device_role",
+            "target_rack", "target_position", "target_face", "stale",
         )
 
 

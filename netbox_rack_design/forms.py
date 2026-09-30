@@ -349,10 +349,12 @@ class DesignForm(NetBoxModelForm):
         return self.cleaned_data
 
 
-class DesignPlacementForm(NetBoxModelForm):
+class DesignPlacementForm(PlanningFieldsFormMixin, NetBoxModelForm):
     design = DynamicModelChoiceField(queryset=Design.objects.all())
     device = DynamicModelChoiceField(queryset=Device.objects.all(), required=False)
     device_type = DynamicModelChoiceField(queryset=DeviceType.objects.all(), required=False)
+    device_role = DynamicModelChoiceField(queryset=DeviceRole.objects.all(), required=False)
+    tenant = DynamicModelChoiceField(queryset=Tenant.objects.all(), required=False)
     target_rack = DynamicModelChoiceField(queryset=Rack.objects.all(), required=False)
 
     # --- device-bay targeting (a blade into a chassis) ---------------------
@@ -383,7 +385,7 @@ class DesignPlacementForm(NetBoxModelForm):
 
     fieldsets = (
         FieldSet("design", "kind", "device", "device_type", "proposed_name",
-                 "tags", name=_("Placement")),
+                 "device_role", "tenant", "tags", name=_("Placement")),
         FieldSet("target_rack", "target_position", "target_face", name=_("Rack slot")),
         FieldSet("chassis", "target_bay", "parent_placement", "target_bay_name",
                  name=_("Device bay")),
@@ -393,11 +395,20 @@ class DesignPlacementForm(NetBoxModelForm):
         model = DesignPlacement
         fields = (
             "design", "kind", "device", "device_type", "proposed_name",
+            "device_role", "tenant",
             "target_rack", "target_position", "target_face",
             "parent_placement", "target_bay", "target_bay_name", "tags",
         )
 
     def __init__(self, *args, **kwargs):
+        # Which planning fields apply depends on the kind (a field's ``kinds``):
+        # the submitted one on a POST, else the row's own, else an add.
+        data = kwargs.get("data") if kwargs.get("data") is not None else (args[0] if args else None)
+        instance = kwargs.get("instance")
+        self.planning_kind = (
+            (data or {}).get("kind") or getattr(instance, "kind", None)
+            or kwargs.get("initial", {}).get("kind") or "add"
+        )
         super().__init__(*args, **kwargs)
         # Editing an existing bay placement: preselect the chassis so the bay
         # picker shows the right list instead of coming up empty.
