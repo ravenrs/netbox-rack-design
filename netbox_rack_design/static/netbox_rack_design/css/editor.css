@@ -1685,6 +1685,12 @@
 }
 .nbx-rd-dist-critical .nbx-rd-dist-label,
 .nbx-rd-dist-overload .nbx-rd-dist-label { color: #fff; }
+/* Dark theme: the empty track is dark, so the dark label vanished past the
+   fill; read in the body color like the rack power bar's label. */
+[data-bs-theme="dark"] .nbx-rd-dist-label {
+    color: var(--tblr-body-color, #f8fafc);
+    text-shadow: 0 0 2px rgba(0, 0, 0, 0.7);
+}
 /* ---- Bank ZONE strip (hangs off each face grid's LEFT edge) ------------- */
 /* One narrow bar per PDU, split into that PDU's banks at the U boundaries the
    distribution engine assigned -- so the segment breaks ARE the bank
