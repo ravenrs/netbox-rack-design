@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-05
+
+### Release Summary
+
+A patch release for the dark theme: the per-bank chips under a rack's power
+bar are readable again, and the README screenshots are refreshed in the dark
+theme on NetBox 4.7. No migrations, no breaking changes.
+
+### Fixed
+- **Bank chip labels unreadable in the dark theme.** The label of a PDU bank
+  chip (e.g. "B1: 500/3680 W") was dark text, so past the fill it vanished into
+  the dark track. It now uses the theme's body color in the dark theme.
+
+### Changed
+- README screenshots retaken in the dark theme on NetBox 4.7.
+
 ## [1.1.1] - 2026-10-05
 
 ### Release Summary
