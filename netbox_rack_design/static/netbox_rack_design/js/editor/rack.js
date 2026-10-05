@@ -322,6 +322,54 @@ function rdClearStaleMovedFrom() {
             if (!isNaN(widx)) { conflictMarkerEls[widx] = m; }
         });
 
+        // A saved add keeps its name editable after a reload: the same hidden
+        // input + pencil a fresh drop gets (finishAdd below). Typing there is
+        // a user-set name, so a later naming pass leaves it alone.
+        function attachNameEdit(w, content, gridItem) {
+            if (!content || content.querySelector(".nbx-rd-name-input")) { return; }
+            var nameInput = document.createElement("input");
+            nameInput.type = "text";
+            nameInput.className = "form-control form-control-sm nbx-rd-name-input";
+            nameInput.setAttribute("placeholder", "name…");
+            nameInput.setAttribute("aria-label", "Proposed name");
+            nameInput.value = w.proposed_name || "";
+            var editBtn = document.createElement("button");
+            editBtn.type = "button";
+            editBtn.className = "nbx-rd-name-edit-btn";
+            editBtn.title = "Edit name";
+            editBtn.setAttribute("aria-label", "Edit name");
+            editBtn.innerHTML = '<i class="mdi mdi-pencil" aria-hidden="true"></i>';
+            content.appendChild(nameInput);
+            content.appendChild(editBtn);
+            function closeNameEdit() {
+                content.classList.remove("nbx-rd-editing");
+                if (gridItem) { gridItem.classList.remove("nbx-rd-editing-item"); }
+            }
+            editBtn.addEventListener("click", function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                content.classList.add("nbx-rd-editing");
+                if (gridItem) { gridItem.classList.add("nbx-rd-editing-item"); }
+                nameInput.value = w.proposed_name || "";
+                nameInput.focus();
+                nameInput.select();
+            });
+            nameInput.addEventListener("blur", closeNameEdit);
+            nameInput.addEventListener("keydown", function (e) {
+                if (e.key === "Enter" || e.key === "Escape") {
+                    e.preventDefault();
+                    nameInput.blur();
+                }
+            });
+            nameInput.addEventListener("input", function () {
+                w.nameUserSet = true;
+                w.proposed_name = nameInput.value;
+                content.setAttribute("data-name", nameInput.value || w.label || "");
+                setTileDisplayName(content, nameInput.value);
+                markDirty();
+            });
+        }
+
         // Config-declared planning attributes: an `add` rehydrated on load gets
         // its attributes button back, pre-filled from the server-delivered
         // widget.planning_data (views.py _slot_to_widget). No-op for a
@@ -330,6 +378,7 @@ function rdClearStaleMovedFrom() {
             if (!w || w.kind !== "add" || w.opposite_face) { return; }
             var el = block.querySelector('.grid-stack-item[data-widget-index="' + idx + '"]');
             var content = el && el.querySelector(".grid-stack-item-content");
+            attachNameEdit(w, content, el);
             attachPlacementFieldsButton(w, content);
         });
 
