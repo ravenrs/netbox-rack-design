@@ -467,6 +467,18 @@
     z-index: 2;
 }
 
+/* On a 1U tile top-left and bottom-left are the same 16px corner, so the
+   planning-attributes (and PDU power) buttons there would cover the pencil.
+   Step it right past whichever of them the tile carries. */
+.grid-stack-item-content:has(> .nbx-rd-placement-btn) > .nbx-rd-name-edit-btn,
+.grid-stack-item-content:has(> .nbx-rd-power-btn) > .nbx-rd-name-edit-btn {
+    left: 16px;
+}
+
+.grid-stack-item-content:has(> .nbx-rd-power-btn):has(> .nbx-rd-placement-btn) > .nbx-rd-name-edit-btn {
+    left: 32px;
+}
+
 .grid-stack-item-content:hover > .nbx-rd-name-edit-btn,
 .grid-stack-item-content.nbx-rd-editing > .nbx-rd-name-edit-btn {
     opacity: 1;

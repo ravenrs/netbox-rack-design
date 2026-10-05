@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-05
+
+### Release Summary
+
+A patch release for the editor: a planned device's name can be edited again
+on a 1U tile once placement planning fields are configured, and after the
+design has been saved and reloaded. No migrations, no breaking changes.
+
+### Fixed
+- **Name pencil hidden on 1U tiles.** With `placement_fields` configured, the
+  planning-attributes button sat over the name pencil on a 1U planned device,
+  so the name could no longer be edited. The pencil now steps clear of that
+  button (and of a PDU's power button).
+- **A saved planned device keeps its name editable after a reload.** Only a
+  freshly dropped tile had the name pencil; one loaded from a saved design now
+  gets it too.
+
+### Added
+- The planning-attributes dialog of a planned device has a **Name** field, so
+  the name and the planning fields are set in one place.
+
 ## [1.1.0] - 2026-09-30
 
 ### Release Summary

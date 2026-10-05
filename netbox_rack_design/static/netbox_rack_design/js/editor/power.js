@@ -1243,6 +1243,15 @@ function showPlacementFieldsDialog(widget, content, kind) {
             + '<div class="form-label small mb-1 fw-semibold">Power</div>'
             + selectsHtml + "</div>";
     }
+    // An add's name lives in the tile's hidden .nbx-rd-name-input (rack.js).
+    // On a 1U tile this dialog's button covers that input's pencil, so the
+    // name is offered here as well and written back through the same input.
+    var nameInput = (kind || widget.kind || "add") === "add" && content
+        ? content.querySelector(".nbx-rd-name-input") : null;
+    var nameHtml = nameInput
+        ? '<div class="mb-2"><label class="form-label small mb-0">Name</label>'
+            + '<input type="text" class="form-control form-control-sm nbx-rd-placement-name"></div>'
+        : "";
     var title = (widget.proposed_name || widget.label || "device").replace(/</g, "&lt;");
     overlay.innerHTML =
         '<div class="modal-dialog modal-dialog-centered">'
@@ -1251,7 +1260,7 @@ function showPlacementFieldsDialog(widget, content, kind) {
         + '<h5 class="modal-title">Planning attributes — ' + title + "</h5>"
         + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
         + "</div>"
-        + '<div class="modal-body">' + rowsHtml + powerHtml
+        + '<div class="modal-body">' + nameHtml + rowsHtml + powerHtml
         + '<div class="form-text">Carried on the planned device when this design is applied.</div>'
         + "</div>"
         + '<div class="modal-footer">'
@@ -1275,6 +1284,9 @@ function showPlacementFieldsDialog(widget, content, kind) {
         var idx = parseInt(sel.getAttribute("data-psu-index"), 10);
         if (currentLegs[idx]) { sel.value = currentLegs[idx]; }
     });
+
+    var nameField = overlay.querySelector(".nbx-rd-placement-name");
+    if (nameField) { nameField.value = widget.proposed_name || ""; }
 
     var decided = { cancelled: false };
     var wired = wireModal(overlay, decided);
@@ -1311,6 +1323,10 @@ function showPlacementFieldsDialog(widget, content, kind) {
             } else {
                 delete widget.preferred_feed_legs;
             }
+        }
+        if (nameField && nameField.value !== (widget.proposed_name || "")) {
+            nameInput.value = nameField.value;
+            nameInput.dispatchEvent(new Event("input", { bubbles: true }));
         }
         stampPlanningAttr(widget, content);
         if (widget._rdAttrStash === undefined) { widget._rdAttrStash = null; }
