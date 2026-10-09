@@ -26,6 +26,7 @@ __all__ = (
     "DesignGroup",
     "Design",
     "DesignPlacement",
+    "DesignStep",
     "DesignPowerFeed",
     "DesignRackPower",
     "FavoriteDeviceType",
@@ -572,6 +573,50 @@ class Design(NetBoxModel):
                         )
 
 
+class DesignStep(NetBoxModel):
+    """
+    One step of a design's execution plan (PLAN-execution-steps.md Sec. 3, E4):
+    a group of actions done together, like a maintenance window. Placements
+    point at their step via ``DesignPlacement.step``; a design has a plan when
+    it has at least one step. Steps are a planning/checking tool only; Apply
+    ignores them.
+    """
+
+    design = models.ForeignKey(
+        to="netbox_rack_design.Design",
+        on_delete=models.CASCADE,
+        related_name="steps",
+    )
+    index = models.PositiveSmallIntegerField()
+    title = models.CharField(max_length=100, blank=True)
+
+    class Meta:
+        ordering = ("design", "index")
+        verbose_name = "design step"
+        verbose_name_plural = "design steps"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("design", "index"),
+                name="%(app_label)s_%(class)s_unique_design_index",
+            ),
+        ]
+
+    def __str__(self):
+        # FK-free, like DesignPowerFeed.__str__: partial-field fetches (GraphQL)
+        # must be able to render the label.
+        if self.title:
+            return f"Step {self.index} \u2013 {self.title}"
+        return f"Step {self.index}"
+
+    def get_absolute_url(self):
+        # No detail view of its own: a step is read in its design's editor.
+        return reverse("plugins:netbox_rack_design:design", args=[self.design_id])
+
+    @property
+    def docs_url(self):
+        return DOCS_BASE_URL
+
+
 class DesignPlacement(NetBoxModel):
     """
     A single proposed change within a design: add a new device from the
@@ -917,6 +962,20 @@ class DesignPlacement(NetBoxModel):
     # the drift this field exists to detect, not something to paper over.
     from_template_version = models.PositiveIntegerField(blank=True, null=True)
 
+    # The execution-plan step this placement belongs to (PLAN-execution-steps.md
+    # Sec. 3); null = unscheduled. SET_NULL: deleting a step must not delete
+    # the work planned in it. A bay child (blade) never carries a step of its
+    # own, it follows its chassis (enforced in clean()). ``step_order`` orders
+    # the checklist inside the step.
+    step = models.ForeignKey(
+        to="netbox_rack_design.DesignStep",
+        on_delete=models.SET_NULL,
+        related_name="placements",
+        blank=True,
+        null=True,
+    )
+    step_order = models.PositiveSmallIntegerField(default=0)
+
     class Meta:
         ordering = ("design", "target_position", "pk")
         verbose_name = "design placement"
@@ -1080,6 +1139,19 @@ class DesignPlacement(NetBoxModel):
         # regardless of what else about the placement would otherwise be valid.
         if self.design_id and self.design.is_frozen:
             raise ValidationError(_frozen_design_clean_message("its placements"))
+
+        # Execution-plan step (PLAN-execution-steps.md Sec. 3): the step must
+        # belong to this placement's own design, and a blade (a bay child, by
+        # either route) has none -- it follows its chassis' step.
+        if self.step_id:
+            if self.step.design_id != self.design_id:
+                raise ValidationError({
+                    "step": "The step must belong to the same design as the placement.",
+                })
+            if self.parent_placement_id or self.base_parent_placement_id:
+                raise ValidationError({
+                    "step": "A blade follows its chassis' step and cannot have one of its own.",
+                })
 
         # Config-declared planning fields: validated against the deployment's
         # ``placement_fields`` schema and normalised in place, so what reaches

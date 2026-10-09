@@ -51,6 +51,7 @@ import {
     freezeAllTiles,
     thawAllTiles,
     findGhostAcrossBlocks,
+    nextActionSeq,
 } from "rd/registry.js";
 
 
@@ -1670,6 +1671,10 @@ function rdClearStaleMovedFrom() {
                 return;
             }
 
+            // The drop was accepted: stamp the user's action order (E6). Kept
+            // on a re-drag, so a placement holds the position of its FIRST move.
+            if (w.action_seq == null) { w.action_seq = nextActionSeq(); }
+
             // The rest of the pipeline (origin/self-return detection, the
             // displacement dialog, the §4a rename prompt) runs for BOTH an
             // EXISTING device becoming a move AND a move_in tile (spec §4.1
@@ -3083,6 +3088,7 @@ function rdClearStaleMovedFrom() {
 
         function flagRemove(itemEl, idx, st) {
             st.removed = !st.removed;
+            if (st.removed && st.widget) { st.widget.action_seq = nextActionSeq(); }
             rdTrace("flagRemove", {
                 rackId: rackId, idx: idx,
                 label: st.widget && st.widget.label, removed: st.removed,
@@ -3270,6 +3276,9 @@ function rdClearStaleMovedFrom() {
                     device_type_id: (w.device_type_id != null) ? w.device_type_id : null,
                     placement_id: placementId,
                 };
+                // The user's action order (E6); only the first-time creation of a
+                // placement is ordered by it server-side.
+                if (w.action_seq != null) { item.action_seq = w.action_seq; }
                 if (isAdd) {
                     if (w.device_role_id != null) { item.device_role_id = w.device_role_id; }
                     if (w.tenant_id != null) { item.tenant_id = w.tenant_id; }
@@ -3774,6 +3783,7 @@ function rdClearStaleMovedFrom() {
                 var newIdx = state.length;
                 var widget = {
                     kind: "add",
+                    action_seq: nextActionSeq(),
                     device_type_id: parseInt(dtId, 10),
                     device_id: null,
                     placement_id: null,
@@ -4297,6 +4307,7 @@ function rdClearStaleMovedFrom() {
                 var label = item.model || item.label_text || ("Device type " + item.device_type_id);
                 var widget = {
                     kind: "add",
+                    action_seq: nextActionSeq(),
                     device_type_id: item.device_type_id,
                     device_id: null,
                     placement_id: null,

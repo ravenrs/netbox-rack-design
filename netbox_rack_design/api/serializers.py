@@ -24,6 +24,7 @@ from ..models import (
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
+    DesignStep,
     PlannedRack,
     Template,
     TemplateGroup,
@@ -37,6 +38,7 @@ __all__ = (
     "DesignGroupSerializer",
     "DesignSerializer",
     "DesignPlacementSerializer",
+    "DesignStepSerializer",
     "PlannedRackSerializer",
     "DesignPowerFeedSerializer",
     "DesignApplySerializer",
@@ -48,6 +50,7 @@ __all__ = (
     "NestedTemplatePlacementSerializer",
     "SaveLayoutSerializer",
     "RecomputeDistributionSerializer",
+    "SimulateStepsSerializer",
     "PreviewTemplateSerializer",
     "PreviewNameSerializer",
     "FavoriteSetWriteSerializer",
@@ -321,6 +324,24 @@ class NestedDesignPlacementSerializer(WritableNestedSerializer):
         fields = ("id", "url", "display", "kind")
 
 
+class DesignStepSerializer(NetBoxModelSerializer):
+    """One step of a design's execution plan (PLAN-execution-steps.md Sec. 3).
+    """
+
+    url = serializers.HyperlinkedIdentityField(
+        view_name="plugins-api:netbox_rack_design-api:designstep-detail"
+    )
+    design = NestedDesignSerializer()
+
+    class Meta:
+        model = DesignStep
+        fields = (
+            "id", "url", "display", "design", "index", "title",
+            "created", "last_updated",
+        )
+        brief_fields = ("id", "url", "display", "index", "title")
+
+
 class DesignPlacementSerializer(NetBoxModelSerializer):
     url = serializers.HyperlinkedIdentityField(
         view_name="plugins-api:netbox_rack_design-api:designplacement-detail"
@@ -357,6 +378,9 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
     # 'add' item, having gotten them from this same design's own
     # preview-template call.
     from_template = NestedTemplateSerializer(required=False, allow_null=True)
+    # The execution-plan step (PLAN-execution-steps.md Sec. 3): a raw pk on
+    # write, a nested brief on read; null = unscheduled.
+    step = DesignStepSerializer(nested=True, required=False, allow_null=True)
 
     class Meta:
         model = DesignPlacement
@@ -367,7 +391,7 @@ class DesignPlacementSerializer(NetBoxModelSerializer):
             "parent_placement", "target_bay", "target_bay_name",
             "base_placement", "base_parent_placement",
             "planning_data", "preferred_feed_legs", "stale", "stale_device_name",
-            "from_template", "from_template_version",
+            "from_template", "from_template_version", "step", "step_order",
             "tags", "custom_fields", "created", "last_updated",
         )
         # Staleness is an OBSERVATION, never a client input: it is stamped when
@@ -519,6 +543,10 @@ class SaveLayoutItemSerializer(serializers.Serializer):
     # processes the rack buckets first, records ref -> placement, then resolves
     # ``parent_ref`` on the bay items. Neither is persisted.
     ref = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    # Editor session action counter (PLAN-execution-steps.md E6): the order the
+    # user performed the action in. save-layout creates NEW placements in
+    # ascending action_seq across all racks so ``created`` follows it.
+    action_seq = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     parent_ref = serializers.CharField(required=False, allow_blank=True, max_length=64)
     # The chassis placement when it ALREADY EXISTS (the chassis layer only renders
     # chassis the design has saved, so it addresses them by pk rather than by a
@@ -641,6 +669,60 @@ class RecomputeDistributionSerializer(SaveLayoutSerializer):
     project_racks = serializers.ListField(
         child=serializers.CharField(max_length=32), required=False, default=list
     )
+
+
+class SaveStepsStepSerializer(serializers.Serializer):
+    """One step of the layout in a save-steps body: ``id`` is the existing
+    ``DesignStep`` pk (null = create), ``placements`` the ordered placement ids."""
+
+    id = serializers.IntegerField(min_value=1, required=False, allow_null=True, default=None)
+    title = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    placements = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), allow_empty=True, required=False, default=list
+    )
+
+
+class SaveStepsSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/save-steps/ (PLAN-execution-steps.md Sec. 6):
+    the design's WHOLE step layout, which replaces what is stored."""
+
+    steps = serializers.ListField(child=SaveStepsStepSerializer(), allow_empty=True)
+
+
+class AutoOrderSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/auto-order/: the current order, a list of
+    steps, each a list of placement ids."""
+
+    steps = serializers.ListField(
+        child=serializers.ListField(child=serializers.IntegerField(min_value=1)),
+        allow_empty=True,
+    )
+
+
+class SimulateStepsSerializer(serializers.Serializer):
+    """Body for POST .../designs/<pk>/simulate-steps/ (PLAN-execution-steps.md
+    Sec. 4): a PROPOSED order -- ``steps`` is a list of steps, each a list of
+    placement ids -- plus optional limits. ``from_step``/``to_step`` (1-based,
+    inclusive) bound which steps are computed; ``racks`` (namespaced
+    ``"r:<pk>"``/``"p:<pk>"`` keys, parsed by the viewset) bounds which racks
+    are reported. Whether the ids belong to the design is checked by
+    ``steps.validate_steps``."""
+
+    steps = serializers.ListField(
+        child=serializers.ListField(child=serializers.IntegerField(min_value=1)),
+        allow_empty=True,
+    )
+    from_step = serializers.IntegerField(min_value=1, required=False)
+    to_step = serializers.IntegerField(min_value=1, required=False)
+    racks = serializers.ListField(
+        child=serializers.CharField(max_length=32), required=False, allow_null=True
+    )
+
+    def validate(self, attrs):
+        lo, hi = attrs.get("from_step"), attrs.get("to_step")
+        if lo is not None and hi is not None and lo > hi:
+            raise serializers.ValidationError({"from_step": "from_step must not exceed to_step."})
+        return attrs
 
 
 class PreviewTemplateSerializer(serializers.Serializer):

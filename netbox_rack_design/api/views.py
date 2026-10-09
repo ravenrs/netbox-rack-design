@@ -1,5 +1,6 @@
 """REST API viewsets for NetBox Rack Design."""
 
+import datetime
 import itertools
 import logging
 import re
@@ -9,7 +10,8 @@ from dcim.choices import DeviceFaceChoices
 from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, Location, PowerFeed, Rack
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, F, Max, Q
+from django.http import HttpResponse
 from netbox.api.authentication import TokenPermissions
 from netbox.api.viewsets import NetBoxModelViewSet
 from netbox.plugins import get_plugin_config
@@ -23,7 +25,7 @@ from utilities.forms.constants import ALPHANUMERIC_EXPANSION_PATTERN
 from utilities.forms.utils import expand_alphanumeric_pattern
 
 from .. import apply as apply_engine
-from .. import filtersets, naming, planning_fields, projection, rackinfo, stamping, versioning
+from .. import filtersets, naming, planning_fields, projection, rackinfo, stamping, steps, versioning, workorder
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import (
     Design,
@@ -32,6 +34,7 @@ from ..models import (
     DesignPlacement,
     DesignPowerFeed,
     DesignRackPower,
+    DesignStep,
     FavoriteDeviceType,
     FavoriteSet,
     HiddenDesignChassis,
@@ -43,6 +46,7 @@ from ..models import (
     rack_key,
 )
 from .serializers import (
+    AutoOrderSerializer,
     CopyFeedsSerializer,
     CreatePlannedRackSerializer,
     DesignApplySerializer,
@@ -52,6 +56,7 @@ from .serializers import (
     DesignRackScopeSerializer,
     DesignRebaseSerializer,
     DesignSerializer,
+    DesignStepSerializer,
     ExtractTemplateFromDesignSerializer,
     ExtractTemplateFromRackSerializer,
     FavoriteSetWriteSerializer,
@@ -69,6 +74,8 @@ from .serializers import (
     RackPowerSerializer,
     RecomputeDistributionSerializer,
     SaveLayoutSerializer,
+    SaveStepsSerializer,
+    SimulateStepsSerializer,
     TemplateGroupSerializer,
     TemplatePlacementSerializer,
     TemplateSerializer,
@@ -625,12 +632,19 @@ class ViewDesignPermissions(TokenPermissions):
     The preview-name @action is a POST that computes a would-be name without any
     write, so it must require only ``view_design`` rather than the ``add_design``
     that TokenPermissions maps POST to by default.
+
+    These POSTs write nothing, so a READ-ONLY token (``write_enabled`` off) may
+    call them too: the MCP server runs with one and simulates through
+    ``simulate-steps``.
     """
 
     perms_map = {
         **TokenPermissions.perms_map,
         "POST": ["%(app_label)s.view_%(model_name)s"],
     }
+
+    def _verify_write_permission(self, request):
+        return True
 
 
 # --- namespaced rack keys (PLAN-templates.md D27, T1.4d) ---------------------
@@ -795,7 +809,8 @@ class DesignViewSet(NetBoxModelViewSet):
     def get_permissions(self):
         action = getattr(self, "action", None)
         if action in ("save_layout", "add_rack", "remove_rack", "rack_power",
-                      "planned_feed", "copy_feeds", "rebase", "apply", "rerun_naming"):
+                      "planned_feed", "copy_feeds", "rebase", "apply", "rerun_naming",
+                      "save_steps"):
             # ``rebase`` re-points THIS design's own ``based_on`` -- an edit
             # to an existing Design, not a create -- so it needs
             # ``change_design`` rather than the ``add_design`` TokenPermissions
@@ -811,7 +826,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # ``rack_power``'s split below.
             return [ChangeDesignPermissions()]
         if action in ("preview_name", "power_source", "feeds", "recompute_distribution",
-                      "chain", "rerun_naming_preview", "conflicts", "preview_template"):
+                      "simulate_steps", "auto_order", "work_order", "chain", "rerun_naming_preview", "conflicts", "preview_template"):
             return [ViewDesignPermissions()]
         return super().get_permissions()
 
@@ -1246,6 +1261,241 @@ class DesignViewSet(NetBoxModelViewSet):
              "power": powers},
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["post"], url_path="save-steps")
+    def save_steps(self, request, pk=None):
+        """
+        Replace the design's execution-plan layout (PLAN-execution-steps.md Sec. 6).
+
+        Body (:class:`SaveStepsSerializer`): ``steps`` = ordered list of
+        ``{"id": <step pk or null>, "title": str, "placements": [ids]}``. Steps
+        are created / updated / deleted and reindexed 1..N; each listed placement
+        gets ``step`` and ``step_order``; unlisted placements become unscheduled.
+
+        400 (nothing saved) when: a placement is foreign, a blade, or listed
+        twice; or a step id is not this design's. Works on approved
+        designs too -- a plan is made for a design that is about to be applied.
+        Requires ``change`` on the design. Returns the saved layout.
+
+        URL name: plugins-api:netbox_rack_design-api:design-save-steps
+        Path:     /api/plugins/rack-design/designs/<pk>/save-steps/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "change")
+        design = self.get_object()
+        body = SaveStepsSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        wanted = body.validated_data["steps"]
+
+        errors = []
+        existing = {s.pk: s for s in DesignStep.objects.filter(design=design)}
+        seen_steps = set()
+        seen_placements = set()
+        flat = [pk for entry in wanted for pk in entry["placements"]]
+        valid = {
+            p.pk: p for p in DesignPlacement.objects.filter(design=design, pk__in=set(flat))
+        }
+        for entry in wanted:
+            step_id = entry["id"]
+            if step_id is not None:
+                if step_id not in existing:
+                    errors.append(f"Step {step_id} does not belong to this design.")
+                    continue
+                if step_id in seen_steps:
+                    errors.append(f"Step {step_id} is listed more than once.")
+                seen_steps.add(step_id)
+            for pk in entry["placements"]:
+                if pk in seen_placements:
+                    errors.append(f"Placement {pk} is listed more than once.")
+                seen_placements.add(pk)
+                placement = valid.get(pk)
+                if placement is None:
+                    errors.append(f"Placement {pk} does not belong to this design.")
+                elif placement.parent_placement_id or placement.base_parent_placement_id:
+                    errors.append(
+                        f"Placement {pk} is a blade: it follows its chassis' step and "
+                        f"must not be listed."
+                    )
+        if errors:
+            return Response({"steps": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Rows are written with snapshot() + save() so NetBox's changelog sees
+        # them, and ONLY when something changed: a drag that moves one action
+        # must log one placement, not the whole plan.
+        wanted_slot = {}
+        for position, entry in enumerate(wanted, start=1):
+            for order, pk in enumerate(entry["placements"], start=1):
+                wanted_slot[pk] = (entry["id"], position, order)
+        with transaction.atomic():
+            keep = {e["id"] for e in wanted if e["id"] is not None}
+            for step in existing.values():
+                step.snapshot()
+            DesignStep.objects.filter(design=design).exclude(pk__in=keep).delete()
+            # Park the survivors out of the way so reindexing never trips the
+            # unique (design, index) constraint mid-way (not logged: the rows
+            # are put right again, or saved properly, just below).
+            DesignStep.objects.filter(design=design).update(
+                index=F("index") + 10000
+            )
+            saved = []
+            for position, entry in enumerate(wanted, start=1):
+                step = existing.get(entry["id"])
+                if step is None:
+                    step = DesignStep(design=design)
+                    step.index, step.title = position, entry["title"]
+                    step.save()
+                else:
+                    old_index = step.index
+                    if old_index == position and step.title == entry["title"]:
+                        DesignStep.objects.filter(pk=step.pk).update(index=old_index)
+                    else:
+                        step.index = position
+                        step.title = entry["title"]
+                        step.save()
+                saved.append((step, entry["placements"]))
+            step_by_position = {i: st for i, (st, _) in enumerate(saved, start=1)}
+            for placement in DesignPlacement.objects.filter(design=design):
+                slot = wanted_slot.get(placement.pk)
+                new_step = step_by_position[slot[1]] if slot else None
+                new_order = slot[2] if slot else 0
+                if placement.step_id == (new_step.pk if new_step else None) \
+                        and placement.step_order == new_order:
+                    continue
+                placement.snapshot()
+                placement.step = new_step
+                placement.step_order = new_order
+                placement.save()
+        return Response({"steps": [
+            {"id": s.pk, "index": s.index, "title": s.title, "placements": ids}
+            for s, ids in saved
+        ]}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="simulate-steps")
+    def simulate_steps(self, request, pk=None):
+        """
+        Simulate a PROPOSED execution order step by step (PLAN-execution-steps.md
+        Sec. 4), read-only.
+
+        Body (:class:`SimulateStepsSerializer`): ``steps`` (list of lists of
+        placement ids -- the proposed order, which need not be saved),
+        optional ``from_step`` / ``to_step`` (1-based, inclusive) and ``racks``
+        (``"r:<pk>"`` / ``"p:<pk>"`` keys). Step N is the state once steps 1..N
+        are done; see ``netbox_rack_design.steps`` for the rules.
+
+        Returns ``{"steps": [{"index": N, "racks": {"<rack key>": {"power",
+        "distribution", "distribution_status", "problems": [{"code",
+        "severity", "detail"}]}}}]}``. 400 for a malformed body, a rack key
+        that is neither shape, a placement of another design, a duplicate id
+        or a listed blade.
+
+        ``project_rack`` writes nothing; the whole call still runs inside a
+        transaction that is rolled back, as a safety net. Requires only
+        ``view`` on the design.
+
+        URL name: plugins-api:netbox_rack_design-api:design-simulate-steps
+        Path:     /api/plugins/rack-design/designs/<pk>/simulate-steps/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+
+        body = SimulateStepsSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        data = body.validated_data
+        try:
+            racks = {parse_rack_id(raw) for raw in (data.get("racks") or [])} or None
+        except ValueError as exc:
+            return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            try:
+                result = steps.simulate(
+                    design, data["steps"], from_step=data.get("from_step"),
+                    to_step=data.get("to_step"), racks=racks,
+                )
+            except steps.StepsValidationError as exc:
+                transaction.set_rollback(True)
+                return Response({"steps": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
+            # Must be the LAST DB action in this atomic block.
+            transaction.set_rollback(True)
+        return Response({"steps": result}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="auto-order")
+    def auto_order(self, request, pk=None):
+        """
+        Propose a safe execution order for the posted steps by simulating it
+        (``steps.auto_order``), read-only.
+
+        Body: ``{"steps": [[placement ids], ...]}``. Returns ``{"steps":
+        [[ids], ...], "titles_kept": true}``: the same steps (never merged,
+        a still-red multi-action step split into single-action steps) plus one
+        single-action step per unscheduled placement. The client keeps each
+        step's title. 400 for ids the simulation rejects. Requires only
+        ``view`` on the design; a read-only token may call it.
+
+        URL name: plugins-api:netbox_rack_design-api:design-auto-order
+        Path:     /api/plugins/rack-design/designs/<pk>/auto-order/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+        body = AutoOrderSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
+        with transaction.atomic():
+            try:
+                result = steps.auto_order(design, body.validated_data["steps"])
+            except steps.StepsValidationError as exc:
+                transaction.set_rollback(True)
+                return Response({"steps": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
+            # Must be the LAST DB action in this atomic block.
+            transaction.set_rollback(True)
+        return Response({"steps": result, "titles_kept": True}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="work-order")
+    def work_order(self, request, pk=None):
+        """
+        The smart-hands work order of the design's execution plan
+        (PLAN-execution-steps.md Sec. 10.1): every action with its from / to
+        location, power cabling, status after, and each step's simulated power.
+
+        Query: ``step=N`` (one step; all when absent) and ``output=json|md|csv``
+        (default json). The body choice is NOT called ``format``: DRF reserves
+        that parameter for its renderer selector and answers 404 to
+        ``?format=md``. 400 for a non-numeric ``step`` or an unknown ``output``;
+        404 for a step the design lacks. Requires only ``view`` on the design.
+
+        URL name: plugins-api:netbox_rack_design-api:design-work-order
+        Path:     /api/plugins/rack-design/designs/<pk>/work-order/
+        """
+        if request.user.is_authenticated:
+            self.queryset = Design.objects.restrict(request.user, "view")
+        design = self.get_object()
+        raw_step = request.query_params.get("step")
+        step_no = None
+        if raw_step not in (None, ""):
+            try:
+                step_no = int(raw_step)
+            except ValueError:
+                return Response({"step": ["Must be a whole number."]},
+                                status=status.HTTP_400_BAD_REQUEST)
+        output = (request.query_params.get("output") or "json").lower()
+        if output not in ("json", "md", "csv"):
+            return Response({"output": ["Choose json, md or csv."]},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                data = workorder.build(design, step_no)
+                # build() only simulates; roll back as a safety net.
+                transaction.set_rollback(True)
+        except workorder.StepNotFound as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        if output == "md":
+            return HttpResponse(workorder.render_markdown(data),
+                                content_type="text/markdown; charset=utf-8")
+        if output == "csv":
+            return HttpResponse(workorder.render_csv(data),
+                                content_type="text/csv; charset=utf-8")
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="preview-template")
     def preview_template(self, request, pk=None):
@@ -2844,6 +3094,11 @@ class DesignViewSet(NetBoxModelViewSet):
         except ValueError as exc:
             return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
+        # pk -> action_seq of every placement THIS request creates (E6).
+        new_seqs = {}
+        max_pk_before = (
+            DesignPlacement.objects.aggregate(m=Max("pk"))["m"] or 0
+        )
         try:
             with transaction.atomic():
                 for rack_data, kind, rack_pk in parsed_rack_ids:
@@ -2887,6 +3142,7 @@ class DesignViewSet(NetBoxModelViewSet):
                         placement = self._reconcile_item(
                             design, rack, face_key, item, errors, desired_placement_ids
                         )
+                        self._note_new_placement(placement, item, max_pk_before, new_seqs)
                         ref = item.get("ref")
                         if ref and placement is not None:
                             ref_map[ref] = placement
@@ -2900,13 +3156,16 @@ class DesignViewSet(NetBoxModelViewSet):
                         device_id = item.get("device_id")
                         if device_id:
                             submitted_device_ids.add(device_id)
-                        self._reconcile_item(
+                        placement = self._reconcile_item(
                             design, rack, "bays", item, errors,
                             desired_placement_ids, ref_map=ref_map,
                         )
+                        self._note_new_placement(placement, item, max_pk_before, new_seqs)
 
                 if errors:
                     raise ValidationError("collision")
+
+                self._restamp_created(design, max_pk_before, new_seqs)
 
                 # Conservative stale-deletion: only delete a move/remove placement
                 # when the user ACTUALLY addressed that device in the editor but the
@@ -2978,6 +3237,40 @@ class DesignViewSet(NetBoxModelViewSet):
             placements, many=True, context={"request": request}
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _note_new_placement(placement, item, max_pk_before, new_seqs):
+        """Remember a placement created by this request with its action_seq."""
+        if placement is not None and placement.pk > max_pk_before:
+            new_seqs[placement.pk] = item.get("action_seq")
+
+    @staticmethod
+    def _restamp_created(design, max_pk_before, new_seqs):
+        """Make ``created`` of this request's NEW placements follow action_seq.
+
+        Racks/faces are reconciled in payload order, not the order the user
+        worked in (PLAN-execution-steps.md E6). Rewrite ``created`` of the new
+        rows to distinct, ascending values (1 microsecond apart, starting at the
+        earliest of them) in (action_seq, pk) order; rows without a seq follow.
+        """
+        if len(new_seqs) < 2:
+            return
+        rows = list(
+            DesignPlacement.objects.filter(design=design, pk__in=list(new_seqs))
+            .values_list("pk", "created")
+        )
+        if len(rows) < 2:
+            return
+        start = min(c for _, c in rows)
+        inf = float("inf")
+        order = sorted(
+            (pk for pk, _ in rows),
+            key=lambda pk: (inf if new_seqs[pk] is None else new_seqs[pk], pk),
+        )
+        for i, pk in enumerate(order):
+            DesignPlacement.objects.filter(pk=pk).update(
+                created=start + datetime.timedelta(microseconds=i)
+            )
 
     @staticmethod
     def _snapshot(placement):
@@ -5001,6 +5294,14 @@ class TemplatePlacementViewSet(NetBoxModelViewSet):
     ).prefetch_related("tags")
     serializer_class = TemplatePlacementSerializer
     filterset_class = filtersets.TemplatePlacementFilterSet
+
+
+class DesignStepViewSet(NetBoxModelViewSet):
+    """A design's execution-plan steps (PLAN-execution-steps.md Sec. 3)."""
+
+    queryset = DesignStep.objects.select_related("design").prefetch_related("tags")
+    serializer_class = DesignStepSerializer
+    filterset_class = filtersets.DesignStepFilterSet
 
 
 class DesignPowerFeedViewSet(NetBoxModelViewSet):

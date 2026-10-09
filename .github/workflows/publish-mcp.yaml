@@ -1,0 +1,55 @@
+# Publishes the MCP server package (mcp/, netbox-rack-design-mcp) to PyPI.
+# Its own tag namespace, "mcp-v*", so it never collides with the plugin's "v*"
+# release tags (publish-pypi.yaml only publishes on those).
+name: Publish MCP server 📦 to PyPI
+
+on:
+  push:
+    tags:
+      - "mcp-v*"
+
+jobs:
+  build:
+    name: Build netbox-rack-design-mcp
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5.1.0
+      with:
+        python-version: "3.x"
+    - name: Run the MCP server tests
+      run: |
+        python3 -m pip install -e ".[test]"
+        python3 -m pytest -q
+    - name: Build a binary wheel and a source tarball
+      run: |
+        python3 -m pip install build
+        python3 -m build
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v4
+      with:
+        name: mcp-distributions
+        path: mcp/dist/
+
+  publish-to-pypi:
+    name: Publish netbox-rack-design-mcp to PyPI
+    needs:
+    - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-mcp
+      url: https://pypi.org/p/netbox-rack-design-mcp
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v4
+      with:
+        name: mcp-distributions
+        path: dist/
+    - name: Publish distribution 📦 to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1

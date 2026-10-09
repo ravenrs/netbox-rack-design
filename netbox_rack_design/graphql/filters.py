@@ -8,6 +8,7 @@ from ..models import (
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
+    DesignStep,
     PlannedRack,
     Template,
     TemplateGroup,
@@ -19,6 +20,7 @@ __all__ = (
     "DesignFilter",
     "DesignPlacementFilter",
     "DesignPowerFeedFilter",
+    "DesignStepFilter",
     "PlannedRackFilter",
     "TemplateGroupFilter",
     "TemplateFilter",
@@ -43,6 +45,11 @@ class DesignFilter(GraphQLDescribedModelFilterBase):
 
 @strawberry_django.filter_type(DesignPlacement, lookups=True)
 class DesignPlacementFilter(GraphQLModelFilterBase):
+    pass
+
+
+@strawberry_django.filter_type(DesignStep, lookups=True)
+class DesignStepFilter(GraphQLModelFilterBase):
     pass
 
 

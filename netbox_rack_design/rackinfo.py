@@ -152,7 +152,14 @@ def rack_devices(rack):
         from dcim.models import Device
 
         return Device.objects.none()
-    return rack.devices.all()
+    devices = rack.devices.all()
+    # While a distribution engine runs, the projection's removed / moved-out PDUs
+    # are stamped on the rack (distribution.generate_distribution_status): they
+    # are not power sources in that projected world.
+    removed = rack.__dict__.get("_rd_removed_pdu_pks")
+    if removed:
+        devices = devices.exclude(pk__in=removed)
+    return devices
 
 
 def rack_desc_units(rack):

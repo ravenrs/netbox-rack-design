@@ -8,6 +8,7 @@ from .views import (
     DesignGroupViewSet,
     DesignPlacementViewSet,
     DesignPowerFeedViewSet,
+    DesignStepViewSet,
     DesignViewSet,
     DeviceTypePowerViewSet,
     FavoriteDeviceTypeViewSet,
@@ -27,6 +28,7 @@ router = NetBoxRouter()
 router.register("design-groups", DesignGroupViewSet)
 router.register("designs", DesignViewSet)
 router.register("placements", DesignPlacementViewSet)
+router.register("design-steps", DesignStepViewSet)
 router.register("planned-racks", PlannedRackViewSet)
 router.register("planned-power-feeds", DesignPowerFeedViewSet)
 router.register("template-groups", TemplateGroupViewSet)
