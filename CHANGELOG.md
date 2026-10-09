@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-09
+
+### Release Summary
+
+A minor release that adds the **execution plan**: a design's actions are put
+in the order the work is done, and the rack, PDU and bank power and the slots
+are checked after every step, so an overload in the middle of a change shows
+even when the final state is fine. Steps can be reordered by hand or by a
+simulation-driven Auto-order, exported as a checklist, and read through a new
+work-order API and a read-only MCP server for Claude. Apply is unchanged.
+One new migration (`0027_designstep`); no breaking changes. CI now tests
+NetBox 4.7.2.
+
+Video: [What's new in 1.2.0](https://youtu.be/8cgy2hknDYY)
+
+### Added
+- **Execution plan tab on a design.** Put a design's actions into steps and
+  check each step on its own. A step shows the power and bank load of the racks
+  it touches, and problems such as an overloaded rack or bank, a slot or bay
+  conflict, or an unpowered device. Drag to reorder; **Auto-order** proposes a
+  safer order; **Reset plan** goes back to the editor's order; **Export** gives a
+  Markdown checklist or a CSV. The plan does not change Apply. See
+  [docs/execution-plan.md](docs/execution-plan.md).
+- **Work-order API.** `GET designs/<id>/work-order/` returns the plan as JSON,
+  Markdown or CSV (`output` parameter). `POST simulate-steps/` and `auto-order/`
+  check or propose an order without saving it, and `save-steps/` saves the plan.
+  See [docs/api.md](docs/api.md#execution-plan).
+- **MCP server `netbox-rack-design-mcp`**, shipped from `mcp/`. Read-only tools
+  let Claude list designs, read a design's plan and its simulation, simulate an
+  order, and fetch the work order. See [docs/mcp.md](docs/mcp.md).
+
+### Fixed
+- **A removed PDU still supplied power.** A PDU that a design removes or moves
+  out kept its banks and planned allocation in the power distribution, and
+  devices cabled to it drew from it. It is no longer a power source; its devices
+  draw from their remaining power paths.
+- **Save keeps the order of the actions.** Placements created by one save were
+  numbered in rack order, not in the order the actions were made in the editor.
+  They are now created in the editor's order.
+
+### Changed
+- CI tests NetBox 4.7.2 (was 4.7.1). The supported range stays 4.4.0–4.7.99.
+
 ## [1.1.2] - 2026-10-05
 
 ### Release Summary

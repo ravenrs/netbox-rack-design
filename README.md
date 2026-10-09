@@ -10,6 +10,8 @@
   <a href="https://youtu.be/o9W6OytpeEM"><b>▶ Watch the 5-minute quick tour</b></a>
   &nbsp;·&nbsp;
   <a href="https://www.youtube.com/playlist?list=PLBRvuwB6Mwu4"><b>▶ Full 20-part course</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://youtu.be/8cgy2hknDYY"><b>▶ What's new in 1.2.0</b></a>
 </p>
 
 NetBox Rack Design adds a lightweight *design layer* to NetBox for planning device adds, moves, and removals in your racks. A **Design** is a named, versioned proposal that overlays your live DCIM data: your real `dcim.Device` and `dcim.Rack` records stay untouched, and each planned change — add, move, or remove — is captured as a structured **placement** instead of a spreadsheet cell. This brings the *intended* rack layout into NetBox and renders it as a projected rack elevation, with power projection, an auto-naming engine, design chains (baselining one design on another approved one), and an explicit Apply step already built in.
@@ -48,6 +50,25 @@ Rack Design pairs a structured data model with an interactive visual editor for 
 - **Change logging**, **tags**, and **custom fields** on the models.
 - Integration with NetBox's native **permission** system.
 
+## Execution plan
+
+The **Execution plan** tab puts a design's actions in the order the work is done,
+and checks each step on its own. A step can overload a rack or bank even when the
+final state is fine. The plan shows these problems per step, with an Auto-order
+button, a checklist export and a work-order API. It does not change Apply. See
+[docs/execution-plan.md](docs/execution-plan.md).
+
+▶ **[What's new in 1.2.0](https://youtu.be/8cgy2hknDYY)** — the execution plan, per-step power checks,
+Auto-order, export and API, and Claude via MCP, in about 12 minutes.
+
+[![Execution plan: a red step in the middle of a plan whose final state is fine](docs/assets/screenshots/14-execution-plan.png)](https://youtu.be/8cgy2hknDYY)
+
+**Claude via MCP** — the `netbox-rack-design-mcp` server lets Claude read a
+design's plan, find a safe order and write a smart-hands ticket, read-only. See
+[docs/mcp.md](docs/mcp.md).
+
+[![Claude Code explaining which steps of a plan are risky](docs/assets/screenshots/15-mcp-risky-steps.png)](https://youtu.be/8cgy2hknDYY)
+
 ## Screenshots
 
 ▶ **[Watch the 5-minute quick tour](https://youtu.be/o9W6OytpeEM)** — the editor, moves across racks, the power heatmap with per-bank load, a row of planned racks, templates, and applying a plan to NetBox.
@@ -83,7 +104,7 @@ More in the [documentation](https://ravenrs.github.io/netbox-rack-design/).
 
 | Plugin Version | Minimum NetBox Version | Maximum NetBox Version | Python    |
 |----------------|------------------------|------------------------|-----------|
-| 1.0.0–1.1.x    | 4.4.0                  | 4.7.99                 | 3.12+     |
+| 1.0.0–1.2.x    | 4.4.0                  | 4.7.99                 | 3.12+     |
 | 0.16.0–0.32.x  | 4.4.0                  | 4.6.99                 | 3.12+     |
 | 0.15.x         | 4.4.0                  | 4.4.99                 | 3.12+     |
 
@@ -91,7 +112,7 @@ The supported NetBox range is enforced at load time via the plugin's `min_versio
 
 ## Dependencies
 
-- **NetBox** 4.4.0 – 4.7.99 (tested against 4.4.8, 4.5.10, 4.6.8 and 4.7.1)
+- **NetBox** 4.4.0 – 4.7.99 (tested against 4.4.8, 4.5.10, 4.6.8 and 4.7.2)
 - **Python** 3.12 or later
 
 No additional Python packages are required beyond NetBox's own dependencies.

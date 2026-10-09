@@ -14,7 +14,7 @@ from django.db import transaction
 from django.db.models import Max, Q
 
 from .choices import DesignStatusChoices
-from .models import Design, DesignPlacement, DesignPowerFeed, DesignRackPower
+from .models import Design, DesignPlacement, DesignPowerFeed, DesignRackPower, DesignStep
 
 __all__ = ("new_version",)
 
@@ -116,6 +116,21 @@ def new_version(design, *, title=None):
             new_rack_power.full_clean()
             new_rack_power.save()
 
+        # --- execution-plan steps: cloned BEFORE placements, which remap onto
+        # them.
+        step_map = {}  # old DesignStep pk -> new DesignStep
+        for step in design.steps.all():
+            new_step = DesignStep(
+                design=clone,
+                index=step.index,
+                title=step.title,
+                custom_field_data=dict(step.custom_field_data),
+            )
+            new_step.full_clean()
+            new_step.save()
+            new_step.tags.set(step.tags.all())
+            step_map[step.pk] = new_step
+
         # --- placements: two passes, because of the self-references ----------
         #
         # `parent_placement` names another placement in THIS SAME design (a
@@ -180,6 +195,8 @@ def new_version(design, *, title=None):
                 base_placement=placement.base_placement,
                 base_parent_placement=placement.base_parent_placement,
                 parent_placement=None,  # remapped in pass 2, see above
+                step=step_map[placement.step_id] if placement.step_id else None,
+                step_order=placement.step_order,
                 custom_field_data=dict(placement.custom_field_data),
             )
             new_placement.save()

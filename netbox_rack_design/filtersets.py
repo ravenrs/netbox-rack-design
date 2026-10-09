@@ -14,6 +14,7 @@ from .models import (
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
+    DesignStep,
     PlannedRack,
     Template,
     TemplateGroup,
@@ -24,6 +25,7 @@ __all__ = (
     "DesignGroupFilterSet",
     "DesignFilterSet",
     "DesignPlacementFilterSet",
+    "DesignStepFilterSet",
     "PlannedRackFilterSet",
     "DesignPowerFeedFilterSet",
     "DesignApplyFilterSet",
@@ -188,6 +190,12 @@ class DesignPlacementFilterSet(NetBoxModelFilterSet):
         queryset=Template.objects.all(), label="From template (ID)"
     )
 
+    # The execution-plan step (PLAN-execution-steps.md Sec. 3): "what is done in
+    # this step?".
+    step_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=DesignStep.objects.all(), label="Step (ID)"
+    )
+
     # "Show me everything this design lost when devices were decommissioned."
     stale = django_filters.BooleanFilter(label="Device deleted")
 
@@ -195,7 +203,7 @@ class DesignPlacementFilterSet(NetBoxModelFilterSet):
         model = DesignPlacement
         fields = (
             "id", "proposed_name", "target_bay_name", "stale_device_name",
-            "target_position", "target_face", "from_template_version",
+            "target_position", "target_face", "from_template_version", "step_order",
         )
 
     def search(self, queryset, name, value):
@@ -208,6 +216,21 @@ class DesignPlacementFilterSet(NetBoxModelFilterSet):
             | Q(device__name__icontains=value)
             | Q(stale_device_name__icontains=value)
         )
+
+
+class DesignStepFilterSet(NetBoxModelFilterSet):
+    design_id = django_filters.ModelMultipleChoiceFilter(
+        queryset=Design.objects.all(), label="Design (ID)"
+    )
+
+    class Meta:
+        model = DesignStep
+        fields = ("id", "index", "title")
+
+    def search(self, queryset, name, value):
+        if not value.strip():
+            return queryset
+        return queryset.filter(title__icontains=value)
 
 
 class PlannedRackFilterSet(NetBoxModelFilterSet):

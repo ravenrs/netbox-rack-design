@@ -8,6 +8,7 @@ nav:
   - Guides:
       - Designs & the data model: designs.md
       - The editor: editor.md
+      - Execution plan: execution-plan.md
       - Device naming: device-naming.md
       - Power projection: power-projection.md
       - Power distribution: power-distribution.md
@@ -18,6 +19,7 @@ nav:
       - Planned racks: planned-racks.md
       - Templates: templates.md
       - API & integrations: api.md
+      - Claude and MCP: mcp.md
       - Permissions: permissions.md
   - Reference:
       - Power projection spec: power-projection-spec.md

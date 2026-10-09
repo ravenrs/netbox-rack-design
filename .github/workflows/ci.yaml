@@ -56,11 +56,11 @@ jobs:
             python-version: '3.12'
           - netbox-version: 'v4.6.8'
             python-version: '3.14'
-          - netbox-version: 'v4.7.1'
+          - netbox-version: 'v4.7.2'
             python-version: '3.12'
-          - netbox-version: 'v4.7.1'
+          - netbox-version: 'v4.7.2'
             python-version: '3.13'
-          - netbox-version: 'v4.7.1'
+          - netbox-version: 'v4.7.2'
             python-version: '3.14'
 
     services:

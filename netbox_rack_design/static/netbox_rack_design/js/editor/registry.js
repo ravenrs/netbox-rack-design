@@ -16,6 +16,17 @@ import { rdEndCursorGesture } from "rd/cursor.js";
 var controllersByRackId = {};
 const tileInFlight = { current: null };
 
+// Monotonic per-session action counter (PLAN-execution-steps.md E6). Every
+// user action that creates or re-targets a placement stamps its widget with
+// the next value; save-layout then creates the new placements in that order,
+// across all racks, so the execution plan defaults to the order the user
+// worked in. Shared by every rack controller, hence it lives here.
+var actionSeqCounter = 0;
+function nextActionSeq() {
+    actionSeqCounter += 1;
+    return actionSeqCounter;
+}
+
 // Freeze/thaw every rack's tiles around a drag so a moved or newly-added
 // device can never displace an existing planned tile (see freezeOthers/thaw).
 function freezeAllTiles(exceptEl) {
@@ -83,4 +94,5 @@ export {
     freezeAllTiles,
     thawAllTiles,
     findGhostAcrossBlocks,
+    nextActionSeq,
 };

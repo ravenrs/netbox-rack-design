@@ -960,7 +960,48 @@ def generate_distribution(elevation, *, mode=None):
     return result
 
 
+# Attribute stamped on the rack object while an engine runs (see
+# ``rackinfo.rack_devices``): pks of PDUs the projection removes or moves out.
+REMOVED_PDU_ATTR = "_rd_removed_pdu_pks"
+
+
+def removed_pdu_pks(elevation):
+    """Pks of real PDU devices the projected world no longer has in this rack: a
+    ``remove`` slot, or a ``move_out_ghost`` slot (moved to another rack) whose
+    device does not also appear as a live slot here (a move inside the rack shows
+    a ghost at the old U and a ``move_in`` at the new one)."""
+    gone, alive = set(), set()
+    for face_slots in (elevation.front, elevation.rear, elevation.non_racked):
+        for slot in face_slots:
+            device = slot.get("device")
+            if device is None:
+                continue
+            state = slot.get("state")
+            if state in _CONSUMING_STATES:
+                alive.add(device.pk)
+            elif (state in ("remove", "move_out_ghost")
+                    and _slot_role_slug(slot) in PDU_ROLE_SLUGS):
+                gone.add(device.pk)
+    return frozenset(gone - alive)
+
+
 def generate_distribution_status(elevation, *, mode=None):
+    """``(distribution, status)`` for a projected rack.
+
+    A PDU the projection removes (or moves out) is not a power source: while the
+    engine runs, ``rackinfo.rack_devices(rack)`` -- where builtin and scripts
+    discover real PDUs -- leaves it out, so it gets no banks and no planned
+    allocation, and cabling to it no longer resolves (the device's draw stays on
+    its remaining live paths)."""
+    rack = elevation.rack
+    rack.__dict__[REMOVED_PDU_ATTR] = removed_pdu_pks(elevation)
+    try:
+        return _generate_distribution_status(elevation, mode=mode)
+    finally:
+        rack.__dict__.pop(REMOVED_PDU_ATTR, None)
+
+
+def _generate_distribution_status(elevation, *, mode=None):
     """``(distribution, status)`` for a projected rack.
 
     ``status`` is why there is (or is not) a distribution, so the UI can say so

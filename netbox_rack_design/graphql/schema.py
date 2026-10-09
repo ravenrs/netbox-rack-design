@@ -8,6 +8,7 @@ from .types import (
     DesignGroupType,
     DesignPlacementType,
     DesignPowerFeedType,
+    DesignStepType,
     DesignType,
     PlannedRackType,
     TemplateGroupType,
@@ -28,6 +29,9 @@ class RackDesignQuery:
 
     design_placement: DesignPlacementType = strawberry_django.field()
     design_placement_list: list[DesignPlacementType] = strawberry_django.field()
+
+    design_step: DesignStepType = strawberry_django.field()
+    design_step_list: list[DesignStepType] = strawberry_django.field()
 
     # Named for the model's verbose name ("planned power feed"), which is what
     # NetBox's generated GraphQL queries look for.

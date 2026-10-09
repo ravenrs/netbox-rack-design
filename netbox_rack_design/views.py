@@ -21,7 +21,7 @@ from netbox.plugins import get_plugin_config
 from netbox.views import generic
 from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.query import count_related
-from utilities.views import ContentTypePermissionRequiredMixin, register_model_view
+from utilities.views import ContentTypePermissionRequiredMixin, ViewTab, register_model_view
 
 from . import apply as apply_engine
 from . import filtersets, forms, models, planning_fields, projection, rackinfo, tables, versioning
@@ -35,7 +35,7 @@ __all__ = (
     "DesignGroupBulkImportView", "DesignGroupBulkEditView", "DesignGroupBulkDeleteView",
     "DesignView", "DesignListView", "DesignEditView", "DesignDeleteView",
     "DesignBulkImportView", "DesignBulkEditView", "DesignBulkDeleteView",
-    "DesignElevationView", "DesignElevationRackRedirectView",
+    "DesignElevationView", "DesignElevationRackRedirectView", "DesignExecutionPlanView",
     "DesignEditorView", "DesignEditorDefaultView", "ElevationBrowserView",
     "DesignPlacementView", "DesignPlacementListView", "DesignPlacementEditView", "DesignPlacementDeleteView",
     "DesignPlacementBulkImportView", "DesignPlacementBulkEditView", "DesignPlacementBulkDeleteView",
@@ -353,6 +353,124 @@ class DesignElevationView(generic.ObjectView):
         }
 
 
+def _plan_action_rows(design):
+    """
+    The execution-plan tab's actions: one dict per TOP-LEVEL, non-stale
+    placement (a blade follows its chassis' step and is not an action of its
+    own), plus the rack-name lookup the dicts refer to by key. Every dict
+    carries ``racks`` -- the keys of the racks the action changes, which is
+    what the client sends to simulate-steps as the dirty set after a drag.
+    """
+    placements = (
+        design.placements.filter(parent_placement__isnull=True, base_parent_placement__isnull=True,
+                                 stale=False)
+        .select_related("device", "device__rack", "device_type", "target_rack",
+                        "target_planned_rack", "base_placement", "step")
+        .order_by("step__index", "step_order", "created", "pk")
+    )
+    rack_names = {}
+
+    def _where(rack, planned, position, face):
+        target = rack or planned
+        if target is None:
+            return None
+        key = models.rack_key(rack, planned)
+        rack_names[key] = target.name
+        return {"rack": key, "name": target.name,
+                "u": str(position).rstrip("0").rstrip(".") if position is not None else None,
+                "face": face or ""}
+
+    rows = []
+    created_key = {}
+    for p in placements:
+        src = None
+        if p.device_id and p.device.rack_id:
+            src = _where(p.device.rack, None, p.device.position, p.device.face)
+        dst = None
+        if p.kind != "remove":
+            dst = _where(p.target_rack, p.target_planned_rack, p.target_position, p.target_face)
+        name = (p.proposed_name or (p.device.name if p.device_id else "")
+                or (str(p.base_placement) if p.base_placement_id else "")
+                or (p.device_type.model if p.device_type_id else "") or f"#{p.pk}")
+        rows.append({
+            "id": p.pk,
+            "kind": p.kind,
+            "name": name,
+            "type": p.device_type.model if p.device_type_id else
+                    (p.device.device_type.model if p.device_id else ""),
+            "from": src,
+            "to": dst,
+            "racks": sorted({w["rack"] for w in (src, dst) if w}),
+            "step": p.step_id,
+            "order": p.step_order,
+        })
+        created_key[p.pk] = (p.created, p.pk)
+    # seq = 1-based rank by placement creation (the editor's order); the
+    # client's default plan is one step per action in this order.
+    for seq, pk in enumerate(sorted(created_key, key=created_key.get), start=1):
+        next(r for r in rows if r["id"] == pk)["seq"] = seq
+    return rows, rack_names
+
+
+@register_model_view(models.Design, "execution_plan", path="execution-plan")
+class DesignExecutionPlanView(generic.ObjectView):
+    """
+    The Execution plan tab (PLAN-execution-steps.md Sec. 6): an Unscheduled tray
+    plus ordered step cards. The page loads a JSON bootstrap (actions, steps,
+    API urls) and ``js/execution_plan.js`` does the rest: it simulates through
+    ``simulate-steps`` and persists through ``save-steps``.
+
+    URL: /plugins/rack-design/designs/<pk>/execution-plan/
+    Name: plugins:netbox_rack_design:design_execution_plan  (kwargs: pk)
+    """
+
+    queryset = models.Design.objects.all()
+    template_name = "netbox_rack_design/design_execution_plan.html"
+    tab = ViewTab(
+        label=_("Execution plan"),
+        badge=lambda obj: obj.steps.count(),
+        permission="netbox_rack_design.view_design",
+        hide_if_empty=False,
+        weight=550,
+    )
+
+    def get_extra_context(self, request, instance):
+        actions, rack_names = _plan_action_rows(instance)
+        steps = [
+            {
+                "id": s.pk,
+                "index": s.index,
+                "title": s.title,
+                "lastUpdated": s.last_updated.isoformat() if s.last_updated else None,
+            }
+            for s in instance.steps.all()
+        ]
+        can_edit = request.user.has_perm("netbox_rack_design.change_design")
+        plan = {
+            "designId": instance.pk,
+            "canEdit": can_edit,
+            "actions": actions,
+            "steps": steps,
+            "rackNames": rack_names,
+            "urls": {
+                "simulate": reverse("plugins-api:netbox_rack_design-api:design-simulate-steps",
+                                    kwargs={"pk": instance.pk}),
+                "autoOrder": reverse("plugins-api:netbox_rack_design-api:design-auto-order",
+                                     kwargs={"pk": instance.pk}),
+                "save": reverse("plugins-api:netbox_rack_design-api:design-save-steps",
+                                kwargs={"pk": instance.pk}),
+                "workOrder": reverse("plugins-api:netbox_rack_design-api:design-work-order",
+                                     kwargs={"pk": instance.pk}),
+            },
+        }
+        return {
+            "design": instance,
+            "plan": plan,
+            "can_edit": can_edit,
+            "asset_version": _asset_version(),
+        }
+
+
 @register_model_view(models.Design, "elevation_rack", path="racks/<int:rack_id>")
 class DesignElevationRackRedirectView(generic.ObjectView):
     """
@@ -400,6 +518,7 @@ _EDITOR_ASSETS = (
     "netbox_rack_design/js/editor/registry.js",
     "netbox_rack_design/js/editor/rack.js",
     "netbox_rack_design/js/editor/templates.js",
+    "netbox_rack_design/js/execution_plan.js",
     "netbox_rack_design/js/editor_panels.js",
     "netbox_rack_design/js/legend_filter.js",
     "netbox_rack_design/js/power_heatmap.js",

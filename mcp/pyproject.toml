@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-rack-design-mcp"
+version = "0.1.0"
+description = "Read-only MCP server for the netbox-rack-design plugin: execution plan, simulation and smart-hands work orders for Claude."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "Petr Voronov", email = "ravenrs@gmail.com"}]
+keywords = ["netbox", "netbox-plugin", "mcp", "claude"]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.2,<2",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.urls]
+Source = "https://github.com/ravenrs/netbox-rack-design"
+
+[project.scripts]
+netbox-rack-design-mcp = "netbox_rack_design_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

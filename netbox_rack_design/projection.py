@@ -1603,7 +1603,20 @@ def _unit_conflicts(*faces):
     return conflicts
 
 
-def _overlay_planned_blades(design, slots_lists, baseline=None):
+def _own_placements(design, only=None):
+    """
+    This design's own placement rows, optionally restricted to a subset.
+
+    ``only=None`` is every row (today's behaviour). A collection of placement
+    ids narrows the projection to "as if ONLY these placements existed" -- the
+    execution plan's steps 1..N. Ancestor designs are never filtered here: they
+    are always fully applied (``_Baseline``).
+    """
+    qs = design.placements.all()
+    return qs if only is None else qs.filter(pk__in=only)
+
+
+def _overlay_planned_blades(design, slots_lists, baseline=None, only_placements=None):
     """
     Fold this design's blade placements into the bay strips they target.
 
@@ -1622,7 +1635,7 @@ def _overlay_planned_blades(design, slots_lists, baseline=None):
     from django.db.models import Q
 
     blades = list(
-        design.placements.filter(
+        _own_placements(design, only_placements).filter(
             Q(target_bay__isnull=False) | Q(parent_placement__isnull=False)
             # The child's OWN blade in a chassis an ANCESTOR planned (G2): its
             # parent is upstream, so neither of the two same-design routes above
@@ -2897,15 +2910,23 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
     return conflicts
 
 
-def project_rack(design, rack):
+def project_rack(design, rack, *, only_placements=None):
     """
     Compute the projected elevation of ``rack`` under ``design``.
 
     Returns a :class:`ProjectedElevation`. See the module docstring for the full
     result/slot contract, including how a design CHAIN composes (reality, then
     each ancestor's layer oldest first, then this design). Performs no writes.
+
+    ``only_placements`` (a collection of placement ids, default ``None`` = all)
+    projects as if ONLY those own placements of ``design`` existed: ``set()`` is
+    the real NetBox state, and the execution plan passes the ids of steps 1..N.
+    Ancestor designs are not filtered.
     """
     from django.db.models import Q
+
+    if only_placements is not None:
+        only_placements = set(only_placements)  # reused below; may be a generator
 
     # The inherited world (G1). Built first because everything below depends on
     # it: which parts of reality are still true, where an identity this design
@@ -2921,7 +2942,8 @@ def project_rack(design, rack):
     # ancestor design's planned add (``base_placement``) that has no dcim row
     # yet. A stale row has neither and is excluded by the same OR.
     moves_removes = list(
-        design.placements.exclude(kind=DesignPlacementKindChoices.KIND_ADD)
+        _own_placements(design, only_placements)
+        .exclude(kind=DesignPlacementKindChoices.KIND_ADD)
         .filter(Q(device__isnull=False) | Q(base_placement__isnull=False))
         # As above: a move INTO a bay renders inside the chassis, not at a U --
         # including a bay of a chassis an ANCESTOR planned (G2).
@@ -2938,7 +2960,8 @@ def project_rack(design, rack):
         {"target_planned_rack": rack} if rackinfo.is_planned(rack) else {"target_rack": rack}
     )
     adds = list(
-        design.placements.filter(kind=DesignPlacementKindChoices.KIND_ADD)
+        _own_placements(design, only_placements)
+        .filter(kind=DesignPlacementKindChoices.KIND_ADD)
         .filter(**_rack_filter)
         # A blade is not a rack slot: a placement targeting a device bay -- real,
         # planned here, or planned by an ANCESTOR (G2) -- is folded into its
@@ -2977,7 +3000,11 @@ def project_rack(design, rack):
     )
     applies_by_device_id = {row.device_id: row for row in apply_rows}
     applies_by_placement_id = {
-        row.placement_id: row for row in apply_rows if row.placement_id is not None
+        row.placement_id: row for row in apply_rows
+        if row.placement_id is not None
+        # A step subset: an apply of a placement outside it is not part of the
+        # projected state, so it must not mark (or suppress) anything here.
+        and (only_placements is None or row.placement_id in only_placements)
     }
     # A device THIS design's own apply already created at the very slot the
     # placement's own add/move_in tile draws must not ALSO come back through
@@ -3253,7 +3280,10 @@ def project_rack(design, rack):
     # the inherited blades; then this design's own.
     _attach_bays((front, rear, non_racked), baseline.suppressed_device_ids)
     _attach_planned_chassis_bays((front, rear, non_racked))
-    _overlay_planned_blades(design, (front, rear, non_racked), baseline=baseline)
+    _overlay_planned_blades(
+        design, (front, rear, non_racked), baseline=baseline,
+        only_placements=only_placements,
+    )
     # One pass for the whole elevation, before anything reads a device's power.
     _prefetch_power((front, rear, non_racked))
 

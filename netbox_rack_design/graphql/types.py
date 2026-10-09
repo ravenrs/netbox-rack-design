@@ -11,6 +11,7 @@ from ..models import (
     DesignGroup,
     DesignPlacement,
     DesignPowerFeed,
+    DesignStep,
     PlannedRack,
     Template,
     TemplateGroup,
@@ -21,6 +22,7 @@ from .filters import (
     DesignGroupFilter,
     DesignPlacementFilter,
     DesignPowerFeedFilter,
+    DesignStepFilter,
     PlannedRackFilter,
     TemplateFilter,
     TemplateGroupFilter,
@@ -46,6 +48,7 @@ __all__ = (
     "DesignType",
     "DesignPlacementType",
     "DesignPowerFeedType",
+    "DesignStepType",
     "PlannedRackType",
     "TemplateGroupType",
     "TemplateType",
@@ -135,6 +138,13 @@ class DesignPowerFeedType(NetBoxObjectType):
     power_panel: Annotated["PowerPanelType", strawberry.lazy("dcim.graphql.types")] | None
 
 
+# One step of a design's execution plan (PLAN-execution-steps.md Sec. 3), and
+# the nested target of DesignPlacement.step.
+@strawberry_django.type(DesignStep, fields="__all__", filters=DesignStepFilter, pagination=True)
+class DesignStepType(NetBoxObjectType):
+    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+
+
 # A PLANNED rack. Queryable in its own right, and the nested target of
 # DesignPlacement.target_planned_rack and Design.planned_racks -- same
 # dual role as DesignPowerFeedType above.
@@ -198,6 +208,7 @@ class DesignPlacementType(NetBoxObjectType):
     from_template: Annotated[
         "TemplateType", strawberry.lazy("netbox_rack_design.graphql.types")
     ] | None
+    step: Annotated["DesignStepType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     real_power_feed: Annotated["PowerFeedType", strawberry.lazy("dcim.graphql.types")] | None
     planned_power_feed: Annotated["DesignPowerFeedType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
     power_source_device: Annotated["DeviceType", strawberry.lazy("dcim.graphql.types")] | None
