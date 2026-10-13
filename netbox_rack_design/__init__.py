@@ -9,7 +9,7 @@ https://docs.netbox.dev/en/stable/plugins/development/#pluginconfig-attributes
 
 __author__ = """Petr Voronov"""
 __email__ = "ravenrs@gmail.com"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 
 from netbox.plugins import PluginConfig
@@ -49,7 +49,8 @@ class RackdesignConfig(PluginConfig):
         # Template used when naming_mode == "template". Dotted attribute paths on
         # the real Design/Device objects; {design.name} aliases the design title.
         "naming_template": "{design.name}-{n}",
-        # Dotted path to a callable used when naming_mode == "script".
+        # Dotted path to a callable used when naming_mode == "script", or
+        # "scriptmodule:<module>.<function>" for a module in NetBox's script storage (S3 too).
         "naming_script": "",
         # Reserved for future per-design naming options (see naming.py). No
         # options are currently defined; an unrecognised key still fails
@@ -64,7 +65,8 @@ class RackdesignConfig(PluginConfig):
         #                feed) -- no config, no script.
         #   "script"  -> a dotted path to fn(rack, devices) -> Distribution dict
         "distribution_mode": "none",
-        # Dotted path to a callable used when distribution_mode == "script".
+        # Dotted path to a callable used when distribution_mode == "script", or
+        # "scriptmodule:<module>.<function>" for a module in NetBox's script storage (S3 too).
         "distribution_script": "",
         # Custom-field bridge for the planning dialogs (Tier 2, §5). Maps site
         # custom fields into the rack/PDU planning inputs -- NATIVE fields

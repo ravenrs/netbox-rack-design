@@ -104,10 +104,10 @@ only ever reached from the read-only projection path (no ``dcim`` writes).
 import logging
 import re
 
-from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
 
 from . import rackinfo
+from .scriptref import resolve_callable
 
 logger = logging.getLogger("netbox_rack_design.distribution")
 
@@ -885,12 +885,7 @@ def _run_script(rack, devices):
             "distribution_mode is 'script' but no 'distribution_script' dotted "
             "path is configured."
         )
-    try:
-        fn = import_string(path)
-    except ImportError as exc:
-        raise ValueError(f"Could not import distribution_script '{path}': {exc}") from exc
-    if not callable(fn):
-        raise ValueError(f"distribution_script '{path}' is not callable.")
+    fn = resolve_callable(path, "distribution_script")
     return fn(rack, devices)
 
 

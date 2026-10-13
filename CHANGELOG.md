@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-13
+
+### Release Summary
+
+A patch release. `naming_script` and `distribution_script` accept
+`scriptmodule:<module>.<function>`, which reads the module through
+`STORAGES["scripts"]`, so scripts kept in S3 or other remote storage work.
+Plain dotted paths are unchanged. No migrations; no breaking changes.
+
+### Added
+- **Naming and distribution scripts from NetBox's script storage.**
+  `naming_script` and `distribution_script` accept
+  `scriptmodule:<module>.<function>`, which reads the module through
+  `STORAGES["scripts"]`, so a script added under Customization → Scripts works
+  when NetBox keeps scripts in S3 or another remote backend. The module is
+  cached per process and reloaded within about 10 seconds of an edit. Plain
+  dotted paths work as before.
+
 ## [1.2.0] - 2026-10-09
 
 ### Release Summary

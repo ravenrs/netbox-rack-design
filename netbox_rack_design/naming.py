@@ -88,11 +88,11 @@ import re
 import string
 
 from django.core.exceptions import ImproperlyConfigured
-from django.utils.module_loading import import_string
 from netbox.plugins import get_plugin_config
 
 from . import planning_fields
 from .choices import DesignPlacementKindChoices
+from .scriptref import resolve_callable
 
 logger = logging.getLogger("netbox_rack_design.naming")
 
@@ -436,12 +436,7 @@ def _run_script(placement):
         raise ValueError(
             "naming_mode is 'script' but no 'naming_script' dotted path is configured."
         )
-    try:
-        fn = import_string(path)
-    except ImportError as exc:
-        raise ValueError(f"Could not import naming_script '{path}': {exc}") from exc
-    if not callable(fn):
-        raise ValueError(f"naming_script '{path}' is not callable.")
+    fn = resolve_callable(path, "naming_script")
     return fn(placement)
 
 
