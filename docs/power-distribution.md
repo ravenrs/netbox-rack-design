@@ -395,6 +395,26 @@ cp .../netbox_rack_design/distribution_example.py  $SCRIPTS_ROOT/power_distribut
 
 No restart needed; the plugin imports it on the next heatmap render.
 
+#### Variant 3 — remote script storage (S3 and other `STORAGES["scripts"]` backends)
+
+When NetBox keeps scripts in remote storage (`STORAGES["scripts"]` pointing at
+S3, MinIO or another django-storages backend), a script you add under
+**Customization → Scripts** is not on the NetBox server's disk, so a
+`scripts.<module>` dotted path cannot import it. Prefix the reference with
+`scriptmodule:` instead — the plugin then reads the module through NetBox's
+script storage, the same way NetBox runs its own scripts:
+
+```python
+"distribution_script": "scriptmodule:power_distribution.build",
+```
+
+`scriptmodule:<module>.<function>` names the file `<module>.py` at the root of
+the script storage, i.e. the module name NetBox lists under Scripts. It works
+with local storage too. The module is cached in each NetBox process: the file is
+re-read at most every 10 seconds and re-executed only when its content changed,
+so an edited script takes effect within about 10 seconds, with no restart. A
+missing module or function falls back to `none` (per-device heatmap) and the editor shows the red *failed* notice with the reason.
+
 > Referencing the package copy directly,
 > `netbox_rack_design.distribution_example.build`, also works and needs no copy
 > at all — use that if you only want the shipped defaults and no per-instance

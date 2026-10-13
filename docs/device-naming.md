@@ -337,6 +337,26 @@ cp .../netbox_rack_design/naming_example.py  $SCRIPTS_ROOT/device_naming.py
 
 No restart needed; the plugin imports it on the next name preview.
 
+#### Variant 3 — remote script storage (S3 and other `STORAGES["scripts"]` backends)
+
+When NetBox keeps scripts in remote storage (`STORAGES["scripts"]` pointing at
+S3, MinIO or another django-storages backend), a script you add under
+**Customization → Scripts** is not on the NetBox server's disk, so a
+`scripts.<module>` dotted path cannot import it. Prefix the reference with
+`scriptmodule:` instead — the plugin then reads the module through NetBox's
+script storage, the same way NetBox runs its own scripts:
+
+```python
+"naming_script": "scriptmodule:device_naming.build_name",
+```
+
+`scriptmodule:<module>.<function>` names the file `<module>.py` at the root of
+the script storage, i.e. the module name NetBox lists under Scripts. It works
+with local storage too. The module is cached in each NetBox process: the file is
+re-read at most every 10 seconds and re-executed only when its content changed,
+so an edited script takes effect within about 10 seconds, with no restart. A
+missing module or function falls back to the default `sequence` name.
+
 > Referencing the package copy directly,
 > `netbox_rack_design.naming_example.build_name`, also works and needs no copy
 > at all — use that if you only want the defaults and no per-instance editing.

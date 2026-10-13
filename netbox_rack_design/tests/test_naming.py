@@ -295,6 +295,33 @@ class NamingEngineTestCase(TestCase):
         # A script that RAISES while computing a name also degrades to default.
         self.assertEqual(generate_name(self.p_add, index=4), "DC-Build-4")
 
+    # --- scriptmodule: (NetBox script storage, e.g. S3) -----------------------
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="script",
+            naming_script="scriptmodule:device_naming.build_name",
+        )
+    )
+    def test_script_mode_from_script_storage(self):
+        from .test_scriptref import script_storage
+
+        with script_storage() as write:
+            write("device_naming", "def build_name(placement):\n    return f'stored:{placement.pk}'\n")
+            self.assertEqual(generate_name(self.p_add), f"stored:{self.p_add.pk}")
+
+    @override_settings(
+        PLUGINS_CONFIG=_plugins_config(
+            naming_mode="script",
+            naming_script="scriptmodule:missing_module.build_name",
+        )
+    )
+    def test_script_mode_missing_storage_module_falls_back_to_sequence(self):
+        from .test_scriptref import script_storage
+
+        with script_storage():
+            self.assertEqual(generate_name(self.p_add, index=4), "DC-Build-4")
+
     # --- collision check ---------------------------------------------------
 
     def test_name_exists_vs_real_device(self):
