@@ -112,7 +112,7 @@ The supported NetBox range is enforced at load time via the plugin's `min_versio
 
 ## Dependencies
 
-- **NetBox** 4.4.0 – 4.7.99 (tested against 4.4.8, 4.5.10, 4.6.8 and 4.7.2)
+- **NetBox** 4.4.0 – 4.7.99 (tested against 4.4.8, 4.5.10, 4.6.8 and 4.7.3)
 - **Python** 3.12 or later
 
 No additional Python packages are required beyond NetBox's own dependencies.
