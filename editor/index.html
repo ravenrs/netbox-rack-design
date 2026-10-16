@@ -1,0 +1,1561 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://ravenrs.github.io/netbox-rack-design/editor/">
+      
+      
+        <link rel="prev" href="../designs/">
+      
+      
+        <link rel="next" href="../execution-plan/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/icon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>The editor - NetBox Rack Design</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#the-editor" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="NetBox Rack Design" class="md-header__button md-logo" aria-label="NetBox Rack Design" data-md-component="logo">
+      
+  <img src="../assets/icon.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            NetBox Rack Design
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              The editor
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/ravenrs/netbox-rack-design" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ravenrs/netbox-rack-design
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="NetBox Rack Design" class="md-nav__button md-logo" aria-label="NetBox Rack Design" data-md-component="logo">
+      
+  <img src="../assets/icon.svg" alt="logo">
+
+    </a>
+    NetBox Rack Design
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/ravenrs/netbox-rack-design" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    ravenrs/netbox-rack-design
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs & the data model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The editor
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The editor
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-editor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The editor
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The editor">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-workspace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The workspace
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-drawer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The drawer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-legend-is-a-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The legend is a filter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#editing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#chassis--blades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Chassis &amp; blades
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#read-only-views" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only views
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../execution-plan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Execution plan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../device-naming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Device naming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../power-projection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Power projection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../power-distribution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Power distribution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../planning-fields/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Planning fields
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../design-chains/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design chains
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../peer-conflicts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Peer conflicts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../apply/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Applying a design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../planned-racks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Planned racks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Templates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API & integrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude and MCP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../permissions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Permissions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../power-projection-spec/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Power projection spec
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pdu-distribution-spec/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    PDU distribution spec
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../editor-behavior-spec/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor behavior spec
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-editor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The editor
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The editor">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-workspace" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The workspace
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-drawer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The drawer
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-legend-is-a-filter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The legend is a filter
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#editing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Editing
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#chassis--blades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Chassis &amp; blades
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#read-only-views" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only views
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>The editor</h1>
+
+<h2 id="the-editor">The editor<a class="headerlink" href="#the-editor" title="Permanent link">&para;</a></h2>
+<p>The editor is where a design is composed: every rack in the design's scope,
+side by side, on top of the live DCIM data, with adds, moves and removals
+drawn as tiles. Nothing you do here touches a real device — <strong>Save</strong> writes
+<code>DesignPlacement</code> rows on the design and nothing else.</p>
+<p>Open it from a design's page — <strong>Open editor</strong> in the header, or in the Racks
+card (<strong>Edit layout</strong> on each rack row) — or from the panel on a core rack
+page. The URL is
+<code>/plugins/rack-design/designs/&lt;pk&gt;/editor/&lt;rack pk&gt;/</code>; the rack pk only picks
+which rack is scrolled into view.</p>
+<h3 id="the-workspace">The workspace<a class="headerlink" href="#the-workspace" title="Permanent link">&para;</a></h3>
+<p>▶ Video: <a href="https://youtu.be/NXj5lqCR5RI">Part 2 — The editor workspace</a></p>
+<ul>
+<li><strong>One block per rack</strong>, in scope order. Each block shows the rack's name
+  and site in its header and has its own <strong>Front / Rear</strong> toggle, so one rack
+  can be viewed from the back while its neighbour stays on the front.
+  Full-depth devices appear on both faces (the rear copy is hatched).</li>
+<li><strong>Racks of different heights hang from a common floor</strong>, so U1 lines up
+  across the row.</li>
+<li><strong>The non-racked tray</strong> under each rack holds zero-U gear — PDUs, and
+  anything else that belongs to the rack without taking a unit. Tray devices
+  can be dragged into the rack and back. A planned PDU dropped into the tray
+  <a href="../power-distribution/#automatic-binding">binds itself</a> to the rack's matching
+  feed — the ⚡ button on the tile names the feed it took and reopens the
+  picker if you want a different one. The picker only opens by itself when
+  there was nothing to bind to.</li>
+<li><strong>The power bar</strong> under a rack's name shows projected draw vs. capacity,
+  utilisation and a ⚠ count of devices with an unconnected power port; hover
+  the ⚠ for their names. Below it, in <code>builtin</code> or <code>script</code> distribution
+  mode, the <strong>bank chips</strong> — one block per PDU, one chip per breaker bank. See
+  <a href="../power-distribution/">Power distribution</a>.</li>
+<li><strong>The hover card</strong> — hover any tile for its type, role and tenant, every
+  power port with its draw (<code>(nc)</code> marks one not cabled to power) and the
+  total allocated, any <a href="../planning-fields/">planning fields</a> it carries, and,
+  for a chassis, <code>N of M bays used</code> plus the occupants. A moved device also
+  shows <strong>From</strong> and <strong>To</strong> — on the device <em>and</em> on the ghost it left — plus
+  its old name, role or tenant when the move changes them; an inherited,
+  conflicting or reserved tile names the design responsible.</li>
+</ul>
+<h3 id="the-drawer">The drawer<a class="headerlink" href="#the-drawer" title="Permanent link">&para;</a></h3>
+<p>▶ Video: <a href="https://youtu.be/NXj5lqCR5RI">Part 2 — The editor workspace</a></p>
+<p>Four buttons on the right edge open panels:</p>
+<table>
+<thead>
+<tr>
+<th>Panel</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Device</strong></td>
+<td>The searchable device-type catalog. Drag a tile onto a rack unit (or into the tray for a 0U type).</td>
+</tr>
+<tr>
+<td><strong>Favorites</strong></td>
+<td>Your per-user shortlist of device types, kept in <strong>named sets</strong> — "Default", "Network gear", whatever you like. The set selector has create / rename / delete; the ★ in the catalog reads and writes the selected set. The same type can sit in several sets; sets are private to you.</td>
+</tr>
+<tr>
+<td><strong>Templates</strong></td>
+<td>Your saved rack layouts and template groups. Drag a card onto a rack, or click it to apply to several racks. See <a href="../templates/">Templates</a>.</td>
+</tr>
+<tr>
+<td><strong>Racks</strong></td>
+<td><strong>Add rack</strong> shows a Site selector (listing only the design's sites), then Location and Rack (both optional); with exactly one site it is pre-selected as a read-only chip. Location and Rack are disabled until a site is chosen; changing site clears both. <strong>Create rack</strong> has the same Site select before Location. The visibility toggles hide racks from <em>your</em> view only — they stay in the design and in everyone else's editor.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-legend-is-a-filter">The legend is a filter<a class="headerlink" href="#the-legend-is-a-filter" title="Permanent link">&para;</a></h3>
+<p>▶ Video: <a href="https://youtu.be/NXj5lqCR5RI">Part 2 — The editor workspace</a></p>
+<p>The row of chips above the racks is both a legend and a set of live filters.
+Untick one and that class of tile disappears until you tick it again.</p>
+<table>
+<thead>
+<tr>
+<th>Chip</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Existing</strong></td>
+<td>A real device, as it stands in DCIM today</td>
+</tr>
+<tr>
+<td><strong>Add</strong></td>
+<td>A planned addition (green outline) — exists only in this design</td>
+</tr>
+<tr>
+<td><strong>Move in</strong></td>
+<td>A device this design moves into this slot</td>
+</tr>
+<tr>
+<td><strong>Move out (ghost)</strong></td>
+<td>The slot a moved device leaves behind</td>
+</tr>
+<tr>
+<td><strong>Remove</strong></td>
+<td>A device flagged for removal (red hatch)</td>
+</tr>
+<tr>
+<td><strong>Inherited</strong></td>
+<td>Rendered from an approved ancestor design — see <a href="../design-chains/">Design chains</a></td>
+</tr>
+<tr>
+<td><strong>Conflict</strong></td>
+<td>An inherited placement that no longer resolves cleanly, or your tile on a unit an ancestor now occupies</td>
+</tr>
+<tr>
+<td><strong>Peer conflict</strong></td>
+<td>Contested by an unrelated draft — see <a href="../peer-conflicts/">Peer conflicts</a></td>
+</tr>
+<tr>
+<td><strong>Applied</strong></td>
+<td>This design already wrote it into DCIM — see <a href="../apply/">Applying a design</a></td>
+</tr>
+<tr>
+<td><strong>Reserved</strong></td>
+<td>Another design applied it; this slot is spoken for</td>
+</tr>
+<tr>
+<td><em>Displaced (was here)</em></td>
+<td>Info only: the stripe on a unit something just moved out of</td>
+</tr>
+<tr>
+<td><em>Rejected</em></td>
+<td>Info only: the ring on a tile the server refused on the last Save</td>
+</tr>
+</tbody>
+</table>
+<p>Next to the legend: the <strong>Power heatmap</strong> switch (colour each tile by its share
+of the rack's biggest consumer), the <strong>Bank zones</strong> switch (a strip beside each
+rack showing which U range each PDU bank serves), and the <strong>Role</strong>, <strong>Tenant</strong>
+and any <a href="../planning-fields/#in-the-editor">rail planning fields</a> — values a
+device picks up as you drop or move it.</p>
+<h3 id="editing">Editing<a class="headerlink" href="#editing" title="Permanent link">&para;</a></h3>
+<p>▶ Video: <a href="https://youtu.be/tTbLeEwYIUQ">Part 3 — Everyday editing</a></p>
+<p><strong>Add.</strong> Set the toolbar <strong>Role</strong> first — NetBox requires a role on every
+device, so a drop with no role is refused: the tile goes back, a warning says
+why, and the Role select is highlighted. Then drag a device type from the
+catalog or Favorites onto a free unit. A green preview shows exactly where it
+will land; the tile appears with a name from the
+<a href="../device-naming/">naming engine</a> and the current toolbar role, tenant and
+rail values. Hover the tile and click the pencil to type a different name.</p>
+<p><strong>Move.</strong> Drag an existing device to another unit — in the same rack, to the
+other face, or into another rack. Every move asks <strong>Name this move</strong>: <em>Keep
+the old name</em> (shown in the design as <code>&lt;design title&gt;-&lt;old name&gt;</code> until it is
+applied) or <em>Set a new name</em>, pre-filled with the naming engine's suggestion
+for the new home. <strong>Apply</strong> confirms; <strong>Cancel</strong> (or closing the dialog)
+undoes the move. The origin keeps a <strong>ghost</strong> so the move stays visible; drag the device back to where it started ("homecoming") and
+both the ghost and the move disappear. Dropping onto a unit that is being
+vacated (a ghost, or a flagged removal) is allowed and <strong>displaces</strong> it; the
+striped unit marks what just changed. A move can carry a rename suggestion
+from the naming engine and planned overrides for role, tenant and planning
+fields — see <a href="../planning-fields/#in-the-editor">Planning fields</a>.</p>
+<p><strong>Illegal drops</strong> — onto an occupied unit, past the top of the rack, a blade
+onto a rack unit — are refused at the preview; release anyway and the tile
+snaps back to its last valid position.</p>
+<p><strong>Remove.</strong> The red × on an existing device flags it for removal. On a planned
+add or move the same × reads <em>Cancel this planned add / move</em> and does exactly
+that.</p>
+<p><strong>Save.</strong> Arms only when something changed. It writes the design's placements
+in one request; if the server rejects a placement (someone racked into that
+unit since you loaded the page) the tile gets the <em>Rejected</em> ring and nothing
+else is lost. Leaving the page with unsaved work asks first; switching to the
+chassis layer offers <strong>Cancel / Discard / Save and switch</strong>.</p>
+<h3 id="chassis--blades">Chassis &amp; blades<a class="headerlink" href="#chassis--blades" title="Permanent link">&para;</a></h3>
+<p>▶ Video: <a href="https://youtu.be/6mCIUimNaq8">Part 6 — Chassis &amp; blades</a></p>
+<p>A device whose type has device bays — a blade chassis, a patch-panel frame,
+anything that holds children — is a normal tile in the rack view. Its bays
+are edited on the <strong>chassis layer</strong>, reached from the <strong>Chassis</strong> button that
+appears in the header once the design's scope contains at least one such
+device (real or planned).</p>
+<ul>
+<li>The layer shows every chassis in scope as a <strong>column of bays</strong>, driven by
+  the same editor: drag a blade into a bay, between bays, or between chassis.
+  A bay holds one occupant, so a drop onto an occupied bay is refused, never
+  displaced.</li>
+<li><strong>The palette filters itself to child device types</strong> on this layer, and the
+  rack grids refuse them everywhere else — a blade can never be racked and a
+  server can never be baid.</li>
+<li><strong>Both kinds of chassis work.</strong> A real chassis offers its DCIM device bays;
+  a chassis this same design adds offers the bays from its type's bay
+  templates (there are no bay rows until it is applied).</li>
+<li><strong>Power is never double-counted</strong>: a chassis with a draw of its own wins
+  and its blades add nothing; a chassis with none rolls its blades up.</li>
+<li>Chassis visibility is per user, like rack visibility.</li>
+<li>The read-only <strong>chassis elevation</strong> (<code>/designs/&lt;pk&gt;/chassis-elevation/</code>)
+  renders the same columns without the editor.</li>
+</ul>
+<p>Applying installs every planned blade into its bay — see
+<a href="../apply/#blades">Apply</a>. Not yet: moving a <em>real</em> blade between chassis in the
+editor.</p>
+<h3 id="read-only-views">Read-only views<a class="headerlink" href="#read-only-views" title="Permanent link">&para;</a></h3>
+<p>▶ Video: <a href="https://youtu.be/90WoG9IRy-Q">Part 19 — Read-only views</a></p>
+<ul>
+<li><strong>Projected elevation</strong> — the design's racks as they would look once
+  applied, both faces, with the heatmap and every legend marker, but no
+  editing. Linked from the design page and the editor.</li>
+<li><strong>Elevations</strong> (menu) — a filterable browser across every design.</li>
+<li><strong>Chain Health</strong> (menu) — every design whose chain is refused or that
+  carries stale placements, each row linking to the fix. See
+  <a href="../design-chains/#chain-health">Design chains</a>.</li>
+<li><strong>The rack page panel</strong> — on a core <code>dcim.rack</code> page, the designs touching
+  that rack, each linking to its editor and elevation (<code>enable_rack_panel</code>).</li>
+</ul>
+<h3 id="reference">Reference<a class="headerlink" href="#reference" title="Permanent link">&para;</a></h3>
+<p>The exact behaviour of every gesture — blocking rules, displacement, cursor
+governance, the save contract — is specified in the
+<a href="../editor-behavior-spec/">Editor behavior spec</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/ravenrs/netbox-rack-design" target="_blank" rel="noopener" title="Github" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="mailto:ravenrs@gmail.com" target="_blank" rel="noopener" title="" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m20 8-8 5-8-5V6l8 5 8-5m0-2H4c-1.11 0-2 .89-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.indexes", "navigation.instant", "navigation.tabs.sticky"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
