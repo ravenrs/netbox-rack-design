@@ -1,8 +1,9 @@
 """Tables for NetBox Rack Design."""
 
 import django_tables2 as tables
+from django.db.models import Prefetch, Q
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from netbox.tables import NetBoxTable, columns
@@ -223,7 +224,7 @@ class ChainHealthTable(tables.Table):
                 '<span class="badge text-bg-danger" title="{}">{}</span>',
                 reason["detail"], label,
             ))
-        return mark_safe("".join(str(p) for p in parts))
+        return format_html_join("", "{}", ((p,) for p in parts))
 
     def render_stale_count(self, record):
         count = record["stale_count"]
@@ -255,7 +256,39 @@ class ChainHealthTable(tables.Table):
             '<i class="mdi mdi-eye"></i> {}</a>',
             design.get_absolute_url(), _("Open design"),
         ))
-        return mark_safe(" ".join(str(b) for b in buttons))
+        return format_html_join(" ", "{}", ((b,) for b in buttons))
+
+
+def viewable_placements_q(user):
+    """The placements ``user`` may see in a list that hangs off another object.
+    A feed's bound PDUs can sit in a descendant design, and core restricts
+    reverse lists. Whoever may view the placement's design sees its rows (the
+    design's permissions are the boundary, as in the editor and on the design
+    page); a placement permission alone also opens the rows it covers."""
+    return Q(design__in=Design.objects.restrict(user, "view")) | Q(
+        pk__in=DesignPlacement.objects.restrict(user, "view").values("pk")
+    )
+
+
+def viewable_bound_placements(user):
+    """``Prefetch`` of a planned feed's bound PDUs the user may see."""
+    return Prefetch(
+        "bound_placements",
+        queryset=DesignPlacement.objects.filter(viewable_placements_q(user)).select_related("target_rack"),
+    )
+
+
+class ViewableBoundPlacementsColumn(columns.ManyToManyColumn):
+    """A feed's bound PDUs, limited to the ones the requester may view. The
+    generic bulk-edit / bulk-delete views build their confirmation table without
+    handing it the user, so the user is read from the request NetBox tracks;
+    outside a request nothing is listed."""
+
+    def filter(self, qs):
+        from netbox.context import current_request
+
+        user = getattr(current_request.get(), "user", None)
+        return qs.filter(viewable_placements_q(user)) if user is not None else qs.none()
 
 
 class DesignPowerFeedTable(NetBoxTable):
@@ -277,7 +310,7 @@ class DesignPowerFeedTable(NetBoxTable):
         verbose_name=_("Derated"), orderable=False,
         accessor="derated_watts",
     )
-    bound_count = columns.ManyToManyColumn(
+    bound_count = ViewableBoundPlacementsColumn(
         accessor="bound_placements", linkify_item=True,
         verbose_name=_("Bound PDUs"), orderable=False,
     )

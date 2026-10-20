@@ -167,6 +167,15 @@
     // the live DOM that power.js's own racksInDom() (editor/power.js) uses
     // for the rack-power dialog's "Copy from rack" row. Duplicated here for
     // the same reason as rackKeyToServer above.
+    // Full HTML escaping (& < > " '): rack/site/location names are user data and
+    // some land inside quoted attributes. Classic script, so no import of the
+    // editor's core.js copy -- keep the two in step.
+    function escapeHtml(v) {
+        return String(v == null ? "" : v)
+            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
     function racksInDom() {
         return Array.prototype.slice.call(
             document.querySelectorAll(".nbx-rd-rack-block")
@@ -182,8 +191,7 @@
 
     function rackOptionsHtml(racks) {
         return racks.map(function (r) {
-            var safe = String(r.name).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-            return '<option value="' + r.id + '">' + safe + "</option>";
+            return '<option value="' + escapeHtml(r.id) + '">' + escapeHtml(r.name) + "</option>";
         }).join("");
     }
 
@@ -355,7 +363,7 @@
 
         function siteOptionsHtml() {
             return siteGroups.map(function (g) {
-                return '<option value="' + g.site_id + '">' + g.site + "</option>";
+                return '<option value="' + escapeHtml(g.site_id) + '">' + escapeHtml(g.site) + "</option>";
             }).join("");
         }
 
@@ -365,7 +373,7 @@
                 return '<option value="">(no locations in this site)</option>';
             }
             return locations.map(function (loc) {
-                return '<option value="' + loc.id + '">' + loc.name + "</option>";
+                return '<option value="' + escapeHtml(loc.id) + '">' + escapeHtml(loc.name) + "</option>";
             }).join("");
         }
 
@@ -400,8 +408,8 @@
                 + '<label class="form-label small mb-1">Site</label>'
                 + (singleSite
                     ? '<div class="form-control form-control-sm bg-body-tertiary nbx-rd-create-rack-site-chip" '
-                      + 'data-rd-create-rack-site-value="' + singleSite.site_id + '">'
-                      + '<i class="mdi mdi-map-marker-outline" aria-hidden="true"></i> ' + singleSite.site
+                      + 'data-rd-create-rack-site-value="' + escapeHtml(singleSite.site_id) + '">'
+                      + '<i class="mdi mdi-map-marker-outline" aria-hidden="true"></i> ' + escapeHtml(singleSite.site)
                       + "</div>"
                     : '<select class="form-select form-select-sm nbx-rd-create-rack-site">'
                       + '<option value="">Choose a site…</option>'

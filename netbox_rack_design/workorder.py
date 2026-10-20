@@ -535,6 +535,19 @@ CSV_COLUMNS = (
 )
 
 
+_FORMULA_LEADERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """A text cell a spreadsheet would run as a formula (leading ``= + - @``,
+    tab or CR -- OWASP "CSV injection") gets a leading apostrophe, which every
+    spreadsheet shows as plain text. Device names, step titles and rack names
+    are planner-typed, and the file is opened by someone else. Numbers pass."""
+    if isinstance(value, str) and value.startswith(_FORMULA_LEADERS):
+        return "'" + value
+    return value
+
+
 def _csv_row(step, title, order, act, child=None):
     src = child or act
     device = src["device"]
@@ -544,7 +557,7 @@ def _csv_row(step, title, order, act, child=None):
     source = (src["power"] or {}).get("source_device")
     dest = [] if child else (act.get("power_to") or [])
     pdus = [c["pdu"] for c in cabling if c.get("pdu")] or ([source] if source else [])
-    return {
+    row = {
         "step": step if step is not None else "",
         "step_title": title or "",
         "order": order,
@@ -565,6 +578,7 @@ def _csv_row(step, title, order, act, child=None):
         "to_outlet": "; ".join(e["outlet"] or "any free outlet" for e in dest),
         "status_after": act["status_after"],
     }
+    return {key: _csv_safe(value) for key, value in row.items()}
 
 
 def render_csv(data):

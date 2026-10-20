@@ -118,15 +118,14 @@
         <tr>
           <th scope="row">{% trans "Required by" %}</th>
           <td>
-            {% with rev=object.dependents.all %}
-              {% if rev %}
-                <ul class="list-unstyled mb-0">
-                  {% for dep in rev %}<li>{{ dep|linkify }}</li>{% endfor %}
-                </ul>
-              {% else %}
-                {{ ''|placeholder }}
-              {% endif %}
-            {% endwith %}
+            {# A list: only the designs the reader may view (DesignView._lineage_context). #}
+            {% if chain_dependents %}
+              <ul class="list-unstyled mb-0">
+                {% for dep in chain_dependents %}<li>{{ dep|linkify }}</li>{% endfor %}
+              </ul>
+            {% else %}
+              {{ ''|placeholder }}
+            {% endif %}
           </td>
         </tr>
       </table>
@@ -141,7 +140,8 @@
     {# and the re-base warning of §9.2.                                  #}
     {# ---------------------------------------------------------------- #}
     <div class="card">
-      {% with ancestors=object.baseline_chain children=object.children %}
+      {# ancestors / children come from DesignView._lineage_context: hidden children are dropped, the ancestor stack is whole. #}
+      {% with ancestors=chain_ancestors children=chain_children %}
       <h2 class="card-header">
         {% trans "Design chain" %}
         <span class="badge {% if children %}text-bg-info{% else %}text-bg-secondary{% endif %} ms-1">{{ children|length }}</span>
@@ -178,7 +178,7 @@
           </div>
         {% endif %}
       </h2>
-      {% if not ancestors and not children %}
+      {% if not ancestors and not chain_has_children %}
         <div class="card-body text-muted">
           {% trans "This design stands alone — it has no parent and nothing is based on it." %}
         </div>
@@ -242,7 +242,7 @@
       <div class="card-footer text-muted small">
         {% if object.is_frozen %}
           <p class="mb-1">{% trans "This design is approved: its placements are read-only. Set the status back to draft, or use the New version button above, to change them." %}</p>
-          {% if children %}
+          {% if chain_has_children %}
             <p class="mb-0">{% trans "It cannot be un-approved while designs are based on it — re-base or remove them first." %}</p>
           {% endif %}
         {% else %}

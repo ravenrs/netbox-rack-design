@@ -67,7 +67,7 @@
       {# and the rack falls back to its default capacity, so the plan says up #}
       {# front what a delete will cost. #}
       <table class="table table-hover attr-table">
-        {% for placement in object.bound_placements.all %}
+        {% for placement in bound_placements %}
         <tr>
           <th scope="row">{{ placement|linkify }}</th>
           <td>{{ placement.target_rack|linkify|placeholder }}</td>

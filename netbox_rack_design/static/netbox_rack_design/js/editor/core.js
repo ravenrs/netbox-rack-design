@@ -118,4 +118,14 @@ function rackDomIdToRealPk(domRackId) {
     return isNaN(n) ? null : n;
 }
 
-export { getCsrfToken, createToast, rackKeyToServer, rackDomIdToRealPk };
+// Full HTML escaping (& < > " '), safe for text AND quoted-attribute context.
+// Every string-built innerHTML sink must route server/user data through this
+// (rack, feed, site, location, device names are all user-defined text). The
+// classic scripts (power_heatmap.js, editor_panels.js) keep a local copy.
+function escapeHtml(v) {
+    return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+export { getCsrfToken, createToast, rackKeyToServer, rackDomIdToRealPk, escapeHtml };

@@ -57,7 +57,10 @@ class CreatePlannedRackActionTest(APITestCase):
         """A name with no brackets: one rack, the same response shape as
         before this feature -- exactly ``rack_key``/``planned_rack_id``/
         ``planned_rack_ids``, no ``planned_racks`` list."""
-        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.change_design",
+            "netbox_rack_design.add_plannedrack",
+        )
         response = self.client.post(
             self._url(),
             {"name": "R101", "u_height": 42, "location_id": self.location.pk},
@@ -76,7 +79,10 @@ class CreatePlannedRackActionTest(APITestCase):
         self.assertEqual(PlannedRack.objects.filter(location=self.location).count(), 1)
 
     def test_pattern_name_creates_multiple_racks_in_order(self):
-        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.change_design",
+            "netbox_rack_design.add_plannedrack",
+        )
         response = self.client.post(
             self._url(),
             {"name": "R[1-4]", "u_height": 42, "location_id": self.location.pk},
@@ -101,7 +107,10 @@ class CreatePlannedRackActionTest(APITestCase):
         self.assertEqual(self.design.planned_racks.count(), 4)
 
     def test_malformed_pattern_returns_400_not_500(self):
-        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.change_design",
+            "netbox_rack_design.add_plannedrack",
+        )
         response = self.client.post(
             self._url(),
             {"name": "R[9-8]", "u_height": 42, "location_id": self.location.pk},
@@ -114,7 +123,10 @@ class CreatePlannedRackActionTest(APITestCase):
     def test_collision_anywhere_in_expansion_creates_nothing(self):
         """One of the expanded names already exists in this location -- the
         whole batch is refused, and NONE of the others are created either."""
-        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.change_design",
+            "netbox_rack_design.add_plannedrack",
+        )
         PlannedRack.objects.create(name="R3", location=self.location, u_height=42)
         response = self.client.post(
             self._url(),
@@ -134,7 +146,10 @@ class CreatePlannedRackActionTest(APITestCase):
         )
 
     def test_copy_feeds_on_create_gives_each_rack_its_own_feeds(self):
-        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.change_design",
+            "netbox_rack_design.add_plannedrack",
+        )
         source = self.racks[0]
         DesignPowerFeed.objects.create(
             design=self.design, rack=source, name=f"{source.name}-A",
@@ -162,7 +177,10 @@ class CreatePlannedRackActionTest(APITestCase):
         self.assertEqual(feed2.name, "R2-A")
 
     def test_copy_feeds_omitted_creates_no_feeds(self):
-        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.change_design")
+        self.add_permissions(
+            "netbox_rack_design.add_design", "netbox_rack_design.change_design",
+            "netbox_rack_design.add_plannedrack",
+        )
         response = self.client.post(
             self._url(),
             {"name": "R900", "u_height": 42, "location_id": self.location.pk},

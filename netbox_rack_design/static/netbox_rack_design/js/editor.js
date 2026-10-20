@@ -626,6 +626,9 @@ import { initRack, setRackHooks } from "rd/rack.js";
         var overlay = document.createElement("div");
         overlay.className = "modal fade nbx-rd-switch-modal";
         overlay.setAttribute("tabindex", "-1");
+        // opts.body is only ever a literal string from editor_panels.js's
+        // promptUnsavedChanges callers, never user data.
+        // security: html-built-safely
         overlay.innerHTML =
             '<div class="modal-dialog modal-dialog-centered modal-sm">'
             + '<div class="modal-content">'

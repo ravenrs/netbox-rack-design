@@ -7,6 +7,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-20
+
+### Release Summary
+
+A security release. A full audit of the REST API, HTML views, GraphQL, the
+apply engine and the editor's JavaScript closed several stored-XSS paths,
+object-permission leaks between designs, permission gaps in Apply, and a few
+denial-of-service vectors. Every fix ships with a regression test that
+reproduces the attack, and new CI guards (a JavaScript HTML-sink scanner, a
+permission matrix over every API action, ruff's security rules) keep these
+classes from coming back. No migrations. Upgrade recommended for all
+installations.
+
+Thanks to @lonewolf101101, whose fork pointed at several of these issues.
+
+### **Breaking Changes**
+- REST: `Design.root` and `version` are read-only (always server-set by
+  `new-version`). Clients that sent them must stop. `sequence` stays writable
+  over REST, as in the HTML form: it is only an execution-order hint.
+- GraphQL: `children` and `depends_on` list only the designs the caller may
+  view (capped at 200), and `based_on`, `root` and the `design` of a
+  placement, planned feed or step resolve to `null` for a design the caller
+  cannot view, the way core's `device { tenant }` does. `ancestors` still
+  returns the whole `based_on` chain, like core's `region { parent }`.
+- Creating planned racks (`create-planned-rack`) needs `add_plannedrack`, and
+  `derive`, `new-version`, `create-planned-rack` and `rebase` check the new row
+  against the caller's own `add` / `change` constraints after writing it.
+- Permissions now enforced where they were missing: previewing or extracting
+  templates needs `view_template`/`view_templategroup`; extracting a template
+  from a rack needs `dcim.view_rack`; `new-version` needs `view_design` on the
+  source (it copies the whole design); device-type power data needs
+  `view_design`; Apply needs `dcim.add_rack` when it has to create a rack.
+
+### Security
+- **Stored XSS** through power-feed names (bank legend, PDU bind dialog),
+  site and location names (Create rack dialog), and rack names. All
+  server-provided strings in the editor now go through one full HTML escaper
+  or are set as text.
+- **Lists and pickers show only the designs the caller can view**, as in
+  NetBox core: the REST `chain` action's `children`, GraphQL `children`,
+  `depends_on` and design links, the design page's children and "required by"
+  lists, the re-base picker and the elevation browser. A related
+  design that is *named* (a parent, the ancestor stack, a chain refusal, a delete
+  guard) keeps its real name, as core's breadcrumbs and "cannot delete" messages
+  do; its link answers 404/403. See `docs/security.md`.
+- **Apply** checks `dcim.add_rack` before creating a rack, only trusts a
+  `realized_rack` in the planned rack's own site, re-checks the user's
+  object permissions after every write (rolling the whole apply back on a
+  violation), and snapshots objects before changing them so the changelog
+  records prechange data.
+- **Writable links behave like core's.** Over REST, a link to a design or to a
+  design's row (`based_on`, `depends_on`, `base_placement`, a feed's or step's
+  `design`, the ids `save-layout` sends, the rebase target) resolves any existing
+  object, as NetBox's writable nested serializers do; the editor's drag of an
+  inherited tile from an ancestor the user cannot view keeps working. The HTML
+  forms are core's restricted ones.
+- **`Design` REST writes now run the model's validation.** The serializer's own
+  `validate()` skipped NetBox's `full_clean()`, so `POST`/`PATCH /designs/` never
+  ran the based-on cycle guard, the un-approve guard or the root checks.
+- **`POST /designs/` runs the site checks too.** A create has no row yet, so the
+  checks that read the sites were skipped: a rack or planned rack from another
+  site, or a `based_on` parent sharing no site, went straight in. They now judge the
+  values the request carries. The HTML form reports a planned rack stranded by
+  narrowing the sites as a `sites` error instead of failing.
+- **"Create rack" name patterns are capped.** A pattern such as `R[1-999999999]`
+  is refused with a 400 when it expands to more than 200 names, before anything
+  is expanded.
+- **Placement, planned-feed and rack-power site checks run when the reference
+  changes.** A device, rack, bay, power source or feed is checked against the
+  design's sites when it is new or changed. A reference NetBox later moved to
+  another site no longer makes the design's own row fail every validation, and
+  `new-version` copies such rows as they are.
+- **Template extraction** (`templates/from-design`, `from-rack`) re-checks a
+  constrained `add_template` permission on the new template and undoes the
+  write (403) when it falls outside it.
+- **A draft you cannot view is not found on the derive page** (404, not an
+  "approve it first" page naming it). Planned feeds list the PDUs bound to them
+  only when you may view the placement's design (or your placement permission
+  covers it): feed page, design page, feed list and its bulk confirmations.
+- `depends_on` cycle detection stops at 200 levels instead of walking an
+  arbitrarily deep graph; a failed Apply drops its queued events whatever the
+  failure was, and its result no longer reports racks or feeds the rollback
+  removed.
+- **Rolled-back work sends no events**: every rollback path (apply, derive,
+  new-version, preview endpoints even when the engine raises) drops the
+  webhooks/event rules the rolled-back writes queued.
+- **Derive stays a trust-model action**: an approved design is clonable by
+  `add_design` holders without `view_design`, and a `sites`-constrained add
+  permission works (the constraint is judged after the sites are copied).
+- Request bodies of `save-layout`, `recompute-distribution` and
+  `preview-template` (and the id lists of the step endpoints) have a total
+  size cap, not just per-list caps.
+- **Version groups can't be hijacked**: `root`/`version` are server-set and
+  `root` is validated. (`sequence` is not part of this: it stays writable.)
+- **Approved designs stay frozen**: placements, planned feeds and steps can no
+  longer be moved out of an approved design.
+- **Scope**: rack, feed and device references are limited to the design's
+  sites (recompute-distribution, power-source, feeds, copy-feeds, rack-power,
+  preview-template, preview-name, placements).
+- **Read-only API tokens** can no longer write through the favorites,
+  hidden-rack/chassis and other custom endpoints.
+- **Preview endpoints** no longer fire webhooks/event rules for rows they
+  create and roll back, and their list inputs are size-capped.
+- **Denial of service**: `depends_on` cycle detection is linear (and checks
+  edges sent over the API); lineage walks are capped at 200; GraphQL `children`
+  and `ancestors` are bounded (setting `GRAPHQL_MAX_QUERY_DEPTH` is recommended, see
+  docs/security.md); malformed `power_config` is rejected instead of breaking
+  the editor for every viewer.
+- **Peer conflicts** disclose only the other design's title: slot claims name
+  your own contested unit, device claims no longer name the peer's
+  destination, and "reserved by" honours `peer_conflicts_enabled`.
+- **Work-order CSV** cells are protected against spreadsheet formula
+  injection.
+- Malformed input returns 400 or a message instead of a 500 in several
+  actions and bulk views.
+
+### Added
+- `docs/security.md` (permission model, how hidden designs appear,
+  hardening settings) and `SECURITY.md` (how to report a vulnerability).
+
 ## [1.2.1] - 2026-10-13
 
 ### Release Summary

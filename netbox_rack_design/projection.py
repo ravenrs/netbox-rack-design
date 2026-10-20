@@ -652,6 +652,13 @@ def _ancestor_refusal(ancestor):
     return None
 
 
+def visible_design_ids(user, ids):
+    """Of design pks ``ids``, the ones ``user`` may view (one query)."""
+    from .models import Design
+
+    return set(Design.objects.restrict(user, "view").filter(pk__in=ids).values_list("pk", flat=True))
+
+
 def resolve_baseline_chain(design):
     """``(chain, refusal)`` -- the §9.2 all-or-nothing answer for ``design``.
 
@@ -1261,6 +1268,11 @@ def _reservation_of(device, applies_by_device_id, design):
     "reserved by design X" case -- title falls back to the snapshot so it
     still reads once that design is gone.
     """
+    # Another design's apply -- its id and title -- is peer information, so it
+    # follows the peer-conflicts switch (the applied marking on a design's OWN
+    # tiles never comes through here).
+    if not _peer_conflicts_enabled():
+        return None, ""
     apply_row = applies_by_device_id.get(device.pk) if applies_by_device_id else None
     if apply_row is None or apply_row.design_id == (design.pk if design else None):
         return None, ""
@@ -2668,22 +2680,20 @@ def _lineage_exclusion_ids(design):
         ancestors = []  # A cycle: already reported as `chain_broken` elsewhere.
     excluded.update(ancestor.pk for ancestor in ancestors)
 
-    # Descendants: BFS over `children` (direct `based_on` pointers back at
-    # this design). One query per depth level of design's OWN lineage tree --
-    # bounded by that tree's size, not by how many peer designs exist.
-    frontier = [design]
+    # Descendants: one pk-only query per DEPTH level of design's own lineage
+    # tree (not per node): deriving thousands of children from a design must not
+    # turn each projection into thousands of queries.
+    from .models import Design
+
+    frontier = [design.pk]
     while frontier:
-        next_frontier = []
-        for node in frontier:
-            for child in node.children:
-                if child.pk not in excluded:
-                    excluded.add(child.pk)
-                    next_frontier.append(child)
-        frontier = next_frontier
+        found = set(
+            Design.objects.filter(based_on_id__in=frontier).values_list("pk", flat=True)
+        ) - excluded
+        excluded.update(found)
+        frontier = list(found)
 
     from django.db.models import Q
-
-    from .models import Design
 
     # Version families: this design's, and every ANCESTOR's -- a child
     # re-based onto v3 of its parent must not see v1/v2 of that parent as
@@ -2856,8 +2866,10 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
                 severity=_peer_severity(peer.design),
                 slot=hit,
                 source_design=peer.design,
+                # OUR contested unit, not where the peer put its device: the
+                # reader may not be allowed to see the peer's layout.
                 detail=f"{peer.design} also plans a device at "
-                       f"U{_fmt_u(peer.target_position)} in {rack}.",
+                       f"U{_fmt_u(hit['u_position'])} in {rack}.",
             ))
 
     # --- peer_name_claim: a peer placement's effective name equals one of
@@ -2891,20 +2903,14 @@ def _peer_conflicts(design, rack, own_placements, front, rear):
         peer = peer_moves_by_device.get(placement.device_id)
         if peer is None:
             continue
-        # Where the peer sends it, rather than asserting it differs: the two
-        # designs may well target the SAME unit, in which case this is a
-        # second, independent reason the plans cannot both come true.
-        if peer.target_rack_id and peer.target_position is not None:
-            where = f"{peer.target_rack} U{_fmt_u(peer.target_position)}"
-        else:
-            where = "another location"
+        # The peer's destination is deliberately NOT named: it is that design's
+        # layout, which the reader of this one may not be allowed to see.
         conflicts.append(_conflict(
             "peer_device_claim",
             severity=_peer_severity(peer.design),
             placement=placement,
             source_design=peer.design,
-            detail=f"{peer.design} also plans to move {placement.device} "
-                   f"(to {where}).",
+            detail=f"{peer.design} also plans to move {placement.device}.",
         ))
 
     return conflicts

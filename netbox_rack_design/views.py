@@ -3,14 +3,16 @@
 import json
 import os
 
+from core.signals import clear_events
 from dcim.models import Location, PowerFeed, Rack, Site
 from django import forms as django_forms
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.staticfiles import finders
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.html import format_html
@@ -19,12 +21,14 @@ from django.views.generic import View
 from django_tables2 import RequestConfig
 from netbox.plugins import get_plugin_config
 from netbox.views import generic
+from utilities.exceptions import PermissionsViolation
 from utilities.paginator import EnhancedPaginator, get_paginate_count
 from utilities.query import count_related
 from utilities.views import ContentTypePermissionRequiredMixin, ViewTab, register_model_view
 
 from . import apply as apply_engine
 from . import filtersets, forms, models, planning_fields, projection, rackinfo, tables, versioning
+from .api.views import _ADD_CONSTRAINT_MESSAGE, _require_add_permission
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
 
@@ -109,8 +113,8 @@ def _design_children_message(design):
     Only re-basing the dependents onto a different design actually severs
     the link, hence pointing at ``rebase``.
     """
-    children = [str(child) for child in design.children]
-    names = ", ".join(children)
+    children = list(design.children)
+    names = ", ".join(str(child) for child in children)
     verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
         f"Cannot delete {design}: {names} {verb} based on this design and "
@@ -162,8 +166,8 @@ def _planned_rack_referenced_message(planned_rack):
     """HTML-door twin of ``_planned_rack_referenced_rest_message``
     (api/views.py) -- see that function's docstring for the full argument
     (T1.9 decision 1)."""
-    designs = [str(design) for design in planned_rack.referencing_designs()]
-    names = ", ".join(designs)
+    designs = list(planned_rack.referencing_designs())
+    names = ", ".join(str(design) for design in designs)
     verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
     return (
         f"Cannot delete {planned_rack}: {names} still {verb} across it and "
@@ -171,6 +175,31 @@ def _planned_rack_referenced_message(planned_rack):
         "rack power for this rack. Remove it from each design's planning "
         "scope first."
     )
+
+
+class _ValidPkListMixin:
+    """
+    Refuse a bulk edit/delete POST whose ``pk`` list is not all integers.
+
+    NetBox's generic bulk views do ``int(pk)`` on every submitted value (and so
+    do the guards below), which turns a hand-edited form into a 500. A message
+    and a redirect back to the list is the answer a user can act on.
+    """
+
+    # dispatch, not post: several bulk views below override post() themselves.
+    def dispatch(self, request, *args, **kwargs):
+        if request.method == "POST" and request.user.is_authenticated:
+            try:
+                [int(pk) for pk in request.POST.getlist("pk")]
+            except ValueError:
+                messages.error(request, "The selection contains an invalid object ID.")
+                return redirect(self.get_return_url(request))
+        return super().dispatch(request, *args, **kwargs)
+
+
+def _frozen_titles(designs):
+    """The frozen ``designs``' titles for a refusal message, sorted, once each."""
+    return ", ".join(sorted({str(design) for design in designs}))
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +241,7 @@ class DesignGroupBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.DesignGroup, "bulk_edit", path="edit", detail=False)
-class DesignGroupBulkEditView(generic.BulkEditView):
+class DesignGroupBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.DesignGroup.objects.all()
     filterset = filtersets.DesignGroupFilterSet
     table = tables.DesignGroupTable
@@ -220,7 +249,7 @@ class DesignGroupBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.DesignGroup, "bulk_delete", path="delete", detail=False)
-class DesignGroupBulkDeleteView(generic.BulkDeleteView):
+class DesignGroupBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     queryset = models.DesignGroup.objects.all()
     filterset = filtersets.DesignGroupFilterSet
     table = tables.DesignGroupTable
@@ -263,11 +292,12 @@ class DesignView(generic.ObjectView):
             .order_by("name", "pk")
         )
         return {
+            **self._lineage_context(request.user, instance),
             "affected_racks": affected_racks,
             "affected_rack_count": len(affected_racks),
             "scoped_racks": scoped_racks,
             "scoped_planned_racks": scoped_planned_racks,
-            "planned_feeds": self._planned_feed_rows(instance),
+            "planned_feeds": self._planned_feed_rows(instance, request.user),
             # Changes this design can no longer carry out because the device
             # they referenced was deleted from DCIM. Reported here because the
             # rows are inert everywhere else: the editor and the elevation skip
@@ -276,7 +306,33 @@ class DesignView(generic.ObjectView):
         }
 
     @staticmethod
-    def _planned_feed_rows(design):
+    def _lineage_context(user, design):
+        """The design's related designs, as ``user`` may see them.
+
+        Same rule as the REST ``chain`` action (NetBox core parity): a LIST
+        (children, "required by") drops the designs the reader cannot view; the
+        ancestor stack is shown whole, like core's breadcrumbs, which name a
+        parent the reader cannot open.
+        """
+        try:
+            ancestors = design.baseline_chain()
+        except models.LineageError:
+            # A cycle (or too deep): the stack cannot be ordered, the Parent row
+            # and the chain-health report still say so.
+            ancestors = []
+        children = list(design.children)
+        dependents = list(design.dependents.all())
+        viewable = projection.visible_design_ids(
+            user, [d.pk for d in (*children, *dependents)])
+        return {
+            "chain_ancestors": ancestors,
+            "chain_children": [c for c in children if c.pk in viewable],
+            "chain_has_children": bool(children),
+            "chain_dependents": [d for d in dependents if d.pk in viewable],
+        }
+
+    @staticmethod
+    def _planned_feed_rows(design, user):
         """The design's PLANNED power feeds, one row per feed.
 
         Planned feeds are written by the rack-power dialog ("copy from rack")
@@ -296,9 +352,11 @@ class DesignView(generic.ObjectView):
 
         max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
         rows = []
+        # The bound PDUs may belong to a descendant design: only the ones the
+        # reader may view are listed (core restricts reverse lists).
         feeds = (
             design.planned_feeds.select_related("rack")
-            .prefetch_related("bound_placements")
+            .prefetch_related(tables.viewable_bound_placements(user))
             .order_by("rack__name", "name")
         )
         for feed in feeds:
@@ -1304,7 +1362,7 @@ class DesignBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.Design, "bulk_edit", path="edit", detail=False)
-class DesignBulkEditView(generic.BulkEditView):
+class DesignBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.Design.objects.all()
     filterset = filtersets.DesignFilterSet
     table = tables.DesignTable
@@ -1312,7 +1370,7 @@ class DesignBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.Design, "bulk_delete", path="delete", detail=False)
-class DesignBulkDeleteView(generic.BulkDeleteView):
+class DesignBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     """See :class:`DesignDeleteView` -- bulk delete has the same gap."""
 
     queryset = models.Design.objects.all()
@@ -1328,10 +1386,11 @@ class DesignBulkDeleteView(generic.BulkDeleteView):
                 pk_list = list(qs.values_list("pk", flat=True))
             else:
                 pk_list = [int(pk) for pk in request.POST.getlist("pk")]
-            blocked_children = models.Design.objects.filter(
+            # self.queryset is already limited to what the user may delete.
+            blocked_children = self.queryset.filter(
                 pk__in=pk_list, derived_designs__isnull=False,
             ).distinct()
-            blocked_versions = models.Design.objects.filter(
+            blocked_versions = self.queryset.filter(
                 pk__in=pk_list, versions__isnull=False,
             ).distinct()
             if blocked_children.exists() or blocked_versions.exists():
@@ -1376,11 +1435,14 @@ class ElevationBrowserView(ContentTypePermissionRequiredMixin, View):
     def get_required_permission(self):
         return "netbox_rack_design.view_design"
 
-    def _build_rows(self):
-        """Derive one row dict per distinct (design, rack) the design touches."""
+    def _build_rows(self, user):
+        """Derive one row dict per distinct (design, rack) the design touches,
+        for the designs ``user`` may view -- a row, and so the design's title and
+        every filter option derived from the rows, never reaches anyone else."""
         placements = (
             models.DesignPlacement.objects.filter(
-                Q(target_rack__isnull=False) | Q(device__rack__isnull=False)
+                Q(target_rack__isnull=False) | Q(device__rack__isnull=False),
+                design__in=models.Design.objects.restrict(user, "view"),
             )
             # "design__site" dropped (PLAN-multi-site.md M1/M2): `site` is no
             # longer a FK select_related can traverse, and this row's own
@@ -1438,7 +1500,7 @@ class ElevationBrowserView(ContentTypePermissionRequiredMixin, View):
         return rows
 
     def get(self, request):
-        all_rows = self._build_rows()
+        all_rows = self._build_rows(request.user)
 
         sel_designs = self._selected_ids(request, "design")
         sel_racks = self._selected_ids(request, "rack")
@@ -1545,7 +1607,7 @@ class DesignPlacementBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.DesignPlacement, "bulk_edit", path="edit", detail=False)
-class DesignPlacementBulkEditView(generic.BulkEditView):
+class DesignPlacementBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.DesignPlacement.objects.all()
     filterset = filtersets.DesignPlacementFilterSet
     table = tables.DesignPlacementTable
@@ -1553,7 +1615,7 @@ class DesignPlacementBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.DesignPlacement, "bulk_delete", path="delete", detail=False)
-class DesignPlacementBulkDeleteView(generic.BulkDeleteView):
+class DesignPlacementBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     """See :class:`DesignPlacementDeleteView` -- bulk delete has the same gap."""
 
     queryset = models.DesignPlacement.objects.all()
@@ -1569,16 +1631,15 @@ class DesignPlacementBulkDeleteView(generic.BulkDeleteView):
                 pk_list = list(qs.values_list("pk", flat=True))
             else:
                 pk_list = [int(pk) for pk in request.POST.getlist("pk")]
-            frozen_designs = sorted({
-                str(design) for design in models.Design.objects.filter(
-                    placements__pk__in=pk_list, status=DesignStatusChoices.STATUS_APPROVED,
-                ).distinct()
-            })
+            frozen_designs = models.Design.objects.filter(
+                placements__pk__in=self.queryset.filter(pk__in=pk_list).values("pk"),
+                status=DesignStatusChoices.STATUS_APPROVED,
+            ).distinct()
             if frozen_designs:
                 messages.error(
                     request,
                     "Cannot delete placements belonging to frozen (approved) "
-                    "designs: " + ", ".join(frozen_designs) + ". Set those "
+                    "designs: " + _frozen_titles(frozen_designs) + ". Set those "
                     "designs back to draft, or use the New version button on "
                     "each of them, to make this change.",
                 )
@@ -1601,11 +1662,17 @@ class DesignPlacementBulkDeleteView(generic.BulkDeleteView):
 class DesignPowerFeedView(generic.ObjectView):
     queryset = models.DesignPowerFeed.objects.select_related("design", "rack")
 
+    def get_extra_context(self, request, instance):
+        return {
+            "bound_placements": models.DesignPlacement.objects
+            .filter(tables.viewable_placements_q(request.user), planned_power_feed=instance)
+            .select_related("target_rack"),
+        }
+
 
 @register_model_view(models.DesignPowerFeed, "list", path="", detail=False)
 class DesignPowerFeedListView(generic.ObjectListView):
-    queryset = models.DesignPowerFeed.objects.select_related(
-        "design", "rack").prefetch_related("bound_placements")
+    queryset = models.DesignPowerFeed.objects.select_related("design", "rack")
     table = tables.DesignPowerFeedTable
     filterset = filtersets.DesignPowerFeedFilterSet
     filterset_form = forms.DesignPowerFeedFilterForm
@@ -1627,7 +1694,10 @@ class DesignPowerFeedEditView(generic.ObjectEditView):
     def post(self, request, *args, **kwargs):
         obj = self.get_object(**kwargs)
         design_id = obj.design_id or request.POST.get("design")
-        design = models.Design.objects.filter(pk=design_id).first() if design_id else None
+        try:
+            design = models.Design.objects.filter(pk=design_id).first() if design_id else None
+        except (TypeError, ValueError):
+            design = None
         if design is not None and design.is_frozen:
             messages.error(request, _frozen_design_message(design, "its planned power feeds"))
             return redirect(design.get_absolute_url())
@@ -1661,25 +1731,23 @@ class DesignPowerFeedBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.DesignPowerFeed, "bulk_edit", path="edit", detail=False)
-class DesignPowerFeedBulkEditView(generic.BulkEditView):
+class DesignPowerFeedBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.DesignPowerFeed.objects.all()
     filterset = filtersets.DesignPowerFeedFilterSet
     table = tables.DesignPowerFeedTable
     form = forms.DesignPowerFeedBulkEditForm
 
     def _update_objects(self, form, request):
-        frozen_designs = sorted({
-            str(design) for design in models.Design.objects.filter(
-                pk__in=self.queryset.filter(
-                    pk__in=form.cleaned_data["pk"]
-                ).values_list("design_id", flat=True),
-                status=DesignStatusChoices.STATUS_APPROVED,
-            )
-        })
+        frozen_designs = models.Design.objects.filter(
+            pk__in=self.queryset.filter(
+                pk__in=form.cleaned_data["pk"]
+            ).values_list("design_id", flat=True),
+            status=DesignStatusChoices.STATUS_APPROVED,
+        )
         if frozen_designs:
             raise ValidationError(
                 "Cannot bulk-edit planned power feeds belonging to frozen "
-                "(approved) designs: " + ", ".join(frozen_designs) + ". Set "
+                "(approved) designs: " + _frozen_titles(frozen_designs) + ". Set "
                 "those designs back to draft, or use the New version button "
                 "on each of them, to make this change."
             )
@@ -1687,7 +1755,7 @@ class DesignPowerFeedBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.DesignPowerFeed, "bulk_delete", path="delete", detail=False)
-class DesignPowerFeedBulkDeleteView(generic.BulkDeleteView):
+class DesignPowerFeedBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     queryset = models.DesignPowerFeed.objects.all()
     filterset = filtersets.DesignPowerFeedFilterSet
     table = tables.DesignPowerFeedTable
@@ -1701,16 +1769,15 @@ class DesignPowerFeedBulkDeleteView(generic.BulkDeleteView):
                 pk_list = list(qs.values_list("pk", flat=True))
             else:
                 pk_list = [int(pk) for pk in request.POST.getlist("pk")]
-            frozen_designs = sorted({
-                str(design) for design in models.Design.objects.filter(
-                    planned_feeds__pk__in=pk_list, status=DesignStatusChoices.STATUS_APPROVED,
-                ).distinct()
-            })
+            frozen_designs = models.Design.objects.filter(
+                planned_feeds__pk__in=self.queryset.filter(pk__in=pk_list).values("pk"),
+                status=DesignStatusChoices.STATUS_APPROVED,
+            ).distinct()
             if frozen_designs:
                 messages.error(
                     request,
                     "Cannot delete planned power feeds belonging to frozen "
-                    "(approved) designs: " + ", ".join(frozen_designs) + ". Set "
+                    "(approved) designs: " + _frozen_titles(frozen_designs) + ". Set "
                     "those designs back to draft, or use the New version "
                     "button on each of them, to make this change.",
                 )
@@ -1797,7 +1864,7 @@ class PlannedRackBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.PlannedRack, "bulk_edit", path="edit", detail=False)
-class PlannedRackBulkEditView(generic.BulkEditView):
+class PlannedRackBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.PlannedRack.objects.select_related("location", "realized_rack")
     filterset = filtersets.PlannedRackFilterSet
     table = tables.PlannedRackTable
@@ -1805,7 +1872,7 @@ class PlannedRackBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.PlannedRack, "bulk_delete", path="delete", detail=False)
-class PlannedRackBulkDeleteView(generic.BulkDeleteView):
+class PlannedRackBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     """The list's "Delete Selected", with :class:`PlannedRackDeleteView`'s guards.
 
     Two reasons this view has to exist at all: NetBox renders the bulk
@@ -1995,8 +2062,19 @@ class DesignDeriveView(generic.ObjectView):
         # Deriving CREATES a new Design.
         return "netbox_rack_design.add_design"
 
-    def get(self, request, pk):
+    def _source(self, request, pk):
+        """The design to derive from. An approved one is open to every add_design
+        holder (the trust model); a draft nobody may clone is only worth a page
+        to someone who can view it -- else it is not found."""
         design = self.get_object(pk=pk)
+        if not design.is_frozen and not models.Design.objects.restrict(
+            request.user, "view"
+        ).filter(pk=design.pk).exists():
+            raise Http404
+        return design
+
+    def get(self, request, pk):
+        design = self._source(request, pk)
         form = DesignDeriveForm(initial={"title": f"{design.title} (derived)"})
         return render(request, self.template_name, {
             "object": design,
@@ -2005,7 +2083,7 @@ class DesignDeriveView(generic.ObjectView):
         })
 
     def post(self, request, pk):
-        design = self.get_object(pk=pk)
+        design = self._source(request, pk)
         if not design.is_frozen:
             messages.error(
                 request,
@@ -2048,13 +2126,21 @@ class DesignDeriveView(generic.ObjectView):
                 # pk) and inside the same transaction as the create, so a
                 # child can never exist with a half-copied scope.
                 child.racks.set(design.racks.all())
+                # After the sites and racks are set: a constraint on them
+                # (``sites__id``...) can only be judged on the finished row.
+                _require_add_permission(request.user, child)
         except ValidationError as e:
+            clear_events.send(sender=self)
             form.add_error(None, e)
             return render(request, self.template_name, {
                 "object": design,
                 "form": form,
                 "return_url": design.get_absolute_url(),
             })
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            messages.error(request, _ADD_CONSTRAINT_MESSAGE)
+            return redirect(design.get_absolute_url())
         messages.success(request, f"Created {child} based on {design}.")
         return redirect(child.get_absolute_url())
 
@@ -2102,6 +2188,11 @@ class DesignNewVersionView(generic.ObjectView):
         # Creating a version CREATES a new Design.
         return "netbox_rack_design.add_design"
 
+    def get_object(self, **kwargs):
+        # The source is READ in full to build the clone (placements, feeds, rack
+        # power, racks): view_design must cover it, not just add_design.
+        return get_object_or_404(self.queryset.restrict(self.request.user, "view"), **kwargs)
+
     def _context(self, design, form):
         return {
             "object": design,
@@ -2127,10 +2218,17 @@ class DesignNewVersionView(generic.ObjectView):
             return render(request, self.template_name, self._context(design, form))
 
         try:
-            clone = versioning.new_version(design, title=form.cleaned_data["title"])
+            with transaction.atomic():
+                clone = versioning.new_version(design, title=form.cleaned_data["title"])
+                _require_add_permission(request.user, clone)
         except ValidationError as e:
+            clear_events.send(sender=self)
             form.add_error(None, e)
             return render(request, self.template_name, self._context(design, form))
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            messages.error(request, _ADD_CONSTRAINT_MESSAGE)
+            return redirect(design.get_absolute_url())
         messages.success(request, f"Created {clone} as a new version of {design}.")
         return redirect(clone.get_absolute_url())
 
@@ -2159,10 +2257,18 @@ class DesignRebaseView(generic.ObjectView):
         # Re-basing EDITS this design's own based_on field.
         return "netbox_rack_design.change_design"
 
+    @staticmethod
+    def _targets(request, design):
+        # Only designs this user may view are offered AND accepted: the picker
+        # is also the validation, so a hand-posted hidden pk is "not a valid
+        # choice" rather than a re-base onto (and a title echo of) a design the
+        # user cannot see.
+        return design.rebase_targets().restrict(request.user, "view")
+
     def get(self, request, pk):
         design = self.get_object(pk=pk)
         form = DesignRebaseForm(initial={"based_on": design.based_on_id})
-        form.fields["based_on"].queryset = design.rebase_targets()
+        form.fields["based_on"].queryset = self._targets(request, design)
         return render(request, self.template_name, {
             "object": design,
             "form": form,
@@ -2172,9 +2278,10 @@ class DesignRebaseView(generic.ObjectView):
     def post(self, request, pk):
         design = self.get_object(pk=pk)
         form = DesignRebaseForm(request.POST)
-        form.fields["based_on"].queryset = design.rebase_targets()
+        form.fields["based_on"].queryset = self._targets(request, design)
         if form.is_valid():
             previous_based_on = design.based_on_id
+            design.snapshot()
             design.based_on = form.cleaned_data["based_on"]
             try:
                 design.full_clean()
@@ -2188,7 +2295,22 @@ class DesignRebaseView(generic.ObjectView):
                 else:
                     form.add_error(None, exc)
             else:
-                design.save()
+                try:
+                    with transaction.atomic():
+                        design.save()
+                        # The new parent is the user's input: the row must still
+                        # fall under their change permission's constraints.
+                        if not models.Design.objects.restrict(request.user, "change").filter(
+                                pk=design.pk).exists():
+                            raise PermissionsViolation
+                except PermissionsViolation:
+                    clear_events.send(sender=self)
+                    design.based_on_id = previous_based_on
+                    messages.error(
+                        request,
+                        "The re-based design does not satisfy the constraints of your "
+                        "change permission, so it was not re-based.")
+                    return redirect(design.get_absolute_url())
                 messages.success(request, f"Re-based {design} onto {design.based_on}.")
                 return redirect(design.get_absolute_url())
         return render(request, self.template_name, {
@@ -2237,7 +2359,35 @@ class DesignApplyView(generic.ObjectView):
 
     def post(self, request, pk):
         design = self.get_object(pk=pk)
-        result = apply_engine.run(design, request.user)
+        try:
+            result = apply_engine.run(design, request.user)
+        except PermissionsViolation:
+            # run() has rolled the whole apply back: nothing was changed.
+            clear_events.send(sender=self)
+            messages.error(
+                request,
+                f"Apply refused: you do not have permission to make every change "
+                f"{design} describes. Nothing was changed.",
+            )
+            return redirect(design.get_absolute_url())
+        except ValidationError as error:
+            clear_events.send(sender=self)
+            messages.error(
+                request,
+                f"Apply failed and was rolled back, nothing was changed: {'; '.join(error.messages)}",
+            )
+            return redirect(design.get_absolute_url())
+        except IntegrityError:
+            # Typically a concurrent apply (or a rack/device created meanwhile):
+            # the database refused, the transaction is gone, a fresh plan will say.
+            clear_events.send(sender=self)
+            messages.error(
+                request,
+                f"Apply failed and was rolled back, nothing was changed: a database "
+                f"constraint was violated, most likely because {design} or the racks "
+                "it targets changed while it ran. Review the plan and apply again.",
+            )
+            return redirect(design.get_absolute_url())
         if result.ok:
             messages.success(
                 request,
@@ -2470,11 +2620,10 @@ class DesignChainHealthView(ContentTypePermissionRequiredMixin, View):
     ``ContentTypePermissionRequiredMixin`` (login required, same as the
     Elevations browser), and every row is additionally restricted to designs
     ``user`` has object-level view permission on, via
-    ``Design.objects.restrict()`` inside ``_chain_health_rows`` -- a chain
-    conflict naming an ancestor the user cannot view is still safe to show
-    (the same is already true of the editor's ``chain_conflicts`` panel,
-    which never permission-checks ``source_design``), but the flagged design
-    itself never leaks to someone without view rights on it.
+    ``Design.objects.restrict()`` inside ``_chain_health_rows``. A chain issue
+    names its ancestor as the editor's ``chain_conflicts`` panel does, viewable
+    or not (core's breadcrumbs name a parent the reader cannot open either); the
+    flagged design itself never leaks to someone without view rights on it.
     """
 
     template_name = "netbox_rack_design/chain_health.html"
@@ -2504,7 +2653,7 @@ class TemplateGroupBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.TemplateGroup, "bulk_edit", path="edit", detail=False)
-class TemplateGroupBulkEditView(generic.BulkEditView):
+class TemplateGroupBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.TemplateGroup.objects.all()
     filterset = filtersets.TemplateGroupFilterSet
     table = tables.TemplateGroupTable
@@ -2512,7 +2661,7 @@ class TemplateGroupBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.TemplateGroup, "bulk_delete", path="delete", detail=False)
-class TemplateGroupBulkDeleteView(generic.BulkDeleteView):
+class TemplateGroupBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     queryset = models.TemplateGroup.objects.all()
     filterset = filtersets.TemplateGroupFilterSet
     table = tables.TemplateGroupTable
@@ -2525,7 +2674,7 @@ class TemplateBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.Template, "bulk_edit", path="edit", detail=False)
-class TemplateBulkEditView(generic.BulkEditView):
+class TemplateBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.Template.objects.select_related("group")
     filterset = filtersets.TemplateFilterSet
     table = tables.TemplateTable
@@ -2533,7 +2682,7 @@ class TemplateBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.Template, "bulk_delete", path="delete", detail=False)
-class TemplateBulkDeleteView(generic.BulkDeleteView):
+class TemplateBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     queryset = models.Template.objects.select_related("group")
     filterset = filtersets.TemplateFilterSet
     table = tables.TemplateTable
@@ -2546,7 +2695,7 @@ class TemplatePlacementBulkImportView(generic.BulkImportView):
 
 
 @register_model_view(models.TemplatePlacement, "bulk_edit", path="edit", detail=False)
-class TemplatePlacementBulkEditView(generic.BulkEditView):
+class TemplatePlacementBulkEditView(_ValidPkListMixin, generic.BulkEditView):
     queryset = models.TemplatePlacement.objects.select_related(
         "template", "device_type", "device_role", "tenant", "parent_placement"
     )
@@ -2556,7 +2705,7 @@ class TemplatePlacementBulkEditView(generic.BulkEditView):
 
 
 @register_model_view(models.TemplatePlacement, "bulk_delete", path="delete", detail=False)
-class TemplatePlacementBulkDeleteView(generic.BulkDeleteView):
+class TemplatePlacementBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
     queryset = models.TemplatePlacement.objects.select_related(
         "template", "device_type", "device_role", "tenant", "parent_placement"
     )

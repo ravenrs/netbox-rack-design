@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING, Annotated
 import strawberry
 import strawberry_django
 from netbox.graphql.types import NetBoxObjectType
+from strawberry import Info
 
+from .. import models
 from ..models import (
     Design,
     DesignGroup,
@@ -55,6 +57,86 @@ __all__ = (
     "TemplatePlacementType",
 )
 
+# One query must not fan out into an unbounded child list. The lineage walk is
+# already capped by models.MAX_LINEAGE_DEPTH; pair both with NetBox's
+# GRAPHQL_MAX_QUERY_DEPTH (docs/api.md).
+MAX_CHILDREN = 200
+
+
+def _viewable(info, design):
+    """``design`` if the caller may view it, else ``None``: a forward FK to an
+    object the caller cannot view resolves null, as it does for core's own
+    models (``device { tenant }``). Unlike REST and the UI, which show a hidden
+    link's name, GraphQL gives no part of it away; ``ancestors`` below is the
+    one field that keeps the whole chain, as core's tree ``parent`` does."""
+    if design is None:
+        return None
+    return design if design.pk in _viewable_design_ids(info) else None
+
+
+def _viewable_design_ids(info):
+    """The pks of every design the caller may view: one query per request,
+    shared by every link in the response (like ``_ancestor_ids``' parent map),
+    instead of one per resolved link."""
+    request = info.context.request
+    viewable = getattr(request, "_rd_viewable_designs", None)
+    if viewable is None:
+        viewable = set(
+            Design.objects.restrict(request.user, "view").values_list("pk", flat=True)
+        )
+        request._rd_viewable_designs = viewable
+    return viewable
+
+
+def _resolve_based_on(root, info: Info):
+    return _viewable(info, root.based_on)
+
+
+def _resolve_root(root, info: Info):
+    return _viewable(info, root.root)
+
+
+def _resolve_depends_on(root, info: Info):
+    # order_by before the slice: an unordered LIMIT returns an arbitrary subset.
+    return list(root.depends_on.restrict(info.context.request.user, "view").order_by("pk")[:MAX_CHILDREN])
+
+
+def _resolve_design(root, info: Info):
+    return _viewable(info, root.design)
+
+
+def _ancestor_ids(info, design):
+    """The pks of ``design``'s ``based_on`` ancestors, oldest first -- ``[]`` for
+    a lineage that cannot be walked (a cycle, or deeper than
+    ``models.MAX_LINEAGE_DEPTH``): a GraphQL field must never 500 on that, and
+    ``projection.resolve_baseline_chain`` degrades the same way.
+
+    One ``(pk, based_on_id)`` query per request, shared by every design in the
+    response, instead of a query per hop per design."""
+    request = info.context.request
+    parents = getattr(request, "_rd_design_parents", None)
+    if parents is None:
+        parents = dict(Design.objects.values_list("pk", "based_on_id"))
+        request._rd_design_parents = parents
+    chain, seen = [], {design.pk}
+    node = parents.get(design.pk)
+    while node is not None:
+        if node in seen or len(chain) >= models.MAX_LINEAGE_DEPTH:
+            return []
+        seen.add(node)
+        chain.append(node)
+        node = parents.get(node)
+    chain.reverse()
+    return chain
+
+
+def _ancestors(info, design):
+    """``design``'s ``based_on`` ancestors, oldest first (``[]`` for a lineage
+    that cannot be walked)."""
+    ids = _ancestor_ids(info, design)
+    found = Design.objects.in_bulk(ids)
+    return [found[pk] for pk in ids if pk in found]
+
 
 @strawberry_django.type(DesignGroup, fields="__all__", filters=DesignGroupFilter, pagination=True)
 class DesignGroupType(NetBoxObjectType):
@@ -68,9 +150,20 @@ class DesignType(NetBoxObjectType):
     # lacks 'view' on rather than needing the whole field to be Optional.
     sites: list[Annotated["SiteType", strawberry.lazy("dcim.graphql.types")]]
     group: Annotated["DesignGroupType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
-    based_on: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
-    root: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
-    depends_on: list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]
+    # based_on / root / depends_on reach other designs: resolved through
+    # _viewable / a restricted queryset, never as a bare FK (see _viewable).
+    # Declared as annotation + resolver (not a method of the same name as the
+    # model field), which strawberry-django resolves to a fieldless
+    # DjangoModelType.
+    based_on: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None = (
+        strawberry_django.field(resolver=_resolve_based_on)
+    )
+    root: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None = (
+        strawberry_django.field(resolver=_resolve_root)
+    )
+    depends_on: list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]] = (
+        strawberry_django.field(resolver=_resolve_depends_on)
+    )
     # planned_racks (M2M to PlannedRack): declared explicitly like depends_on
     # above rather than relying on PlannedRackType being registered elsewhere
     # first, so this field's resolution never depends on import order.
@@ -81,8 +174,11 @@ class DesignType(NetBoxObjectType):
     # Django field, so ``fields="__all__"`` never picks it up -- it needs an
     # explicit resolver like every other non-field attribute on this type.
     @strawberry_django.field
-    def children(self) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
-        return list(self.children)
+    def children(self, info: Info) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
+        # Only designs the caller may view (a list, so a hidden one is dropped,
+        # like REST ``chain``), capped at MAX_CHILDREN. order_by before the
+        # slice: an unordered LIMIT returns an arbitrary subset.
+        return list(self.children.restrict(info.context.request.user, "view").order_by("pk")[:MAX_CHILDREN])
 
     # ``is_frozen`` (Design.is_frozen) is a plain bool property.
     @strawberry_django.field
@@ -90,25 +186,23 @@ class DesignType(NetBoxObjectType):
         return self.is_frozen
 
     @strawberry_django.field
-    def ancestors(self) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
+    def ancestors(
+        self, info: Info
+    ) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
         """
         The ordered ``based_on`` chain (oldest first), i.e.
-        ``Design.baseline_chain()`` surfaced over GraphQL.
+        ``Design.baseline_chain()`` surfaced over GraphQL. The whole chain is
+        returned, hidden ancestors included, like REST ``chain`` and the
+        design page: core's own ``parent`` of a tree object is not restricted
+        either.
 
-        ``baseline_chain()`` raises ``ValueError`` on a cycle in the lineage
-        (a row saved before ``clean()`` grew its guard could already hold
-        one) -- a GraphQL field must never 500 on that, so this degrades to
-        an empty list exactly the way ``projection.resolve_baseline_chain``
-        already degrades projection: an unresolvable lineage inherits
-        nothing rather than crashing the query. A client that needs to
-        distinguish "no parent" from "broken lineage" already has
-        ``based_on`` for that -- a non-null ``based_on`` with empty
+        An unwalkable lineage (a cycle, or deeper than
+        ``models.MAX_LINEAGE_DEPTH``) is an empty list -- a GraphQL field must
+        never 500 on it. A client that needs to tell "no parent" from "broken
+        lineage" has ``based_on`` for that: a non-null ``based_on`` with empty
         ``ancestors`` says exactly that.
         """
-        try:
-            return self.baseline_chain()
-        except ValueError:
-            return []
+        return _ancestors(info, self)
 
 
 # A PLANNED power feed. Now a queryable object in its own right (it became a
@@ -124,7 +218,8 @@ class DesignPowerFeedType(NetBoxObjectType):
     # Cross-app/cross-model FKs are nullable for the same reason as DesignType's:
     # under object-level permissions a related object the caller cannot view
     # resolves to null.
-    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None = strawberry_django.field(resolver=_resolve_design)
+
     rack: Annotated["RackType", strawberry.lazy("dcim.graphql.types")] | None
     # planned_rack (D25/T1.8b): the planned-rack counterpart of ``rack`` --
     # declared explicitly, like DesignPlacementType.target_planned_rack below,
@@ -142,7 +237,7 @@ class DesignPowerFeedType(NetBoxObjectType):
 # the nested target of DesignPlacement.step.
 @strawberry_django.type(DesignStep, fields="__all__", filters=DesignStepFilter, pagination=True)
 class DesignStepType(NetBoxObjectType):
-    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None = strawberry_django.field(resolver=_resolve_design)
 
 
 # A PLANNED rack. Queryable in its own right, and the nested target of
@@ -191,7 +286,8 @@ class TemplatePlacementType(NetBoxObjectType):
 
 @strawberry_django.type(DesignPlacement, fields="__all__", filters=DesignPlacementFilter, pagination=True)
 class DesignPlacementType(NetBoxObjectType):
-    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
+    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None = strawberry_django.field(resolver=_resolve_design)
+
     device: Annotated["DeviceType", strawberry.lazy("dcim.graphql.types")] | None
     device_type: Annotated["DeviceTypeType", strawberry.lazy("dcim.graphql.types")] | None
     device_role: Annotated["DeviceRoleType", strawberry.lazy("dcim.graphql.types")] | None

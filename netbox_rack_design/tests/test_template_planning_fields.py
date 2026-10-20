@@ -84,7 +84,10 @@ class TemplateTakesDeviceValuesTest(APITestCase, _Fixture):
         cls.build()
 
     def _perms(self):
-        self.add_permissions("netbox_rack_design.add_template", "netbox_rack_design.view_design")
+        self.add_permissions(
+            "netbox_rack_design.add_template", "netbox_rack_design.view_design",
+            "dcim.view_rack",  # from-rack reads a rack no design scopes
+        )
 
     def test_from_a_real_rack(self):
         self._perms()

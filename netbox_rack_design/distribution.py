@@ -259,8 +259,9 @@ def _placement_custom_fields(placement):
     source_device = getattr(placement, "power_source_device", None)
     if source_device is not None:
         return dict(source_device.cf or {})
-    config = getattr(placement, "power_config", None) or {}
-    return dict(config.get("custom_fields") or {})
+    from .models import _manual_custom_fields  # local: models imports this module lazily
+
+    return dict(_manual_custom_fields(getattr(placement, "power_config", None)))
 
 
 def devices_from_elevation(elevation):
@@ -1046,9 +1047,23 @@ def _generate_distribution_status(elevation, *, mode=None):
     # all, so this override -- which exists purely to feed a script -- is only
     # applied in "script" mode; "none" mode never reaches here either, so it
     # never queries DesignRackPower.
-    if mode == "script":
-        apply_rack_power_override(elevation)
-    devices = devices_from_elevation(elevation)
+    # These two read stored JSON, so a bad row must degrade to a ``failed``
+    # status the user can read -- not take the whole editor page down.
+    try:
+        if mode == "script":
+            apply_rack_power_override(elevation)
+        devices = devices_from_elevation(elevation)
+    except Exception as exc:  # noqa: BLE001 - must never break the editor
+        logger.warning(
+            "distribution: preparing rack %r for the %r engine raised unexpectedly.",
+            getattr(elevation.rack, "name", None), mode, exc_info=True,
+        )
+        return None, {
+            "state": "failed", "engine": mode,
+            "script": (get_plugin_config(PLUGIN_NAME, "distribution_script", "") or None)
+            if mode == "script" else None,
+            "detail": f"Preparing the rack's power data raised {_exc_line(exc)}",
+        }
     planned_pdu_count = sum(
         1 for d in devices
         if d.get("device") is None and (d.get("role") or "") in ("pdu", "unmanageable-pdu")

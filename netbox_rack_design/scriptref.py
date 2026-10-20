@@ -116,7 +116,9 @@ def _load_storage_module(module_name, config_key):
     # Registered before exec so dataclasses / typing can find the module.
     sys.modules[qualname] = module
     try:
-        exec(compile(source, filename, "exec"), module.__dict__)
+        # Feature, not a hole: runs the NetBox-admin-managed naming/distribution script from
+        # script storage (editing it already requires NetBox script-write access).
+        exec(compile(source, filename, "exec"), module.__dict__)  # noqa: S102
     except Exception:
         sys.modules.pop(qualname, None)
         raise

@@ -488,7 +488,7 @@ class DesignChainActionsTest(APITestCase):
     # --- new_version ------------------------------------------------------
 
     def test_new_version_with_add_permission_succeeds(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         root = make_design(
             title="Root", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -508,7 +508,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
 
     def test_new_version_with_no_body_keeps_source_title(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         root = make_design(
             title="Keep my title", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -519,7 +519,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertEqual(clone.title, "Keep my title")
 
     def test_new_version_with_blank_title_rejected(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         root = make_design(
             title="Root3", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -533,7 +533,7 @@ class DesignChainActionsTest(APITestCase):
         # No status requirement, unlike `derive`: a version may be created
         # from a design in ANY status, since approval makes a version
         # necessary, not valid.
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         draft = make_design(title="Draft root", site=self.site)
         response = self.client.post(self._new_version_url(draft), {}, **self.header)
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
@@ -542,7 +542,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertEqual(clone.version, 2)
 
     def test_new_version_clones_placements_and_feeds(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         source = make_design(
             title="With content", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -3908,6 +3908,12 @@ class HiddenDesignRackTest(APITestCase):
         self.user_b = User.objects.create_user(username="user_b")
         self.token_b = Token.objects.create(user=self.user_b)
         self.header_b = api_token_header(self.token_b)
+        # The toggle looks the design up through view_design, for both users.
+        self.add_permissions("netbox_rack_design.view_design")
+        permission = ObjectPermission(name="hidden-racks-view-b", actions=["view"])
+        permission.save()
+        permission.users.add(self.user_b)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
 
     def _list_url(self):
         return reverse("plugins-api:netbox_rack_design-api:hiddendesignrack-list")
@@ -4957,6 +4963,11 @@ class DeviceTypePowerTest(APITestCase):
         cls.dt_passive = DeviceType.objects.create(
             manufacturer=mfr, model="DTP-Passive", slug="dtp-passive",
             u_height=1, is_full_depth=False)
+
+    def setUp(self):
+        super().setUp()
+        # The endpoint is gated on the plugin's own view permission.
+        self.add_permissions("netbox_rack_design.view_design")
 
     def _url(self):
         return reverse(

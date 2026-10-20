@@ -51,6 +51,97 @@ __all__ = (
 DOCS_BASE_URL = "https://ravenrs.github.io/netbox-rack-design/"
 
 
+# A ``based_on`` chain deeper than this is refused: baseline_chain() costs a
+# query per hop, and every projection/clean walks it, so an unbounded chain is
+# a cheap way to make a design's pages arbitrarily slow.
+MAX_LINEAGE_DEPTH = 200
+
+# Where a placement/feed may say it is "faced": core's own two faces (or none).
+_FACES = ("", "front", "rear")
+
+
+class LineageError(ValueError):
+    """The ``based_on`` walk cannot be ordered: a cycle, or too deep.
+
+    A ``ValueError`` (not ``ValidationError``) so any caller walking the chain
+    -- not just a form context -- can catch it. ``designs`` is the path that
+    shows it.
+    """
+
+    def __init__(self, designs, *, too_deep=False):
+        self.designs = list(designs)
+        self.too_deep = too_deep
+        if too_deep:
+            message = (f"Design lineage is deeper than {MAX_LINEAGE_DEPTH} levels; "
+                       "re-base this design onto a nearer ancestor.")
+        else:
+            message = "Cycle detected in design lineage: " + " -> ".join(str(d) for d in self.designs)
+        super().__init__(message)
+
+
+def _validate_power_config(value, field="power_config"):
+    """``power_config`` is ``None`` or a dict whose ``custom_fields`` is
+    ``None`` or a dict. Every reader does ``.get("custom_fields")`` on it, so
+    any other JSON shape would 500 the editor for everyone viewing the design."""
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValidationError({field: "Must be an object (or null)."})
+    custom_fields = value.get("custom_fields")
+    if custom_fields is not None and not isinstance(custom_fields, dict):
+        raise ValidationError({field: "'custom_fields' must be an object (or null)."})
+
+
+def _manual_custom_fields(power_config):
+    """The ``custom_fields`` dict inside a ``power_config`` blob, ``{}`` for any
+    shape that is not ``{"custom_fields": {...}}`` -- a row that bypassed
+    ``clean()`` (import, shell, an older release) must not take a reader down."""
+    if not isinstance(power_config, dict):
+        return {}
+    custom_fields = power_config.get("custom_fields")
+    return custom_fields if isinstance(custom_fields, dict) else {}
+
+
+def _refs_to_site_check(instance, *attnames):
+    """Which of ``attnames`` (FK attnames) must be site-checked on this
+    ``clean()``: all of them for a new row or one moved into another design,
+    else only those that differ from the stored row. NetBox may move a device,
+    rack or feed to another site long after a design pointed at it; that must
+    not make the design's own row unsaveable. ``_refs_copied`` marks a verbatim
+    copy of a stored row (a new version): its references were vouched for when
+    the source was written."""
+    if getattr(instance, "_refs_copied", False):
+        return set()
+    stored = None
+    if instance.pk:
+        stored = type(instance).objects.filter(pk=instance.pk).values("design_id", *attnames).first()
+    if stored is None or stored["design_id"] != instance.design_id:
+        return set(attnames)
+    return {name for name in attnames if stored[name] != getattr(instance, name)}
+
+
+def _reject_reparent_out_of_frozen(instance, what):
+    """A row of an APPROVED design may not be re-pointed at another design.
+
+    ``clean()`` only looks at the NEW ``design`` for the freeze rule, so
+    changing ``design`` was a way to pull rows out from under an approved
+    design. The stored row says where it lives now."""
+    if not instance.pk:
+        return
+    old_design_id = (
+        type(instance).objects.filter(pk=instance.pk).values_list("design_id", flat=True).first()
+    )
+    if (
+        old_design_id and old_design_id != instance.design_id
+        and Design.objects.filter(pk=old_design_id, status=DesignStatusChoices.STATUS_APPROVED).exists()
+    ):
+        raise ValidationError({
+            "design": f"The design this belongs to is approved, and approved designs "
+                      f"are frozen: {what} cannot be moved to another design. Set "
+                      "the design back to draft first."
+        })
+
+
 def _frozen_design_clean_message(what):
     """
     The message ``clean()`` raises when a write is rejected because the
@@ -108,11 +199,21 @@ class DesignGroup(NetBoxModel):
 
     def clean(self):
         super().clean()
-        # Guard against cyclic parenting.
+        # Guard against cyclic parenting. Existing rows may already hold a loop
+        # (or a very long chain), so the walk keeps a visited set and a depth cap
+        # instead of trusting the data to end.
         ancestor = self.parent
+        seen = set()
         while ancestor is not None:
             if ancestor.pk == self.pk:
                 raise ValidationError({"parent": "A group cannot be its own ancestor."})
+            if ancestor.pk in seen:
+                raise ValidationError(
+                    {"parent": "The parent's own chain loops back on itself; fix that first."})
+            if len(seen) >= MAX_LINEAGE_DEPTH:
+                raise ValidationError(
+                    {"parent": f"Groups are nested deeper than {MAX_LINEAGE_DEPTH} levels."})
+            seen.add(ancestor.pk)
             ancestor = ancestor.parent
 
 
@@ -352,7 +453,7 @@ class Design(NetBoxModel):
         equivalent (§2.2), and there is nothing to freshen and no snapshot to
         go stale.
 
-        Raises ``ValueError``, not ``ValidationError``: existing rows could
+        Raises ``LineageError`` (a ``ValueError``), not ``ValidationError``: existing rows could
         already hold a cycle (nothing prevented one before ``clean()`` grew a
         guard), so any caller walking the chain -- not just a form/clean()
         context -- needs a plain exception naming every design in the loop,
@@ -363,8 +464,9 @@ class Design(NetBoxModel):
         current = self.based_on
         while current is not None:
             if current.pk in seen:
-                path = " -> ".join(str(d) for d in [*chain, current])
-                raise ValueError(f"Cycle detected in design lineage: {path}")
+                raise LineageError([*chain, current])
+            if len(chain) >= MAX_LINEAGE_DEPTH:
+                raise LineageError(chain, too_deep=True)
             chain.append(current)
             seen.add(current.pk)
             current = current.based_on
@@ -394,32 +496,98 @@ class Design(NetBoxModel):
             self.sequence = (last or 0) + 10
         super().save(*args, **kwargs)
 
+    def _incoming_pks(self, name):
+        """pks of the m2m values a REST write is about to apply (stashed by
+        NetBox's ``ValidatedModelSerializer`` before ``full_clean()``), or
+        ``None`` when this validation is not carrying any for ``name``."""
+        values = getattr(self, "_m2m_values", {}).get(name)
+        if values is None:
+            return None
+        return {getattr(value, "pk", value) for value in values}
+
+    def _check_depends_on_acyclic(self):
+        """Raise if ``depends_on`` would contain a cycle through this design.
+
+        A breadth-first walk over the stored edges, one query per level and a
+        visited set, so the cost is O(V+E) however many diamonds the graph has
+        (the recursive per-path walk it replaces was exponential). A cycle must
+        pass back through ``self`` to have been introduced by this write, so
+        reaching ``self`` again is the whole test; ``parent`` rebuilds the path
+        for the message.
+        """
+        incoming = self._incoming_pks("depends_on")
+        through = Design.depends_on.through
+        first = (
+            incoming if incoming is not None
+            else set(through.objects.filter(from_design_id=self.pk).values_list("to_design_id", flat=True))
+        )
+        parent = dict.fromkeys(first, self.pk)  # node -> its predecessor on a path from self
+        closer = self.pk if self.pk in first else None  # the node whose edge points back at self
+        frontier = [pk for pk in first if pk != self.pk]
+        levels = 0
+        while frontier and closer is None:
+            levels += 1
+            if levels > MAX_LINEAGE_DEPTH:
+                raise ValidationError(
+                    {"depends_on": f"The 'depends_on' graph is deeper than {MAX_LINEAGE_DEPTH} levels."})
+            next_frontier = []
+            edges = through.objects.filter(from_design_id__in=frontier).values_list(
+                "from_design_id", "to_design_id")
+            for src, dst in edges:
+                if dst == self.pk:
+                    closer = src
+                    break
+                if dst not in parent:
+                    parent[dst] = src
+                    next_frontier.append(dst)
+            frontier = next_frontier
+        if closer is None:
+            return
+        hop_ids = []
+        node = closer
+        while node != self.pk:
+            hop_ids.append(node)
+            node = parent[node]
+        hops = Design.objects.in_bulk(hop_ids)
+        path = " -> ".join([str(self), *(str(hops[pk]) for pk in reversed(hop_ids)), str(self)])
+        raise ValidationError({"depends_on": f"Cycle in 'depends_on': {path}"})
+
     def clean(self):
         super().clean()
         if self.based_on_id and self.based_on_id == self.pk:
             raise ValidationError({"based_on": "A design cannot be based on itself."})
+        # ``root`` groups a plan's versions: it names the FIRST version, which
+        # has no root of its own. Anything else (self, or a design that is itself
+        # a later version) lets a client graft a design into someone else's
+        # version group, which blocks that group's approve/delete.
+        if self.root_id:
+            if self.root_id == self.pk:
+                raise ValidationError({"root": "A design cannot be its own root."})
+            if self.root.root_id:
+                raise ValidationError({"root": "The root must be the first version of a plan, not a later one."})
         # Longer cycles (A -> B -> A, or deeper): baseline_chain() already walks
         # the ancestor chain to detect one (G7), so reuse it rather than
         # duplicating the walk here.
         if self.based_on_id:
             try:
                 self.baseline_chain()
-            except ValueError as exc:
+            except LineageError as exc:
                 raise ValidationError({"based_on": str(exc)}) from exc
 
         # A chain across two DISJOINT sites is meaningless (PLAN-design-chains.md
         # gap 1): a parent's placements are site-scoped, so a child that shares
         # none of the parent's sites could never actually replay them into its
         # own racks. (PLAN-multi-site.md M5): the rule loosens from "same site"
-        # to "child and parent share at least one site". ``sites`` is now a
-        # M2M, so -- unlike the old scalar ``site_id`` -- it cannot be read on
-        # an unsaved instance (no pk means no through-rows yet); this check
-        # only runs once persisted (mirrors the ``racks`` M2M-timing caveat
-        # below), so it covers edits, not CREATE -- the form/serializer layer
-        # re-runs full_clean() post-save to enforce it on create, same as the
-        # ``racks`` scope check.
-        if self.pk and self.based_on_id:
-            if not self.sites.filter(pk__in=self.based_on.sites.values_list("pk", flat=True)).exists():
+        # to "child and parent share at least one site". ``sites`` is a M2M, so
+        # it cannot be read on an unsaved instance (no pk means no through-rows
+        # yet): the sites are the INCOMING ones a REST write stashed in
+        # ``_m2m_values`` when present (which is what makes a create judgeable),
+        # else the stored ones once persisted. The HTML form checks on its own.
+        site_ids = self._incoming_pks("sites")
+        if site_ids is None and self.pk:
+            site_ids = set(self.sites.values_list("pk", flat=True))
+        if site_ids is not None and self.based_on_id:
+            if not site_ids & set(self.based_on.sites.values_list("pk", flat=True)):
                 raise ValidationError(
                     {"based_on": "The parent design shares no site with this "
                                   "design -- a chain across disjoint sites is "
@@ -429,23 +597,12 @@ class Design(NetBoxModel):
         # depends_on cycle guard (G7): a many-to-many relation cannot be read on
         # an unsaved instance (pk=None) -- Django raises before the through-rows
         # exist -- so, mirroring the ``racks`` check below, this only runs once
-        # the design is persisted (i.e. on edits; a brand-new design has no
-        # dependents attached yet to form a cycle with).
+        # the design is persisted (a brand-new design has no dependents attached
+        # yet to form a cycle with). On the REST path the NEW depends_on is not
+        # in the table yet but sits in ``_m2m_values`` (see the ``racks`` note
+        # below), so that is what this design's outgoing edges are when present.
         if self.pk:
-            # DFS tracking the current recursion path's pks (not a flat "seen"
-            # set collected across branches) so a revisit within ONE path is a
-            # real cycle, an unrelated diamond (A depends on B and C, both
-            # depending on D) is not mistaken for one, and a cycle that does
-            # not happen to pass back through self (but is reachable from it)
-            # still terminates instead of recursing forever.
-            def _walk(node, path):
-                if node.pk in {p.pk for p in path}:
-                    chain = " -> ".join(str(d) for d in [*path, node])
-                    raise ValidationError({"depends_on": f"Cycle in 'depends_on': {chain}"})
-                for nxt in node.depends_on.all():
-                    _walk(nxt, [*path, node])
-
-            _walk(self, [])
+            self._check_depends_on_acyclic()
 
         # At most one approved version per plan (root group). A brand-new, unsaved
         # root (pk=None, root=None) has no persisted version group yet, so there is
@@ -494,39 +651,45 @@ class Design(NetBoxModel):
 
         # At least one site is required (M1). Same M2M-timing caveat as every
         # other ``sites``-dependent check here: only checkable once persisted.
-        if self.pk and not self.sites.exists():
-            raise ValidationError({"sites": "A design must have at least one site."})
+        # The sites/racks/planned_racks a REST write is ABOUT to apply are in
+        # ``_m2m_values`` (see the freeze note below); each check reads those
+        # when present, else the stored rows -- so a write cannot slip a
+        # foreign-site rack past a check that only looked at the old state.
+        # An unsaved design (a REST create) has only the incoming values to judge.
+        if site_ids is not None:
+            from dcim.models import Rack  # local: see the string-only dcim FKs above
 
-        # Every scoped rack must belong to one of this design's sites (M3;
-        # consistent with the site-scoping of placements). M2M-timing caveat:
-        # a many-to-many relation cannot be read on an unsaved instance
-        # (pk=None) -- Django raises before the through-rows exist -- so this
-        # check only runs once the design is persisted (i.e. on edits). For a
-        # brand-new design the racks are attached only after the initial save,
-        # so the form/serializer layer (a later phase) must re-run
-        # full_clean() post-save to enforce this on create.
-        if self.pk:
-            offending = self.racks.exclude(site_id__in=self.sites.values_list("pk", flat=True))
+            if not site_ids:
+                raise ValidationError({"sites": "A design must have at least one site."})
+
+            # Every scoped rack must belong to one of this design's sites (M3;
+            # consistent with the site-scoping of placements).
+            rack_ids = self._incoming_pks("racks")
+            if rack_ids is not None:
+                racks = Rack.objects.filter(pk__in=rack_ids)
+            else:
+                racks = self.racks.all() if self.pk else Rack.objects.none()
+            offending = racks.exclude(site_id__in=site_ids)
             if offending.exists():
                 names = ", ".join(str(rack) for rack in offending)
                 raise ValidationError(
                     {"racks": f"These racks are not in one of the design's sites: {names}."}
                 )
 
-        # Same rule for `planned_racks` (T1.3): a PlannedRack has no site FK of
-        # its own -- its site is reached through `location` (PlannedRack.site)
-        # -- so this filters on `location__site_id` rather than `site_id`
-        # directly. Same M2M-timing caveat as the `racks` check just above.
-        if self.pk:
-            offending_planned = self.planned_racks.exclude(
-                location__site_id__in=self.sites.values_list("pk", flat=True)
-            )
+            # Same rule for `planned_racks` (T1.3): a PlannedRack has no site FK
+            # of its own -- its site is reached through `location` -- so this
+            # filters on `location__site_id`.
+            planned_ids = self._incoming_pks("planned_racks")
+            if planned_ids is not None:
+                planned = PlannedRack.objects.filter(pk__in=planned_ids)
+            else:
+                planned = self.planned_racks.all() if self.pk else PlannedRack.objects.none()
+            offending_planned = planned.exclude(location__site_id__in=site_ids)
             if offending_planned.exists():
                 names = ", ".join(str(rack) for rack in offending_planned)
                 raise ValidationError(
                     {"planned_racks": f"These planned racks are not in one of the design's sites: {names}."}
                 )
-
 
         # A design's `racks` scope is part of what was approved (§2.2/G4): the
         # `add-rack`/`remove-rack` API actions already refuse to widen or
@@ -607,6 +770,10 @@ class DesignStep(NetBoxModel):
         if self.title:
             return f"Step {self.index} \u2013 {self.title}"
         return f"Step {self.index}"
+
+    def clean(self):
+        super().clean()
+        _reject_reparent_out_of_frozen(self, "a step")
 
     def get_absolute_url(self):
         # No detail view of its own: a step is read in its design's editor.
@@ -1131,6 +1298,8 @@ class DesignPlacement(NetBoxModel):
         super().clean()
         kind = self.kind
 
+        _reject_reparent_out_of_frozen(self, "its placements")
+
         # A design that is APPROVED is frozen (§2.2, Design.is_frozen): its
         # placements are read-only, because approval is what makes the design
         # derivable and downstream chains must be able to trust that a frozen
@@ -1152,6 +1321,11 @@ class DesignPlacement(NetBoxModel):
                 raise ValidationError({
                     "step": "A blade follows its chassis' step and cannot have one of its own.",
                 })
+
+        if self.target_face not in _FACES:
+            raise ValidationError({"target_face": "Must be 'front', 'rear' or empty."})
+        _validate_power_config(self.power_config)
+        self._validate_refs_in_design_sites()
 
         # Config-declared planning fields: validated against the deployment's
         # ``placement_fields`` schema and normalised in place, so what reaches
@@ -1195,7 +1369,7 @@ class DesignPlacement(NetBoxModel):
         # A planned PDU's custom fields come from at most ONE source: a referenced
         # real device (cf read live) OR manual power_config -- never both (docs/
         # pdu-distribution-spec §6.5).
-        if self.power_source_device_id and (self.power_config or {}).get("custom_fields"):
+        if self.power_source_device_id and _manual_custom_fields(self.power_config):
             raise ValidationError(
                 "A placement cannot both reference a source device and carry "
                 "manual power_config custom fields."
@@ -1371,6 +1545,37 @@ class DesignPlacement(NetBoxModel):
 
         self._validate_target_slot()
 
+    def _validate_refs_in_design_sites(self):
+        """The real objects a placement points at must sit in one of the design's
+        sites -- the same scope the target rack already has. Without it a design
+        could name any device / PDU / power feed in NetBox and have the work
+        order, projection and apply read it back."""
+        if not self.design_id:
+            return
+        changed = _refs_to_site_check(
+            self, "device_id", "target_bay_id", "power_source_device_id", "real_power_feed_id")
+        if not changed:
+            return
+        refs = (
+            ("device", "device_id", lambda: self.device.site_id),
+            # A blade's chassis, racked or not (a rackless chassis has no rack
+            # whose site could vouch for it).
+            ("target_bay", "target_bay_id", lambda: self.target_bay.device.site_id),
+            ("power_source_device", "power_source_device_id", lambda: self.power_source_device.site_id),
+            ("real_power_feed", "real_power_feed_id", lambda: self.real_power_feed.power_panel.site_id),
+        )
+        site_ids = None
+        for field_name, attname, read_site in refs:
+            if attname not in changed or not getattr(self, attname):
+                continue
+            site_id = read_site()
+            if not site_id:
+                continue
+            if site_ids is None:
+                site_ids = set(self.design.sites.values_list("pk", flat=True))
+            if site_id not in site_ids:
+                raise ValidationError({field_name: "Must be in one of the design's sites."})
+
     def _validate_base_placement(self):
         """A ``base_placement`` (G2) must point at a TRUE ancestor's 'add'.
 
@@ -1388,7 +1593,7 @@ class DesignPlacement(NetBoxModel):
             return
         try:
             chain_design_ids = {d.pk for d in self.design.baseline_chain()}
-        except ValueError as exc:
+        except LineageError as exc:
             raise ValidationError({"base_placement": str(exc)}) from exc
         if base.design_id not in chain_design_ids:
             raise ValidationError({
@@ -1421,7 +1626,7 @@ class DesignPlacement(NetBoxModel):
             return
         try:
             chain_design_ids = {d.pk for d in self.design.baseline_chain()}
-        except ValueError as exc:
+        except LineageError as exc:
             raise ValidationError({"planned_power_feed": str(exc)}) from exc
         if feed.design_id not in chain_design_ids:
             raise ValidationError({
@@ -1483,13 +1688,6 @@ class DesignPlacement(NetBoxModel):
                 raise ValidationError({
                     "target_rack": "Target rack must be the rack the chassis is in.",
                 })
-            if (
-                self.design_id and parent.rack_id
-                and not self.design.sites.filter(pk=parent.rack.site_id).exists()
-            ):
-                raise ValidationError({
-                    "target_bay": "The chassis is not in one of the design's sites.",
-                })
             # The bay must be free in the design's PROJECTED world: an occupant
             # this same design moves out or removes has already vacated it.
             occupant_id = self.target_bay.installed_device_id
@@ -1540,7 +1738,7 @@ class DesignPlacement(NetBoxModel):
             return
         try:
             chain_design_ids = {d.pk for d in self.design.baseline_chain()}
-        except ValueError as exc:
+        except LineageError as exc:
             raise ValidationError({"base_parent_placement": str(exc)}) from exc
         if base_parent.design_id not in chain_design_ids:
             raise ValidationError({
@@ -2156,6 +2354,7 @@ class DesignPowerFeed(NetBoxModel):
         # place rather than guarding each call site by hand. (Delete never
         # reaches clean() at all -- that half is guarded explicitly on the
         # viewset / HTML delete views instead, same as for placements.)
+        _reject_reparent_out_of_frozen(self, "its planned power feeds")
         if self.design_id and self.design.is_frozen:
             raise ValidationError(_frozen_design_clean_message("its planned power feeds"))
 
@@ -2176,13 +2375,25 @@ class DesignPowerFeed(NetBoxModel):
         # PlannedRack has no site FK of its own -- ``site`` is a property that
         # derefs through ``location`` -- so this reads location_id/site_id
         # rather than comparing a column directly.
+        changed = _refs_to_site_check(self, "rack_id", "planned_rack_id", "power_panel_id")
         if (
-            self.planned_rack_id and self.design_id
+            "planned_rack_id" in changed and self.planned_rack_id and self.design_id
             and not self.design.sites.filter(pk=self.planned_rack.location.site_id).exists()
         ):
             raise ValidationError({
                 "planned_rack": "Planned rack must be in one of the design's sites.",
             })
+
+        # The real rack and power panel are scoped the same way: Apply turns this
+        # row into a PowerFeed on that rack/panel, so a foreign site's would
+        # become a write there.
+        if self.design_id and changed:
+            site_ids = set(self.design.sites.values_list("pk", flat=True))
+            if "rack_id" in changed and self.rack_id and self.rack.site_id not in site_ids:
+                raise ValidationError({"rack": "Rack must be in one of the design's sites."})
+            if "power_panel_id" in changed and self.power_panel_id and self.power_panel.site_id not in site_ids:
+                raise ValidationError(
+                    {"power_panel": "Power panel must be in one of the design's sites."})
 
     @property
     def derated_watts(self):
@@ -2298,17 +2509,24 @@ class DesignRackPower(models.Model):
             raise ValidationError({
                 "rack": "A rack power override requires a rack or a planned rack.",
             })
+        _validate_power_config(self.power_config)
 
         # Same-site scope as DesignPowerFeed.clean() / DesignPlacement.
         # _validate_planned_rack_target: PlannedRack has no site FK of its
         # own -- ``site`` is a property that derefs through ``location``.
+        changed = _refs_to_site_check(self, "rack_id", "planned_rack_id")
         if (
-            self.planned_rack_id and self.design_id
+            "planned_rack_id" in changed and self.planned_rack_id and self.design_id
             and not self.design.sites.filter(pk=self.planned_rack.location.site_id).exists()
         ):
             raise ValidationError({
                 "planned_rack": "Planned rack must be in one of the design's sites.",
             })
+        if (
+            "rack_id" in changed and self.rack_id and self.design_id
+            and not self.design.sites.filter(pk=self.rack.site_id).exists()
+        ):
+            raise ValidationError({"rack": "Rack must be in one of the design's sites."})
 
     @classmethod
     def effective_custom_fields(cls, design, rack):
@@ -2356,13 +2574,13 @@ class DesignRackPower(models.Model):
                 row = cls.objects.get(design=ancestor, **rack_filter)
             except cls.DoesNotExist:
                 continue
-            merged.update((row.power_config or {}).get("custom_fields") or {})
+            merged.update(_manual_custom_fields(row.power_config))
         try:
             own = cls.objects.get(design=design, **rack_filter)
         except cls.DoesNotExist:
             own = None
         if own is not None:
-            merged.update((own.power_config or {}).get("custom_fields") or {})
+            merged.update(_manual_custom_fields(own.power_config))
         return merged, conflict
 
 
@@ -2601,6 +2819,13 @@ class PlannedRack(NetBoxModel):
                 "u_height": _(
                     "U height must be between 1 and {max}."
                 ).format(max=RACK_U_HEIGHT_MAX),
+            })
+        # Apply and the projection trust ``realized_rack`` as "the real rack this
+        # became", so it must be one in this planned rack's own site: otherwise a
+        # writer could aim a plan's devices at any rack in NetBox.
+        if self.realized_rack_id and self.realized_rack.site_id != self.location.site_id:
+            raise ValidationError({
+                "realized_rack": _("The realized rack must be in the planned rack's site."),
             })
 
     @property
