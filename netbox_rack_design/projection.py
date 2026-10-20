@@ -627,43 +627,29 @@ def _identity_key(placement):
     return None
 
 
-# What a reader who cannot view a design sees in its place (NetBox core parity:
-# direct links show the title, LISTS redact what the reader may not open).
-RESTRICTED_DESIGN_LABEL = "(restricted design)"
-_REFUSAL_KINDS = ("ancestor_implemented", "ancestor_not_approved", "chain_broken")
-
-
-def _ancestor_refusal(ancestor, *, redacted=False):
-    """The §9.2 conflict for an ancestor that must not be replayed, or None.
-
-    ``redacted`` words the same refusal without the ancestor's title or status
-    and drops ``source_design`` (flagging ``source_design_restricted`` instead),
-    for a reader who may not view that design.
-    """
+def _ancestor_refusal(ancestor):
+    """The §9.2 conflict for an ancestor that must not be replayed, or None."""
     status = ancestor.status
     if status == DesignStatusChoices.STATUS_IMPLEMENTED:
-        kind = "ancestor_implemented"
-        tail = (" is marked implemented, so reality may already "
-                "contain part of its layer and replaying it would count "
-                "those changes twice. Nothing is inherited from this chain: "
-                "re-base this design onto the world as it now stands.")
-        what = f"{ancestor}{tail}"
-        redacted_what = f"{RESTRICTED_DESIGN_LABEL}{tail}"
-    elif status != DesignStatusChoices.STATUS_APPROVED:
-        kind = "ancestor_not_approved"
-        tail = ("its placements are still free to change, so a "
-                "design built on it would render a world that moves "
-                "underneath it. Nothing is inherited from this chain until "
-                "it is approved.")
-        what = f"{ancestor} is {ancestor.get_status_display().lower()}, not approved: {tail}"
-        redacted_what = f"{RESTRICTED_DESIGN_LABEL} is not approved: {tail}"
-    else:
-        return None
-    if redacted:
-        conflict = _conflict(kind, detail=redacted_what)
-        conflict["source_design_restricted"] = True
-        return conflict
-    return _conflict(kind, source_design=ancestor, detail=what)
+        return _conflict(
+            "ancestor_implemented",
+            source_design=ancestor,
+            detail=f"{ancestor} is marked implemented, so reality may already "
+                   f"contain part of its layer and replaying it would count "
+                   f"those changes twice. Nothing is inherited from this chain: "
+                   f"re-base this design onto the world as it now stands.",
+        )
+    if status != DesignStatusChoices.STATUS_APPROVED:
+        return _conflict(
+            "ancestor_not_approved",
+            source_design=ancestor,
+            detail=f"{ancestor} is {ancestor.get_status_display().lower()}, not "
+                   f"approved: its placements are still free to change, so a "
+                   f"design built on it would render a world that moves "
+                   f"underneath it. Nothing is inherited from this chain until "
+                   f"it is approved.",
+        )
+    return None
 
 
 def visible_design_ids(user, ids):
@@ -673,60 +659,7 @@ def visible_design_ids(user, ids):
     return set(Design.objects.restrict(user, "view").filter(pk__in=ids).values_list("pk", flat=True))
 
 
-def redact_conflicts(conflicts, design, user):
-    """``conflicts`` with every chain refusal naming a design ``user`` may not
-    view rewritten without it (title, status, and ``source_design`` itself).
-
-    For a caller that shows ``ProjectedElevation.conflicts`` (or
-    :func:`resolve_baseline_chain`'s refusal) to someone who is not
-    necessarily allowed to see every ancestor. ``design``'s own direct parent
-    is a direct link and keeps its title. The input is not modified; ``user``
-    of ``None`` returns the list unchanged.
-    """
-    from .models import LineageError
-
-    conflicts = list(conflicts)
-    if user is None:
-        return conflicts
-    refusals = [c for c in conflicts if c.get("kind") in _REFUSAL_KINDS]
-    if not refusals:
-        return conflicts
-    ids = {c["source_design"].pk for c in refusals if c.get("source_design") is not None}
-    lineage = None
-    if any(c["kind"] == "chain_broken" for c in refusals):
-        try:
-            design.baseline_chain()
-        except LineageError as exc:
-            lineage = exc
-            ids |= {d.pk for d in exc.designs}
-    visible = visible_design_ids(user, ids) | {design.pk}
-    if design.based_on_id:
-        visible.add(design.based_on_id)
-
-    def label(d):
-        return str(d) if d.pk in visible else RESTRICTED_DESIGN_LABEL
-
-    out = []
-    for conflict in conflicts:
-        kind = conflict.get("kind")
-        source = conflict.get("source_design")
-        if kind in ("ancestor_implemented", "ancestor_not_approved") and (
-            source is not None and source.pk not in visible
-        ):
-            redacted = _ancestor_refusal(source, redacted=True)
-            conflict = {**conflict, "source_design": None, "detail": redacted["detail"],
-                        "source_design_restricted": True}
-        elif kind == "chain_broken" and lineage is not None:
-            conflict = {
-                **conflict,
-                "detail": "This design's lineage cannot be resolved, so nothing is "
-                          f"inherited: {lineage.message_for(label)}",
-            }
-        out.append(conflict)
-    return out
-
-
-def resolve_baseline_chain(design, user=None):
+def resolve_baseline_chain(design):
     """``(chain, refusal)`` -- the §9.2 all-or-nothing answer for ``design``.
 
     ``chain`` is ``design.baseline_chain()`` (oldest ancestor first, excluding
@@ -741,10 +674,6 @@ def resolve_baseline_chain(design, user=None):
     item 2) -- asks the SAME question the SAME way. A second, slightly
     different notion of "the chain" in each place is exactly how a stray
     ancestor ends up counted where it should have been refused.
-
-    ``user`` (optional) redacts a refusal that names a design that user may not
-    view -- see :func:`redact_conflicts`. The default, ``None``, is the
-    unredacted answer the engine itself needs.
     """
     if not design.based_on_id:
         return [], None
@@ -754,12 +683,11 @@ def resolve_baseline_chain(design, user=None):
         # A cycle in the lineage. baseline_chain() raises rather than looping;
         # a projection must degrade to single-layer and SAY so, never 500 on a
         # page the planner cannot fix from there.
-        refusal = _conflict(
+        return [], _conflict(
             "chain_broken",
             detail=f"This design's lineage cannot be resolved, so nothing is "
                    f"inherited: {exc}",
         )
-        return [], redact_conflicts([refusal], design, user)[0]
     for ancestor in chain:
         refusal = _ancestor_refusal(ancestor)
         if refusal is not None:
@@ -767,7 +695,7 @@ def resolve_baseline_chain(design, user=None):
             # ancestor breaks every layer stacked on top of it too, because
             # those layers were planned against ITS result. So the whole
             # chain is dropped, not just the offending link.
-            return [], redact_conflicts([refusal], design, user)[0]
+            return [], refusal
     return chain, None
 
 

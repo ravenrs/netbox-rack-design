@@ -5,6 +5,7 @@ import itertools
 import logging
 import re
 from collections.abc import Mapping
+from contextlib import contextmanager
 from decimal import Decimal
 
 from core.signals import clear_events
@@ -255,8 +256,39 @@ def expand_planned_rack_name_pattern(raw_name):
     that into a clean 400, never a 500.
     """
     if re.search(ALPHANUMERIC_EXPANSION_PATTERN, raw_name):
+        if _pattern_name_count(raw_name) > MAX_PLANNED_RACK_NAMES:
+            raise ValidationError(
+                f"The pattern expands to more than {MAX_PLANNED_RACK_NAMES} names."
+            )
         return list(expand_alphanumeric_pattern(raw_name))
     return [raw_name]
+
+
+# One "Create rack" request may name at most this many racks.
+MAX_PLANNED_RACK_NAMES = 200
+
+
+def _pattern_name_count(raw_name):
+    """How many names ``raw_name`` would expand to, counted from the bracket
+    ranges alone: core's expander materialises each range as a list, so ``R[1-
+    999999999]`` must be refused before it is handed over."""
+    total = 1
+    for match in re.finditer(ALPHANUMERIC_EXPANSION_PATTERN, raw_name):
+        size = 0
+        for item in match.group(1).split(","):
+            begin, dash, end = item.partition("-")
+            if not dash:
+                size += 1
+            elif begin.isdigit() and end.isdigit():
+                size += max(int(end) - int(begin) + 1, 1)
+            elif len(begin) == len(end) == 1:
+                size += max(ord(end) - ord(begin) + 1, 1)
+            else:
+                size += 1  # malformed: core's own range check rejects it
+        total *= size
+        if total > MAX_PLANNED_RACK_NAMES:
+            break
+    return total
 
 
 def _retarget_feed_name(name, source_rack_name, target_rack_name):
@@ -297,22 +329,7 @@ def _frozen_design_rest_message(design):
     )
 
 
-def _names_for_reader(designs, user):
-    """Titles of ``designs`` for a message shown to ``user``: the ones they may
-    view by name, the rest only as a count (a hidden title is never printed).
-    ``user`` of None names everything."""
-    designs = list(designs)
-    if user is None:
-        return ", ".join(str(d) for d in designs)
-    visible = projection.visible_design_ids(user, [d.pk for d in designs])
-    names = [str(d) for d in designs if d.pk in visible]
-    hidden = len(designs) - len(names)
-    if hidden:
-        names.append(f"{hidden} design(s) you cannot view")
-    return ", ".join(names)
-
-
-def _design_children_rest_message(design, user=None):
+def _design_children_rest_message(design):
     """
     The message body for a REST 409 rejecting the delete of ``design``
     because other designs are based on it (PLAN-design-chains.md §2.2).
@@ -333,7 +350,7 @@ def _design_children_rest_message(design, user=None):
     ``rebase``, which does.
     """
     children = list(design.children)
-    names = _names_for_reader(children, user)
+    names = ", ".join(str(child) for child in children)
     verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
         f"Cannot delete {design}: {names} {verb} based on this design and "
@@ -342,7 +359,7 @@ def _design_children_rest_message(design, user=None):
     )
 
 
-def _design_versions_rest_message(design, user=None):
+def _design_versions_rest_message(design):
     """
     The message body for a REST 409 rejecting the delete of ``design``
     because other versions of the same plan point their ``root`` at it
@@ -354,7 +371,7 @@ def _design_versions_rest_message(design, user=None):
     warning. Mirrors ``_design_versions_message`` (views.py) so a user sees
     one consistent explanation regardless of which door caught it.
     """
-    names = _names_for_reader(design.versions.all(), user)
+    names = ", ".join(str(version) for version in design.versions.all())
     return (
         f"Cannot delete {design}: {names} are later versions of this plan "
         "and would be destroyed along with it. Delete those versions "
@@ -383,7 +400,7 @@ def _planned_rack_realized_rest_message(planned_rack):
     )
 
 
-def _planned_rack_referenced_rest_message(planned_rack, user=None):
+def _planned_rack_referenced_rest_message(planned_rack):
     """
     The message body for a REST 409 rejecting the delete of a ``PlannedRack``
     still referenced by one or more designs (T1.9, decision 1). Every FK that
@@ -400,7 +417,7 @@ def _planned_rack_referenced_rest_message(planned_rack, user=None):
     shortcut.
     """
     designs = list(planned_rack.referencing_designs())
-    names = _names_for_reader(designs, user)
+    names = ", ".join(str(design) for design in designs)
     verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
     return (
         f"Cannot delete {planned_rack}: {names} still {verb} across it and "
@@ -646,12 +663,39 @@ class IsAuthenticatedTokenWrite(IsAuthenticated):
         return True
 
 
+_ADD_CONSTRAINT_MESSAGE = (
+    "The new design does not satisfy the constraints of your add permission, "
+    "so it was not created."
+)
+
+
+def _require_add_permission(user, obj):
+    """Raise ``PermissionsViolation`` unless ``user``'s add permission covers the
+    row just created (NetBox's own post-save check for a constrained add). Call
+    inside the ``transaction.atomic()`` that created ``obj``."""
+    if not type(obj).objects.restrict(user, "add").filter(pk=obj.pk).exists():
+        raise PermissionsViolation
+
+
 def _discard_preview_writes(sender):
     """End of a preview that wrote and rolled back: drop the rows AND the events
     the writes queued (core's ``clear_events``), or the request would still
     flush webhooks for objects that never existed."""
     transaction.set_rollback(True)
     clear_events.send(sender=sender)
+
+
+@contextmanager
+def _preview_transaction(sender):
+    """``transaction.atomic()`` that is ALWAYS rolled back, with the events its
+    writes queued dropped -- on every exit: the end of the block, an early
+    ``return`` inside it, or an exception (an engine that raises must not leave
+    phantom webhooks behind a 500). Nothing may touch the ORM after the block."""
+    with transaction.atomic():
+        try:
+            yield
+        finally:
+            _discard_preview_writes(sender)
 
 
 def _json_object(request):
@@ -676,16 +720,6 @@ def _bad_title(title):
             {"title": [f"Ensure this field has no more than {max_length} characters."]},
             status=status.HTTP_400_BAD_REQUEST)
     return None
-
-
-def _name_collides(name, site, user):
-    """``naming.name_exists_in_site`` for a reader: other designs' placement names
-    count only if the reader may view those designs, while a real device of the
-    site always counts (plugin perms are the boundary for dcim data, and the site
-    is one of the design's own)."""
-    if naming.name_exists_in_site(name, site, exclude_placement=None, user=user):
-        return True
-    return bool(name and site is not None and Device.objects.filter(site=site, name=name).exists())
 
 
 def _int_or_none(value):
@@ -951,9 +985,9 @@ class DesignViewSet(NetBoxModelViewSet):
         """
         reasons = []
         if instance.children.exists():
-            reasons.append(_design_children_rest_message(instance, self.request.user))
+            reasons.append(_design_children_rest_message(instance))
         if instance.versions.exists():
-            reasons.append(_design_versions_rest_message(instance, self.request.user))
+            reasons.append(_design_versions_rest_message(instance))
         if reasons:
             exc = APIException(" ".join(reasons))
             exc.status_code = status.HTTP_409_CONFLICT
@@ -1098,7 +1132,9 @@ class DesignViewSet(NetBoxModelViewSet):
         # the design's own site when no target_rack was supplied (this is a
         # scratch, not-yet-targeted placement, so `placement.site` is None),
         # matching a one-site design's pre-P1 behaviour.
-        exists = _name_collides(name, placement.site or design.site, request.user)
+        exists = naming.name_exists_in_site(
+            name, placement.site or design.site, exclude_placement=None
+        )
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
         )
@@ -1290,7 +1326,7 @@ class DesignViewSet(NetBoxModelViewSet):
         distributions = {}
         dist_status = {}
         powers = {}
-        with transaction.atomic():
+        with _preview_transaction(self):
             for rack_data, kind, pk in parsed_racks:
                 keys = _keys_for(kind, pk)
                 # A well-formed "p:<pk>" key is looked up in the PlannedRack
@@ -1354,11 +1390,6 @@ class DesignViewSet(NetBoxModelViewSet):
                     distributions[key] = elevation.power.get("distribution")
                     dist_status[key] = elevation.power.get("distribution_status")
                     powers[key] = power
-
-            # Read-only: discard every transient placement (and the events they
-            # queued). Must be the LAST DB action in this atomic block (no ORM
-            # use is allowed after it).
-            _discard_preview_writes(self)
 
         return Response(
             {"distributions": distributions, "distribution_status": dist_status,
@@ -1511,17 +1542,14 @@ class DesignViewSet(NetBoxModelViewSet):
         except ValueError as exc:
             return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
-        with transaction.atomic():
+        with _preview_transaction(self):
             try:
                 result = steps.simulate(
                     design, data["steps"], from_step=data.get("from_step"),
                     to_step=data.get("to_step"), racks=racks,
                 )
             except steps.StepsValidationError as exc:
-                _discard_preview_writes(self)
                 return Response({"steps": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
-            # Must be the LAST DB action in this atomic block.
-            _discard_preview_writes(self)
         return Response({"steps": result}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="auto-order")
@@ -1545,14 +1573,11 @@ class DesignViewSet(NetBoxModelViewSet):
         design = self.get_object()
         body = AutoOrderSerializer(data=request.data)
         body.is_valid(raise_exception=True)
-        with transaction.atomic():
+        with _preview_transaction(self):
             try:
                 result = steps.auto_order(design, body.validated_data["steps"])
             except steps.StepsValidationError as exc:
-                _discard_preview_writes(self)
                 return Response({"steps": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
-            # Must be the LAST DB action in this atomic block.
-            _discard_preview_writes(self)
         return Response({"steps": result, "titles_kept": True}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="work-order")
@@ -1587,10 +1612,9 @@ class DesignViewSet(NetBoxModelViewSet):
             return Response({"output": ["Choose json, md or csv."]},
                             status=status.HTTP_400_BAD_REQUEST)
         try:
-            with transaction.atomic():
+            with _preview_transaction(self):
+                # build() only simulates; the block rolls back as a safety net.
                 data = workorder.build(design, step_no)
-                # build() only simulates; roll back as a safety net.
-                _discard_preview_writes(self)
         except workorder.StepNotFound as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
         if output == "md":
@@ -1843,7 +1867,7 @@ class DesignViewSet(NetBoxModelViewSet):
         # decision stays theirs.
         already_stamped = {}
 
-        with transaction.atomic():
+        with _preview_transaction(self):
             # Optional unsaved editor state (D19): reconcile it through the
             # SAME helpers save-layout/recompute-distribution use, so occupancy
             # below reflects what the planner is currently looking at. Only
@@ -2014,7 +2038,9 @@ class DesignViewSet(NetBoxModelViewSet):
                     name = naming.generate_name(placement, index=counter)
                     pending.append(name)
                     # M4: the placement's own site, not the design's.
-                    exists = _name_collides(name, placement.site, request.user)
+                    exists = naming.name_exists_in_site(
+                        name, placement.site, exclude_placement=None
+                    )
 
                     entry = {
                         "template_placement": tp.pk,
@@ -2067,8 +2093,9 @@ class DesignViewSet(NetBoxModelViewSet):
                         blade_name = naming.generate_name(blade_placement, index=counter)
                         pending.append(blade_name)
                         # M4: the placement's own site, not the design's.
-                        blade_exists = _name_collides(
-                            blade_name, blade_placement.site, request.user)
+                        blade_exists = naming.name_exists_in_site(
+                            blade_name, blade_placement.site, exclude_placement=None
+                        )
                         blades.append({
                             "template_placement": blade.pk,
                             "device_type": blade.device_type_id,
@@ -2092,12 +2119,9 @@ class DesignViewSet(NetBoxModelViewSet):
 
                 result[key] = rack_result
 
-            # Read-only: discard the layout replay AND every in-memory
-            # DesignPlacement built above (none of them were ever .save()d, so
-            # there is nothing of ours to discard beyond the layout replay --
-            # this rollback exists for THAT). Must be the LAST DB action in
-            # this atomic block.
-            _discard_preview_writes(self)
+            # Read-only: the block's exit discards the layout replay (every
+            # in-memory DesignPlacement built above was never .save()d, so the
+            # rollback exists for THAT) and the events it queued.
 
         result["skipped"] = skipped
         result["already_stamped"] = already_stamped
@@ -2299,8 +2323,8 @@ class DesignViewSet(NetBoxModelViewSet):
         # it, exactly as add-rack does (M8, user ruling 2026-09-22) -- the
         # two are the same gesture, one for a rack that exists and one for a
         # rack that does not. A frozen design is refused before this point.
-        if not design.sites.filter(pk=location.site_id).exists():
-            design.sites.add(location.site)
+        # (The widening itself happens inside the write transaction below, so a
+        # refused request leaves the design's sites untouched.)
 
         # Build + validate every instance before writing anything (D4's
         # uniqueness is already proven clear above; full_clean() here catches
@@ -2336,6 +2360,8 @@ class DesignViewSet(NetBoxModelViewSet):
         try:
             with transaction.atomic():
                 design = Design.objects.select_for_update().get(pk=design.pk)
+                if not design.sites.filter(pk=location.site_id).exists():
+                    design.sites.add(location.site)
                 for pr in planned_racks:
                     pr.save()
                     design.planned_racks.add(pr)
@@ -2352,11 +2378,28 @@ class DesignViewSet(NetBoxModelViewSet):
                             design, copy_source, pr, copy_source_kind, "p"
                         )
                     created_entries.append(entry)
+                # What was just created must still fall under the requester's
+                # ``add`` permission on planned racks (constraints on location /
+                # site are judged on the finished rows), or nothing is created.
+                created_ok = PlannedRack.objects.restrict(request.user, "add").filter(
+                    pk__in=[pr.pk for pr in planned_racks]).count()
+                if created_ok != len(planned_racks):
+                    raise PermissionsViolation
         except Design.DoesNotExist:
             return Response(
                 {"detail": "This design was deleted."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            # No add permission at all vs. an add permission whose constraints
+            # the new rows miss: say which.
+            if not request.user.has_perm("netbox_rack_design.add_plannedrack"):
+                raise PermissionDenied("You do not have permission to add planned racks.") from None
+            raise PermissionDenied(
+                "The planned racks do not satisfy the constraints of your add "
+                "permission, so none were created."
+            ) from None
 
         first = created_entries[0]
         response_data = {
@@ -2624,7 +2667,9 @@ class DesignViewSet(NetBoxModelViewSet):
             try:
                 result = apply_engine.run(design, request.user)
             except (ValidationError, IntegrityError, PermissionsViolation) as exc:
-                # The engine rolled the whole run back; say why instead of a 500.
+                # The engine rolled the whole run back; say why instead of a 500,
+                # and drop the events the rolled-back writes queued.
+                clear_events.send(sender=self)
                 if isinstance(exc, ValidationError):
                     problem = "; ".join(exc.messages)
                 elif isinstance(exc, PermissionsViolation):
@@ -2974,21 +3019,15 @@ class DesignViewSet(NetBoxModelViewSet):
             _feed_dict(f, "planned")
             for f in DesignPowerFeed.objects.filter(design=design, **own_lookup)
         ]
-        chain, _refusal = projection.resolve_baseline_chain(design, user=request.user)
-        # A direct parent keeps its title; any older ancestor the reader may not
-        # view is named only as "(restricted design)" (and loses its id).
-        shown = projection.visible_design_ids(request.user, [a.pk for a in chain])
-        if design.based_on_id:
-            shown.add(design.based_on_id)
+        chain, _refusal = projection.resolve_baseline_chain(design)
         for ancestor in chain:
             for f in DesignPowerFeed.objects.filter(
                 design=ancestor, **own_lookup
             ):
                 entry = _feed_dict(f, "planned")
                 entry["inherited"] = True
-                visible = ancestor.pk in shown
-                entry["design_id"] = ancestor.pk if visible else None
-                entry["design_name"] = str(ancestor) if visible else projection.RESTRICTED_DESIGN_LABEL
+                entry["design_id"] = ancestor.pk
+                entry["design_name"] = str(ancestor)
                 planned_feeds.append(entry)
         logger.debug(
             "api.feeds: design=%s rack_id=%s:%s real=%d planned=%d",
@@ -3260,8 +3299,10 @@ class DesignViewSet(NetBoxModelViewSet):
         try:
             with transaction.atomic():
                 for rack_data, kind, rack_pk in parsed_rack_ids:
+                    # Racks resolve inside design.sites only: a foreign site's rack
+                    # is "does not exist", never an existence oracle.
+                    rack = resolve_design_rack(design, f"{kind}:{rack_pk}")[2]
                     if kind == "p":
-                        rack = PlannedRack.objects.filter(pk=rack_pk).first()
                         if rack is None:
                             errors.append({
                                 "rack_id": rack_data["rack_id"],
@@ -3272,7 +3313,6 @@ class DesignViewSet(NetBoxModelViewSet):
                             continue
                         submitted_planned_rack_ids.add(rack_pk)
                     else:
-                        rack = Rack.objects.filter(pk=rack_pk).first()
                         if rack is None:
                             errors.append({
                                 "rack_id": rack_data["rack_id"],
@@ -3911,13 +3951,6 @@ class DesignViewSet(NetBoxModelViewSet):
             return (placement.target_face or "") == (target.face or "")
         return False
 
-    def _design_label(self, design):
-        """``design``'s title, or "(restricted design)" when the requester may
-        not view it (a foreign placement's owner is not necessarily visible)."""
-        if projection.visible_design_ids(self.request.user, [design.pk]):
-            return str(design)
-        return projection.RESTRICTED_DESIGN_LABEL
-
     def _reconcile_item(self, design, rack, face_key, item, errors,
                         desired_placement_ids, ref_map=None):
         """
@@ -4004,8 +4037,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 "u_position": _norm_pos(u_position),
                 "device_id": None,
                 "detail": (
-                    f"placement {placement_id} belongs to "
-                    f"{self._design_label(foreign_placement.design)}, "
+                    f"placement {placement_id} belongs to {foreign_placement.design}, "
                     f"not this design ({design}), and cannot be edited or cancelled "
                     f"here."
                 ),
@@ -4462,27 +4494,14 @@ class DesignViewSet(NetBoxModelViewSet):
             # resolve_baseline_chain (below) reports the SAME break as
             # ``refusal``; this just avoids crashing the endpoint that displays it.
             ancestors = []
-        user = request.user
-        # Lists are restricted (NetBox core parity): children the reader cannot
-        # view are dropped; ancestors they cannot view stay in place as a
-        # "(restricted design)" placeholder so the chain keeps its length. The
-        # direct parent is a direct link and always shows its title.
-        viewable = projection.visible_design_ids(
-            user, [d.pk for d in ancestors] + list(design.children.values_list("pk", flat=True)))
-        children = [c for c in design.children if c.pk in viewable]
-        shown = viewable | ({design.based_on_id} if design.based_on_id else set())
-        _, refusal = projection.resolve_baseline_chain(design, user=user)
+        # ``children`` is a list: designs the reader may not view are left out
+        # (NetBox core restricts lists). The ancestor chain is shown whole, like
+        # core's own breadcrumbs, which name a parent the reader cannot open.
+        viewable = Design.objects.restrict(request.user, "view")
+        children = list(design.children.filter(pk__in=viewable))
+        _, refusal = projection.resolve_baseline_chain(design)
 
         context = {"request": request}
-
-        def nested(d):
-            return {**NestedDesignSerializer(d, context=context).data, "restricted": False}
-
-        placeholder = {
-            "id": None, "url": None, "display": projection.RESTRICTED_DESIGN_LABEL,
-            "title": projection.RESTRICTED_DESIGN_LABEL, "version": None, "status": None,
-            "restricted": True,
-        }
         refusal_data = None
         if refusal is not None:
             refusal_data = {
@@ -4490,15 +4509,15 @@ class DesignViewSet(NetBoxModelViewSet):
                 "severity": refusal["severity"],
                 "detail": refusal["detail"],
                 "source_design": (
-                    nested(refusal["source_design"]) if refusal["source_design"] is not None
-                    else (dict(placeholder) if refusal.get("source_design_restricted") else None)
+                    NestedDesignSerializer(refusal["source_design"], context=context).data
+                    if refusal["source_design"] is not None else None
                 ),
             }
 
         return Response(
             {
-                "ancestors": [nested(a) if a.pk in shown else dict(placeholder) for a in ancestors],
-                "children": [nested(c) for c in children],
+                "ancestors": NestedDesignSerializer(ancestors, many=True, context=context).data,
+                "children": NestedDesignSerializer(children, many=True, context=context).data,
                 "resolves": refusal is None,
                 "refusal": refusal_data,
             },
@@ -4561,9 +4580,7 @@ class DesignViewSet(NetBoxModelViewSet):
         entries = []
         for rack in design.racks.all():
             result = projection.project_rack(design, rack)
-            # Chain refusals name an ancestor: redact the ones the reader may not view.
-            conflicts = projection.redact_conflicts(result.conflicts, design, request.user)
-            entries.extend(projection.flatten_conflicts(rack, conflicts))
+            entries.extend(projection.flatten_conflicts(rack, result.conflicts))
 
         return Response({"conflicts": entries}, status=status.HTTP_200_OK)
 
@@ -4635,11 +4652,16 @@ class DesignViewSet(NetBoxModelViewSet):
                 child.full_clean()
                 child.save()
                 self._seed_derived(child, design)
+                _require_add_permission(request.user, child)
         except ValidationError as exc:
+            clear_events.send(sender=self)
             return Response(
                 exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            raise PermissionDenied(_ADD_CONSTRAINT_MESSAGE) from None
         logger.debug("api.derive: design=%s -> child=%s", design.pk, child.pk)
         return Response(
             DesignSerializer(child, context={"request": request}).data,
@@ -4713,10 +4735,16 @@ class DesignViewSet(NetBoxModelViewSet):
             return bad
 
         try:
-            clone = versioning.new_version(design, title=title)
+            with transaction.atomic():
+                clone = versioning.new_version(design, title=title)
+                _require_add_permission(request.user, clone)
         except ValidationError as exc:
+            clear_events.send(sender=self)
             errors = exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages}
             return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            raise PermissionDenied(_ADD_CONSTRAINT_MESSAGE) from None
         logger.debug("api.new_version: design=%s -> clone=%s", design.pk, clone.pk)
         return Response(
             DesignSerializer(clone, context={"request": request}).data,
@@ -4754,9 +4782,7 @@ class DesignViewSet(NetBoxModelViewSet):
         body.is_valid(raise_exception=True)
         target_id = body.validated_data["based_on"]
 
-        # Only designs the requester may view are candidates, so the error below
-        # never names (or confirms the existence of) a hidden design.
-        target = Design.objects.restrict(request.user, "view").filter(pk=target_id).first()
+        target = Design.objects.filter(pk=target_id).first()
         if target is None:
             return Response(
                 {"based_on": ["Design does not exist."]},
@@ -4778,25 +4804,26 @@ class DesignViewSet(NetBoxModelViewSet):
         design.snapshot()  # changelog prechange data, before based_on moves
         design.based_on = target
         try:
-            design.baseline_chain()
-        except LineageError as exc:
-            # Same message the model would give, but a design the requester may
-            # not view is named "(restricted design)", not by title.
-            design.based_on_id = previous_based_on_id
-            viewable = projection.visible_design_ids(request.user, [d.pk for d in exc.designs])
-            return Response(
-                {"based_on": [exc.message_for(
-                    lambda d: str(d) if d.pk in viewable else projection.RESTRICTED_DESIGN_LABEL)]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
             design.full_clean()
         except ValidationError as exc:
             design.based_on_id = previous_based_on_id
             errors = exc.message_dict if hasattr(exc, "message_dict") else {"based_on": [str(exc)]}
             return Response(errors, status=status.HTTP_400_BAD_REQUEST)
 
-        design.save()
+        try:
+            with transaction.atomic():
+                design.save()
+                # The new parent is the requester's input: the row must still fall
+                # under their change permission's constraints.
+                if not Design.objects.restrict(request.user, "change").filter(pk=design.pk).exists():
+                    raise PermissionsViolation
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            design.based_on_id = previous_based_on_id
+            raise PermissionDenied(
+                "The re-based design does not satisfy the constraints of your "
+                "change permission, so it was not re-based."
+            ) from None
         logger.debug("api.rebase: design=%s -> based_on=%s", design.pk, target.pk)
         return Response(
             DesignSerializer(design, context={"request": request}).data,
@@ -4885,7 +4912,7 @@ class PlannedRackViewSet(NetBoxModelViewSet):
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
         if not instance.is_orphan:
-            exc = APIException(_planned_rack_referenced_rest_message(instance, self.request.user))
+            exc = APIException(_planned_rack_referenced_rest_message(instance))
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
         super().perform_destroy(instance)
@@ -5418,8 +5445,16 @@ class TemplateViewSet(NetBoxModelViewSet):
                     u_height=rack.u_height, group=group,
                     anchored=anchored, islands=islands,
                 )
+                # A constrained add permission is judged on the finished row.
+                _require_add_permission(request.user, template)
         except ValidationError as exc:
             return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            raise PermissionDenied(
+                "The new template does not satisfy the constraints of your add "
+                "permission, so it was not created."
+            ) from None
 
         warnings.extend(island_warnings)
         return Response(
@@ -5491,8 +5526,16 @@ class TemplateViewSet(NetBoxModelViewSet):
                     u_height=rack.u_height, group=group,
                     anchored=anchored, islands=islands,
                 )
+                # A constrained add permission is judged on the finished row.
+                _require_add_permission(request.user, template)
         except ValidationError as exc:
             return Response(exc.message_dict, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionsViolation:
+            clear_events.send(sender=self)
+            raise PermissionDenied(
+                "The new template does not satisfy the constraints of your add "
+                "permission, so it was not created."
+            ) from None
 
         warnings.extend(island_warnings)
         return Response(

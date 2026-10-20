@@ -7,7 +7,7 @@ import strawberry_django
 from netbox.graphql.types import NetBoxObjectType
 from strawberry import Info
 
-from .. import projection
+from .. import models
 from ..models import (
     Design,
     DesignGroup,
@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from tenancy.graphql.types import TenantType
 
 __all__ = (
-    "DesignLineageEntry",
     "DesignGroupType",
     "DesignType",
     "DesignPlacementType",
@@ -64,30 +63,29 @@ __all__ = (
 MAX_CHILDREN = 200
 
 
-@strawberry.type
-class DesignLineageEntry:
-    """One ancestor in ``Design.lineage`` -- the GraphQL twin of an entry in the
-    REST ``chain`` endpoint. An ancestor the caller may not view is a placeholder
-    (``restricted`` true, ``id``/``design`` null, ``title`` the label), so the
-    chain keeps its length without naming the design."""
-
-    id: strawberry.ID | None
-    title: str
-    version: int | None
-    status: str | None
-    restricted: bool
-    design: Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None
-
-
 def _viewable(info, design):
-    """``design`` if the caller may view it, else ``None``. A forward FK is not
-    restricted by strawberry-django, so without this ``based_on { description }``
-    (or ``placement { design { ... } }``) hands out a design the caller's
-    ``view_design`` constraints exclude -- the field resolves null instead, the
-    convention this module's other cross-model FKs already document."""
+    """``design`` if the caller may view it, else ``None``: a forward FK to an
+    object the caller cannot view resolves null, as it does for core's own
+    models (``device { tenant }``). Unlike REST and the UI, which show a hidden
+    link's name, GraphQL gives no part of it away; ``ancestors`` below is the
+    one field that keeps the whole chain, as core's tree ``parent`` does."""
     if design is None:
         return None
-    return design if projection.visible_design_ids(info.context.request.user, [design.pk]) else None
+    return design if design.pk in _viewable_design_ids(info) else None
+
+
+def _viewable_design_ids(info):
+    """The pks of every design the caller may view: one query per request,
+    shared by every link in the response (like ``_ancestor_ids``' parent map),
+    instead of one per resolved link."""
+    request = info.context.request
+    viewable = getattr(request, "_rd_viewable_designs", None)
+    if viewable is None:
+        viewable = set(
+            Design.objects.restrict(request.user, "view").values_list("pk", flat=True)
+        )
+        request._rd_viewable_designs = viewable
+    return viewable
 
 
 def _resolve_based_on(root, info: Info):
@@ -99,21 +97,45 @@ def _resolve_root(root, info: Info):
 
 
 def _resolve_depends_on(root, info: Info):
-    return list(root.depends_on.restrict(info.context.request.user, "view")[:MAX_CHILDREN])
+    # order_by before the slice: an unordered LIMIT returns an arbitrary subset.
+    return list(root.depends_on.restrict(info.context.request.user, "view").order_by("pk")[:MAX_CHILDREN])
 
 
 def _resolve_design(root, info: Info):
     return _viewable(info, root.design)
 
 
-def _lineage(design):
-    """``design.baseline_chain()``, or ``[]`` for a lineage that cannot be walked
-    (a cycle, or deeper than ``MAX_LINEAGE_DEPTH``) -- a GraphQL field must never
-    500 on that, and ``projection.resolve_baseline_chain`` degrades the same way."""
-    try:
-        return design.baseline_chain()
-    except ValueError:
-        return []
+def _ancestor_ids(info, design):
+    """The pks of ``design``'s ``based_on`` ancestors, oldest first -- ``[]`` for
+    a lineage that cannot be walked (a cycle, or deeper than
+    ``models.MAX_LINEAGE_DEPTH``): a GraphQL field must never 500 on that, and
+    ``projection.resolve_baseline_chain`` degrades the same way.
+
+    One ``(pk, based_on_id)`` query per request, shared by every design in the
+    response, instead of a query per hop per design."""
+    request = info.context.request
+    parents = getattr(request, "_rd_design_parents", None)
+    if parents is None:
+        parents = dict(Design.objects.values_list("pk", "based_on_id"))
+        request._rd_design_parents = parents
+    chain, seen = [], {design.pk}
+    node = parents.get(design.pk)
+    while node is not None:
+        if node in seen or len(chain) >= models.MAX_LINEAGE_DEPTH:
+            return []
+        seen.add(node)
+        chain.append(node)
+        node = parents.get(node)
+    chain.reverse()
+    return chain
+
+
+def _ancestors(info, design):
+    """``design``'s ``based_on`` ancestors, oldest first (``[]`` for a lineage
+    that cannot be walked)."""
+    ids = _ancestor_ids(info, design)
+    found = Design.objects.in_bulk(ids)
+    return [found[pk] for pk in ids if pk in found]
 
 
 @strawberry_django.type(DesignGroup, fields="__all__", filters=DesignGroupFilter, pagination=True)
@@ -154,8 +176,9 @@ class DesignType(NetBoxObjectType):
     @strawberry_django.field
     def children(self, info: Info) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
         # Only designs the caller may view (a list, so a hidden one is dropped,
-        # like REST ``chain``), capped at MAX_CHILDREN.
-        return list(self.children.restrict(info.context.request.user, "view")[:MAX_CHILDREN])
+        # like REST ``chain``), capped at MAX_CHILDREN. order_by before the
+        # slice: an unordered LIMIT returns an arbitrary subset.
+        return list(self.children.restrict(info.context.request.user, "view").order_by("pk")[:MAX_CHILDREN])
 
     # ``is_frozen`` (Design.is_frozen) is a plain bool property.
     @strawberry_django.field
@@ -165,40 +188,21 @@ class DesignType(NetBoxObjectType):
     @strawberry_django.field
     def ancestors(
         self, info: Info
-    ) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")] | None]:
+    ) -> list[Annotated["DesignType", strawberry.lazy("netbox_rack_design.graphql.types")]]:
         """
         The ordered ``based_on`` chain (oldest first), i.e.
-        ``Design.baseline_chain()`` surfaced over GraphQL. It keeps the chain
-        length like REST ``chain``: an ancestor the caller may not view is
-        ``null`` at its position. ``lineage`` carries the redacted placeholder
-        (title, restricted flag) for those positions.
+        ``Design.baseline_chain()`` surfaced over GraphQL. The whole chain is
+        returned, hidden ancestors included, like REST ``chain`` and the
+        design page: core's own ``parent`` of a tree object is not restricted
+        either.
 
-        An unwalkable lineage (see ``_lineage``) is an empty list. A client that
-        needs to tell "no parent" from "broken lineage" has ``based_on`` for
-        that: a non-null ``based_on`` with empty ``ancestors`` says exactly that.
+        An unwalkable lineage (a cycle, or deeper than
+        ``models.MAX_LINEAGE_DEPTH``) is an empty list -- a GraphQL field must
+        never 500 on it. A client that needs to tell "no parent" from "broken
+        lineage" has ``based_on`` for that: a non-null ``based_on`` with empty
+        ``ancestors`` says exactly that.
         """
-        chain = _lineage(self)
-        visible = projection.visible_design_ids(info.context.request.user, [d.pk for d in chain])
-        return [d if d.pk in visible else None for d in chain]
-
-    @strawberry_django.field
-    def lineage(
-        self, info: Info
-    ) -> list[Annotated["DesignLineageEntry", strawberry.lazy("netbox_rack_design.graphql.types")]]:
-        """The full ``based_on`` chain (oldest first), a hidden ancestor redacted
-        to a placeholder -- the same shape and length as REST ``chain``."""
-        chain = _lineage(self)
-        visible = projection.visible_design_ids(info.context.request.user, [d.pk for d in chain])
-        return [
-            DesignLineageEntry(
-                id=strawberry.ID(str(d.pk)), title=d.title, version=d.version, status=d.status,
-                restricted=False, design=d,
-            ) if d.pk in visible else DesignLineageEntry(
-                id=None, title=projection.RESTRICTED_DESIGN_LABEL, version=None, status=None,
-                restricted=True, design=None,
-            )
-            for d in chain
-        ]
+        return _ancestors(info, self)
 
 
 # A PLANNED power feed. Now a queryable object in its own right (it became a

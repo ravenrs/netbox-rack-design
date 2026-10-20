@@ -76,6 +76,18 @@ MAX_RACKS = 500
 MAX_ITEMS_PER_BUCKET = 500
 MAX_STEPS = 1000
 MAX_IDS_PER_STEP = 5000
+# The per-list caps above multiply (500 racks x 500 items x 4 buckets), so the
+# whole body gets its own ceiling.
+MAX_TOTAL_ITEMS = 5000
+MAX_TOTAL_STEP_IDS = 5000
+
+
+def _check_total_step_ids(step_lists):
+    total = sum(len(ids) for ids in step_lists)
+    if total > MAX_TOTAL_STEP_IDS:
+        raise serializers.ValidationError(
+            {"steps": [f"At most {MAX_TOTAL_STEP_IDS} placement ids in total per request."]}
+        )
 
 # dcim.PowerFeed stores voltage/amperage in (small)integer columns; mirror that.
 FEED_BOUNDS = {"min_value": 1, "max_value": 32767}
@@ -287,8 +299,9 @@ class DesignSerializer(NetBoxModelSerializer):
     )
     group = NestedDesignGroupSerializer(required=False, allow_null=True)
     # Server-set: ``root``/``version`` group a plan's versions (new-version is the
-    # only door), ``sequence`` is auto-assigned. A client-writable root would let
-    # anyone graft a design into a victim's version group.
+    # only door); a client-writable root would let anyone graft a design into a
+    # victim's version group. ``sequence`` is only an execution-order hint (the
+    # HTML form edits it too), so it stays writable.
     root = NestedDesignSerializer(read_only=True)
     based_on = NestedDesignSerializer(required=False, allow_null=True)
     depends_on = SerializedPKRelatedField(
@@ -312,7 +325,7 @@ class DesignSerializer(NetBoxModelSerializer):
             "description", "comments", "is_frozen", "tags", "custom_fields",
             "created", "last_updated",
         )
-        read_only_fields = ("version", "sequence")
+        read_only_fields = ("version",)
         brief_fields = ("id", "url", "display", "title", "version", "status")
 
     def validate(self, data):
@@ -326,7 +339,10 @@ class DesignSerializer(NetBoxModelSerializer):
             raise serializers.ValidationError(
                 {"sites": "A design must have at least one site."}
             )
-        return data
+        # Overriding validate() without this skipped NetBox's full_clean() of the
+        # model, so a REST create/PATCH ran none of Design.clean(): the based_on
+        # cycle guard, the un-approve guard, the root checks.
+        return super().validate(data)
 
 
 class NestedDesignPlacementSerializer(WritableNestedSerializer):
@@ -670,6 +686,18 @@ class SaveLayoutSerializer(serializers.Serializer):
     design_id = serializers.IntegerField()
     racks = SaveLayoutRackSerializer(many=True, max_length=MAX_RACKS)
 
+    def validate(self, attrs):
+        total = sum(
+            len(rack.get(bucket) or ())
+            for rack in attrs.get("racks", ())
+            for bucket in ("front", "rear", "other", "bays")
+        )
+        if total > MAX_TOTAL_ITEMS:
+            raise serializers.ValidationError(
+                {"racks": [f"At most {MAX_TOTAL_ITEMS} items in total per request."]}
+            )
+        return attrs
+
 
 class RecomputeDistributionSerializer(SaveLayoutSerializer):
     """Body for POST .../designs/<pk>/recompute-distribution/.
@@ -713,6 +741,10 @@ class SaveStepsSerializer(serializers.Serializer):
     steps = serializers.ListField(
         child=SaveStepsStepSerializer(), allow_empty=True, max_length=MAX_STEPS)
 
+    def validate(self, attrs):
+        _check_total_step_ids(step["placements"] for step in attrs["steps"])
+        return attrs
+
 
 class AutoOrderSerializer(serializers.Serializer):
     """Body for POST .../designs/<pk>/auto-order/: the current order, a list of
@@ -723,6 +755,10 @@ class AutoOrderSerializer(serializers.Serializer):
             child=serializers.IntegerField(min_value=1), max_length=MAX_IDS_PER_STEP),
         allow_empty=True, max_length=MAX_STEPS,
     )
+
+    def validate(self, attrs):
+        _check_total_step_ids(attrs["steps"])
+        return attrs
 
 
 class SimulateStepsSerializer(serializers.Serializer):
@@ -747,6 +783,7 @@ class SimulateStepsSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
+        _check_total_step_ids(attrs["steps"])
         lo, hi = attrs.get("from_step"), attrs.get("to_step")
         if lo is not None and hi is not None and lo > hi:
             raise serializers.ValidationError({"from_step": "from_step must not exceed to_step."})

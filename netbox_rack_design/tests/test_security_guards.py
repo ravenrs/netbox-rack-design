@@ -11,21 +11,35 @@ classes of bug the 1.2.2 audit fixed cannot quietly come back.
    analyser, not a JS engine, and errs on the side of flagging):
 
    * string literals, numbers, template literals whose ``${}`` parts are safe;
-   * calls to the escaping/number helpers: ``escapeHtml(...)``, ``esc(...)``,
-     ``safeToken(...)``, ``Number``/``parseInt``/``parseFloat``/``Math.*``,
+   * calls to the escaping helpers ``escapeHtml(...)`` / ``esc(...)`` /
+     ``safeToken(...)`` -- trusted by DEFINITION, not by name: the definition the
+     file uses (``function``, ``var``/``const`` function or arrow, or an alias such
+     as ``var esc = escapeHtml``; a name imported from another module resolves to
+     that module's definition) must really escape ``& < > " '`` (``safeToken``: test
+     against an anchored whitelist), so an identity ``esc`` is flagged;
+   * calls to ``Number``/``parseInt``/``parseFloat``/``Math.*``,
      ``encodeURIComponent``; ``.length`` and ``.toFixed(...)``; arithmetic and
      comparison results; the branches of ``a ? b : c`` and ``a || b``;
    * a variable whose EVERY assignment in the enclosing function scope (else the
      file) is itself safe -- so ``var html = ''; html += '<b>' + escapeHtml(x)``
      is proven, ``html += '<b>' + x`` is not; function parameters are unproven;
+   * ``TABLE[key]`` for a constant object/array literal -- and every property
+     write into it (``TABLE[k] = v``, ``TABLE.p = v``, ``TABLE.push(v)``,
+     ``Object.assign(TABLE, ...)``) must be safe too;
    * a function parameter whose every call in the file passes a safe argument;
    * a call to a function defined in the same file whose every ``return`` is
      safe, and ``list.map(callback).join(...)`` whose callback returns are all
      safe; ``x.innerHTML`` read back (markup the DOM already holds).
 
+   Other sinks flagged: ``.srcdoc =``, ``createContextualFragment(``,
+   ``DOMParser().parseFromString(``, jQuery ``.html(``, a ``javascript:`` URL
+   literal and Bootstrap's ``data-bs-html``.
+
    Escape hatch, for markup the analyser cannot follow: put the comment
-   ``// security: html-built-safely`` on any line of the statement or on the
-   line directly above it, and say WHY in the same comment. Use it sparingly --
+   ``// security: html-built-safely`` on a line of the sink statement itself (not
+   inside a function body nested in it) or on a comment-only line directly above
+   it -- never on the trailing comment of a previous statement -- and say WHY in
+   the same comment. Use it sparingly --
    prefer rewriting to ``createElement``/``textContent`` or routing the value
    through ``escapeHtml``. The scanner tests below feed it synthetic snippets, so
    a loosened rule shows up there first.
@@ -36,8 +50,9 @@ classes of bug the 1.2.2 audit fixed cannot quietly come back.
    neither the matrix nor the skip list fails ``test_every_action_is_classified``,
    which forces the author to put the endpoint through both checks.
 
-3. ``GraphQLLineageTest`` -- the lineage fields as a constrained user never name
-   a design the user cannot view.
+3. ``GraphQLLineageTest`` -- the list and plain-FK design fields as a constrained
+   user never yield a design the user cannot view (the ``ancestors`` chain is whole,
+   as core's tree ``parent`` is).
 """
 
 import json
@@ -69,12 +84,15 @@ JS_SKIP = {"gridstack-all.js"}
 ALLOW_MARKER = "security: html-built-safely"
 
 # Calls whose RESULT is markup-safe whatever the arguments are.
-SAFE_CALLS = {
-    "escapeHtml", "esc", "safeToken", "Number", "parseInt", "parseFloat", "Boolean",
-    "encodeURIComponent",
-}
+SAFE_CALLS = {"Number", "parseInt", "parseFloat", "Boolean", "encodeURIComponent"}
 SAFE_CALL_PREFIXES = ("Math.",)
-SAFE_METHOD_SUFFIXES = {"toFixed", "toLocaleString"}
+# The helpers whose safety is verified from their definition (see _helper_ok).
+ESCAPE_HELPERS = {"escapeHtml", "esc"}
+TOKEN_HELPERS = {"safeToken"}
+HELPERS = ESCAPE_HELPERS | TOKEN_HELPERS
+QUOTE_ENTITIES = {"&#39;", "&#x27;", "&apos;"}
+# toLocaleString is deliberately absent: on anything but a number it is arbitrary text.
+SAFE_METHOD_SUFFIXES = {"toFixed"}
 ITERATION_METHODS = {"map", "forEach", "filter", "some", "every", "find", "findIndex", "flatMap"}
 LITERAL_IDS = {"true", "false", "null", "undefined", "NaN", "Infinity"}
 NOT_FUNCTION_HEADS = {"if", "for", "while", "switch", "catch", "with", "function", "return", "typeof"}
@@ -214,9 +232,15 @@ Func = namedtuple("Func", "start end params plist name head")  # token index ran
 class Scanner:
     """Finds HTML sinks in one JS source and proves (or fails to prove) the markup safe."""
 
-    def __init__(self, src, path="<snippet>"):
+    def __init__(self, src, path="<snippet>", registry=None):
         self.path = path
+        self._registry = registry
         self.toks, self.allow = lex(src)
+        # Lines that carry code: an allow-marker on such a line belongs to THAT
+        # statement, not to a sink on the next line.
+        self.code_lines = set()
+        for t in self.toks:
+            self.code_lines.update(range(t.line, t.line + t.text.count("\n") + 1))
         self.match = self._match_brackets()
         self.funcs = self._find_functions()
         self.assigns = self._index_assignments()
@@ -412,6 +436,104 @@ class Scanner:
             return self._table_safe(toks[0])
         return False, self._src(toks)
 
+    # -- escaping helpers, verified by definition ------------------------------
+    def _body_escapes(self, func, kind):
+        """Does the function body really escape (``kind`` an escape helper) or
+        whitelist (``kind`` a token helper)? Judged on its string/regex tokens."""
+        body = self.toks[func.start:func.end + 1]
+        if kind in TOKEN_HELPERS:
+            return any(t.kind == "regex" and "^" in t.text and "$" in t.text for t in body)
+        text = " ".join(t.text for t in body if t.kind in {"str", "tpl"})
+        return (
+            any(t.kind == "id" and t.text == "replace" for t in body)
+            and all(entity in text for entity in ("&amp;", "&lt;", "&gt;", "&quot;"))
+            and any(entity in text for entity in QUOTE_ENTITIES)
+        )
+
+    def _local_helper_verdict(self, name, kind, seen=(), tree=False):
+        """``True``/``False`` when this file defines ``name`` (a function, a
+        function/arrow bound to it, or an alias of another helper); ``None`` when
+        it does not. An alias whose target lives in another file is judged by the
+        tree-wide verdict (``tree``)."""
+        if name in seen:
+            return None
+        verdicts = [self._body_escapes(f, kind) for f in self.funcs if f.name == name]
+        for i in self.assigns.get(name, []):
+            if self.toks[i + 1].text != "=":
+                continue
+            rhs = self.toks[i + 2:self._expr_end(i + 2)]
+            if len(rhs) == 1 and rhs[0].kind == "id":
+                target = rhs[0].text
+                v = self._local_helper_verdict(target, kind, (*seen, name), tree)
+                if v is None and tree:
+                    v = self._tree_helper(target, kind)
+                if v is not None:
+                    verdicts.append(v)
+        return all(verdicts) if verdicts else None
+
+    def _tree_helper(self, name, kind):
+        registry = self._registry if self._registry is not None else tree_helper_registry()
+        return bool(registry.get(name))
+
+    def _helper_ok(self, name):
+        verdict = self._local_helper_verdict(name, name, tree=True)
+        if verdict is None:
+            verdict = self._tree_helper(name, name)
+        if verdict:
+            return True, ""
+        return False, f"`{name}` is not an escaping helper (its definition does not escape & < > \" ')"
+
+    def _literal_values_safe(self, base, rhs):
+        for entry in self._split_top(rhs[1:-1], {","}):
+            value = entry
+            for j, t in self._top_level(entry):
+                if t.kind == "punct" and t.text == ":":
+                    value = entry[j + 1:]
+                    break
+            ok, why = self.expr_safe(value)
+            if not ok:
+                return False, f"`{base}` holds an unsafe value: {why}"
+        return True, ""
+
+    def _table_writes_safe(self, base):
+        """Every later write into the table (``T[k] = v``, ``T.p = v``,
+        ``T.push(v)``, ``Object.assign(T, {...})``) must be safe as well."""
+        toks = self.toks
+        for i, t in enumerate(toks):
+            if t.kind == "id" and t.text == "Object" and toks[i + 1:i + 3] and toks[i + 1].text == "." \
+                    and i + 3 < len(toks) and toks[i + 2].text == "assign" and toks[i + 3].text == "(" \
+                    and (i + 3) in self.match:
+                args = self._split_top(toks[i + 4:self.match[i + 3]], {","})
+                if args and [a.text for a in args[0]] == [base]:
+                    for extra in args[1:]:
+                        if not (extra and extra[0].text == "{" and self._closes_all(extra)):
+                            return False, f"`{base}` is extended by Object.assign with a non-literal"
+                        ok, why = self._literal_values_safe(base, extra)
+                        if not ok:
+                            return False, why
+            if t.kind != "id" or t.text != base or (i and toks[i - 1].text == "."):
+                continue
+            j = i + 1
+            if j < len(toks) and toks[j].text == "[" and j in self.match:
+                j = self.match[j] + 1
+            elif j + 1 < len(toks) and toks[j].text == "." and toks[j + 1].kind == "id":
+                if toks[j + 1].text in {"push", "unshift"} and j + 2 < len(toks) \
+                        and toks[j + 2].text == "(" and (j + 2) in self.match:
+                    for arg in self._split_top(toks[j + 3:self.match[j + 2]], {","}):
+                        ok, why = self.expr_safe(arg)
+                        if not ok:
+                            return False, f"`{base}` gets an unsafe entry (line {t.line}): {why}"
+                    continue
+                j += 2
+            else:
+                continue
+            if j < len(toks) and toks[j].text in {"=", "+="}:
+                rhs = toks[j + 1:self._expr_end(j + 1)]
+                ok, why = self.expr_safe(rhs)
+                if not ok:
+                    return False, f"`{base}` is written an unsafe value (line {t.line}): {why}"
+        return True, ""
+
     def _table_safe(self, base):
         """``TABLE[key]`` where ``TABLE`` is only ever assigned an object/array
         literal whose values are all safe (a constant lookup table)."""
@@ -422,16 +544,10 @@ class Scanner:
             rhs = self.toks[i + 2:self._expr_end(i + 2)]
             if not rhs or rhs[0].text not in {"{", "["} or not self._closes_all(rhs):
                 return False, f"`{base.text}` is not a plain literal table"
-            for entry in self._split_top(rhs[1:-1], {","}):
-                value = entry
-                for j, t in self._top_level(entry):
-                    if t.kind == "punct" and t.text == ":":
-                        value = entry[j + 1:]
-                        break
-                ok, why = self.expr_safe(value)
-                if not ok:
-                    return False, f"`{base.text}` holds an unsafe value: {why}"
-        return True, ""
+            ok, why = self._literal_values_safe(base.text, rhs)
+            if not ok:
+                return False, why
+        return self._table_writes_safe(base.text)
 
     def _call_safe(self, toks):
         # find the "(" matching the final ")"
@@ -451,6 +567,8 @@ class Scanner:
         name = "".join(t.text for t in callee)
         if name in SAFE_CALLS or name.startswith(SAFE_CALL_PREFIXES):
             return True, ""
+        if name in HELPERS:
+            return self._helper_ok(name)
         if len(callee) >= 2 and callee[-2].text == "." and callee[-1].text in SAFE_METHOD_SUFFIXES:
             return True, ""
         if len(callee) >= 2 and callee[-2].text == "." and callee[-1].text == "join":
@@ -729,44 +847,100 @@ class Scanner:
         return text if len(text) <= limit else text[:limit] + "..."
 
     # -- sinks -------------------------------------------------------------------
+    def _marker_covers(self, first_line, last_line, rhs):
+        """Is the sink statement on ``first_line``..``last_line`` allow-listed?
+        A marker counts on a line of the statement itself (not inside a function
+        body nested in it -- that is another statement) or on a comment-only line
+        directly above; the trailing comment of the previous statement does not."""
+        blocked = set()
+        if rhs:
+            lo, hi = rhs[0].idx, rhs[-1].idx
+            for f in self.funcs:
+                if lo <= f.start and f.end <= hi and self.toks[f.start].text == "{":
+                    blocked.update(range(self.toks[f.start].line + 1, self.toks[f.end].line))
+        for ln in self.allow:
+            if ln in blocked:
+                continue
+            if first_line <= ln <= last_line:
+                return True
+            if ln == first_line - 1 and ln not in self.code_lines:
+                return True
+        return False
+
     def findings(self):
         out, toks = [], self.toks
         for i, t in enumerate(toks):
             sink = rhs = None
             nxt = toks[i + 1] if i + 1 < len(toks) else None
-            if t.kind == "id" and t.text in {"innerHTML", "outerHTML"} and i >= 1 and toks[i - 1].text == "." \
+            after_dot = i >= 1 and toks[i - 1].text == "."
+            call_args = (
+                self._split_top(toks[i + 2:self.match[i + 1]], {","})
+                if nxt and nxt.text == "(" and i + 1 in self.match else None
+            )
+            if t.kind == "id" and t.text in {"innerHTML", "outerHTML", "srcdoc"} and after_dot \
                     and nxt and nxt.text in {"=", "+="}:
                 sink, start = f".{t.text} {nxt.text}", i + 2
                 rhs = toks[start:self._expr_end(start)]
-            elif t.kind == "str" and t.text.strip("'\"") in {"innerHTML", "outerHTML"} and i >= 1 \
+            elif t.kind == "str" and t.text.strip("'\"") in {"innerHTML", "outerHTML", "srcdoc"} and i >= 1 \
                     and toks[i - 1].text == "[" and i + 2 < len(toks) and toks[i + 1].text == "]" \
                     and toks[i + 2].text in {"=", "+="}:
                 sink, start = f"[{t.text}] {toks[i + 2].text}", i + 3
                 rhs = toks[start:self._expr_end(start)]
-            elif t.kind == "id" and t.text == "insertAdjacentHTML" and nxt and nxt.text == "(" and i + 1 in self.match:
-                args = self._split_top(toks[i + 2:self.match[i + 1]], {","})
+            elif t.kind == "id" and t.text == "insertAdjacentHTML" and call_args is not None:
                 sink = "insertAdjacentHTML("
-                rhs = args[1] if len(args) > 1 else []
-                start = i
-            elif t.kind == "id" and t.text in {"write", "writeln"} and i >= 2 and toks[i - 1].text == "." \
-                    and toks[i - 2].text == "document" and nxt and nxt.text == "(" and i + 1 in self.match:
+                rhs = call_args[1] if len(call_args) > 1 else []
+            elif t.kind == "id" and t.text in {"write", "writeln"} and i >= 2 and after_dot \
+                    and toks[i - 2].text == "document" and call_args is not None:
                 sink = f"document.{t.text}("
                 rhs = toks[i + 2:self.match[i + 1]]
-                start = i
-            if sink is None:
-                continue
-            first_line = t.line
-            last_line = (rhs[-1].line if rhs else first_line)
-            if any(first_line - 1 <= ln <= last_line for ln in self.allow):
-                continue
-            ok, why = self.expr_safe(rhs)
-            if not ok:
-                out.append(Finding(self.path, first_line, sink, self._src(rhs, 120), why))
+            elif t.kind == "id" and t.text == "createContextualFragment" and call_args is not None:
+                sink, rhs = "createContextualFragment(", call_args[0]
+            elif t.kind == "id" and t.text == "parseFromString" and call_args is not None:
+                sink, rhs = "DOMParser.parseFromString(", call_args[0]
+            elif t.kind == "id" and t.text == "html" and after_dot and call_args is not None \
+                    and any(call_args):
+                sink, rhs = ".html(", call_args[0]  # jQuery
+            if sink is not None:
+                first_line = t.line
+                last_line = (rhs[-1].line if rhs else first_line)
+                if self._marker_covers(first_line, last_line, rhs):
+                    continue
+                ok, why = self.expr_safe(rhs)
+                if not ok:
+                    out.append(Finding(self.path, first_line, sink, self._src(rhs, 120), why))
+            elif t.kind in {"str", "tpl"}:
+                body = t.text[1:].lower()
+                reason = None
+                if body.startswith("javascript:"):
+                    sink, reason = "javascript: URL", "a javascript: URL runs script when followed"
+                elif "data-bs-html" in body:
+                    sink, reason = "data-bs-html", "Bootstrap renders this tooltip/popover content as HTML"
+                if reason and not self._marker_covers(t.line, t.line, []):
+                    out.append(Finding(self.path, t.line, sink, self._src([t], 120), reason))
         return out
 
 
 def scan_source(src, path="<snippet>"):
     return Scanner(src, path).findings()
+
+
+_REGISTRY = {}
+
+
+def tree_helper_registry():
+    """``{name: bool}`` for the escaping helpers: True when the tree defines
+    ``name`` and EVERY definition really escapes (an alias is not a definition).
+    A module that imports ``escapeHtml`` is judged by this."""
+    if not _REGISTRY:
+        scanners = [
+            Scanner(path.read_text(encoding="utf-8"), path.name, registry={})
+            for path in sorted(JS_ROOT.rglob("*.js")) if path.name not in JS_SKIP
+        ]
+        for name in sorted(HELPERS):
+            verdicts = [v for v in (sc._local_helper_verdict(name, name) for sc in scanners)
+                        if v is not None]
+            _REGISTRY[name] = bool(verdicts) and all(verdicts)
+    return _REGISTRY
 
 
 def scan_js_tree():
@@ -931,6 +1105,91 @@ class JsSinkScannerTest(SimpleTestCase):
         self.assertFlagged(
             "// security: html-built-safely\n\nel.innerHTML = '<b>' + name + '</b>';")
 
+    # -- hardening: helpers verified by definition, tables, markers, sinks ------
+    GOOD_ESC = (
+        "function escapeHtml(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')"
+        ".replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;'); }\n"
+    )
+
+    def test_to_locale_string_is_not_trusted(self):
+        self.assertFlagged("el.innerHTML = '<b>' + x.toLocaleString() + '</b>';")
+        self.assertClean("el.innerHTML = '<b>' + x.toFixed(2) + '</b>';")
+
+    def test_an_identity_helper_is_flagged_whatever_it_is_called_by(self):
+        use = "el.innerHTML = '<b>' + esc(name) + '</b>';"
+        self.assertFlagged("function esc(s) { return s; }\n" + use)
+        self.assertFlagged("var esc = function (s) { return s; };\n" + use)
+        self.assertFlagged("const esc = (s) => s;\n" + use)
+        self.assertFlagged("const esc = s => String(s);\n" + use)
+        self.assertFlagged("function escapeHtml(s) { return s; }\nvar esc = escapeHtml;\n" + use)
+        self.assertFlagged("function safeToken(v) { return v; }\nel.innerHTML = '<b class=\"' + safeToken(c) + '\">';")
+
+    def test_a_helper_that_misses_a_character_is_flagged(self):
+        no_quotes = (
+            "function escapeHtml(v) { return String(v).replace(/&/g, '&amp;')"
+            ".replace(/</g, '&lt;').replace(/>/g, '&gt;'); }\n"
+        )
+        self.assertFlagged(no_quotes + "el.innerHTML = '<b>' + escapeHtml(name) + '</b>';")
+
+    def test_a_real_helper_is_trusted_locally_aliased_or_imported(self):
+        use = "el.innerHTML = '<b>' + escapeHtml(name) + '</b>';"
+        self.assertClean(self.GOOD_ESC + use)
+        self.assertClean(self.GOOD_ESC + "var esc = escapeHtml;\nel.innerHTML = '<b>' + esc(name) + '</b>';")
+        # defined nowhere in the snippet: judged by the tree's own definition
+        self.assertClean("import { escapeHtml } from 'rd/core.js';\n" + use)
+        self.assertClean("var esc = escapeHtml;\nel.innerHTML = '<b>' + esc(name) + '</b>';")
+        self.assertClean(
+            "function safeToken(v) { var t = String(v); return /^[A-Za-z0-9_-]{1,8}$/.test(t) ? t : ''; }\n"
+            "el.innerHTML = '<b class=\"' + safeToken(c) + '\">';")
+
+    def test_the_trees_own_helpers_are_verified(self):
+        self.assertEqual(
+            {name: tree_helper_registry()[name] for name in HELPERS},
+            dict.fromkeys(HELPERS, True))
+
+    def test_property_writes_into_a_lookup_table_are_judged(self):
+        table = "var T = { a: '<i>a</i>', b: '<i>b</i>' };\n"
+        read = "el.innerHTML = '<p>' + T[key] + '</p>';"
+        self.assertClean(table + read)
+        self.assertClean(table + "T.c = '<i>c</i>';\n" + read)
+        self.assertClean(table + "T[k] = escapeHtml(name);\n" + read)
+        self.assertFlagged(table + "T[k] = name;\n" + read)
+        self.assertFlagged(table + "T.extra = user.bio;\n" + read)
+        self.assertFlagged(table + "Object.assign(T, other);\n" + read)
+        self.assertFlagged(table + "Object.assign(T, { z: name });\n" + read)
+        self.assertFlagged("var L = ['<i>a</i>'];\nL.push(name);\nel.innerHTML = L[i];")
+
+    def test_a_marker_on_the_previous_statement_does_not_suppress(self):
+        self.assertFlagged(
+            "foo(); // security: html-built-safely\n"
+            "el.innerHTML = '<b>' + name + '</b>';")
+        self.assertFlagged(
+            "var x = 1; /* security: html-built-safely */\n"
+            "el.innerHTML = '<b>' + name + '</b>';")
+
+    def test_a_marker_inside_a_nested_function_body_does_not_cover_the_outer_sink(self):
+        self.assertFlagged(
+            "el.innerHTML = rows.map(function (r) {\n"
+            "  var n = r.name; // security: html-built-safely\n"
+            "  return '<li>' + n + '</li>';\n"
+            "}).join('') + '<b>' + name + '</b>';")
+
+    def test_a_marker_on_its_own_line_above_still_suppresses(self):
+        self.assertClean(
+            "foo();\n// security: html-built-safely: icon is one of three literals\n"
+            "el.innerHTML = '<b>' + icon + '</b>';")
+
+    def test_more_sinks_are_flagged(self):
+        self.assertFlagged("frame.srcdoc = '<p>' + name + '</p>';")
+        self.assertFlagged("var f = range.createContextualFragment('<p>' + name + '</p>');")
+        self.assertFlagged("var d = new DOMParser().parseFromString('<p>' + name + '</p>', 'text/html');")
+        self.assertFlagged("$(el).html('<p>' + name + '</p>');")
+        self.assertFlagged("a.href = 'javascript:void(0)';")
+        self.assertFlagged("el.setAttribute('data-bs-html', 'true');")
+        self.assertClean("frame.srcdoc = '<p>static</p>';")
+        self.assertClean("var f = range.createContextualFragment('<p>' + escapeHtml(name) + '</p>');")
+        self.assertClean("var h = $(el).html();")
+
     def test_comments_and_regex_do_not_confuse_the_lexer(self):
         self.assertClean(
             "// el.innerHTML = '<b>' + name;\n"
@@ -977,7 +1236,7 @@ DESIGN_ACTION_MATRIX = {
     "rack_power": A({"get", "post"}, {"rack_id": 1}, query="?rack_id=1"),
     "apply": A({"get", "post"}),
     "power_source": A({"get"}, query="?rack_id=1"),
-    "copy_feeds": A({"post"}, {"source_rack_id": 1, "target_rack_id": 1}),
+    "copy_feeds": A({"post"}, {"rack_id": 1, "source_rack_id": 1}),
     "feeds": A({"get"}, query="?rack_id=1"),
     "planned_feed": A({"get", "post", "delete"}, {"rack_id": 1, "name": "x"}, query="?rack_id=1"),
     "save_layout": A({"post"}, {"placements": []}),
@@ -1117,7 +1376,9 @@ class ConstrainedUserMatrixTest(MatrixBase):
         body = response.content.decode()
         self.assertLess(response.status_code, 500, f"{label}: server error: {body[:300]}")
         self.assertNotEqual(response.status_code // 100, 2, f"{label}: succeeded against a hidden design")
-        self.assertIn(response.status_code, {400, 403, 404, 405}, f"{label}: {response.status_code} {body[:300]}")
+        # A design the caller cannot view is exactly "not found": a 403 would
+        # confirm it exists, a 400 would mean the body was read before the lookup.
+        self.assertEqual(response.status_code, 404, f"{label}: {response.status_code} {body[:300]}")
         for secret in (SECRET_TITLE, SECRET_PLACEMENT, SECRET_FEED, "ZZ-SECRET"):
             self.assertNotIn(secret, body, f"{label}: leaked {secret!r}")
 
@@ -1246,6 +1507,21 @@ class ReadOnlyTokenMatrixTest(MatrixBase):
                                  f"{method.upper()} {url_name} ({viewset.__name__}) -> "
                                  f"{response.status_code} {response.content.decode()[:200]}")
 
+    def test_the_same_routes_are_not_refused_for_a_write_enabled_token(self):
+        # Control: the 403s above come from ``write_enabled`` and nothing else --
+        # the same superuser with a write-enabled token gets past the token check
+        # on every route (it may 4xx on the dummy body, never 403).
+        self.token.write_enabled = True
+        self.token.save()
+        for _basename, viewset, url_name, detail, method, label in _sweep_routes():
+            with self.subTest(route=url_name, method=method, handler=label):
+                response = self.request(
+                    method, self._url(url_name, detail),
+                    {"rack_id": 1, "device_type_id": 1, "design_id": 1})
+                self.assertNotEqual(
+                    response.status_code, status.HTTP_403_FORBIDDEN,
+                    f"{method.upper()} {url_name} ({viewset.__name__}): {response.content.decode()[:200]}")
+
     def test_the_read_only_token_still_reads(self):
         for url_name, args in (("design-list", []), ("design-detail", [self.target.pk]),
                                ("design-chain", [self.target.pk]), ("design-conflicts", [self.target.pk])):
@@ -1272,9 +1548,9 @@ class ReadOnlyTokenMatrixTest(MatrixBase):
 
 @override_settings(LOGIN_REQUIRED=True)
 class GraphQLLineageTest(MatrixBase):
-    """``design { children ancestors lineage based_on root depends_on }`` as a
-    user who may view only part of a design family never yields a hidden design's
-    id or title (a hidden ancestor is a null / ``restricted`` placeholder)."""
+    """``design { children based_on root depends_on }`` as a user who may view only
+    part of a design family never yields a hidden design's id or title (a hidden
+    link is null, a hidden list entry is dropped); ``ancestors`` is the whole chain."""
 
     HIDDEN_MARKER = "ZZ-HIDDEN"
 
@@ -1304,12 +1580,11 @@ class GraphQLLineageTest(MatrixBase):
         self.assertEqual(response.status_code, 200, response.content[:300])
         return json.loads(response.content)
 
-    def test_lineage_fields_never_name_a_hidden_design(self):
+    def test_list_and_link_fields_never_name_a_hidden_design(self):
         entry = "id title description sites { name } based_on { id title } root { id title } depends_on { id title }"
         query = (
             f"{{ design(id: {self.leaf.pk}) {{ id title "
-            f"children {{ {entry} }} ancestors {{ {entry} }} "
-            f"lineage {{ id title version status restricted design {{ {entry} }} }} "
+            f"children {{ {entry} }} "
             f"based_on {{ {entry} }} root {{ {entry} }} depends_on {{ {entry} }} }} }}"
         )
         data = self.gql(query)
@@ -1321,11 +1596,15 @@ class GraphQLLineageTest(MatrixBase):
         design = data["data"]["design"]
         # The visible parts still resolve (the checks above are not passing on an empty answer).
         self.assertEqual([c["title"] for c in design["children"]], ["Visible child"])
-        self.assertEqual(len(design["lineage"]), 3)  # chain length kept, hidden entries redacted
-        self.assertEqual([e["restricted"] for e in design["lineage"]], [True, True, False])
         self.assertEqual(design["based_on"]["title"], "Visible mid")
         self.assertEqual([d["title"] for d in design["depends_on"]], ["Visible mid"])
         self.assertIsNone(design["root"])
+
+    def test_ancestors_is_the_whole_chain(self):
+        data = self.gql(f"{{ design(id: {self.leaf.pk}) {{ ancestors {{ title }} }} }}")
+        self.assertNotIn("errors", data, data.get("errors"))
+        self.assertEqual([a["title"] for a in data["data"]["design"]["ancestors"]],
+                         ["ZZ-HIDDEN-1", "ZZ-HIDDEN-2", "Visible mid"])
 
     def test_a_hidden_design_cannot_be_queried_directly(self):
         data = self.gql(f"{{ design(id: {self.h1.pk}) {{ id title }} }}")

@@ -180,7 +180,7 @@
                    {# Chain provenance/conflict (PLAN-design-chains.md §8.4): flags on top of the existing state, never a new state. Coded defensively -- the server agent is landing these keys concurrently. #}
                    {% if slot.inherited %}data-inherited="1"{% endif %}
                    {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
-                   {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.source_design_label|default:slot.placement.design }}"{% endif %}
+                   {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
                    {% if slot.conflict %}data-conflict="1"{% endif %}
                    {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
                    {# Apply markers (apply-projection phase): a device THIS design's own apply already created (`applied`, this tile IS it -- pressing apply again is a no-op), or a device some OTHER design's apply created and holds (`reserved-by`). Mutually exclusive in practice: an applied tile is this design's own placement, a reserved tile is a plain existing slot. #}
@@ -279,7 +279,7 @@
                    {% if slot.state == 'move_out_ghost' and slot.placement %}{% if slot.placement.proposed_name %}data-new-name="{{ slot.placement.proposed_name }}"{% endif %}{% with mt=slot|slot_moved_to %}{% if mt %} data-moved-to="{{ mt }}"{% endif %}{% endwith %}{% endif %}
                    {% if slot.inherited %}data-inherited="1"{% endif %}
                    {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
-                   {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.source_design_label|default:slot.placement.design }}"{% endif %}
+                   {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
                    {% if slot.conflict %}data-conflict="1"{% endif %}
                    {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
                    {# Apply markers (apply-projection phase): see the front face for the full comment. #}
@@ -365,7 +365,7 @@
                {% if slot.state == 'move_in' and slot.device %}data-old-name="{{ slot.device.name }}"{% if slot.device.tenant %} data-old-tenant="{{ slot.device.tenant }}"{% endif %}{% with mf=slot|slot_moved_from %}{% if mf %} data-moved-from="{{ mf }}"{% endif %}{% endwith %}{% endif %}
                {% if slot.inherited %}data-inherited="1"{% endif %}
                {% if slot.source_design_id %}data-source-design-id="{{ slot.source_design_id }}"{% endif %}
-               {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.source_design_label|default:slot.placement.design }}"{% endif %}
+               {% if slot.inherited and slot.placement %}data-source-design-name="{{ slot.placement.design }}"{% endif %}
                {% if slot.conflict %}data-conflict="1"{% endif %}
                {% if slot.conflict_reason %}data-conflict-reason="{{ slot.conflict_reason }}"{% endif %}
                {# Apply markers (apply-projection phase): see the front face for the full comment. #}

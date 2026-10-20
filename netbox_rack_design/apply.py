@@ -139,8 +139,9 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from core.signals import clear_events
 from dcim.choices import DeviceFaceChoices, RackStatusChoices
-from dcim.models import Device, Rack
+from dcim.models import Cable, Device, DeviceBay, PowerFeed, Rack
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q
@@ -660,17 +661,12 @@ def plan(design, user):
         chain = []  # a broken lineage is reported by the chain check below instead
     unapplied_ancestor = _first_unapplied_ancestor(chain)
     if unapplied_ancestor is not None:
-        visible = projection.visible_design_ids(user, [unapplied_ancestor.pk])
-        label = (
-            str(unapplied_ancestor)
-            if unapplied_ancestor.pk in visible or unapplied_ancestor.pk == design.based_on_id
-            else projection.RESTRICTED_DESIGN_LABEL
+        result.problems.append(
+            f"{unapplied_ancestor} has unapplied placements; apply it first."
         )
-        result.problems.append(f"{label} has unapplied placements; apply it first.")
 
     # --- 3. the chain must resolve ------------------------------------------
-    # ``user`` redacts a refusal naming an ancestor the applier may not view.
-    _, refusal = projection.resolve_baseline_chain(design, user=user)
+    _, refusal = projection.resolve_baseline_chain(design)
     if refusal is not None:
         result.problems.append(refusal["detail"])
 
@@ -1100,7 +1096,7 @@ def _plan_feeds(design, result, rack_by_planned_id):
     Idempotent: a feed already standing on that panel under that name (a
     previous apply) is reused, never duplicated. Read-only.
     """
-    from dcim.models import PowerFeed, PowerPanel
+    from dcim.models import PowerPanel
 
     from .models import DesignPowerFeed
 
@@ -1138,12 +1134,11 @@ def _plan_feeds(design, result, rack_by_planned_id):
             planned_feed=pf, power_panel=panel, rack=rack, existing=existing))
 
 
-def _realize_feeds(result):
+def _realize_feeds(result, user):
     """The write half of :func:`_plan_feeds`: create (or reuse) each feed on
     its now-real rack. Runs after the racks are realized and before any
     device is placed. Returns ``{DesignPowerFeed.pk: dcim.PowerFeed}``."""
     from dcim.choices import PowerFeedStatusChoices
-    from dcim.models import PowerFeed
 
     rack_by_planned_id = {e.planned_rack.pk: e.rack for e in result.resolved_racks}
     by_planned = {}
@@ -1162,18 +1157,18 @@ def _realize_feeds(result):
             )
             feed.full_clean()
             feed.save()
+            _require_allowed(user, PowerFeed, "add", feed)
             entry.feed = feed
         by_planned[pf.pk] = entry.feed
     return by_planned
 
 
-def _cable_to_feed(device, feed):
+def _cable_to_feed(device, feed, user):
     """Connect ``device``'s first free power port to ``feed`` with a planned
     cable -- what a bound PDU's binding means once both are real. A feed
     takes exactly one cable, so an already-cabled feed (a second PDU bound to
     the same leg) is left alone rather than failing the apply."""
     from dcim.choices import LinkStatusChoices
-    from dcim.models import Cable
 
     if feed.cable_id:
         return
@@ -1184,6 +1179,7 @@ def _cable_to_feed(device, feed):
                   status=LinkStatusChoices.STATUS_PLANNED)
     cable.full_clean()
     cable.save()
+    _require_allowed(user, Cable, "add", cable)
 
 
 # --- execution -----------------------------------------------------------
@@ -1191,7 +1187,11 @@ def _cable_to_feed(device, feed):
 def run(design, user):
     """Apply ``design``: :func:`plan`, refuse on any problem, else write it all
     inside one transaction. See the module docstring for the all-or-nothing
-    contract."""
+    contract.
+
+    Every rollback also sends core's ``clear_events``: the writes already queued
+    webhook / event-rule events for rows that no longer exist, and the request's
+    tail would otherwise flush them."""
     with transaction.atomic():
         result = plan(design, user)
         if not result.ok:
@@ -1202,8 +1202,8 @@ def run(design, user):
             # Two applies racing for the same placement (the unique DesignApply
             # row) land here: undo this run, report it, never a 500.
             transaction.set_rollback(True)
-            for entry in result.created:
-                entry.device = None
+            clear_events.send(sender=run)
+            _forget_rolled_back(result)
             result.problems.append(
                 "The database refused a change because another change conflicted with "
                 "it (was this design applied twice at once?), so nothing was applied. "
@@ -1216,13 +1216,36 @@ def run(design, user):
             # reason back as a problem -- the confirmation page shows it --
             # rather than letting it escape as a 500.
             transaction.set_rollback(True)
-            for entry in result.created:
-                entry.device = None     # rolled back: no such device exists
+            clear_events.send(sender=run)
+            _forget_rolled_back(result)
             result.problems.extend(
                 f"NetBox refused to save a device, so nothing was applied: {message}"
                 for message in _validation_messages(exc)
             )
+        except BaseException:
+            # PermissionsViolation (the caller reports it) or anything unexpected:
+            # the atomic block rolls the writes back and the events go with them.
+            clear_events.send(sender=run)
+            raise
         return result
+
+
+def _forget_rolled_back(result):
+    """After a rollback the result must not point at rows that no longer exist:
+    the created devices, the racks and feeds this run created."""
+    for entry in result.created:
+        entry.device = None
+    built = set()
+    for entry in result.resolved_racks:
+        if entry.created:  # an adopted rack is real and stays
+            built.add(entry.planned_rack.pk)
+            entry.rack = None
+            entry.planned_rack.realized_rack = None
+    for entry in result.feeds:
+        if entry.existing is None:
+            entry.feed = None
+            if entry.planned_feed.planned_rack_id in built:
+                entry.rack = None
 
 
 def _realize_planned_racks(result, user):
@@ -1310,7 +1333,7 @@ def _execute(design, user, result):
             ):
                 entry.changes["rack"] = rack_by_planned_id[entry.placement.target_planned_rack_id]
 
-    feed_by_planned = _realize_feeds(result)
+    feed_by_planned = _realize_feeds(result, user)
 
     from extras.models import CustomField
 
@@ -1368,6 +1391,7 @@ def _execute(design, user, result):
         bay.installed_device = device
         bay.full_clean()
         bay.save()
+        _require_allowed(user, DeviceBay, "change", bay)
         entry.device = device
         device_by_placement[entry.placement.pk] = device
         if entry.recreated:
@@ -1387,7 +1411,7 @@ def _execute(design, user, result):
                     .select_related("placement", "device")):
             feed = feed_by_planned.get(row.placement.planned_power_feed_id)
             if feed is not None:
-                _cable_to_feed(row.device, feed)
+                _cable_to_feed(row.device, feed, user)
 
     for entry in result.updated:
         device = entry.device
@@ -1405,10 +1429,12 @@ def _execute(design, user, result):
                 old_bay.snapshot()
                 old_bay.installed_device = None
                 old_bay.save()
+                _require_allowed(user, DeviceBay, "change", old_bay)
             new_bay.snapshot()
             new_bay.installed_device = device
             new_bay.full_clean()
             new_bay.save()
+            _require_allowed(user, DeviceBay, "change", new_bay)
         row = entry.apply_row
         row.applied_by = user
         row.save()

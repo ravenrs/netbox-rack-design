@@ -282,6 +282,19 @@ class DesignForm(NetBoxModelForm):
                 self.instance.sites.values_list("pk", flat=True)
             )
 
+    def _update_errors(self, errors):
+        # ``Design.clean()`` reads the submitted m2m values (NetBoxModelForm hands
+        # them over in ``_m2m_values``) and keys some errors by names this form
+        # has no field for or has already reported itself in ``clean()``.
+        error_dict = getattr(errors, "error_dict", None)
+        if error_dict is not None:
+            # Planned racks are not editable here; they are stranded by the sites.
+            if "planned_racks" in error_dict:
+                error_dict["sites"] = error_dict.pop("planned_racks") + error_dict.get("sites", [])
+            for field in [f for f in error_dict if f in self._errors]:
+                del error_dict[field]
+        super()._update_errors(errors)
+
     def clean(self):
         super().clean()
         # Enforce the same-sites rule at the FORM layer so it also holds on

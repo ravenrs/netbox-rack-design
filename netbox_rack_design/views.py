@@ -3,6 +3,7 @@
 import json
 import os
 
+from core.signals import clear_events
 from dcim.models import Location, PowerFeed, Rack, Site
 from django import forms as django_forms
 from django.conf import settings
@@ -11,6 +12,7 @@ from django.contrib.staticfiles import finders
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.html import format_html
@@ -26,7 +28,7 @@ from utilities.views import ContentTypePermissionRequiredMixin, ViewTab, registe
 
 from . import apply as apply_engine
 from . import filtersets, forms, models, planning_fields, projection, rackinfo, tables, versioning
-from .api.views import _names_for_reader
+from .api.views import _ADD_CONSTRAINT_MESSAGE, _require_add_permission
 from .choices import DesignStatusChoices
 from .distribution import DEFAULT_DISTRIBUTION_MODE
 
@@ -91,7 +93,7 @@ def _frozen_design_message(design, what):
     )
 
 
-def _design_children_message(design, user=None):
+def _design_children_message(design):
     """
     The message shown when a delete is rejected because other designs are
     based on ``design`` (PLAN-design-chains.md §2.2). Deleting a design never
@@ -112,18 +114,16 @@ def _design_children_message(design, user=None):
     the link, hence pointing at ``rebase``.
     """
     children = list(design.children)
-    # A child the reader cannot view is counted, never named (see
-    # ``api.views._names_for_reader``, the REST door's twin).
-    names = _names_for_reader(children, user)
+    names = ", ".join(str(child) for child in children)
     verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
-        f"Cannot delete {_design_label(design, user)}: {names} {verb} based on this design and "
+        f"Cannot delete {design}: {names} {verb} based on this design and "
         f"would silently lose {own} baseline. Re-base the dependent designs "
         "onto another design first."
     )
 
 
-def _design_versions_message(design, user=None):
+def _design_versions_message(design):
     """
     The message shown when a delete is rejected because other versions of
     the same plan point their ``root`` at ``design`` (models.py: ``root`` is
@@ -138,9 +138,9 @@ def _design_versions_message(design, user=None):
     ``_design_children_message`` above: a DRAFT root with another version is
     refused too.
     """
-    names = _names_for_reader(design.versions.all(), user)
+    names = ", ".join(str(version) for version in design.versions.all())
     return (
-        f"Cannot delete {_design_label(design, user)}: {names} are later versions of this plan "
+        f"Cannot delete {design}: {names} are later versions of this plan "
         "and would be destroyed along with it. Delete those versions "
         "first."
     )
@@ -162,12 +162,12 @@ def _planned_rack_realized_message(planned_rack):
     )
 
 
-def _planned_rack_referenced_message(planned_rack, user=None):
+def _planned_rack_referenced_message(planned_rack):
     """HTML-door twin of ``_planned_rack_referenced_rest_message``
     (api/views.py) -- see that function's docstring for the full argument
     (T1.9 decision 1)."""
     designs = list(planned_rack.referencing_designs())
-    names = _names_for_reader(designs, user)
+    names = ", ".join(str(design) for design in designs)
     verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
     return (
         f"Cannot delete {planned_rack}: {names} still {verb} across it and "
@@ -197,18 +197,9 @@ class _ValidPkListMixin:
         return super().dispatch(request, *args, **kwargs)
 
 
-def _design_label(design, user):
-    """``design``'s title for a message shown to ``user``; a design they may not
-    view reads "(restricted design)". ``user`` of None names it."""
-    if user is None or projection.visible_design_ids(user, [design.pk]):
-        return str(design)
-    return projection.RESTRICTED_DESIGN_LABEL
-
-
-def _frozen_titles(designs, user):
-    """Titles of the frozen ``designs`` named in a refusal shown to ``user``:
-    viewable ones by name, the rest only as a count."""
-    return _names_for_reader(sorted(designs, key=str), user)
+def _frozen_titles(designs):
+    """The frozen ``designs``' titles for a refusal message, sorted, once each."""
+    return ", ".join(sorted({str(design) for design in designs}))
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +297,7 @@ class DesignView(generic.ObjectView):
             "affected_rack_count": len(affected_racks),
             "scoped_racks": scoped_racks,
             "scoped_planned_racks": scoped_planned_racks,
-            "planned_feeds": self._planned_feed_rows(instance),
+            "planned_feeds": self._planned_feed_rows(instance, request.user),
             # Changes this design can no longer carry out because the device
             # they referenced was deleted from DCIM. Reported here because the
             # rows are inert everywhere else: the editor and the elevation skip
@@ -318,10 +309,10 @@ class DesignView(generic.ObjectView):
     def _lineage_context(user, design):
         """The design's related designs, as ``user`` may see them.
 
-        Same rule as the REST ``chain`` action (NetBox core parity): a DIRECT
-        link (based_on, depends_on) keeps its title; a LIST (children, "required
-        by") drops the designs the reader cannot view; a hidden ANCESTOR stays in
-        the stack as a restricted placeholder so the chain keeps its length.
+        Same rule as the REST ``chain`` action (NetBox core parity): a LIST
+        (children, "required by") drops the designs the reader cannot view; the
+        ancestor stack is shown whole, like core's breadcrumbs, which name a
+        parent the reader cannot open.
         """
         try:
             ancestors = design.baseline_chain()
@@ -332,21 +323,16 @@ class DesignView(generic.ObjectView):
         children = list(design.children)
         dependents = list(design.dependents.all())
         viewable = projection.visible_design_ids(
-            user, [d.pk for d in (*ancestors, *children, *dependents)])
-        # The immediate parent is a direct link: it always shows its title.
-        shown = viewable | ({design.based_on_id} if design.based_on_id else set())
+            user, [d.pk for d in (*children, *dependents)])
         return {
-            "chain_ancestors": [
-                {"design": a, "restricted": a.pk not in shown} for a in ancestors
-            ],
+            "chain_ancestors": ancestors,
             "chain_children": [c for c in children if c.pk in viewable],
             "chain_has_children": bool(children),
             "chain_dependents": [d for d in dependents if d.pk in viewable],
-            "restricted_design_label": projection.RESTRICTED_DESIGN_LABEL,
         }
 
     @staticmethod
-    def _planned_feed_rows(design):
+    def _planned_feed_rows(design, user):
         """The design's PLANNED power feeds, one row per feed.
 
         Planned feeds are written by the rack-power dialog ("copy from rack")
@@ -366,9 +352,11 @@ class DesignView(generic.ObjectView):
 
         max_util = get_config().POWERFEED_DEFAULT_MAX_UTILIZATION or 100
         rows = []
+        # The bound PDUs may belong to a descendant design: only the ones the
+        # reader may view are listed (core restricts reverse lists).
         feeds = (
             design.planned_feeds.select_related("rack")
-            .prefetch_related("bound_placements")
+            .prefetch_related(tables.viewable_bound_placements(user))
             .order_by("rack__name", "name")
         )
         for feed in feeds:
@@ -412,7 +400,7 @@ class DesignElevationView(generic.ObjectView):
         )
         # One per-rack projected bundle per scoped rack, shaped identically to the
         # editor's blocks (same projection.project_rack contract).
-        rack_blocks = [_project_rack_bundle(instance, rack, request.user) for rack in scoped_racks]
+        rack_blocks = [_project_rack_bundle(instance, rack) for rack in scoped_racks]
         return {
             "design": instance,
             "scoped_racks": scoped_racks,
@@ -612,7 +600,7 @@ def _asset_version():
     return newest
 
 
-def _design_names_for_slots(slots, user=None):
+def _design_names_for_slots(slots):
     """
     Batch-resolve ``source_design_id`` -> design name for a set of slots.
 
@@ -620,10 +608,6 @@ def _design_names_for_slots(slots, user=None):
     design's NAME (``source_design_name``), not just its pk, so the frontend
     never has to fetch it separately. One query per call site (per rack)
     rather than one per inherited slot.
-
-    ``user`` (optional): an ancestor design that user may not view is named
-    "(restricted design)" instead of by its title -- the hover card must not
-    be a way to read a title the design list would hide.
     """
     ids = {slot.get("source_design_id") for slot in slots if slot.get("source_design_id")}
     if not ids:
@@ -632,11 +616,7 @@ def _design_names_for_slots(slots, user=None):
     # ``chain_conflicts`` uses for a design-level entry's ``source_design_name``
     # (both read off ``str(source_design)`` -- see ``_conflict()`` in
     # projection.py, whose messages already read "{ancestor}").
-    visible = ids if user is None else projection.visible_design_ids(user, ids)
-    return {
-        d.pk: str(d) if d.pk in visible else projection.RESTRICTED_DESIGN_LABEL
-        for d in models.Design.objects.filter(pk__in=ids)
-    }
+    return {d.pk: str(d) for d in models.Design.objects.filter(pk__in=ids)}
 
 
 def _slot_to_widget(slot, design_names=None):
@@ -728,25 +708,17 @@ def _slot_to_widget(slot, design_names=None):
     }
 
 
-def _project_rack_bundle(design, rack, user=None):
+def _project_rack_bundle(design, rack):
     """
     Project ONE rack under a design into a per-rack widget bundle for the editor.
 
     Reuses ``projection.project_rack`` (the projection contract is unchanged) and
     the existing ``_slot_to_widget`` builder, so every visible rack in the
     multi-rack workspace is shaped identically to the single-rack context.
-
-    ``user`` (optional) is the reader the bundle is for: titles of ancestor
-    designs they may not view are replaced by "(restricted design)" in the hover
-    names and in the chain-refusal conflicts.
     """
     result = projection.project_rack(design, rack)
     all_slots = (*result.front, *result.rear, *result.non_racked)
-    design_names = _design_names_for_slots(all_slots, user)
-    for slot in all_slots:
-        # What rack_block.html prints as the tile's source design.
-        if slot.get("inherited"):
-            slot["source_design_label"] = design_names.get(slot.get("source_design_id"))
+    design_names = _design_names_for_slots(all_slots)
     widgets = [_slot_to_widget(slot, design_names) for slot in all_slots]
     # T1.5: ``rack`` is now EITHER a real ``dcim.Rack`` (from ``design.racks``)
     # or a ``models.PlannedRack`` (from the SEPARATE ``design.planned_racks``
@@ -802,7 +774,7 @@ def _project_rack_bundle(design, rack, user=None):
         # ``chain_conflicts`` context key by ``_design_editor_context`` --
         # kept here too so a caller working with one bundle (not the whole
         # editor context) can still see them.
-        "conflicts": projection.redact_conflicts(result.conflicts, design, user),
+        "conflicts": result.conflicts,
     }
 
 
@@ -845,13 +817,13 @@ def _design_editor_context(request, design):
     # racks" panel can show/hide them via a CSS class with no page reload.
     all_rack_blocks = [
         {
-            **_project_rack_bundle(design, scoped_rack, request.user),
+            **_project_rack_bundle(design, scoped_rack),
             "hidden": scoped_rack.pk in hidden_rack_ids,
         }
         for scoped_rack in scoped_racks
     ] + [
         # A planned rack hides like a real one (its own HiddenDesignRack row).
-        {**_project_rack_bundle(design, planned_rack, request.user),
+        {**_project_rack_bundle(design, planned_rack),
          "hidden": planned_rack.pk in hidden_planned_ids}
         for planned_rack in scoped_planned_racks
     ]
@@ -1122,10 +1094,7 @@ class DesignEditorView(generic.ObjectView):
         result = projection.project_rack(instance, rack)
 
         all_slots = (*result.front, *result.rear, *result.non_racked)
-        design_names = _design_names_for_slots(all_slots, request.user)
-        for slot in all_slots:
-            if slot.get("inherited"):
-                slot["source_design_label"] = design_names.get(slot.get("source_design_id"))
+        design_names = _design_names_for_slots(all_slots)
         widgets = [_slot_to_widget(slot, design_names) for slot in all_slots]
 
         context = _design_editor_context(request, instance)
@@ -1135,7 +1104,7 @@ class DesignEditorView(generic.ObjectView):
         # rack-specific route's context contract (the template renders the full
         # all_rack_blocks set; this is exposed for callers/tests).
         visible_racks = [
-            _project_rack_bundle(instance, scoped_rack, request.user)
+            _project_rack_bundle(instance, scoped_rack)
             for scoped_rack in scoped_racks
             if scoped_rack.pk not in hidden_rack_ids
         ]
@@ -1378,9 +1347,9 @@ class DesignDeleteView(generic.ObjectDeleteView):
         has_children = obj.children.exists()
         has_versions = obj.versions.exists()
         if has_children:
-            messages.error(request, _design_children_message(obj, request.user))
+            messages.error(request, _design_children_message(obj))
         if has_versions:
-            messages.error(request, _design_versions_message(obj, request.user))
+            messages.error(request, _design_versions_message(obj))
         if has_children or has_versions:
             return redirect(obj.get_absolute_url())
         return super().post(request, *args, **kwargs)
@@ -1426,9 +1395,9 @@ class DesignBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
             ).distinct()
             if blocked_children.exists() or blocked_versions.exists():
                 for design in blocked_children:
-                    messages.error(request, _design_children_message(design, request.user))
+                    messages.error(request, _design_children_message(design))
                 for design in blocked_versions:
-                    messages.error(request, _design_versions_message(design, request.user))
+                    messages.error(request, _design_versions_message(design))
                 return redirect(self.get_return_url(request))
         return super().post(request, **kwargs)
 
@@ -1596,18 +1565,6 @@ class ElevationBrowserView(ContentTypePermissionRequiredMixin, View):
 class DesignPlacementView(generic.ObjectView):
     queryset = models.DesignPlacement.objects.all()
 
-    def get_extra_context(self, request, instance):
-        # A planned-upstream chassis belongs to an ANCESTOR design, which this
-        # reader may not be allowed to see: show its title only when they can.
-        upstream = instance.base_parent_placement
-        upstream_design = None
-        if upstream is not None and projection.visible_design_ids(request.user, [upstream.design_id]):
-            upstream_design = upstream.design
-        return {
-            "base_parent_design": upstream_design,
-            "restricted_design_label": projection.RESTRICTED_DESIGN_LABEL,
-        }
-
 
 @register_model_view(models.DesignPlacement, "list", path="", detail=False)
 class DesignPlacementListView(generic.ObjectListView):
@@ -1682,7 +1639,7 @@ class DesignPlacementBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
                 messages.error(
                     request,
                     "Cannot delete placements belonging to frozen (approved) "
-                    "designs: " + _frozen_titles(frozen_designs, request.user) + ". Set those "
+                    "designs: " + _frozen_titles(frozen_designs) + ". Set those "
                     "designs back to draft, or use the New version button on "
                     "each of them, to make this change.",
                 )
@@ -1705,11 +1662,17 @@ class DesignPlacementBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
 class DesignPowerFeedView(generic.ObjectView):
     queryset = models.DesignPowerFeed.objects.select_related("design", "rack")
 
+    def get_extra_context(self, request, instance):
+        return {
+            "bound_placements": models.DesignPlacement.objects
+            .filter(tables.viewable_placements_q(request.user), planned_power_feed=instance)
+            .select_related("target_rack"),
+        }
+
 
 @register_model_view(models.DesignPowerFeed, "list", path="", detail=False)
 class DesignPowerFeedListView(generic.ObjectListView):
-    queryset = models.DesignPowerFeed.objects.select_related(
-        "design", "rack").prefetch_related("bound_placements")
+    queryset = models.DesignPowerFeed.objects.select_related("design", "rack")
     table = tables.DesignPowerFeedTable
     filterset = filtersets.DesignPowerFeedFilterSet
     filterset_form = forms.DesignPowerFeedFilterForm
@@ -1731,15 +1694,8 @@ class DesignPowerFeedEditView(generic.ObjectEditView):
     def post(self, request, *args, **kwargs):
         obj = self.get_object(**kwargs)
         design_id = obj.design_id or request.POST.get("design")
-        # The submitted pk is the client's: look it up only among the designs this
-        # user may view, or the refusal below would name any design by id. A design
-        # outside that set is turned away by the form itself (its choices are
-        # restricted the same way).
         try:
-            design = (
-                models.Design.objects.restrict(request.user, "view").filter(pk=design_id).first()
-                if design_id else None
-            )
+            design = models.Design.objects.filter(pk=design_id).first() if design_id else None
         except (TypeError, ValueError):
             design = None
         if design is not None and design.is_frozen:
@@ -1791,7 +1747,7 @@ class DesignPowerFeedBulkEditView(_ValidPkListMixin, generic.BulkEditView):
         if frozen_designs:
             raise ValidationError(
                 "Cannot bulk-edit planned power feeds belonging to frozen "
-                "(approved) designs: " + _frozen_titles(frozen_designs, request.user) + ". Set "
+                "(approved) designs: " + _frozen_titles(frozen_designs) + ". Set "
                 "those designs back to draft, or use the New version button "
                 "on each of them, to make this change."
             )
@@ -1821,7 +1777,7 @@ class DesignPowerFeedBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
                 messages.error(
                     request,
                     "Cannot delete planned power feeds belonging to frozen "
-                    "(approved) designs: " + _frozen_titles(frozen_designs, request.user) + ". Set "
+                    "(approved) designs: " + _frozen_titles(frozen_designs) + ". Set "
                     "those designs back to draft, or use the New version "
                     "button on each of them, to make this change.",
                 )
@@ -1896,7 +1852,7 @@ class PlannedRackDeleteView(generic.ObjectDeleteView):
             messages.error(request, _planned_rack_realized_message(obj))
             return redirect(obj.get_absolute_url())
         if not obj.is_orphan:
-            messages.error(request, _planned_rack_referenced_message(obj, request.user))
+            messages.error(request, _planned_rack_referenced_message(obj))
             return redirect(obj.get_absolute_url())
         return super().post(request, *args, **kwargs)
 
@@ -1953,7 +1909,7 @@ class PlannedRackBulkDeleteView(_ValidPkListMixin, generic.BulkDeleteView):
                     messages.error(request, _planned_rack_realized_message(planned_rack))
                     blocked = True
                 elif not planned_rack.is_orphan:
-                    messages.error(request, _planned_rack_referenced_message(planned_rack, request.user))
+                    messages.error(request, _planned_rack_referenced_message(planned_rack))
                     blocked = True
             if blocked:
                 return redirect(self.get_return_url(request))
@@ -2084,23 +2040,6 @@ class DesignDeriveForm(django_forms.Form):
     )
 
 
-_ADD_CONSTRAINT_MESSAGE = (
-    "The new design does not satisfy the constraints of your add permission, "
-    "so it was not created."
-)
-
-
-def _require_add_permission(user, obj):
-    """Raise ``PermissionsViolation`` unless ``user``'s add permission covers the
-    row just created -- NetBox's own post-save check for an object-constrained
-    add permission. A view that clones one design into another must repeat it,
-    because the new row's values (title, status, sites...) are the user's input.
-    Call inside the ``transaction.atomic()`` that created ``obj``: raising rolls
-    it back."""
-    if not type(obj).objects.restrict(user, "add").filter(pk=obj.pk).exists():
-        raise PermissionsViolation
-
-
 @register_model_view(models.Design, "derive", path="derive")
 class DesignDeriveView(generic.ObjectView):
     """
@@ -2123,15 +2062,19 @@ class DesignDeriveView(generic.ObjectView):
         # Deriving CREATES a new Design.
         return "netbox_rack_design.add_design"
 
-    def get_object(self, **kwargs):
-        # The base design is READ to build the child (its racks and sites are
-        # copied), so it must be one this user may view -- the add permission
-        # alone says nothing about that. The queryset is already limited by
-        # add_design's constraints; this narrows it by view_design's.
-        return get_object_or_404(self.queryset.restrict(self.request.user, "view"), **kwargs)
+    def _source(self, request, pk):
+        """The design to derive from. An approved one is open to every add_design
+        holder (the trust model); a draft nobody may clone is only worth a page
+        to someone who can view it -- else it is not found."""
+        design = self.get_object(pk=pk)
+        if not design.is_frozen and not models.Design.objects.restrict(
+            request.user, "view"
+        ).filter(pk=design.pk).exists():
+            raise Http404
+        return design
 
     def get(self, request, pk):
-        design = self.get_object(pk=pk)
+        design = self._source(request, pk)
         form = DesignDeriveForm(initial={"title": f"{design.title} (derived)"})
         return render(request, self.template_name, {
             "object": design,
@@ -2140,7 +2083,7 @@ class DesignDeriveView(generic.ObjectView):
         })
 
     def post(self, request, pk):
-        design = self.get_object(pk=pk)
+        design = self._source(request, pk)
         if not design.is_frozen:
             messages.error(
                 request,
@@ -2169,7 +2112,6 @@ class DesignDeriveView(generic.ObjectView):
             with transaction.atomic():
                 child.full_clean()
                 child.save()
-                _require_add_permission(request.user, child)
                 # M5: a derived design starts with the parent's own sites --
                 # mirrors api/views.py's `derive` action. Must run after
                 # save() (M2M needs a pk), same as `racks` below.
@@ -2184,7 +2126,11 @@ class DesignDeriveView(generic.ObjectView):
                 # pk) and inside the same transaction as the create, so a
                 # child can never exist with a half-copied scope.
                 child.racks.set(design.racks.all())
+                # After the sites and racks are set: a constraint on them
+                # (``sites__id``...) can only be judged on the finished row.
+                _require_add_permission(request.user, child)
         except ValidationError as e:
+            clear_events.send(sender=self)
             form.add_error(None, e)
             return render(request, self.template_name, {
                 "object": design,
@@ -2192,6 +2138,7 @@ class DesignDeriveView(generic.ObjectView):
                 "return_url": design.get_absolute_url(),
             })
         except PermissionsViolation:
+            clear_events.send(sender=self)
             messages.error(request, _ADD_CONSTRAINT_MESSAGE)
             return redirect(design.get_absolute_url())
         messages.success(request, f"Created {child} based on {design}.")
@@ -2275,9 +2222,11 @@ class DesignNewVersionView(generic.ObjectView):
                 clone = versioning.new_version(design, title=form.cleaned_data["title"])
                 _require_add_permission(request.user, clone)
         except ValidationError as e:
+            clear_events.send(sender=self)
             form.add_error(None, e)
             return render(request, self.template_name, self._context(design, form))
         except PermissionsViolation:
+            clear_events.send(sender=self)
             messages.error(request, _ADD_CONSTRAINT_MESSAGE)
             return redirect(design.get_absolute_url())
         messages.success(request, f"Created {clone} as a new version of {design}.")
@@ -2346,7 +2295,22 @@ class DesignRebaseView(generic.ObjectView):
                 else:
                     form.add_error(None, exc)
             else:
-                design.save()
+                try:
+                    with transaction.atomic():
+                        design.save()
+                        # The new parent is the user's input: the row must still
+                        # fall under their change permission's constraints.
+                        if not models.Design.objects.restrict(request.user, "change").filter(
+                                pk=design.pk).exists():
+                            raise PermissionsViolation
+                except PermissionsViolation:
+                    clear_events.send(sender=self)
+                    design.based_on_id = previous_based_on
+                    messages.error(
+                        request,
+                        "The re-based design does not satisfy the constraints of your "
+                        "change permission, so it was not re-based.")
+                    return redirect(design.get_absolute_url())
                 messages.success(request, f"Re-based {design} onto {design.based_on}.")
                 return redirect(design.get_absolute_url())
         return render(request, self.template_name, {
@@ -2399,6 +2363,7 @@ class DesignApplyView(generic.ObjectView):
             result = apply_engine.run(design, request.user)
         except PermissionsViolation:
             # run() has rolled the whole apply back: nothing was changed.
+            clear_events.send(sender=self)
             messages.error(
                 request,
                 f"Apply refused: you do not have permission to make every change "
@@ -2406,6 +2371,7 @@ class DesignApplyView(generic.ObjectView):
             )
             return redirect(design.get_absolute_url())
         except ValidationError as error:
+            clear_events.send(sender=self)
             messages.error(
                 request,
                 f"Apply failed and was rolled back, nothing was changed: {'; '.join(error.messages)}",
@@ -2414,6 +2380,7 @@ class DesignApplyView(generic.ObjectView):
         except IntegrityError:
             # Typically a concurrent apply (or a rack/device created meanwhile):
             # the database refused, the transaction is gone, a fresh plan will say.
+            clear_events.send(sender=self)
             messages.error(
                 request,
                 f"Apply failed and was rolled back, nothing was changed: a database "
@@ -2534,30 +2501,20 @@ def _chain_refusal_map():
     return {pk: resolve(pk, frozenset()) for pk in by_pk}
 
 
-def _chain_health_detail(kind, ancestor, restricted=False):
+def _chain_health_detail(kind, ancestor):
     """The sentence a human reads for one flagged design's chain issue.
 
     Mirrors ``projection._ancestor_refusal``'s reasoning in the report's own
     words -- the two must not disagree about WHY, only about audience (this
     is a summary row, not the editor's persistent panel).
-
-    ``restricted``: the reader may not view ``ancestor``, so it is named
-    "(restricted design)" and its exact status is not spelled out (the same
-    redaction ``projection._ancestor_refusal`` applies).
     """
     if kind == "ancestor_implemented":
         return (
-            f"{projection.RESTRICTED_DESIGN_LABEL if restricted else ancestor} is marked "
-            f"implemented: reality may already contain "
+            f"{ancestor} is marked implemented: reality may already contain "
             f"part of its layer, so replaying it would double-count those "
             f"changes. Re-base past it."
         )
     if kind == "ancestor_not_approved":
-        if restricted:
-            return (
-                f"{projection.RESTRICTED_DESIGN_LABEL} is not approved: its placements are "
-                f"still free to change. Re-base once it is approved, or onto another parent."
-            )
         return (
             f"{ancestor} is {ancestor.get_status_display().lower()}, not "
             f"approved: its placements are still free to change. Re-base "
@@ -2616,10 +2573,6 @@ def _chain_health_rows(user):
         {d.pk: d for d in models.Design.objects.filter(pk__in=needed_ancestor_pks)}
         if needed_ancestor_pks else {}
     )
-    # A row is a LIST entry: an ancestor the reader may not view is named
-    # "(restricted design)". The design's own parent is a direct link and keeps
-    # its title (same rule as ``projection.redact_conflicts``).
-    viewable_ancestors = projection.visible_design_ids(user, needed_ancestor_pks)
 
     rows = []
     for pk, design in visible_designs.items():
@@ -2628,16 +2581,10 @@ def _chain_health_rows(user):
         if refusal is not None:
             kind, ancestor_pk = refusal
             ancestor = ancestors.get(ancestor_pk) if ancestor_pk is not None else None
-            restricted = (
-                ancestor is not None
-                and ancestor.pk not in viewable_ancestors
-                and ancestor.pk != design.based_on_id
-            )
             reasons.append({
                 "kind": kind,
-                "ancestor": None if restricted else ancestor,
-                "restricted": restricted,
-                "detail": _chain_health_detail(kind, ancestor, restricted),
+                "ancestor": ancestor,
+                "detail": _chain_health_detail(kind, ancestor),
             })
         rows.append({
             "design": design,
@@ -2674,9 +2621,9 @@ class DesignChainHealthView(ContentTypePermissionRequiredMixin, View):
     Elevations browser), and every row is additionally restricted to designs
     ``user`` has object-level view permission on, via
     ``Design.objects.restrict()`` inside ``_chain_health_rows``. A chain issue
-    naming an ancestor the user cannot view says "(restricted design)" instead
-    of its title (as the editor's ``chain_conflicts`` panel does), unless that
-    ancestor is the design's own parent -- a direct link keeps its title.
+    names its ancestor as the editor's ``chain_conflicts`` panel does, viewable
+    or not (core's breadcrumbs name a parent the reader cannot open either); the
+    flagged design itself never leaks to someone without view rights on it.
     """
 
     template_name = "netbox_rack_design/chain_health.html"

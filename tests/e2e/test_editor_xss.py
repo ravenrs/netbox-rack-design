@@ -13,12 +13,17 @@ the REST API, drives the real UI to the sink, and proves three things:
   * nothing executed (``window.__xss`` stays unset, no alert/confirm fired).
 
 Payloads: ``P1`` is an element injection (``<img src=x onerror=...>``), ``P2``
-an attribute breakout (``" autofocus onfocus=...``).
+an attribute breakout (``" autofocus onfocus=...``), ``P3`` a ``</select>``
+breakout that closes the option list a name is printed into and then injects an
+element (the payload that tells a sink that only escapes quotes from one that
+escapes ``<``).
 
 Sinks covered: the per-bank distribution legend (power_heatmap.js), the PDU
-"bind to a power feed" dialog and the rack-power dialog (editor/power.js), the
-Create-rack dialog's site chip / site select / location select / "copy feeds
-from" select (editor_panels.js).
+"bind to a power feed" dialog (feed list, PDU select) and the rack-power dialog
+(title, copy-from select, planned-feeds list) (editor/power.js), the Create-rack
+dialog's site chip / site select / location select / "copy feeds from" select
+(editor_panels.js), and the execution-plan page's rack, action and step names
+(execution_plan.js).
 
 SELF-PROVISIONING and cleaning up after itself: every fixture is created over
 the REST API under a unique ``e2e-xss-<uuid>`` tag and deleted in reverse
@@ -34,6 +39,7 @@ import unittest
 import urllib.error
 import urllib.request
 import uuid
+from urllib.parse import urlparse
 
 BASE = os.environ.get("RD_BASE", "http://127.0.0.1:8000").rstrip("/")
 USER = os.environ.get("RD_USER", "rd_shot")
@@ -41,6 +47,7 @@ PASS = os.environ.get("RD_PASS", "ShotPass12345!")
 
 P1 = '<img src=x onerror="window.__xss=1">'
 P2 = '" autofocus onfocus="window.__xss=1'
+P3 = '</select><img src=x onerror="window.__xss=1">'
 PREFIX = "e2e-xss-"
 
 
@@ -157,6 +164,15 @@ class EditorXssTestCase(unittest.TestCase):
             "name": f"{P1} {tag}", "slug": f"{tag}-loc-a", "site": cls._site_a["id"]})
         cls._loc_b = cls._make("locations", "/api/dcim/locations/", {
             "name": f"{P2} {tag}", "slug": f"{tag}-loc-b", "site": cls._site_b["id"]})
+        # Site / location / rack C carry P3 (the </select> breakout): the names that
+        # land in the Create-rack dialog's <select> option lists.
+        cls._site_c = cls._make("sites", "/api/dcim/sites/", {
+            "name": f"{P3} {tag}", "slug": f"{tag}-c", "status": "active"})
+        cls._loc_c = cls._make("locations", "/api/dcim/locations/", {
+            "name": f"{P3} {tag}", "slug": f"{tag}-loc-c", "site": cls._site_c["id"]})
+        cls._rack_c = cls._make("racks", "/api/dcim/racks/", {
+            "name": f"{P3} {tag}", "site": cls._site_c["id"],
+            "location": cls._loc_c["id"], "status": "active", "u_height": 20})
         # Rack A is named with P2 so it shows up as a hostile option in the
         # "copy feeds from" / rack-power selects; rack B is plain.
         cls._rack_a = cls._make("racks", "/api/dcim/racks/", {
@@ -201,6 +217,17 @@ class EditorXssTestCase(unittest.TestCase):
             "a_terminations": [{"object_type": "dcim.powerport", "object_id": port["id"]}],
             "b_terminations": [{"object_type": "dcim.powerfeed", "object_id": feed["id"]}],
             "status": "connected"})
+        # A second PDU named with P3: the PDU select of the bind dialog lists it.
+        cls._pdu_hostile_name = f"{P3} {tag}"
+        cls._pdu_hostile = cls._make("devices", "/api/dcim/devices/", {
+            "name": cls._pdu_hostile_name, "device_type": dtype["id"], "role": role_id,
+            "site": cls._site_a["id"], "rack": cls._rack_a["id"],
+            "status": "active", **cf})
+        cls._pdu = pdu
+        # A 1U type for the execution-plan page's placements.
+        cls._dtype_1u = cls._make("device_types", "/api/dcim/device-types/", {
+            "manufacturer": mfr["id"], "model": f"{tag}-1U", "slug": f"{tag}-1u",
+            "u_height": 1, "is_full_depth": False})
 
     @classmethod
     def _cleanup_class(cls):
@@ -251,10 +278,11 @@ class EditorXssTestCase(unittest.TestCase):
         self.dialogs = []
         self.page.on("dialog", lambda d: (self.dialogs.append(d.message), d.dismiss()))
         self.stray_requests = []
+        # The injected <img src=x> resolves RELATIVE to the page it sits in (under
+        # /plugins/rack-design/designs/<pk>/editor/<rack>/x), so match the path's
+        # last segment, not one fixed URL.
         self.page.on("request", lambda r: self.stray_requests.append(r.url)
-                     if r.url.split("?")[0].rstrip("/") == f"{BASE}/x"
-                     or r.url.split("?")[0].endswith("/plugins/rack-design/x")
-                     else None)
+                     if urlparse(r.url).path.rstrip("/").endswith("/x") else None)
 
     def tearDown(self):
         try:
@@ -298,8 +326,10 @@ class EditorXssTestCase(unittest.TestCase):
         self.page.click("#nbx-rd-create-planned-rack-btn")
         self.page.wait_for_selector(".nbx-rd-create-rack-modal.show", timeout=10000)
 
-    def _assert_nothing_ran(self, where):
-        """The three global tripwires: sentinel, injected element, stray request."""
+    def _assert_nothing_ran(self, where, scope="#rd-editor, .modal"):
+        """The three global tripwires: sentinel, injected element, stray request.
+        The attribute scan covers only ``scope`` (the editor and its dialogs): the
+        surrounding NetBox page legitimately carries on*/autofocus attributes."""
         self.page.wait_for_timeout(700)  # let a broken image's onerror fire
         self.assertIsNone(
             self.page.evaluate("() => window.__xss === undefined ? null : window.__xss"),
@@ -307,13 +337,19 @@ class EditorXssTestCase(unittest.TestCase):
         self.assertEqual(
             self.page.evaluate("() => document.querySelectorAll('img[src=\"x\"]').length"),
             0, f"{where}: an <img src=x> was injected into the page")
-        tainted = self.page.evaluate(
-            """() => [...document.querySelectorAll('*')].filter(
-                (el) => !/^(SCRIPT|LINK)$/.test(el.tagName) && [...el.attributes].some(
-                    (a) => a.name === 'autofocus' || /^on/.test(a.name)))
-                .map((el) => el.outerHTML.slice(0, 200))""")
+        scanned = self.page.evaluate(
+            """(scope) => {
+                const roots = [...document.querySelectorAll(scope)];
+                const all = new Set(roots.flatMap((r) => [r, ...r.querySelectorAll('*')]));
+                return {roots: roots.length, tainted: [...all].filter(
+                    (el) => !/^(SCRIPT|LINK)$/.test(el.tagName) && [...el.attributes].some(
+                        (a) => a.name === 'autofocus' || /^on/.test(a.name)))
+                    .map((el) => el.outerHTML.slice(0, 200))};
+            }""", scope)
+        self.assertGreater(scanned["roots"], 0, f"{where}: the scan scope {scope!r} matched nothing")
         self.assertEqual(
-            tainted, [], f"{where}: an element carries an injected on*/autofocus attribute")
+            scanned["tainted"], [],
+            f"{where}: an element carries an injected on*/autofocus attribute")
         self.assertEqual(self.stray_requests, [],
                          f"{where}: the browser requested the injected image")
         self.assertEqual(self.dialogs, [], f"{where}: a browser dialog fired")
@@ -483,6 +519,122 @@ class EditorXssTestCase(unittest.TestCase):
                 " .nbx-rd-create-rack-modal [autofocus]').length"),
             0, "nothing may be injected into the Create-rack dialog")
         self._assert_nothing_ran("create-rack dialog, multi site")
+
+    # -- P3: the </select> breakout ---------------------------------------------
+
+    def test_create_rack_selects_survive_a_select_breakout_p3(self):
+        """A name that closes the <select> early must not leave options outside
+        it or inject an element: site / location / copy-from options are text."""
+        design = self._design(
+            [self._site_a["id"], self._site_c["id"]],
+            [self._rack_a["id"], self._rack_c["id"]], "p3-create")
+        self._open_create_rack_dialog(design, self._rack_a)
+        site_names = self.page.evaluate(
+            """() => [...document.querySelectorAll('.nbx-rd-create-rack-site option')]
+                .map((o) => o.textContent)""")
+        self.assertIn(self._site_c["name"], site_names, "P3 site must be option text")
+        self.page.select_option(".nbx-rd-create-rack-site", str(self._site_c["id"]))
+        self.page.wait_for_function(
+            "() => { const el = document.querySelector('.nbx-rd-create-rack-location');"
+            " return el && !el.disabled; }", timeout=10000)
+        loc_names = self.page.evaluate(
+            """() => [...document.querySelectorAll('.nbx-rd-create-rack-location option')]
+                .map((o) => o.textContent)""")
+        self.assertIn(self._loc_c["name"], loc_names, "P3 location must be option text")
+        copy_names = self.page.evaluate(
+            """() => [...document.querySelectorAll('.nbx-rd-create-rack-copy-feeds option')]
+                .map((o) => o.textContent)""")
+        self.assertIn(self._rack_c["name"], copy_names, "P3 rack must be option text")
+        # every option sits INSIDE its select (a </select> breakout would orphan them)
+        orphans = self.page.evaluate(
+            """() => [...document.querySelectorAll('.nbx-rd-create-rack-modal option')]
+                .filter((o) => !o.closest('select')).length""")
+        self.assertEqual(orphans, 0, "options escaped their <select>")
+        self._assert_nothing_ran("create-rack dialog, P3 breakout")
+
+    def test_rack_power_dialog_copy_from_select_survives_p3(self):
+        design = self._design(
+            [self._site_a["id"], self._site_c["id"]],
+            [self._rack_a["id"], self._rack_c["id"]], "p3-copy")
+        self._open_rack_power_dialog(design, self._rack_a, self._rack_a)
+        options = self.page.evaluate(
+            """() => [...document.querySelectorAll('.nbx-rd-rackpower-rack option')]
+                .map((o) => ({text: o.textContent, inSelect: !!o.closest('select')}))""")
+        self.assertIn(self._rack_c["name"], [o["text"] for o in options])
+        self.assertTrue(all(o["inSelect"] for o in options), options)
+        self._assert_nothing_ran("rack power dialog, P3 breakout")
+
+    # -- planned-feeds list (rack-power dialog) ---------------------------------
+
+    def test_planned_feeds_list_renders_names_as_text(self):
+        design = self._design([self._site_a["id"]], [self._rack_a["id"]], "planned-list")
+        names = [f"{P1} planned {self._tag}", f"{P3} planned {self._tag}"]
+        for name in names:
+            self._api("POST", "/api/plugins/rack-design/planned-power-feeds/", {
+                "design": design["id"], "rack": self._rack_a["id"], "name": name,
+                "voltage": 230, "amperage": 16})
+        self._open_rack_power_dialog(design, self._rack_a, self._rack_a)
+        self.page.wait_for_selector(".nbx-rd-planned-list .small", timeout=15000)
+        rows = self._texts(".nbx-rd-planned-list .small")
+        for name in names:
+            match = [r for r in rows if name in r["text"]]
+            self.assertTrue(match, f"{name!r} must be listed verbatim as text; got {rows}")
+            for row in match:
+                self.assertEqual(row["kids"], 0, "a planned-feed row holds text only")
+        self._assert_nothing_ran("planned feeds list")
+
+    # -- PDU select (bind dialog, custom-fields section) ------------------------
+
+    def test_bind_dialog_pdu_select_renders_names_as_text(self):
+        design = self._design([self._site_a["id"]], [self._rack_a["id"]], "pdu-select")
+        self._open_editor(design, self._rack_a)
+        # power_source_device_id makes the dialog show its "reference a PDU" section.
+        self.page.evaluate(
+            """([rackId, pduId]) => {
+                const widget = {proposed_name: 'xss-pdu-select', role_slug: 'pdu',
+                                label: 'xss-pdu-select', power_source_device_id: pduId};
+                window.NbxRdEditor.showPduPowerDialog(
+                    widget, document.createElement('div'), {rackId: String(rackId)});
+            }""",
+            [self._rack_a["id"], self._pdu["id"]])
+        self.page.wait_for_function(
+            "() => document.querySelectorAll('.nbx-rd-pducf-pdu option').length >= 3",
+            timeout=15000)
+        options = self.page.evaluate(
+            """() => [...document.querySelectorAll('.nbx-rd-pducf-pdu option')]
+                .map((o) => ({text: o.textContent, inSelect: !!o.closest('select')}))""")
+        self.assertIn(self._pdu_hostile_name, [o["text"] for o in options],
+                      f"the hostile PDU name must be option text; got {options}")
+        self.assertTrue(all(o["inSelect"] for o in options), options)
+        self._assert_nothing_ran("bind dialog PDU select")
+
+    # -- execution plan page ----------------------------------------------------
+
+    def test_execution_plan_names_render_as_text(self):
+        design = self._design([self._site_a["id"]], [self._rack_a["id"]], "plan")
+        action_name = f"{P1} act {self._tag}"
+        placement = self._api("POST", "/api/plugins/rack-design/placements/", {
+            "design": design["id"], "kind": "add", "device_type": self._dtype_1u["id"],
+            "target_rack": self._rack_a["id"], "target_position": 5, "target_face": "front",
+            "proposed_name": action_name})
+        step_title = f"{P2} step"
+        self._api("POST", f"/api/plugins/rack-design/designs/{design['id']}/save-steps/", {
+            "steps": [{"id": None, "title": step_title, "placements": [placement["id"]]}]})
+        self.page.goto(
+            f"{BASE}/plugins/rack-design/designs/{design['id']}/execution-plan/",
+            wait_until="networkidle")
+        self.page.wait_for_selector("[data-rd-step]", timeout=30000)
+        self.page.wait_for_selector(".rd-plan-rack-name", timeout=30000)
+        self.page.wait_for_timeout(600)
+        rack_names = [r["text"] for r in self._texts(".rd-plan-rack-name")]
+        self.assertIn(self._rack_a["name"], rack_names, "the rack name is shown as text")
+        actions = self._texts("[data-rd-action] > span:nth-child(2)")
+        self.assertIn(action_name, [a["text"] for a in actions])
+        self.assertTrue(all(a["kids"] == 0 for a in actions), "action names are text only")
+        titles = self.page.evaluate(
+            "() => [...document.querySelectorAll('[data-rd-title]')].map((i) => i.value)")
+        self.assertIn(step_title, titles, "the step title round-trips through the input value")
+        self._assert_nothing_ran("execution plan", scope="[data-rd-plan-root]")
 
 
 if __name__ == "__main__":  # pragma: no cover

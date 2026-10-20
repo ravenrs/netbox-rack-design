@@ -150,9 +150,7 @@ promised to write.
 - `GET /api/plugins/rack-design/designs/<pk>/conflicts/` — requires
   `view_design`, writes nothing. Returns `{"conflicts": [...]}`, where each
   entry has `kind`, `severity`, `detail`, `rack_id`, `source_design_id`,
-  `source_design_name`, and `slot_key`. For a chain conflict whose source
-  design the caller may not view, `source_design_id` and `source_design_name` are `null` and `detail` reads
-  `(restricted design)` instead of naming it. This also carries **chain**
+  `source_design_name`, and `slot_key`. This also carries **chain**
   conflicts, not only peer ones — the point is that an automation pipeline
   can gate on one call before ever reaching `apply`, which is otherwise the
   first thing that would tell it about a problem.

@@ -78,12 +78,6 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     view_namespace = "plugins-api:netbox_rack_design"
     brief_fields = ["display", "id", "status", "title", "url", "version"]
 
-    def _build_query_with_filter(self, name, filter_string):
-        # The generated query cannot tell that `ancestors` ([DesignType]!, nullable
-        # entries) is an object list and selects it without a subselection.
-        query = super()._build_query_with_filter(name, filter_string)
-        return query.replace("ancestors\n", "ancestors { id }\n")
-
     @classmethod
     def setUpTestData(cls):
         env = create_dcim_environment()
@@ -193,7 +187,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_rejected_when_has_children(self):
         """DELETE a design another design is based on -> 409, body carries
         the explanation, the design still exists."""
-        self.add_permissions("netbox_rack_design.delete_design", "netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.delete_design")
         parent = make_design(title="API parent", site=self.site)
         child = make_design(
             title="API child", site=self.site, based_on=parent,
@@ -233,7 +227,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_rejected_when_has_versions(self):
         """DELETE a root that another version points its ``root`` at -> 409,
         body carries the explanation, both designs still exist."""
-        self.add_permissions("netbox_rack_design.delete_design", "netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.delete_design")
         root = make_design(title="API root", site=self.site)
         v2 = make_design(
             title="API root", site=self.site, root=root, version=2,
@@ -259,7 +253,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_rejected_reports_both_reasons(self):
         """A design that is both a root-with-versions AND has a child ->
         409 whose body mentions both reasons, not just the first found."""
-        self.add_permissions("netbox_rack_design.delete_design", "netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.delete_design")
         root = make_design(title="API both", site=self.site)
         v2 = make_design(title="API both", site=self.site, root=root, version=2)
         child = make_design(
@@ -572,7 +566,7 @@ class DesignChainActionsTest(APITestCase):
     # --- rebase ---------------------------------------------------------------
 
     def test_rebase_to_approved_target_succeeds(self):
-        self.add_permissions("netbox_rack_design.change_design", "netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
         old_parent = make_design(
             title="Old parent", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -611,7 +605,7 @@ class DesignChainActionsTest(APITestCase):
         """Same rule as the Re-base page: another version of the current
         parent's own plan is a valid target whatever its status -- the step
         that lets a frozen parent be replaced by its new version."""
-        self.add_permissions("netbox_rack_design.change_design", "netbox_rack_design.view_design")
+        self.add_permissions("netbox_rack_design.change_design")
         parent = make_design(title="Frozen", site=self.site,
                              status=DesignStatusChoices.STATUS_APPROVED)
         v2 = make_design(title="Frozen", site=self.site, root=parent, version=2)

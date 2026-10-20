@@ -30,10 +30,10 @@ retrieve, create, update, delete, filter, bulk operations:
 | Action | Does |
 |---|---|
 | `apply/` | `GET`: **dry run** — what applying would create, update, flag, delete, plus every problem that would stop it; writes nothing. `POST`: apply (200, or 409 with the problems if refused). |
-| `derive/` | Create a draft child design based on this approved one. |
+| `derive/` | Create a draft child design based on this approved one. Needs `add_design` only (no `view_design` on the source); the new design must satisfy your `add` constraints. |
 | `new-version/` | Clone this design as the next version of the same plan. |
 | `rebase/` | Point `based_on` at another design (`{"based_on": <id>}`) — an approved one, or another version of the current parent. |
-| `chain/`, `conflicts/` | `GET`: the design's ancestor chain; its chain, stale and peer conflicts. |
+| `chain/`, `conflicts/` | `GET`: the design's ancestor chain; its chain, stale and peer conflicts. Each `conflicts` entry has `source_design_id` and `source_design_name`; they name the design at fault whether or not you may view it, as NetBox core names a parent you cannot open. `chain/`'s `children` list leaves out the designs you may not view. |
 | `save-layout/` | What the editor's Save sends: the full set of placements. |
 | `preview-name/` | The name the naming engine would give a prospective placement. |
 | `rerun-naming-preview/`, `rerun-naming/` | Re-name placements whose names collide with a peer design. |
@@ -301,34 +301,30 @@ with a `_list`).
 
 ### Design lineage and permissions
 
-A user constrained to some designs (an object-constrained `view_design`
-permission) sees the same lineage over GraphQL as over REST `chain`:
+Designs follow NetBox core's GraphQL: lists and plain foreign keys are
+restricted to what the user may view, and a tree's parent chain is not.
 
 - `children` and `depends_on` list only the designs the user may view, capped
   at 200 entries.
 - `based_on`, `root` and the `design` field of a placement, planned feed or step
-  are `null` when the user may not view that design.
-- `ancestors` is the chain, oldest first, with the same length as REST `chain`.
-  An ancestor the user may not view is `null` at its position, so the list
-  type is `[DesignType]!` (nullable entries).
-- `lineage` is the same chain with a placeholder for each hidden ancestor, like
-  REST `chain`. For an ancestor the user may not view, `restricted` is
-  `true`, `id`, `version`, `status` and `design` are `null`, and `title` is
-  `(restricted design)`.
+  are `null` when the user may not view that design, the way `device { tenant }`
+  is `null` for a tenant the user cannot view.
+- `ancestors` is the whole `based_on` chain, oldest first, hidden designs
+  included, like REST `chain` and the design page (core's own `region { parent }`
+  returns a parent the user cannot view too). It is `[DesignType]!`.
 
 ```graphql
 {
   design(id: 12) {
-    lineage { id title version restricted design { description } }
+    ancestors { id title version status }
   }
 }
 ```
 
-A lineage deeper than 200 levels (or with a cycle) returns empty `ancestors`
-and `lineage`.
+A lineage deeper than 200 levels (or with a cycle) returns empty `ancestors`.
 
 Set `GRAPHQL_MAX_QUERY_DEPTH` in NetBox's `configuration.py` (it is unset by
-default) so a client cannot nest `children`, `ancestors` or `lineage` without
+default) so a client cannot nest `children` or `ancestors` without
 limit. A value of `10` to `15` is enough for ordinary queries. NetBox's
 `GRAPHQL_MAX_ALIASES` (default 10) limits repeated fields in one query.
 
@@ -346,10 +342,10 @@ existing install, build the index once:
 python manage.py reindex netbox_rack_design
 ```
 
-A planned power feed's search result shows its rack, voltage and amperage but
-not its design, because a search result is visible to everyone who may view
-feeds. Run `reindex` after upgrading to 1.2.2 to drop the design name from
-results already cached.
+A planned power feed's search result shows its design, rack, voltage and
+amperage, the way NetBox's own results show a device's tenant or site: the
+result is visible to everyone who may view the feed, and the design link in it
+follows that design's own permissions.
 
 ## Related
 

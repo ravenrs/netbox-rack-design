@@ -103,6 +103,7 @@ def new_version(design, *, title=None):
                 supply=feed.supply,
                 custom_field_data=dict(feed.custom_field_data),
             )
+            new_feed._refs_copied = True  # verbatim copy: NetBox may have moved the rack since
             new_feed.full_clean()
             new_feed.save()
             new_feed.tags.set(feed.tags.all())
@@ -113,6 +114,7 @@ def new_version(design, *, title=None):
             new_rack_power = DesignRackPower(
                 design=clone, rack=rack_power.rack, power_config=rack_power.power_config,
             )
+            new_rack_power._refs_copied = True
             new_rack_power.full_clean()
             new_rack_power.save()
 
@@ -209,6 +211,7 @@ def new_version(design, *, title=None):
             old_parent_pk = old_parent_of.get(old_pk)
             if old_parent_pk is not None:
                 new_placement.parent_placement = old_to_new[old_parent_pk]
+            new_placement._refs_copied = True
             new_placement.full_clean()
             new_placement.save()
             new_placement.tags.set(source_of[old_pk].tags.all())

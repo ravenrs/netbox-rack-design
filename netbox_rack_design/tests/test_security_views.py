@@ -2,27 +2,28 @@
 Security regression tests for the HTML views (1.2.2).
 
 Each test drives the ATTACK -- an object-constrained ObjectPermission, a hand-posted
-pk, a hand-edited bulk form -- and asserts the page refuses, redacts or degrades to
-a message, never discloses another design's title and never 500s.
+pk, a hand-edited bulk form -- and asserts the page refuses or degrades to a
+message and never 500s.
 
-Visibility rule (NetBox core parity), shared with REST/GraphQL: a DIRECT link
-(based_on, depends_on) keeps its title; a LIST (children, "required by",
-ancestor stack, chain-health rows, hover source names, rebase picker, elevation
-browser) shows only designs the reader may view; a hidden ANCESTOR stays in the
-stack as "(restricted design)".
+Visibility rule (NetBox core parity), shared with REST/GraphQL: a LIST
+(children, "required by", rebase picker, elevation browser) shows only designs
+the reader may view; a related object NAMED on a page (a parent, an ancestor
+stack, a guard or error message) shows its real name, like core's breadcrumbs
+and ProtectedError messages do -- the link it carries simply 404s.
 """
 
 from unittest import mock
 
 from core.models import ObjectChange, ObjectType
+from dcim.models import DeviceType, Rack, Site
 from django.contrib.messages import get_messages
 from django.db import IntegrityError
 from django.urls import reverse
+from django.utils.html import escape
 from users.models import ObjectPermission
 from utilities.exceptions import PermissionsViolation
 from utilities.testing import TestCase
 
-from .. import projection
 from ..choices import DesignPlacementKindChoices, DesignStatusChoices
 from ..models import Design, DesignPlacement, DesignPowerFeed, PlannedRack
 from .utils import create_dcim_environment, make_design
@@ -30,7 +31,6 @@ from .utils import create_dcim_environment, make_design
 ADD = DesignPlacementKindChoices.KIND_ADD
 APPROVED = DesignStatusChoices.STATUS_APPROVED
 IMPLEMENTED = DesignStatusChoices.STATUS_IMPLEMENTED
-RESTRICTED = projection.RESTRICTED_DESIGN_LABEL
 NS = "plugins:netbox_rack_design"
 
 
@@ -70,6 +70,23 @@ class ViewSecurityBase(TestCase):
 
     def message_texts(self, response):
         return [str(m) for m in get_messages(response.wsgi_request)]
+
+    def spy_clear_events(self):
+        """``(seen, patcher)``: ``seen`` gets the size of the request's event queue
+        each time a view clears it -- proof the rolled-back writes DID queue events
+        and the view dropped them."""
+        from core.signals import clear_events
+        from netbox.context import events_queue
+
+        seen = []
+
+        class Spy:
+            @staticmethod
+            def send(sender, **kwargs):
+                seen.append(len(events_queue.get()))
+                return clear_events.send(sender=sender, **kwargs)
+
+        return seen, mock.patch("netbox_rack_design.views.clear_events", Spy())
 
     def url(self, name, *args):
         return reverse(f"{NS}:{name}", args=args)
@@ -141,17 +158,17 @@ class DesignPageListsTest(ViewSecurityBase):
     def test_page_renders(self):
         self.assertHttpStatus(self.response, 200)
 
-    def test_hidden_ancestor_is_a_placeholder_that_keeps_chain_length(self):
-        self.assertNotContains(self.response, "Secret ancestor A")
-        self.assertContains(self.response, RESTRICTED)
+    def test_ancestor_stack_names_every_ancestor_like_core_breadcrumbs(self):
+        self.assertContains(self.response, "Secret ancestor A")
         self.assertContains(self.response, "Visible parent B")
-        # the stack still has two entries: the placeholder and the parent
-        self.assertEqual(len(self.response.context["chain_ancestors"]), 2)
-        self.assertTrue(self.response.context["chain_ancestors"][0]["restricted"])
-        self.assertFalse(self.response.context["chain_ancestors"][1]["restricted"])
+        self.assertEqual(
+            [a.pk for a in self.response.context["chain_ancestors"]], [self.a.pk, self.b.pk])
 
-    def test_hidden_ancestor_status_does_not_surface_as_an_alert(self):
-        self.assertNotContains(self.response, "is marked Implemented")
+    def test_the_link_of_a_hidden_ancestor_does_not_open(self):
+        self.assertHttpStatus(self.client.get(self.a.get_absolute_url()), 404)
+
+    def test_hidden_implemented_ancestor_still_alerts(self):
+        self.assertContains(self.response, "is marked Implemented")
 
     def test_children_list_drops_hidden_designs(self):
         self.assertContains(self.response, "Visible child")
@@ -164,13 +181,6 @@ class DesignPageListsTest(ViewSecurityBase):
     def test_direct_links_keep_their_title(self):
         # depends_on is a direct link, like based_on (Parent row) above.
         self.assertContains(self.response, "Secret dependency")
-
-    def test_visible_ancestor_implemented_still_alerts(self):
-        self.b.status = IMPLEMENTED
-        self.b.save()
-        self.can_view_only(self.b)
-        response = self.client.get(self.url("design", self.c.pk))
-        self.assertContains(response, "is marked Implemented")
 
 
 class EditorHoverNamesTest(ViewSecurityBase):
@@ -193,7 +203,7 @@ class EditorHoverNamesTest(ViewSecurityBase):
         cls.c = make_design(title="Editing C", site=cls.site, based_on=cls.b)
         cls.c.racks.add(cls.racks[0])
 
-    def test_hidden_source_design_is_named_restricted_in_widgets_and_markup(self):
+    def test_a_hidden_source_design_is_named_in_widgets_and_markup(self):
         self.can_view_only(self.b, self.c)
         response = self.client.get(self.url("design_editor_default", self.c.pk))
         self.assertHttpStatus(response, 200)
@@ -202,34 +212,48 @@ class EditorHoverNamesTest(ViewSecurityBase):
             if w["placement_id"] == self.upstream.pk
         )
         self.assertTrue(widget["inherited"])
-        self.assertEqual(widget["source_design_name"], RESTRICTED)
-        self.assertNotContains(response, "Secret origin A")
-        self.assertContains(response, f'data-source-design-name="{RESTRICTED}"')
+        self.assertIn("Secret origin A", widget["source_design_name"])
+        self.assertEqual(widget["source_design_id"], self.a.pk)
+        self.assertContains(response, f'data-source-design-id="{self.a.pk}"')
+        self.assertContains(response, 'data-source-design-name="Secret origin A')
 
-    def test_elevation_page_hover_is_redacted_too(self):
+    def test_elevation_page_hover_names_it_too(self):
         self.can_view_only(self.b, self.c)
         response = self.client.get(self.url("design_elevation", self.c.pk))
         self.assertHttpStatus(response, 200)
-        self.assertNotContains(response, "Secret origin A")
+        self.assertContains(response, "Secret origin A")
 
-    def test_viewable_source_design_keeps_its_name(self):
-        self.can_view_only(self.a, self.b, self.c)
-        response = self.client.get(self.url("design_editor_default", self.c.pk))
-        self.assertContains(response, 'data-source-design-name="Secret origin A')
+    def test_a_chain_refusal_keeps_its_real_kind_and_names_the_ancestor(self):
+        self.can_view_only(self.b, self.c)
+        for status, kind in ((IMPLEMENTED, "ancestor_implemented"),
+                             (DesignStatusChoices.STATUS_DRAFT, "ancestor_not_approved")):
+            Design.objects.filter(pk=self.a.pk).update(status=status)
+            response = self.client.get(self.url("design_editor_default", self.c.pk))
+            self.assertHttpStatus(response, 200)
+            rows = [c for c in response.context["chain_conflicts"] if c["kind"] == kind]
+            self.assertTrue(rows, (kind, response.context["chain_conflicts"]))
+            self.assertEqual(rows[0]["source_design_id"], self.a.pk)
+            self.assertIn("Secret origin A", rows[0]["source_design_name"])
+            self.assertNotIn("chain_broken", [c["kind"] for c in response.context["chain_conflicts"]])
 
-    def test_hidden_implemented_ancestor_conflict_is_redacted(self):
-        self.a.status = IMPLEMENTED
-        self.a.save()
+    def test_an_occupancy_conflict_names_the_ancestor_at_fault(self):
+        # c plans U10 itself while the (hidden) grand-ancestor a owns it.
+        DesignPlacement.objects.create(
+            design=self.c, kind=ADD, device_type=self.device_type, target_rack=self.racks[0],
+            target_position=10, target_face="front", proposed_name="srv-mine")
         self.can_view_only(self.b, self.c)
         response = self.client.get(self.url("design_editor_default", self.c.pk))
-        self.assertHttpStatus(response, 200)
-        self.assertNotContains(response, "Secret origin A")
-        self.assertTrue(response.context["chain_conflicts"])
+        rows = [c for c in response.context["chain_conflicts"] if c["kind"] == "unit_occupied"]
+        self.assertEqual(len(rows), 1, response.context["chain_conflicts"])
+        self.assertEqual(rows[0]["source_design_id"], self.a.pk)
+        self.assertContains(response, "Secret origin A")
 
 
 # --- chain-health report ---------------------------------------------------------
 
-class ChainHealthRedactionTest(ViewSecurityBase):
+class ChainHealthNamesAncestorsTest(ViewSecurityBase):
+    """Rows are restricted to designs the reader may view; the ancestor a row
+    blames is named whether or not the reader can open it."""
 
     @classmethod
     def setUpTestData(cls):
@@ -242,18 +266,152 @@ class ChainHealthRedactionTest(ViewSecurityBase):
             title="Visible child of P", site=cls.site, based_on=cls.parent_hidden,
         )
 
-    def test_hidden_non_parent_ancestor_is_named_restricted(self):
+    def test_a_row_names_the_hidden_ancestor_at_fault(self):
         self.can_view_only(self.leaf)
         response = self.client.get(self.url("design_chain_health"))
         self.assertHttpStatus(response, 200)
         self.assertContains(response, "Visible leaf L")
-        self.assertNotContains(response, "Secret root R")
-        self.assertContains(response, RESTRICTED)
+        self.assertContains(response, "Secret root R")
+        self.assertContains(response, "is marked implemented")
 
-    def test_the_designs_own_parent_is_a_direct_link_and_keeps_its_title(self):
+    def test_hidden_designs_get_no_row(self):
+        self.can_view_only(self.leaf)
+        response = self.client.get(self.url("design_chain_health"))
+        self.assertNotContains(response, "Secret mid M")
+
+    def test_the_designs_own_parent_is_named(self):
         self.can_view_only(self.child_of_hidden)
         response = self.client.get(self.url("design_chain_health"))
         self.assertContains(response, "Secret draft parent P")
+
+
+class HiddenImmediateParentTest(ViewSecurityBase):
+    """The immediate parent is named on the page even when the reader cannot view
+    it (REST shows it too; GraphQL resolves the link null)."""
+
+    def test_design_page_shows_a_hidden_immediate_parent(self):
+        parent = self.make("Secret immediate parent", status=APPROVED)
+        child = self.make("Visible child", based_on=parent)
+        self.can_view_only(child)
+        response = self.client.get(self.url("design", child.pk))
+        self.assertHttpStatus(response, 200)
+        self.assertContains(response, "Secret immediate parent")
+        self.assertEqual([a.pk for a in response.context["chain_ancestors"]], [parent.pk])
+
+
+# --- markup in names: every template prints it escaped ---------------------------
+
+class MarkupInNamesTest(ViewSecurityBase):
+    """A design / placement name with markup renders as text on the design page,
+    in the chain-health title attribute and in the editor's tile attributes."""
+
+    PAYLOAD = '"><img src=x onerror="window.__xss=1">'
+    ESCAPED = escape(PAYLOAD)
+
+    def assert_escaped(self, response):
+        self.assertHttpStatus(response, 200)
+        self.assertNotContains(response, self.PAYLOAD)
+        self.assertNotContains(response, '<img src=x onerror="window.__xss=1">')
+        self.assertContains(response, self.ESCAPED)
+
+    def test_design_page(self):
+        root = self.make(f"Root {self.PAYLOAD}", status=APPROVED)
+        parent = self.make(f"Parent {self.PAYLOAD}", status=APPROVED, based_on=root)
+        page = self.make(f"Page {self.PAYLOAD}", based_on=parent)
+        self.make(f"Child {self.PAYLOAD}", based_on=page)
+        self.grant(Design, ["view"])
+        self.assert_escaped(self.client.get(self.url("design", page.pk)))
+
+    def test_chain_health_title_attribute(self):
+        # A visible, not-approved parent: the row's detail (a title="..." attribute)
+        # carries its title.
+        parent = self.make(f"Draft parent {self.PAYLOAD}")
+        child = self.make("Child", based_on=parent)
+        self.grant(Design, ["view"])
+        response = self.client.get(self.url("design_chain_health"))
+        self.assert_escaped(response)
+        self.assertContains(response, escape(f"Draft parent {self.PAYLOAD}"))
+        self.assertContains(response, child.title)
+
+    def test_editor_tile_attributes(self):
+        a = self.make(f"Origin {self.PAYLOAD}")
+        a.racks.add(self.racks[0])
+        self.add_placement(a, position=10, name=f"from-a {self.PAYLOAD}")
+        a.status = APPROVED
+        a.save()
+        c = self.make("Editing", based_on=a)
+        c.racks.add(self.racks[0])
+        self.add_placement(c, position=20, name=f"mine {self.PAYLOAD}")
+        self.grant(Design, ["view"])
+        self.assert_escaped(self.client.get(self.url("design_editor_default", c.pk)))
+
+
+class FormLinkScopeTest(ViewSecurityBase):
+    """The HTML model forms are core's: NetBox restricts every choice field of a
+    model form to what the user may view, so a hand-posted pk or title of a hidden
+    design is an invalid choice (core's own forms do the same for a hidden tenant)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.hidden = make_design(title="Secret linked", site=cls.site, status=APPROVED)
+        cls.visible = make_design(title="Visible linked", site=cls.site, status=APPROVED)
+        cls.mine = make_design(title="Mine", site=cls.site)
+
+    def setUp(self):
+        super().setUp()
+        self.can_view_only(self.visible, self.mine)
+        self.grant(Design, ["change", "add"])
+        # The forms' other pickers are restricted by core's own view permissions.
+        for model in (Site, Rack, DeviceType):
+            self.grant(model, ["view"])
+
+    def _design_form(self, **extra):
+        return {"title": "Mine", "sites": [self.site.pk], "status": "draft", **extra}
+
+    def test_based_on_and_depends_on_of_a_hidden_design_are_invalid_choices(self):
+        for field in ("based_on", "depends_on"):
+            response = self.client.post(
+                self.url("design_edit", self.mine.pk), self._design_form(**{field: self.hidden.pk}))
+            self.assertHttpStatus(response, 200)
+            self.assertNotContains(response, "Secret linked")
+            self.mine.refresh_from_db()
+            self.assertIsNone(self.mine.based_on_id)
+            self.assertEqual(self.mine.depends_on.count(), 0)
+        ok = self.client.post(
+            self.url("design_edit", self.mine.pk), self._design_form(based_on=self.visible.pk))
+        self.assertHttpStatus(ok, 302)
+        self.mine.refresh_from_db()
+        self.assertEqual(self.mine.based_on_id, self.visible.pk)
+
+    def test_placement_form_cannot_write_into_a_hidden_design(self):
+        self.grant(DesignPlacement, ["add", "view"])
+        form = {"design": self.hidden.pk, "kind": "add", "device_type": self.device_type.pk,
+                "proposed_name": "sneaky", "target_rack": self.racks[0].pk,
+                "target_position": 12, "target_face": "front"}
+        response = self.client.post(self.url("designplacement_add"), form)
+        self.assertHttpStatus(response, 200)
+        self.assertFalse(DesignPlacement.objects.filter(proposed_name="sneaky").exists())
+        ok = self.client.post(self.url("designplacement_add"), {**form, "design": self.mine.pk})
+        self.assertHttpStatus(ok, 302)
+        self.assertTrue(DesignPlacement.objects.filter(proposed_name="sneaky", design=self.mine).exists())
+
+    def test_csv_import_cannot_name_a_hidden_design(self):
+        self.grant(DesignPlacement, ["add", "view"])
+        csv = ("design,kind,device_type,proposed_name,target_rack,target_position,target_face\n"
+               f"Secret linked,add,{self.device_type.model},csv-sneaky,{self.racks[0].name},14,front")
+        response = self.client.post(self.url("designplacement_bulk_import"), {
+            "data": csv, "format": "csv", "csv_delimiter": ","})
+        self.assertHttpStatus(response, 200)
+        self.assertFalse(DesignPlacement.objects.filter(proposed_name="csv-sneaky").exists())
+        # positive control: the same file naming a design the user may view imports,
+        # so the refusal above is the hidden design, not a malformed CSV.
+        ok = self.client.post(self.url("designplacement_bulk_import"), {
+            "data": csv.replace("Secret linked", "Mine").replace("csv-sneaky", "csv-fine"),
+            "format": "csv", "csv_delimiter": ","})
+        self.assertHttpStatus(ok, 302)
+        self.assertTrue(
+            DesignPlacement.objects.filter(proposed_name="csv-fine", design=self.mine).exists())
 
 
 # --- 3. Rebase ---------------------------------------------------------------------
@@ -301,6 +459,80 @@ class RebaseRestrictedTest(ViewSecurityBase):
         self.assertIsNotNone(change.prechange_data)
 
 
+# --- the PDUs bound to a feed: a reverse list, restricted like core's -----------------
+
+class BoundPlacementsRestrictedTest(ViewSecurityBase):
+    """A descendant design's PDU bound to an ancestor's planned feed shows only to
+    someone who may view that placement (core restricts reverse/related lists)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.parent = make_design(title="Feed owner", site=cls.site, status=APPROVED)
+        cls.feed = DesignPowerFeed.objects.create(
+            design=cls.parent, rack=cls.racks[0], name="Feed-X", voltage=230, amperage=16)
+        cls.child = make_design(title="Hidden child", site=cls.site, based_on=cls.parent)
+        cls.hidden = DesignPlacement.objects.create(
+            design=cls.child, kind=ADD, device_type=cls.device_type, target_rack=cls.racks[0],
+            target_position=10, target_face="front", proposed_name="ZZ-hidden-pdu",
+            planned_power_feed=cls.feed)
+        cls.own = DesignPlacement.objects.create(
+            design=cls.parent, kind=ADD, device_type=cls.device_type, target_rack=cls.racks[0],
+            target_position=12, target_face="front", proposed_name="ZZ-own-pdu",
+            planned_power_feed=cls.feed)
+
+    def pages(self):
+        return {
+            "feed page": self.url("designpowerfeed", self.feed.pk),
+            "feed list": self.url("designpowerfeed_list"),
+            "design page": self.url("design", self.parent.pk),
+        }
+
+    def test_a_placement_the_reader_cannot_view_is_not_listed(self):
+        self.grant(Design, ["view"], {"pk": self.parent.pk})
+        self.grant(DesignPowerFeed, ["view"])
+        self.grant(DesignPlacement, ["view"], {"design_id": self.parent.pk})
+        for label, url in self.pages().items():
+            with self.subTest(page=label):
+                response = self.client.get(url)
+                self.assertHttpStatus(response, 200)
+                body = response.content.decode()
+                self.assertIn("ZZ-own-pdu", body)  # the control: viewable rows still list
+                self.assertNotIn("ZZ-hidden-pdu", body)
+
+    def test_the_design_permission_alone_shows_the_designs_own_rows(self):
+        # A planner holding only view_design (no placement permission) still sees
+        # the PDUs of the design they may view -- the design is the boundary --
+        # but not those of a descendant design they may not.
+        self.grant(Design, ["view"], {"pk": self.parent.pk})
+        self.grant(DesignPowerFeed, ["view"])
+        for label, url in self.pages().items():
+            with self.subTest(page=label):
+                body = self.client.get(url).content.decode()
+                self.assertIn("ZZ-own-pdu", body)
+                self.assertNotIn("ZZ-hidden-pdu", body)
+
+    def test_the_bulk_delete_confirmation_table_is_restricted_too(self):
+        self.grant(Design, ["view"], {"pk": self.parent.pk})
+        self.grant(DesignPowerFeed, ["view", "delete"])
+        self.grant(DesignPlacement, ["view"], {"design_id": self.parent.pk})
+        # Not frozen-refused until confirmed: the first POST only renders the table.
+        response = self.client.post(
+            self.url("designpowerfeed_bulk_delete"), {"pk": [self.feed.pk], "confirm": "true"})
+        self.assertHttpStatus(response, 200)
+        body = response.content.decode()
+        self.assertIn("Feed-X", body)
+        self.assertNotIn("ZZ-hidden-pdu", body)
+
+    def test_a_reader_who_may_view_it_sees_it(self):
+        self.grant(Design, ["view"])
+        self.grant(DesignPowerFeed, ["view"])
+        self.grant(DesignPlacement, ["view"])
+        for label, url in self.pages().items():
+            with self.subTest(page=label):
+                self.assertIn("ZZ-hidden-pdu", self.client.get(url).content.decode())
+
+
 # --- 4. derive / new-version ---------------------------------------------------------
 
 class CloneViewsSourceTest(ViewSecurityBase):
@@ -323,11 +555,37 @@ class CloneViewsSourceTest(ViewSecurityBase):
             self.assertHttpStatus(response, 404)
         self.assertFalse(Design.objects.filter(title="Stolen").exists())
 
-    def test_derive_from_a_hidden_design_is_404(self):
+    def test_derive_from_a_hidden_approved_design_is_allowed(self):
+        # Trust model: an approved design is clonable by every add_design holder.
+        self.assertHttpStatus(self.client.get(self.url("design_derive", self.secret.pk)), 200)
+        response = self.client.post(self.url("design_derive", self.secret.pk), {"title": "Cloned"})
+        self.assertHttpStatus(response, 302)
+        self.assertEqual(Design.objects.get(title="Cloned").based_on_id, self.secret.pk)
+
+    def test_derive_from_a_hidden_draft_is_not_found_and_names_nothing(self):
+        # A draft is not clonable, so there is no reason to say it exists: 404 on
+        # both verbs, and its title appears nowhere.
+        draft = make_design(title="Secret draft source", site=self.site)
         for method in (self.client.get, self.client.post):
-            response = method(self.url("design_derive", self.secret.pk), {"title": "Stolen"})
+            response = method(self.url("design_derive", draft.pk), {"title": "Early"})
             self.assertHttpStatus(response, 404)
-        self.assertFalse(Design.objects.filter(title="Stolen").exists())
+            self.assertNotIn("Secret draft source", response.content.decode())
+        self.assertFalse(Design.objects.filter(title="Early").exists())
+
+    def test_derive_from_a_visible_draft_says_to_approve_it_first(self):
+        draft = make_design(title="Visible draft source", site=self.site)
+        self.can_view_only(self.mine, draft)
+        response = self.client.post(self.url("design_derive", draft.pk), {"title": "Early"})
+        self.assertHttpStatus(response, 302)
+        self.assertIn("Approve", " ".join(self.message_texts(response)))
+        self.assertFalse(Design.objects.filter(title="Early").exists())
+
+    def test_derive_page_of_a_visible_draft_says_to_approve_it_first(self):
+        draft = make_design(title="Visible draft page", site=self.site)
+        self.can_view_only(self.mine, draft)
+        response = self.client.get(self.url("design_derive", draft.pk))
+        self.assertHttpStatus(response, 200)
+        self.assertIn("Approve", response.content.decode())
 
     def test_viewable_source_still_works(self):
         response = self.client.post(self.url("design_new_version", self.mine.pk), {"title": "Mine v2"})
@@ -363,6 +621,47 @@ class CloneViewsAddConstraintTest(ViewSecurityBase):
         self.assertEqual(Design.objects.count(), before)
         self.assertTrue(self.message_texts(response))
 
+    def test_rolled_back_clones_drop_the_events_their_writes_queued(self):
+        for name, title in (("design_new_version", "Draft clone"), ("design_derive", "Draft child")):
+            seen, spy = self.spy_clear_events()
+            with spy:
+                response = self.client.post(self.url(name, self.source.pk), {"title": title})
+            self.assertHttpStatus(response, 302)
+            self.assertTrue(seen and max(seen) > 0, (name, seen))
+
+
+class DeriveSitesConstraintTest(ViewSecurityBase):
+    """The add constraint is judged on the FINISHED child (sites copied from the
+    parent), so a ``sites__id`` constraint that the child satisfies must succeed."""
+
+    def test_sites_constrained_add_permission_derives(self):
+        source = make_design(title="Approved src", site=self.site, status=APPROVED)
+        self.grant(Design, ["add"], {"sites__id": self.site.pk})
+        response = self.client.post(self.url("design_derive", source.pk), {"title": "Sited child"})
+        self.assertHttpStatus(response, 302)
+        child = Design.objects.get(title="Sited child")
+        self.assertEqual(list(child.sites.all()), [self.site])
+        self.assertEqual(child.based_on_id, source.pk)
+
+
+class RebaseWriteCheckTest(ViewSecurityBase):
+
+    def test_rebase_outside_the_change_constraint_is_rolled_back(self):
+        parent = make_design(title="Parent", site=self.site, status=APPROVED)
+        new_parent = make_design(title="New parent", site=self.site, status=APPROVED)
+        child = make_design(title="Child", site=self.site, based_on=parent)
+        self.grant(Design, ["view"])
+        self.grant(Design, ["change"], {"based_on_id": parent.pk})
+        seen, spy = self.spy_clear_events()
+        with spy:
+            response = self.client.post(
+                self.url("design_rebase", child.pk), {"based_on": new_parent.pk})
+        self.assertHttpStatus(response, 302)
+        self.assertTrue(self.message_texts(response))
+        self.assertTrue(seen and max(seen) > 0, seen)  # events were queued, then dropped
+        child.refresh_from_db()
+        self.assertEqual(child.based_on_id, parent.pk)
+
 
 # --- 5. apply ---------------------------------------------------------------------------
 
@@ -396,6 +695,15 @@ class ApplyViewErrorsTest(ViewSecurityBase):
         from django.core.exceptions import ValidationError
         self.assert_message_and_redirect(self.post_with(ValidationError("device not allowed")))
 
+    def test_every_error_branch_clears_the_queued_events(self):
+        from django.core.exceptions import ValidationError
+
+        for error in (PermissionsViolation, IntegrityError("dup"), ValidationError("bad")):
+            seen, spy = self.spy_clear_events()
+            with spy:
+                self.post_with(error)
+            self.assertEqual(len(seen), 1, error)
+
     def test_integrity_error_detail_stays_out_of_the_message(self):
         response = self.post_with(IntegrityError("duplicate key violates constraint secret_idx"))
         self.assertNotIn("secret_idx", " ".join(self.message_texts(response)))
@@ -403,7 +711,9 @@ class ApplyViewErrorsTest(ViewSecurityBase):
 
 # --- 6. guard messages ---------------------------------------------------------------------
 
-class GuardMessagesNameNoHiddenDesignTest(ViewSecurityBase):
+class GuardMessagesNameTheDependentsTest(ViewSecurityBase):
+    """Core's ProtectedError message names every dependent object, viewable or
+    not; the delete guards here do the same."""
 
     @classmethod
     def setUpTestData(cls):
@@ -426,15 +736,12 @@ class GuardMessagesNameNoHiddenDesignTest(ViewSecurityBase):
         self.assertHttpStatus(response, 302)
         text = self.joined(response)
         self.assertIn("Cannot delete", text)
-        self.assertNotIn("Secret child", text)
-        self.assertIn("1 design(s) you cannot view", text)
+        self.assertIn("Secret child", text)
         self.assertTrue(Design.objects.filter(pk=self.parent.pk).exists())
 
     def test_delete_versions_guard(self):
         response = self.client.post(self.url("design_delete", self.root.pk), {"confirm": "true"})
-        text = self.joined(response)
-        self.assertNotIn("Secret version", text)
-        self.assertIn("1 design(s) you cannot view", text)
+        self.assertIn("Secret version", self.joined(response))
 
     def test_bulk_delete_guards(self):
         response = self.client.post(
@@ -443,22 +750,23 @@ class GuardMessagesNameNoHiddenDesignTest(ViewSecurityBase):
         )
         self.assertHttpStatus(response, 302)
         text = self.joined(response)
-        self.assertNotIn("Secret child", text)
-        self.assertNotIn("Secret version", text)
+        self.assertIn("Secret child", text)
+        self.assertIn("Secret version", text)
+        self.assertTrue(Design.objects.filter(pk=self.parent.pk).exists())
 
-    def test_hidden_design_being_deleted_is_not_named_by_its_own_guard(self):
-        # The user may delete everything but only view the designs above: the guard
-        # for a design outside that set must not print its title.
+    def test_bulk_delete_only_guards_the_rows_the_user_may_delete(self):
+        # The user may delete only what the delete permission covers: a pk
+        # outside it is not in the queryset, so it is neither guarded nor named.
         hidden = make_design(title="Hidden deletable", site=self.site, status=APPROVED)
         make_design(title="Its child", site=self.site, based_on=hidden)
+        ObjectPermission.objects.filter(users=self.user, actions=["delete"]).delete()
+        self.grant(Design, ["delete"], {"pk__in": [self.parent.pk, self.root.pk]})
         response = self.client.post(
             self.url("design_bulk_delete"),
             {"pk": [hidden.pk], "confirm": "true", "_confirm": "true"},
         )
-        text = self.joined(response)
-        self.assertIn("Cannot delete", text)
-        self.assertNotIn("Hidden deletable", text)
-        self.assertNotIn("Its child", text)
+        self.assertNotIn("Hidden deletable", self.joined(response))
+        self.assertTrue(Design.objects.filter(pk=hidden.pk).exists())
 
     def test_planned_rack_referenced_guard(self):
         planned = PlannedRack.objects.create(name="PR1", location=self._location())
@@ -468,14 +776,13 @@ class GuardMessagesNameNoHiddenDesignTest(ViewSecurityBase):
         response = self.client.post(self.url("plannedrack_delete", planned.pk), {"confirm": "true"})
         text = self.joined(response)
         self.assertIn("Cannot delete", text)
-        self.assertNotIn("Secret planner", text)
-        self.assertIn("1 design(s) you cannot view", text)
+        self.assertIn("Secret planner", text)
 
     def _location(self):
         from dcim.models import Location
         return Location.objects.create(name="Loc", slug="loc", site=self.site)
 
-    def test_frozen_bulk_placement_delete_names_no_hidden_design(self):
+    def test_frozen_bulk_placement_delete_names_the_frozen_design(self):
         secret = make_design(title="Secret frozen", site=self.site, status=APPROVED)
         placement = DesignPlacement.objects.create(
             design=secret, kind=ADD, device_type=self.device_type,
@@ -486,19 +793,18 @@ class GuardMessagesNameNoHiddenDesignTest(ViewSecurityBase):
             self.url("designplacement_bulk_delete"),
             {"pk": [placement.pk], "confirm": "true", "_confirm": "true"},
         )
-        text = self.joined(response)
-        self.assertNotIn("Secret frozen", text)
-        self.assertIn("you cannot view", text)
+        self.assertIn("Secret frozen", self.joined(response))
+        self.assertTrue(DesignPlacement.objects.filter(pk=placement.pk).exists())
 
-    def test_feed_add_with_a_hidden_frozen_design_names_nothing(self):
+    def test_feed_add_with_a_viewable_frozen_design_is_refused_by_name(self):
         secret = make_design(title="Secret frozen feed design", site=self.site, status=APPROVED)
+        self.can_view_only(self.parent, self.root, secret)
         self.grant(DesignPowerFeed, ["add", "view"])
         response = self.client.post(self.url("designpowerfeed_add"), {
             "design": secret.pk, "rack": self.racks[0].pk, "name": "F1",
             "supply": "ac", "phase": "single-phase", "voltage": 230, "amperage": 16,
         })
-        body = response.content.decode() + " ".join(self.message_texts(response))
-        self.assertNotIn("Secret frozen feed design", body)
+        self.assertIn("Secret frozen feed design", " ".join(self.message_texts(response)))
         self.assertFalse(DesignPowerFeed.objects.filter(design=secret).exists())
 
 
@@ -508,6 +814,18 @@ class BulkPkValidationTest(ViewSecurityBase):
         super().setUp()
         for model in (Design, DesignPlacement, DesignPowerFeed, PlannedRack):
             self.grant(model, ["view", "change", "delete"])
+
+    def test_valid_pks_still_bulk_delete(self):
+        # Positive control: the pk validation must not refuse a good selection.
+        doomed = make_design(title="Doomed", site=self.site)
+        survivor = make_design(title="Survivor", site=self.site)
+        response = self.client.post(
+            self.url("design_bulk_delete"),
+            {"pk": [doomed.pk], "confirm": "true", "_confirm": "true"},
+        )
+        self.assertHttpStatus(response, 302)
+        self.assertFalse(Design.objects.filter(pk=doomed.pk).exists())
+        self.assertTrue(Design.objects.filter(pk=survivor.pk).exists())
 
     def test_non_integer_pk_is_a_message_not_a_500(self):
         for name in (

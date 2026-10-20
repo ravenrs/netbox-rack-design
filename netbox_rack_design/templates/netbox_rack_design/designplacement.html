@@ -108,7 +108,7 @@
             {% if object.target_bay %}{{ object.target_bay.device|linkify }}
             {% elif object.base_parent_placement %}{{ object.base_parent_placement|linkify }}
               <span class="badge text-bg-purple">{% trans "planned upstream" %}</span>
-              <div class="text-muted">{% if base_parent_design %}{{ base_parent_design|linkify }}{% else %}{{ restricted_design_label }}{% endif %}</div>
+              <div class="text-muted">{{ object.base_parent_placement.design|linkify }}</div>
             {% else %}{{ object.parent_placement|linkify }}
               <span class="badge text-bg-blue">{% trans "planned" %}</span>{% endif %}
           </td>
