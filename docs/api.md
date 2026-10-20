@@ -299,6 +299,39 @@ with a `_list`).
 }
 ```
 
+### Design lineage and permissions
+
+A user constrained to some designs (an object-constrained `view_design`
+permission) sees the same lineage over GraphQL as over REST `chain`:
+
+- `children` and `depends_on` list only the designs the user may view, capped
+  at 200 entries.
+- `based_on`, `root` and the `design` field of a placement, planned feed or step
+  are `null` when the user may not view that design.
+- `ancestors` is the chain, oldest first, with the same length as REST `chain`.
+  An ancestor the user may not view is `null` at its position, so the list
+  type is `[DesignType]!` (nullable entries).
+- `lineage` is the same chain with a placeholder for each hidden ancestor, like
+  REST `chain`. For an ancestor the user may not view, `restricted` is
+  `true`, `id`, `version`, `status` and `design` are `null`, and `title` is
+  `(restricted design)`.
+
+```graphql
+{
+  design(id: 12) {
+    lineage { id title version restricted design { description } }
+  }
+}
+```
+
+A lineage deeper than 200 levels (or with a cycle) returns empty `ancestors`
+and `lineage`.
+
+Set `GRAPHQL_MAX_QUERY_DEPTH` in NetBox's `configuration.py` (it is unset by
+default) so a client cannot nest `children`, `ancestors` or `lineage` without
+limit. A value of `10` to `15` is enough for ordinary queries. NetBox's
+`GRAPHQL_MAX_ALIASES` (default 10) limits repeated fields in one query.
+
 The GraphQL filters are NetBox's base ones (`id`, tags, created/updated);
 to narrow by design, site or status, use the REST filters or select the
 fields you need and filter client-side.
@@ -312,6 +345,11 @@ existing install, build the index once:
 ```bash
 python manage.py reindex netbox_rack_design
 ```
+
+A planned power feed's search result shows its rack, voltage and amperage but
+not its design, because a search result is visible to everyone who may view
+feeds. Run `reindex` after upgrading to 1.2.2 to drop the design name from
+results already cached.
 
 ## Related
 

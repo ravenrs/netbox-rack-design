@@ -21,6 +21,7 @@ nav:
       - API & integrations: api.md
       - Claude and MCP: mcp.md
       - Permissions: permissions.md
+      - Security: security.md
   - Reference:
       - Power projection spec: power-projection-spec.md
       - PDU distribution spec: pdu-distribution-spec.md

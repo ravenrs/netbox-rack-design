@@ -78,6 +78,12 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     view_namespace = "plugins-api:netbox_rack_design"
     brief_fields = ["display", "id", "status", "title", "url", "version"]
 
+    def _build_query_with_filter(self, name, filter_string):
+        # The generated query cannot tell that `ancestors` ([DesignType]!, nullable
+        # entries) is an object list and selects it without a subselection.
+        query = super()._build_query_with_filter(name, filter_string)
+        return query.replace("ancestors\n", "ancestors { id }\n")
+
     @classmethod
     def setUpTestData(cls):
         env = create_dcim_environment()
@@ -187,7 +193,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_rejected_when_has_children(self):
         """DELETE a design another design is based on -> 409, body carries
         the explanation, the design still exists."""
-        self.add_permissions("netbox_rack_design.delete_design")
+        self.add_permissions("netbox_rack_design.delete_design", "netbox_rack_design.view_design")
         parent = make_design(title="API parent", site=self.site)
         child = make_design(
             title="API child", site=self.site, based_on=parent,
@@ -227,7 +233,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_rejected_when_has_versions(self):
         """DELETE a root that another version points its ``root`` at -> 409,
         body carries the explanation, both designs still exist."""
-        self.add_permissions("netbox_rack_design.delete_design")
+        self.add_permissions("netbox_rack_design.delete_design", "netbox_rack_design.view_design")
         root = make_design(title="API root", site=self.site)
         v2 = make_design(
             title="API root", site=self.site, root=root, version=2,
@@ -253,7 +259,7 @@ class DesignTest(APIViewTestCases.APIViewTestCase):
     def test_delete_rejected_reports_both_reasons(self):
         """A design that is both a root-with-versions AND has a child ->
         409 whose body mentions both reasons, not just the first found."""
-        self.add_permissions("netbox_rack_design.delete_design")
+        self.add_permissions("netbox_rack_design.delete_design", "netbox_rack_design.view_design")
         root = make_design(title="API both", site=self.site)
         v2 = make_design(title="API both", site=self.site, root=root, version=2)
         child = make_design(
@@ -488,7 +494,7 @@ class DesignChainActionsTest(APITestCase):
     # --- new_version ------------------------------------------------------
 
     def test_new_version_with_add_permission_succeeds(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         root = make_design(
             title="Root", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -508,7 +514,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertHttpStatus(response, status.HTTP_403_FORBIDDEN)
 
     def test_new_version_with_no_body_keeps_source_title(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         root = make_design(
             title="Keep my title", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -519,7 +525,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertEqual(clone.title, "Keep my title")
 
     def test_new_version_with_blank_title_rejected(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         root = make_design(
             title="Root3", site=self.site, status=DesignStatusChoices.STATUS_APPROVED,
         )
@@ -533,7 +539,7 @@ class DesignChainActionsTest(APITestCase):
         # No status requirement, unlike `derive`: a version may be created
         # from a design in ANY status, since approval makes a version
         # necessary, not valid.
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         draft = make_design(title="Draft root", site=self.site)
         response = self.client.post(self._new_version_url(draft), {}, **self.header)
         self.assertHttpStatus(response, status.HTTP_201_CREATED)
@@ -542,7 +548,7 @@ class DesignChainActionsTest(APITestCase):
         self.assertEqual(clone.version, 2)
 
     def test_new_version_clones_placements_and_feeds(self):
-        self.add_permissions("netbox_rack_design.add_design")
+        self.add_permissions("netbox_rack_design.add_design", "netbox_rack_design.view_design")
         source = make_design(
             title="With content", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -566,7 +572,7 @@ class DesignChainActionsTest(APITestCase):
     # --- rebase ---------------------------------------------------------------
 
     def test_rebase_to_approved_target_succeeds(self):
-        self.add_permissions("netbox_rack_design.change_design")
+        self.add_permissions("netbox_rack_design.change_design", "netbox_rack_design.view_design")
         old_parent = make_design(
             title="Old parent", site=self.site,
             status=DesignStatusChoices.STATUS_APPROVED,
@@ -605,7 +611,7 @@ class DesignChainActionsTest(APITestCase):
         """Same rule as the Re-base page: another version of the current
         parent's own plan is a valid target whatever its status -- the step
         that lets a frozen parent be replaced by its new version."""
-        self.add_permissions("netbox_rack_design.change_design")
+        self.add_permissions("netbox_rack_design.change_design", "netbox_rack_design.view_design")
         parent = make_design(title="Frozen", site=self.site,
                              status=DesignStatusChoices.STATUS_APPROVED)
         v2 = make_design(title="Frozen", site=self.site, root=parent, version=2)
@@ -3908,6 +3914,12 @@ class HiddenDesignRackTest(APITestCase):
         self.user_b = User.objects.create_user(username="user_b")
         self.token_b = Token.objects.create(user=self.user_b)
         self.header_b = api_token_header(self.token_b)
+        # The toggle looks the design up through view_design, for both users.
+        self.add_permissions("netbox_rack_design.view_design")
+        permission = ObjectPermission(name="hidden-racks-view-b", actions=["view"])
+        permission.save()
+        permission.users.add(self.user_b)
+        permission.object_types.add(ObjectType.objects.get_for_model(Design))
 
     def _list_url(self):
         return reverse("plugins-api:netbox_rack_design-api:hiddendesignrack-list")
@@ -4957,6 +4969,11 @@ class DeviceTypePowerTest(APITestCase):
         cls.dt_passive = DeviceType.objects.create(
             manufacturer=mfr, model="DTP-Passive", slug="dtp-passive",
             u_height=1, is_full_depth=False)
+
+    def setUp(self):
+        super().setUp()
+        # The endpoint is gated on the plugin's own view permission.
+        self.add_permissions("netbox_rack_design.view_design")
 
     def _url(self):
         return reverse(

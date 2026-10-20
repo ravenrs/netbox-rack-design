@@ -80,7 +80,11 @@ WHAT THIS VERSION DELIBERATELY DOES NOT DO
   scoping it to the destination site/tenant. ``change``/``delete`` -- which
   act on devices that already exist -- ARE checked per-object, via
   ``Device.objects.restrict(user, ...)``, so a site/tenant-constrained user is
-  correctly refused there.
+  correctly refused there. :func:`run` then closes the gap core closes the same
+  way: every device it creates, changes, removes or reverts (and every rack it
+  creates) is re-checked against ``restrict(user, "add"/"change")`` AFTER it is
+  saved, and a row the user's constraints would not allow raises
+  ``PermissionsViolation`` out of the transaction -- the whole run rolls back.
 
 PLANNED RACKS
 ------------------------------------------------------------------------------
@@ -138,9 +142,10 @@ from decimal import Decimal
 from dcim.choices import DeviceFaceChoices, RackStatusChoices
 from dcim.models import Device, Rack
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q
 from netbox.plugins import get_plugin_config
+from utilities.exceptions import PermissionsViolation
 
 from . import planning_fields, projection
 from .choices import DesignPlacementKindChoices, DesignStatusChoices
@@ -348,7 +353,12 @@ def _find_realized_or_adopt(planned):
     :func:`_execute`'s actual create-or-adopt step below.
     """
     if planned.realized_rack_id is not None:
-        rack = Rack.objects.filter(pk=planned.realized_rack_id).first()
+        # Only a rack in the planned rack's own site is "the rack it became": the
+        # field is a plain FK that a write could aim anywhere, and a device
+        # placed into a foreign site's rack would be a quiet cross-site write.
+        rack = Rack.objects.filter(
+            pk=planned.realized_rack_id, site_id=planned.location.site_id
+        ).first()
         if rack is not None:
             return rack
     return Rack.objects.filter(location_id=planned.location_id, name=planned.name).first()
@@ -650,12 +660,17 @@ def plan(design, user):
         chain = []  # a broken lineage is reported by the chain check below instead
     unapplied_ancestor = _first_unapplied_ancestor(chain)
     if unapplied_ancestor is not None:
-        result.problems.append(
-            f"{unapplied_ancestor} has unapplied placements; apply it first."
+        visible = projection.visible_design_ids(user, [unapplied_ancestor.pk])
+        label = (
+            str(unapplied_ancestor)
+            if unapplied_ancestor.pk in visible or unapplied_ancestor.pk == design.based_on_id
+            else projection.RESTRICTED_DESIGN_LABEL
         )
+        result.problems.append(f"{label} has unapplied placements; apply it first.")
 
     # --- 3. the chain must resolve ------------------------------------------
-    _, refusal = projection.resolve_baseline_chain(design)
+    # ``user`` redacts a refusal naming an ancestor the applier may not view.
+    _, refusal = projection.resolve_baseline_chain(design, user=user)
     if refusal is not None:
         result.problems.append(refusal["detail"])
 
@@ -734,6 +749,16 @@ def plan(design, user):
     delete_device_ids = set()
 
     for pl in workable:
+        if pl.kind == DesignPlacementKindChoices.KIND_MOVE and pl.device_id is None:
+            # A move of a device an ANCESTOR design planned (base_placement): it
+            # has no dcim.Device to move until that design is applied, and this
+            # engine cannot move the device that apply creates.
+            result.problems.append(
+                f"{_placement_label(pl)} moves a device planned by an ancestor design, "
+                f"which apply cannot move. Apply the ancestor design, then plan the "
+                f"move against the real device."
+            )
+            continue
         if pl.kind in (DesignPlacementKindChoices.KIND_ADD, DesignPlacementKindChoices.KIND_MOVE):
             device_type = pl.device_type if pl.kind == DesignPlacementKindChoices.KIND_ADD else pl.device.device_type
             name = _target_name(pl)
@@ -903,6 +928,13 @@ def plan(design, user):
     if result.feeds and not user.has_perm("dcim.add_cable"):
         result.problems.append(
             "You do not have permission to create cables (to connect PDUs to their feeds).")
+    # A PlannedRack with no real rack yet becomes one: that is a rack create.
+    for entry in result.resolved_racks:
+        if entry.rack is None and not user.has_perm("dcim.add_rack"):
+            result.problems.append(
+                f"You do not have permission to create racks (to build the planned "
+                f"rack {entry.planned_rack} in site {entry.planned_rack.location.site})."
+            )
     # M7: the message names the DEVICE's own (target rack's) site, not the
     # design's -- a multi-site design's ``site`` property is None, and even
     # for a one-site design the rack's site is what actually matters. One
@@ -1166,6 +1198,17 @@ def run(design, user):
             return result
         try:
             _execute(design, user, result)
+        except IntegrityError:
+            # Two applies racing for the same placement (the unique DesignApply
+            # row) land here: undo this run, report it, never a 500.
+            transaction.set_rollback(True)
+            for entry in result.created:
+                entry.device = None
+            result.problems.append(
+                "The database refused a change because another change conflicted with "
+                "it (was this design applied twice at once?), so nothing was applied. "
+                "Reload the page and check before trying again."
+            )
         except ValidationError as exc:
             # plan() checks everything it knows how to check; NetBox checks
             # more on save. If it still refuses a device half-way through,
@@ -1182,7 +1225,7 @@ def run(design, user):
         return result
 
 
-def _realize_planned_racks(result):
+def _realize_planned_racks(result, user):
     """The WRITE half of T1.6: adopt or create the real ``dcim.Rack`` for
     every ``ResolvedRack`` :func:`plan` identified, BEFORE any device is
     written -- a failure resolving a rack must abort cleanly rather than
@@ -1220,19 +1263,33 @@ def _realize_planned_racks(result):
             )
             rack.full_clean()
             rack.save()
+            _require_allowed(user, Rack, "add", rack)
             entry.created = True
         else:
             entry.created = False
         entry.rack = rack
         if planned.realized_rack_id != rack.pk:
+            planned.snapshot()
             planned.realized_rack = rack
             planned.save(update_fields=["realized_rack"])
+
+
+def _require_allowed(user, model, action, obj):
+    """Core's post-save permission check: ``obj`` was just written, and it must
+    be inside what ``user``'s object permissions allow for ``action`` -- a
+    constrained user cannot create or edit their way OUT of their constraints.
+    Raises ``PermissionsViolation`` (the caller's transaction rolls back)."""
+    if not model.objects.restrict(user, action).filter(pk=obj.pk).exists():
+        raise PermissionsViolation(
+            f"{model._meta.verbose_name} {obj} is outside the object permissions "
+            f"{user} holds, so nothing was applied."
+        )
 
 
 def _execute(design, user, result):
     removal_status = get_plugin_config("netbox_rack_design", "removal_status")
 
-    _realize_planned_racks(result)
+    _realize_planned_racks(result, user)
     if result.resolved_racks:
         # Some CreatedDevice/UpdatedDevice entries were built by plan() before
         # their planned rack existed, so their `rack`/`changes["rack"]` is
@@ -1276,6 +1333,7 @@ def _execute(design, user, result):
             setattr(device, attr, value)
         device.full_clean()
         device.save()
+        _require_allowed(user, Device, "add", device)
         entry.device = device
         if entry.recreated:
             row = entry.apply_row
@@ -1305,6 +1363,8 @@ def _execute(design, user, result):
             setattr(device, attr, value)
         device.full_clean()
         device.save()
+        _require_allowed(user, Device, "add", device)
+        bay.snapshot()
         bay.installed_device = device
         bay.full_clean()
         bay.save()
@@ -1332,16 +1392,20 @@ def _execute(design, user, result):
     for entry in result.updated:
         device = entry.device
         new_bay = entry.changes.get("parent_bay")
+        device.snapshot()
         for attr, value in entry.changes.items():
             if attr != "parent_bay":
                 setattr(device, attr, value)
         device.full_clean()
         device.save()
+        _require_allowed(user, Device, "change", device)
         if new_bay is not None:
             old_bay = getattr(device, "parent_bay", None)
             if old_bay is not None and old_bay.pk != new_bay.pk:
+                old_bay.snapshot()
                 old_bay.installed_device = None
                 old_bay.save()
+            new_bay.snapshot()
             new_bay.installed_device = device
             new_bay.full_clean()
             new_bay.save()
@@ -1351,9 +1415,11 @@ def _execute(design, user, result):
 
     for entry in result.removed:
         device = entry.device
+        device.snapshot()
         device.status = removal_status
         device.full_clean()
         device.save()
+        _require_allowed(user, Device, "change", device)
         if entry.corrected:
             row = entry.apply_row
             # prior_device_status is left untouched: it must keep recording the
@@ -1376,8 +1442,10 @@ def _execute(design, user, result):
     for entry in result.reverted:
         device = entry.device
         if device is not None:
+            device.snapshot()
             device.status = entry.prior_status
             device.full_clean()
             device.save()
+            _require_allowed(user, Device, "change", device)
         entry.apply_row.delete()
         entry.device = None

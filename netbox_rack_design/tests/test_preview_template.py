@@ -79,7 +79,12 @@ class PreviewTemplateTest(APITestCase):
             ))
 
     def _add_permission(self):
-        self.add_permissions("netbox_rack_design.view_design")
+        # view_template / view_templategroup: the template lookups are restricted.
+        self.add_permissions(
+            "netbox_rack_design.view_design",
+            "netbox_rack_design.view_template",
+            "netbox_rack_design.view_templategroup",
+        )
 
     # --- the worked example -------------------------------------------------
 

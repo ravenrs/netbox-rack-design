@@ -70,6 +70,17 @@ __all__ = (
 )
 
 
+# Request-size caps: every list a preview/save body may carry is bounded, so one
+# POST cannot make the server reconcile or project an unbounded amount of work.
+MAX_RACKS = 500
+MAX_ITEMS_PER_BUCKET = 500
+MAX_STEPS = 1000
+MAX_IDS_PER_STEP = 5000
+
+# dcim.PowerFeed stores voltage/amperage in (small)integer columns; mirror that.
+FEED_BOUNDS = {"min_value": 1, "max_value": 32767}
+
+
 # Self-referential FKs (DesignGroup.parent, Design.root / based_on / depends_on)
 # cannot reference their own serializer from inside its class body, so they get an
 # explicit brief serializer each -- the same shape as the corresponding
@@ -275,7 +286,10 @@ class DesignSerializer(NetBoxModelSerializer):
         many=True,
     )
     group = NestedDesignGroupSerializer(required=False, allow_null=True)
-    root = NestedDesignSerializer(required=False, allow_null=True)
+    # Server-set: ``root``/``version`` group a plan's versions (new-version is the
+    # only door), ``sequence`` is auto-assigned. A client-writable root would let
+    # anyone graft a design into a victim's version group.
+    root = NestedDesignSerializer(read_only=True)
     based_on = NestedDesignSerializer(required=False, allow_null=True)
     depends_on = SerializedPKRelatedField(
         queryset=Design.objects.all(),
@@ -298,6 +312,7 @@ class DesignSerializer(NetBoxModelSerializer):
             "description", "comments", "is_frozen", "tags", "custom_fields",
             "created", "last_updated",
         )
+        read_only_fields = ("version", "sequence")
         brief_fields = ("id", "url", "display", "title", "version", "status")
 
     def validate(self, data):
@@ -433,6 +448,9 @@ class DesignPowerFeedSerializer(NetBoxModelSerializer):
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "name")
+        extra_kwargs = {
+            "voltage": FEED_BOUNDS, "amperage": FEED_BOUNDS,
+        }
 
 
 class DesignApplySerializer(BaseModelSerializer):
@@ -633,20 +651,24 @@ class SaveLayoutRackSerializer(serializers.Serializer):
     """
 
     rack_id = serializers.CharField(max_length=32)
-    front = SaveLayoutItemSerializer(many=True, required=False, default=list)
-    rear = SaveLayoutItemSerializer(many=True, required=False, default=list)
-    other = SaveLayoutItemSerializer(many=True, required=False, default=list)
+    front = SaveLayoutItemSerializer(
+        many=True, required=False, default=list, max_length=MAX_ITEMS_PER_BUCKET)
+    rear = SaveLayoutItemSerializer(
+        many=True, required=False, default=list, max_length=MAX_ITEMS_PER_BUCKET)
+    other = SaveLayoutItemSerializer(
+        many=True, required=False, default=list, max_length=MAX_ITEMS_PER_BUCKET)
     # Blades: placed IN a chassis bay rather than AT a rack unit, so they cannot
     # live in a face bucket. Processed after the face buckets so a blade can
     # reference a chassis created by the same submit (see ``ref``/``parent_ref``).
-    bays = SaveLayoutItemSerializer(many=True, required=False, default=list)
+    bays = SaveLayoutItemSerializer(
+        many=True, required=False, default=list, max_length=MAX_ITEMS_PER_BUCKET)
 
 
 class SaveLayoutSerializer(serializers.Serializer):
     """Top-level body for POST .../designs/<pk>/save-layout/."""
 
     design_id = serializers.IntegerField()
-    racks = SaveLayoutRackSerializer(many=True)
+    racks = SaveLayoutRackSerializer(many=True, max_length=MAX_RACKS)
 
 
 class RecomputeDistributionSerializer(SaveLayoutSerializer):
@@ -667,7 +689,8 @@ class RecomputeDistributionSerializer(SaveLayoutSerializer):
     # CharField child (T1.4d) -- see SaveLayoutRackSerializer's rack_id
     # docstring; the viewset parses each entry via parse_rack_id.
     project_racks = serializers.ListField(
-        child=serializers.CharField(max_length=32), required=False, default=list
+        child=serializers.CharField(max_length=32), required=False, default=list,
+        max_length=MAX_RACKS,
     )
 
 
@@ -678,7 +701,8 @@ class SaveStepsStepSerializer(serializers.Serializer):
     id = serializers.IntegerField(min_value=1, required=False, allow_null=True, default=None)
     title = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     placements = serializers.ListField(
-        child=serializers.IntegerField(min_value=1), allow_empty=True, required=False, default=list
+        child=serializers.IntegerField(min_value=1), allow_empty=True, required=False, default=list,
+        max_length=MAX_IDS_PER_STEP,
     )
 
 
@@ -686,7 +710,8 @@ class SaveStepsSerializer(serializers.Serializer):
     """Body for POST .../designs/<pk>/save-steps/ (PLAN-execution-steps.md Sec. 6):
     the design's WHOLE step layout, which replaces what is stored."""
 
-    steps = serializers.ListField(child=SaveStepsStepSerializer(), allow_empty=True)
+    steps = serializers.ListField(
+        child=SaveStepsStepSerializer(), allow_empty=True, max_length=MAX_STEPS)
 
 
 class AutoOrderSerializer(serializers.Serializer):
@@ -694,8 +719,9 @@ class AutoOrderSerializer(serializers.Serializer):
     steps, each a list of placement ids."""
 
     steps = serializers.ListField(
-        child=serializers.ListField(child=serializers.IntegerField(min_value=1)),
-        allow_empty=True,
+        child=serializers.ListField(
+            child=serializers.IntegerField(min_value=1), max_length=MAX_IDS_PER_STEP),
+        allow_empty=True, max_length=MAX_STEPS,
     )
 
 
@@ -709,13 +735,15 @@ class SimulateStepsSerializer(serializers.Serializer):
     ``steps.validate_steps``."""
 
     steps = serializers.ListField(
-        child=serializers.ListField(child=serializers.IntegerField(min_value=1)),
-        allow_empty=True,
+        child=serializers.ListField(
+            child=serializers.IntegerField(min_value=1), max_length=MAX_IDS_PER_STEP),
+        allow_empty=True, max_length=MAX_STEPS,
     )
     from_step = serializers.IntegerField(min_value=1, required=False)
     to_step = serializers.IntegerField(min_value=1, required=False)
     racks = serializers.ListField(
-        child=serializers.CharField(max_length=32), required=False, allow_null=True
+        child=serializers.CharField(max_length=32), required=False, allow_null=True,
+        max_length=MAX_RACKS,
     )
 
     def validate(self, attrs):
@@ -762,7 +790,7 @@ class PreviewTemplateSerializer(serializers.Serializer):
     template = serializers.IntegerField(required=False)
     group = serializers.IntegerField(required=False)
     racks = serializers.ListField(
-        child=serializers.CharField(max_length=32), allow_empty=False,
+        child=serializers.CharField(max_length=32), allow_empty=False, max_length=MAX_RACKS,
     )
     layout = SaveLayoutSerializer(required=False)
 
@@ -1063,8 +1091,8 @@ class PlannedFeedUpsertSerializer(serializers.Serializer):
 
     rack_id = serializers.CharField(max_length=32)
     name = serializers.CharField(max_length=100)
-    voltage = serializers.IntegerField(required=False)
-    amperage = serializers.IntegerField(required=False)
+    voltage = serializers.IntegerField(required=False, **FEED_BOUNDS)
+    amperage = serializers.IntegerField(required=False, **FEED_BOUNDS)
     phase = serializers.ChoiceField(choices=PowerFeedPhaseChoices, required=False)
     supply = serializers.ChoiceField(choices=PowerFeedSupplyChoices, required=False)
 

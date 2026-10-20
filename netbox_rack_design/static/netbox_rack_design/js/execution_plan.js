@@ -504,7 +504,7 @@ function init(boot) {
                 : where(a.from) + " → " + where(a.to);
         const draggable = canEdit;
         return '<div class="rd-plan-action" data-rd-action="'
-            + a.id + '" data-kind="' + esc(a.kind) + '"' + (draggable ? ' draggable="true"' : "") + ">"
+            + esc(a.id) + '" data-kind="' + esc(a.kind) + '"' + (draggable ? ' draggable="true"' : "") + ">"
             + '<span class="rd-plan-kind rd-plan-kind-' + esc(a.kind) + '">' + (KIND_GLYPH[a.kind] || "?")
             + "</span><span>" + esc(a.name) + "</span>"
             + '<span class="rd-plan-where">' + route + "</span></div>";
@@ -544,11 +544,11 @@ function init(boot) {
               + ' aria-label="Move step ' + (i + 1) + '"><i class="mdi mdi-drag" aria-hidden="true"></i></span>'
             : "";
         return '<div class="card rd-plan-step" data-rd-step data-step-index="' + (i + 1)
-            + '" data-step-uid="' + step.uid + '">'
+            + '" data-step-uid="' + esc(step.uid) + '">'
             + '<div class="card-header d-flex align-items-center gap-2">' + handle
             + '<span class="fw-bold">Step ' + (i + 1)
             + "</span>" + title + stepPill(step) + del + "</div>"
-            + '<div class="rd-plan-body"><div class="rd-plan-drop" data-rd-drop="' + step.uid + '">'
+            + '<div class="rd-plan-body"><div class="rd-plan-drop" data-rd-drop="' + esc(step.uid) + '">'
             + step.actions.map((id) => actionRow(id)).join("")
             + (step.actions.length ? "" : '<div class="text-muted small p-2">Drop actions here</div>')
             + "</div>"

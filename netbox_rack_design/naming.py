@@ -625,7 +625,7 @@ def chain_placement_names(placement):
     ]
 
 
-def name_exists_in_site(name, site, *, exclude_placement=None):
+def name_exists_in_site(name, site, *, exclude_placement=None, user=None):
     """
     Read-only collision check: return ``True`` if ``name`` is already used in
     ``site`` -- either by a real ``dcim.Device``, or by another
@@ -640,6 +640,11 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
     Performs no writes. Callers use this to WARN; the engine never resolves the
     collision itself.
 
+    ``user`` (optional): when given, only devices that user may view and
+    designs they may view are considered, so the answer cannot be used to probe
+    for names (or plans) they have no access to. ``None`` -- the default --
+    checks everything, which is what the engine itself wants.
+
     ``design__sites=site`` narrows the candidate rows to designs that touch
     ``site`` at all (one query, indexed) before the exact per-placement site
     (which may differ from ``site`` for a multi-site design) is checked in
@@ -652,12 +657,17 @@ def name_exists_in_site(name, site, *, exclude_placement=None):
 
     from dcim.models import Device
 
-    from .models import DesignPlacement
+    from .models import Design, DesignPlacement
 
-    if Device.objects.filter(site=site, name=name).exists():
+    devices = Device.objects.filter(site=site, name=name)
+    placements = DesignPlacement.objects.filter(design__sites=site, proposed_name=name)
+    if user is not None:
+        devices = Device.objects.restrict(user, "view").filter(site=site, name=name)
+        placements = placements.filter(design__in=Design.objects.restrict(user, "view"))
+    if devices.exists():
         return True
 
-    qs = DesignPlacement.objects.filter(design__sites=site, proposed_name=name).select_related(
+    qs = placements.select_related(
         "target_rack", "target_planned_rack__location",
     )
     if exclude_placement is not None and exclude_placement.pk:

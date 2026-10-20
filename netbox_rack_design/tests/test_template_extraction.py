@@ -69,6 +69,10 @@ class TemplateExtractionTest(APITestCase):
         self.add_permissions(
             "netbox_rack_design.add_template",
             "netbox_rack_design.view_design",
+            # from-rack has no design to scope by, so the rack must be viewable;
+            # a group_id must name a viewable template group.
+            "dcim.view_rack",
+            "netbox_rack_design.view_templategroup",
         )
 
     # ------------------------------------------------------------------

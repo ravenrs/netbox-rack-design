@@ -215,7 +215,7 @@ def read_planning_fields(role, obj):
     return out
 
 
-def read_for_slot(device, planning_data):
+def read_for_slot(device, planning_data, user=None):
     """The ``(label, value)`` pairs to show for one projected slot.
 
     Answers "what will this planning field be here once the design is done?",
@@ -241,7 +241,7 @@ def read_for_slot(device, planning_data):
             value = resolve_source(device, field.get("target"))
         if _is_unset(value):
             continue
-        out.append((field["label"], display_value(field, value)))
+        out.append((field["label"], display_value(field, value, user)))
     return out
 
 
@@ -249,22 +249,32 @@ def _is_unset(value):
     return value is None or value == "" or value == []
 
 
-def _object_names(field, ids):
-    """``{pk: str(obj)}`` for the related objects of an object-type field."""
+def _viewable(model, user):
+    """``model.objects``, narrowed to what ``user`` may view when one is given."""
+    manager = model.objects
+    if user is not None and hasattr(manager, "restrict"):
+        return manager.restrict(user, "view")
+    return manager
+
+
+def _object_names(field, ids, user=None):
+    """``{pk: str(obj)}`` for the related objects of an object-type field
+    (only those ``user`` may view, when a user is given)."""
     model = field.get("model")
     if model is None or not ids:
         return {}
-    key = f"objnames:{model._meta.label_lower}"
+    key = f"objnames:{model._meta.label_lower}:{getattr(user, 'pk', None)}"
     names = _request_memo(key, dict)
     missing = [pk for pk in ids if pk not in names]
     if missing:
-        for obj in model.objects.filter(pk__in=missing):
+        for obj in _viewable(model, user).filter(pk__in=missing):
             names[obj.pk] = str(obj)
     return names
 
 
-def display_value(field, value):
-    """The text a hover card shows for one stored planning value."""
+def display_value(field, value, user=None):
+    """The text a hover card shows for one stored planning value. With a
+    ``user``, a related object they may not view shows as ``#<id>``."""
     field_type = field["type"]
     if field_type == "boolean":
         return "Yes" if value in (True, 1, "true", "True") else "No"
@@ -276,7 +286,7 @@ def display_value(field, value):
     if field_type in OBJECT_TYPES:
         ids = value if isinstance(value, list) else [value]
         ids = [pk for pk in ids if isinstance(pk, int)]
-        names = _object_names(field, ids)
+        names = _object_names(field, ids, user)
         return ", ".join(names.get(pk, f"#{pk}") for pk in ids)
     if field_type == "json" and not isinstance(value, str):
         return json.dumps(value, sort_keys=True)
@@ -431,15 +441,18 @@ def public_placement_field_schema():
 # --- validating what a planner (or an API client) sent ----------------------
 
 
-def coerce_value(field, value):
+def coerce_value(field, value, user=None):
     """Coerce one submitted value to the descriptor's type.
+
+    ``user`` (optional) limits the existence check of an object-type value to
+    objects that user may view, so a submission cannot probe for ids.
 
     Raises ``ValueError`` with a human message when the value does not fit.
     ``None`` and ``""`` both mean "not set" and come back as ``None``.
     """
     if _is_unset(value):
         return None
-    value = _coerce_to_type(field, value)
+    value = _coerce_to_type(field, value, user)
     if value is None:
         return None
     cf = field.get("cf")
@@ -460,7 +473,7 @@ def _as_list(value):
     return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
-def _coerce_to_type(field, value):
+def _coerce_to_type(field, value, user=None):
     """``value`` in the JSON form a device's ``custom_field_data`` holds."""
     label = field["label"]
     field_type = field["type"]
@@ -549,7 +562,7 @@ def _coerce_to_type(field, value):
                 raise ValueError(f"{label}: {item!r} is not an object ID.") from None
         model = field.get("model")
         if model is not None and ids:
-            found = set(model.objects.filter(pk__in=ids).values_list("pk", flat=True))
+            found = set(_viewable(model, user).filter(pk__in=ids).values_list("pk", flat=True))
             missing = [pk for pk in ids if pk not in found]
             if missing:
                 raise ValueError(
@@ -636,8 +649,11 @@ def unbound_cf_targets():
     ]
 
 
-def validate_planning_data(data, kind):
+def validate_planning_data(data, kind, user=None):
     """Validate a ``planning_data`` blob against the configured schema.
+
+    ``user`` (optional) is passed down so object-type values are checked only
+    against what that user may view.
 
     Returns the cleaned dict (unset keys dropped). Raises Django's
     ``ValidationError`` keyed on ``planning_data`` so it surfaces the same way
@@ -667,7 +683,7 @@ def validate_planning_data(data, kind):
                 errors.append(f"{field['label']}: cannot be set on a '{kind}' placement.")
                 continue
             try:
-                value = coerce_value(field, data[key])
+                value = coerce_value(field, data[key], user)
             except ValueError as exc:
                 errors.append(str(exc))
                 continue

@@ -151,7 +151,9 @@ class PlannedRackAPIDeleteGuardTest(APITestCase):
         self.assertFalse(PlannedRack.objects.filter(pk=pr.pk).exists())
 
     def test_delete_still_referenced_returns_409_not_500(self):
-        self.add_permissions("netbox_rack_design.delete_plannedrack")
+        # view_design: the referencing design's title is only named to a user who may view it.
+        self.add_permissions(
+            "netbox_rack_design.delete_plannedrack", "netbox_rack_design.view_design")
         pr = PlannedRack.objects.create(name="API referenced", location=self.location, u_height=10)
         design = make_design(title="API referencing design", site=self.site)
         design.planned_racks.add(pr)
@@ -197,6 +199,8 @@ class PlannedRackHTMLDeleteGuardTest(TestCase):
     user_permissions = (
         "netbox_rack_design.view_plannedrack",
         "netbox_rack_design.delete_plannedrack",
+        # the refusal names the referencing designs the user may view
+        "netbox_rack_design.view_design",
     )
 
     @classmethod
@@ -332,6 +336,8 @@ class PlannedRackBulkDeleteGuardTest(TestCase):
     user_permissions = (
         "netbox_rack_design.view_plannedrack",
         "netbox_rack_design.delete_plannedrack",
+        # the refusal names the referencing designs the user may view
+        "netbox_rack_design.view_design",
     )
 
     @classmethod

@@ -39,7 +39,9 @@ class DesignPowerFeedIndex(SearchIndex):
     fields = (
         ("name", 100),
     )
-    display_attrs = ("design", "rack", "voltage", "amperage")
+    # No "design": the cached value is shown to anyone who may view a planned
+    # feed, whatever their view_design constraints -- it would leak a title.
+    display_attrs = ("rack", "voltage", "amperage")
 
 
 class PlannedRackIndex(SearchIndex):

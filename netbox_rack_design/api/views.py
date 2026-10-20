@@ -4,8 +4,10 @@ import datetime
 import itertools
 import logging
 import re
+from collections.abc import Mapping
 from decimal import Decimal
 
+from core.signals import clear_events
 from dcim.choices import DeviceFaceChoices
 from dcim.models import Device, DeviceBay, DeviceRole, DeviceType, Location, PowerFeed, Rack
 from django.core.exceptions import ValidationError
@@ -18,9 +20,11 @@ from netbox.plugins import get_plugin_config
 from rest_framework import status, views, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, PermissionDenied
-from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from tenancy.models import Tenant
+from users.models import Token
+from utilities.exceptions import PermissionsViolation
 from utilities.forms.constants import ALPHANUMERIC_EXPANSION_PATTERN
 from utilities.forms.utils import expand_alphanumeric_pattern
 
@@ -39,6 +43,7 @@ from ..models import (
     FavoriteSet,
     HiddenDesignChassis,
     HiddenDesignRack,
+    LineageError,
     PlannedRack,
     Template,
     TemplateGroup,
@@ -292,7 +297,22 @@ def _frozen_design_rest_message(design):
     )
 
 
-def _design_children_rest_message(design):
+def _names_for_reader(designs, user):
+    """Titles of ``designs`` for a message shown to ``user``: the ones they may
+    view by name, the rest only as a count (a hidden title is never printed).
+    ``user`` of None names everything."""
+    designs = list(designs)
+    if user is None:
+        return ", ".join(str(d) for d in designs)
+    visible = projection.visible_design_ids(user, [d.pk for d in designs])
+    names = [str(d) for d in designs if d.pk in visible]
+    hidden = len(designs) - len(names)
+    if hidden:
+        names.append(f"{hidden} design(s) you cannot view")
+    return ", ".join(names)
+
+
+def _design_children_rest_message(design, user=None):
     """
     The message body for a REST 409 rejecting the delete of ``design``
     because other designs are based on it (PLAN-design-chains.md §2.2).
@@ -312,8 +332,8 @@ def _design_children_rest_message(design):
     different design actually severs the link, hence pointing at
     ``rebase``, which does.
     """
-    children = [str(child) for child in design.children]
-    names = ", ".join(children)
+    children = list(design.children)
+    names = _names_for_reader(children, user)
     verb, own = ("is", "its") if len(children) == 1 else ("are", "their")
     return (
         f"Cannot delete {design}: {names} {verb} based on this design and "
@@ -322,7 +342,7 @@ def _design_children_rest_message(design):
     )
 
 
-def _design_versions_rest_message(design):
+def _design_versions_rest_message(design, user=None):
     """
     The message body for a REST 409 rejecting the delete of ``design``
     because other versions of the same plan point their ``root`` at it
@@ -334,7 +354,7 @@ def _design_versions_rest_message(design):
     warning. Mirrors ``_design_versions_message`` (views.py) so a user sees
     one consistent explanation regardless of which door caught it.
     """
-    names = ", ".join(str(version) for version in design.versions.all())
+    names = _names_for_reader(design.versions.all(), user)
     return (
         f"Cannot delete {design}: {names} are later versions of this plan "
         "and would be destroyed along with it. Delete those versions "
@@ -363,7 +383,7 @@ def _planned_rack_realized_rest_message(planned_rack):
     )
 
 
-def _planned_rack_referenced_rest_message(planned_rack):
+def _planned_rack_referenced_rest_message(planned_rack, user=None):
     """
     The message body for a REST 409 rejecting the delete of a ``PlannedRack``
     still referenced by one or more designs (T1.9, decision 1). Every FK that
@@ -379,8 +399,8 @@ def _planned_rack_referenced_rest_message(planned_rack):
     docstring for why a shared object like this one does not get that
     shortcut.
     """
-    designs = [str(design) for design in planned_rack.referencing_designs()]
-    names = ", ".join(designs)
+    designs = list(planned_rack.referencing_designs())
+    names = _names_for_reader(designs, user)
     verb, own = ("plans", "its") if len(designs) == 1 else ("plan", "their")
     return (
         f"Cannot delete {planned_rack}: {names} still {verb} across it and "
@@ -539,7 +559,11 @@ def _rerun_naming_plan(design, placement_ids):
     straight back in the response, and the commit action still writes the
     name regardless (P10: "Confirm writes every line shown").
     """
-    if not isinstance(placement_ids, list) or not placement_ids:
+    if (
+        not isinstance(placement_ids, list) or not placement_ids
+        or len(placement_ids) > 1000
+        or not all(isinstance(pid, int) and not isinstance(pid, bool) for pid in placement_ids)
+    ):
         return Response(
             {"placement_ids": ["This field is required and must be a non-empty list of placement ids."]},
             status=status.HTTP_400_BAD_REQUEST,
@@ -587,6 +611,7 @@ def _rerun_naming_plan(design, placement_ids):
         placement._rd_pending_names = list(granted)
         new_name = naming.generate_name(placement)
         granted.append(new_name)
+        placement.snapshot()  # before the in-memory rename, for the changelog
         placement.proposed_name = new_name
         still_colliding = bool(naming.peer_name_claims(placement, peers))
         lines.append({
@@ -602,6 +627,72 @@ def _rerun_naming_plan(design, placement_ids):
             "unchanged": new_name == old_name,
         })
     return ordered, lines
+
+
+class IsAuthenticatedTokenWrite(IsAuthenticated):
+    """``IsAuthenticated`` for the per-user helper endpoints, plus the token rule
+    ``TokenPermissions`` enforces on model endpoints: a token without
+    ``write_enabled`` may not use an unsafe method. Session auth is unaffected."""
+
+    def has_permission(self, request, view):
+        if not super().has_permission(request, view):
+            return False
+        if (
+            isinstance(request.auth, Token)
+            and request.method not in SAFE_METHODS
+            and not request.auth.write_enabled
+        ):
+            return False
+        return True
+
+
+def _discard_preview_writes(sender):
+    """End of a preview that wrote and rolled back: drop the rows AND the events
+    the writes queued (core's ``clear_events``), or the request would still
+    flush webhooks for objects that never existed."""
+    transaction.set_rollback(True)
+    clear_events.send(sender=sender)
+
+
+def _json_object(request):
+    """``request.data`` when it is a JSON object, else ``{}`` (a list or scalar
+    body is a client error the callers turn into a 400, never an attribute error)."""
+    return request.data if isinstance(request.data, Mapping) else {}
+
+
+def _bad_title(title):
+    """A 400 ``Response`` when ``title`` is present but not a non-blank string of
+    at most the model's length, else None."""
+    if title is None:
+        return None
+    if not isinstance(title, str):
+        return Response({"title": ["Not a valid string."]}, status=status.HTTP_400_BAD_REQUEST)
+    if not title.strip():
+        return Response({"title": ["This field may not be blank."]},
+                        status=status.HTTP_400_BAD_REQUEST)
+    max_length = Design._meta.get_field("title").max_length
+    if len(title) > max_length:
+        return Response(
+            {"title": [f"Ensure this field has no more than {max_length} characters."]},
+            status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
+def _name_collides(name, site, user):
+    """``naming.name_exists_in_site`` for a reader: other designs' placement names
+    count only if the reader may view those designs, while a real device of the
+    site always counts (plugin perms are the boundary for dcim data, and the site
+    is one of the design's own)."""
+    if naming.name_exists_in_site(name, site, exclude_placement=None, user=user):
+        return True
+    return bool(name and site is not None and Device.objects.filter(site=site, name=name).exists())
+
+
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class ChangeDesignPermissions(TokenPermissions):
@@ -706,6 +797,20 @@ def resolve_rack_from_id(value):
     if kind == "r":
         return kind, pk, Rack.objects.filter(pk=pk).first()
     return kind, pk, PlannedRack.objects.filter(pk=pk).first()
+
+
+def resolve_design_rack(design, value):
+    """
+    ``resolve_rack_from_id`` limited to the racks inside ``design.sites`` (a real
+    rack by its site, a planned one by its location's site). A rack of any other
+    site comes back as ``None`` -- exactly like an unknown pk -- so no action
+    reads or writes another site's rack through a design that does not cover it.
+    """
+    kind, pk = parse_rack_id(value)
+    sites = design.sites.all()
+    if kind == "r":
+        return kind, pk, Rack.objects.filter(pk=pk, site__in=sites).first()
+    return kind, pk, PlannedRack.objects.filter(pk=pk, location__site__in=sites).first()
 
 
 def parse_real_rack_id(value):
@@ -846,9 +951,9 @@ class DesignViewSet(NetBoxModelViewSet):
         """
         reasons = []
         if instance.children.exists():
-            reasons.append(_design_children_rest_message(instance))
+            reasons.append(_design_children_rest_message(instance, self.request.user))
         if instance.versions.exists():
-            reasons.append(_design_versions_rest_message(instance))
+            reasons.append(_design_versions_rest_message(instance, self.request.user))
         if reasons:
             exc = APIException(" ".join(reasons))
             exc.status_code = status.HTTP_409_CONFLICT
@@ -928,7 +1033,12 @@ class DesignViewSet(NetBoxModelViewSet):
             if pk_value is None:
                 resolved[field] = None
                 continue
-            obj = model.objects.filter(pk=pk_value).first()
+            candidates = model.objects
+            if field == "device":
+                # Plugin perms are the boundary for dcim data, so a device is
+                # scoped to the design's sites rather than to dcim view perms.
+                candidates = candidates.filter(site__in=design.sites.all())
+            obj = candidates.filter(pk=pk_value).first()
             if obj is None:
                 return Response(
                     {field: [f"{model.__name__} does not exist."]},
@@ -945,7 +1055,7 @@ class DesignViewSet(NetBoxModelViewSet):
         rack_key_value = data.get("target_rack")
         if rack_key_value not in (None, ""):
             try:
-                kind, _pk, rack_obj = resolve_rack_from_id(rack_key_value)
+                kind, _pk, rack_obj = resolve_design_rack(design, rack_key_value)
             except ValueError as exc:
                 return Response({"target_rack": [str(exc)]},
                                 status=status.HTTP_400_BAD_REQUEST)
@@ -988,9 +1098,7 @@ class DesignViewSet(NetBoxModelViewSet):
         # the design's own site when no target_rack was supplied (this is a
         # scratch, not-yet-targeted placement, so `placement.site` is None),
         # matching a one-site design's pre-P1 behaviour.
-        exists = naming.name_exists_in_site(
-            name, placement.site or design.site, exclude_placement=None
-        )
+        exists = _name_collides(name, placement.site or design.site, request.user)
         return Response(
             {"name": name, "exists_in_site": exists}, status=status.HTTP_200_OK
         )
@@ -1022,7 +1130,7 @@ class DesignViewSet(NetBoxModelViewSet):
             self.queryset = Design.objects.restrict(request.user, "view")
         design = self.get_object()
 
-        result = _rerun_naming_plan(design, request.data.get("placement_ids"))
+        result = _rerun_naming_plan(design, _json_object(request).get("placement_ids"))
         if isinstance(result, Response):
             return result
         _placements, lines = result
@@ -1057,7 +1165,7 @@ class DesignViewSet(NetBoxModelViewSet):
         if design.is_frozen:
             return _reject_frozen_design(design)
 
-        result = _rerun_naming_plan(design, request.data.get("placement_ids"))
+        result = _rerun_naming_plan(design, _json_object(request).get("placement_ids"))
         if isinstance(result, Response):
             return result
         placements, lines = result
@@ -1190,10 +1298,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 # sequences, so a bare Rack lookup could silently resolve to
                 # an unrelated real rack sharing the pk). Either way, a
                 # lookup miss is reported as null -- never a crash.
-                rack = (
-                    Rack.objects.filter(pk=pk).first() if kind == "r"
-                    else PlannedRack.objects.filter(pk=pk).first()
-                )
+                # Scoped to design.sites: a rack of another site is "unknown".
+                rack = resolve_design_rack(design, f"{kind}:{pk}")[2]
                 if rack is None:
                     for key in keys:
                         distributions[key] = None
@@ -1234,10 +1340,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     # asked for see a complete layout), but not projected. The
                     # caller keeps whatever numbers it already had for it.
                     continue
-                rack = (
-                    Rack.objects.get(pk=pk) if kind == "r"
-                    else PlannedRack.objects.get(pk=pk)
-                )
+                rack = resolve_design_rack(design, f"{kind}:{pk}")[2]
                 elevation = projection.project_rack(design, rack)
                 # The rack-level summary rides along so the editor's power BAR is
                 # live too, not just the per-bank chips. Capacity is the reason:
@@ -1252,9 +1355,10 @@ class DesignViewSet(NetBoxModelViewSet):
                     dist_status[key] = elevation.power.get("distribution_status")
                     powers[key] = power
 
-            # Read-only: discard every transient placement. Must be the LAST DB
-            # action in this atomic block (no ORM use is allowed after it).
-            transaction.set_rollback(True)
+            # Read-only: discard every transient placement (and the events they
+            # queued). Must be the LAST DB action in this atomic block (no ORM
+            # use is allowed after it).
+            _discard_preview_writes(self)
 
         return Response(
             {"distributions": distributions, "distribution_status": dist_status,
@@ -1414,10 +1518,10 @@ class DesignViewSet(NetBoxModelViewSet):
                     to_step=data.get("to_step"), racks=racks,
                 )
             except steps.StepsValidationError as exc:
-                transaction.set_rollback(True)
+                _discard_preview_writes(self)
                 return Response({"steps": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
             # Must be the LAST DB action in this atomic block.
-            transaction.set_rollback(True)
+            _discard_preview_writes(self)
         return Response({"steps": result}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="auto-order")
@@ -1445,10 +1549,10 @@ class DesignViewSet(NetBoxModelViewSet):
             try:
                 result = steps.auto_order(design, body.validated_data["steps"])
             except steps.StepsValidationError as exc:
-                transaction.set_rollback(True)
+                _discard_preview_writes(self)
                 return Response({"steps": exc.errors}, status=status.HTTP_400_BAD_REQUEST)
             # Must be the LAST DB action in this atomic block.
-            transaction.set_rollback(True)
+            _discard_preview_writes(self)
         return Response({"steps": result, "titles_kept": True}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="work-order")
@@ -1486,7 +1590,7 @@ class DesignViewSet(NetBoxModelViewSet):
             with transaction.atomic():
                 data = workorder.build(design, step_no)
                 # build() only simulates; roll back as a safety net.
-                transaction.set_rollback(True)
+                _discard_preview_writes(self)
         except workorder.StepNotFound as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_404_NOT_FOUND)
         if output == "md":
@@ -1630,7 +1734,7 @@ class DesignViewSet(NetBoxModelViewSet):
         # Prefetch shape shared by a single Template and by every member of a
         # TemplateGroup below -- kept as one queryset builder so the two
         # modes can never drift on what they eagerly load.
-        template_qs = Template.objects.prefetch_related(
+        template_qs = Template.objects.restrict(request.user, "view").prefetch_related(
             "placements__device_type", "placements__device_role",
             "placements__tenant", "placements__bay_children__device_type",
             "placements__bay_children__device_role", "placements__bay_children__tenant",
@@ -1644,7 +1748,8 @@ class DesignViewSet(NetBoxModelViewSet):
         # docstring). The serializer's ``validate()`` already guarantees
         # exactly one of the two is present.
         if "group" in data:
-            group = TemplateGroup.objects.filter(pk=data["group"]).first()
+            group = TemplateGroup.objects.restrict(request.user, "view").filter(
+                pk=data["group"]).first()
             if group is None:
                 return Response(
                     {"group": ["Template group does not exist."]},
@@ -1720,7 +1825,7 @@ class DesignViewSet(NetBoxModelViewSet):
         resolved_racks = []
         for template_obj, key in template_rack_pairs:
             try:
-                _kind, _pk, rack_obj = resolve_rack_from_id(key)
+                _kind, _pk, rack_obj = resolve_design_rack(design, key)
             except ValueError as exc:
                 return Response({"racks": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
             resolved_racks.append((key, rack_obj, template_obj))
@@ -1770,7 +1875,10 @@ class DesignViewSet(NetBoxModelViewSet):
                         rack_id = parse_real_rack_id(rack_data["rack_id"])
                     except ValueError:
                         rack_id = None
-                    rack = Rack.objects.filter(pk=rack_id).first() if rack_id is not None else None
+                    rack = (
+                        Rack.objects.filter(pk=rack_id, site__in=design.sites.all()).first()
+                        if rack_id is not None else None
+                    )
                     if rack is None:
                         continue
                     items = []
@@ -1906,9 +2014,7 @@ class DesignViewSet(NetBoxModelViewSet):
                     name = naming.generate_name(placement, index=counter)
                     pending.append(name)
                     # M4: the placement's own site, not the design's.
-                    exists = naming.name_exists_in_site(
-                        name, placement.site, exclude_placement=None
-                    )
+                    exists = _name_collides(name, placement.site, request.user)
 
                     entry = {
                         "template_placement": tp.pk,
@@ -1961,9 +2067,8 @@ class DesignViewSet(NetBoxModelViewSet):
                         blade_name = naming.generate_name(blade_placement, index=counter)
                         pending.append(blade_name)
                         # M4: the placement's own site, not the design's.
-                        blade_exists = naming.name_exists_in_site(
-                            blade_name, blade_placement.site, exclude_placement=None
-                        )
+                        blade_exists = _name_collides(
+                            blade_name, blade_placement.site, request.user)
                         blades.append({
                             "template_placement": blade.pk,
                             "device_type": blade.device_type_id,
@@ -1992,7 +2097,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # there is nothing of ours to discard beyond the layout replay --
             # this rollback exists for THAT). Must be the LAST DB action in
             # this atomic block.
-            transaction.set_rollback(True)
+            _discard_preview_writes(self)
 
         result["skipped"] = skipped
         result["already_stamped"] = already_stamped
@@ -2153,8 +2258,8 @@ class DesignViewSet(NetBoxModelViewSet):
         copy_source_kind = copy_source = None
         if copy_feeds_from_rack_id:
             try:
-                copy_source_kind, _copy_source_pk, copy_source = resolve_rack_from_id(
-                    copy_feeds_from_rack_id
+                copy_source_kind, _copy_source_pk, copy_source = resolve_design_rack(
+                    design, copy_feeds_from_rack_id
                 )
             except ValueError as exc:
                 return Response(
@@ -2409,7 +2514,7 @@ class DesignViewSet(NetBoxModelViewSet):
             # ONLY source of a planned rack's power custom fields (no
             # dcim.Rack row to hold rack.cf at all).
             try:
-                kind, rack_pk, rack_obj = resolve_rack_from_id(body.validated_data["rack_id"])
+                kind, rack_pk, rack_obj = resolve_design_rack(design, body.validated_data["rack_id"])
             except ValueError as exc:
                 return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2420,10 +2525,18 @@ class DesignViewSet(NetBoxModelViewSet):
                 )
 
             lookup = {"rack": rack_obj} if kind == "r" else {"planned_rack": rack_obj}
-            rack_power, _created = DesignRackPower.objects.get_or_create(
-                design=design, **lookup
-            )
+            rack_power = DesignRackPower.objects.filter(design=design, **lookup).first()
+            _created = rack_power is None
+            if _created:
+                rack_power = DesignRackPower(design=design, **lookup)
             rack_power.power_config = power_config
+            try:
+                rack_power.full_clean()
+            except ValidationError as exc:
+                return Response(
+                    exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             rack_power.save()
             logger.debug(
                 "api.rack_power: design=%s rack_id=%s:%s %s",
@@ -2508,7 +2621,20 @@ class DesignViewSet(NetBoxModelViewSet):
         design = self.get_object()
 
         if request.method == "POST":
-            result = apply_engine.run(design, request.user)
+            try:
+                result = apply_engine.run(design, request.user)
+            except (ValidationError, IntegrityError, PermissionsViolation) as exc:
+                # The engine rolled the whole run back; say why instead of a 500.
+                if isinstance(exc, ValidationError):
+                    problem = "; ".join(exc.messages)
+                elif isinstance(exc, PermissionsViolation):
+                    problem = "You do not have permission to make one of the changes this apply requires."
+                else:
+                    problem = "A database constraint refused the apply; nothing was changed."
+                return Response(
+                    {**_serialize_apply_result(apply_engine.ApplyResult(problems=[problem]))},
+                    status=status.HTTP_409_CONFLICT,
+                )
             body = _serialize_apply_result(result)
             code = status.HTTP_200_OK if result.ok else status.HTTP_409_CONFLICT
             return Response(body, status=code)
@@ -2564,7 +2690,7 @@ class DesignViewSet(NetBoxModelViewSet):
         raw_rack_id = request.query_params.get("rack_id")
         try:
             rack_kind, rack_pk, rack = (
-                resolve_rack_from_id(raw_rack_id) if raw_rack_id else (None, None, None)
+                resolve_design_rack(design, raw_rack_id) if raw_rack_id else (None, None, None)
             )
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
@@ -2662,21 +2788,16 @@ class DesignViewSet(NetBoxModelViewSet):
         # planned feeds" case below, just for a source that never has real
         # feeds to begin with).
         try:
-            target_kind, target_pk, target = resolve_rack_from_id(data["rack_id"])
-            source_kind, source_pk, source = resolve_rack_from_id(data["source_rack_id"])
+            target_kind, target_pk, target = resolve_design_rack(design, data["rack_id"])
+            source_kind, source_pk, source = resolve_design_rack(design, data["source_rack_id"])
         except ValueError as exc:
             return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
         if target is None:
             return Response({"rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        # Same-site rule, mirroring add-rack / rack-power / planned-feed (M3).
-        # PlannedRack has no site FK of its own -- ``site`` is a property that
-        # derefs through ``location`` (mirrors DesignPowerFeed.clean()).
-        target_site_id = target.site_id if target_kind == "r" else target.location.site_id
-        if not design.sites.filter(pk=target_site_id).exists():
-            return Response({"rack_id": ["This rack is not in one of the design's sites."]},
-                            status=status.HTTP_400_BAD_REQUEST)
+        # Same-site rule (M3) is the lookup itself: resolve_design_rack only finds
+        # racks inside design.sites, for the source as well as the target.
         if source is None:
             return Response({"source_rack_id": ["Rack does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -2745,6 +2866,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 if created:
                     created_count += 1
                 else:
+                    planned.snapshot()
                     for field_name, value in electricals.items():
                         setattr(planned, field_name, value)
                     planned.save()
@@ -2843,22 +2965,30 @@ class DesignViewSet(NetBoxModelViewSet):
         # rack, nor vice versa (D28: the two tables keep separate pk
         # sequences) -- own_lookup picks the column that matches rack_kind.
         own_lookup = {"rack_id": rack_pk} if rack_kind == "r" else {"planned_rack_id": rack_pk}
+        # A rack outside design.sites is "unknown": no real feeds are read for it.
+        in_scope = resolve_design_rack(design, raw_rack_id)[2] is not None
         real_feeds = [
             _feed_dict(f, "real") for f in PowerFeed.objects.filter(rack_id=rack_pk)
-        ] if rack_kind == "r" else []
+        ] if rack_kind == "r" and in_scope else []
         planned_feeds = [
             _feed_dict(f, "planned")
             for f in DesignPowerFeed.objects.filter(design=design, **own_lookup)
         ]
-        chain, _refusal = projection.resolve_baseline_chain(design)
+        chain, _refusal = projection.resolve_baseline_chain(design, user=request.user)
+        # A direct parent keeps its title; any older ancestor the reader may not
+        # view is named only as "(restricted design)" (and loses its id).
+        shown = projection.visible_design_ids(request.user, [a.pk for a in chain])
+        if design.based_on_id:
+            shown.add(design.based_on_id)
         for ancestor in chain:
             for f in DesignPowerFeed.objects.filter(
                 design=ancestor, **own_lookup
             ):
                 entry = _feed_dict(f, "planned")
                 entry["inherited"] = True
-                entry["design_id"] = ancestor.pk
-                entry["design_name"] = str(ancestor)
+                visible = ancestor.pk in shown
+                entry["design_id"] = ancestor.pk if visible else None
+                entry["design_name"] = str(ancestor) if visible else projection.RESTRICTED_DESIGN_LABEL
                 planned_feeds.append(entry)
         logger.debug(
             "api.feeds: design=%s rack_id=%s:%s real=%d planned=%d",
@@ -2909,23 +3039,14 @@ class DesignViewSet(NetBoxModelViewSet):
             # (planned rack, D25/T1.8b): DesignPowerFeed.planned_rack is
             # exactly the greenfield case this dialog flow exists for.
             try:
-                rack_kind, rack_pk, rack = resolve_rack_from_id(data["rack_id"])
+                rack_kind, rack_pk, rack = resolve_design_rack(design, data["rack_id"])
             except ValueError as exc:
                 return Response({"rack_id": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
+            # Same-site rule (M3) is the lookup: only racks in design.sites resolve.
             if rack is None:
                 return Response(
                     {"rack_id": ["Rack does not exist."]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            # Same-site rule, mirroring add-rack/rack_power (M3): a planned
-            # feed can only be defined for a rack in one of the design's
-            # sites. PlannedRack has no site FK of its own -- ``site`` is a
-            # property that derefs through ``location``.
-            rack_site_id = rack.site_id if rack_kind == "r" else rack.location.site_id
-            if not design.sites.filter(pk=rack_site_id).exists():
-                return Response(
-                    {"rack_id": ["This rack is not in one of the design's sites."]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2933,13 +3054,50 @@ class DesignViewSet(NetBoxModelViewSet):
                 k: data[k] for k in ("voltage", "amperage", "phase", "supply") if k in data
             }
             target_lookup = {"rack": rack} if rack_kind == "r" else {"planned_rack": rack}
-            feed, created = DesignPowerFeed.objects.get_or_create(
-                design=design, name=data["name"], defaults=electricals, **target_lookup
-            )
-            if not created and electricals:
+            def _validation_error(exc):
+                return Response(
+                    exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            def _update(feed):
+                feed.snapshot()
                 for field_name, value in electricals.items():
                     setattr(feed, field_name, value)
+                feed.full_clean()
                 feed.save()
+
+            feed = DesignPowerFeed.objects.filter(
+                design=design, name=data["name"], **target_lookup).first()
+            created = feed is None
+            try:
+                if created:
+                    feed = DesignPowerFeed(
+                        design=design, name=data["name"], **electricals, **target_lookup)
+                    feed.full_clean()
+                    try:
+                        with transaction.atomic():
+                            feed.save()
+                    except IntegrityError:
+                        # A concurrent request created the same (design, rack,
+                        # name) between the lookup and the insert: fall back to
+                        # updating that row, as get_or_create used to.
+                        feed = DesignPowerFeed.objects.filter(
+                            design=design, name=data["name"], **target_lookup).first()
+                        if feed is None:
+                            raise
+                        created = False
+                        if electricals:
+                            _update(feed)
+                elif electricals:
+                    _update(feed)
+            except ValidationError as exc:
+                return _validation_error(exc)
+            except IntegrityError:
+                return Response(
+                    {"detail": "This planned feed was modified concurrently; please retry."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             logger.debug(
                 "api.planned_feed: design=%s rack_id=%s:%s name=%s %s",
                 design.pk, rack_kind, rack_pk, data["name"], "created" if created else "updated",
@@ -3753,6 +3911,13 @@ class DesignViewSet(NetBoxModelViewSet):
             return (placement.target_face or "") == (target.face or "")
         return False
 
+    def _design_label(self, design):
+        """``design``'s title, or "(restricted design)" when the requester may
+        not view it (a foreign placement's owner is not necessarily visible)."""
+        if projection.visible_design_ids(self.request.user, [design.pk]):
+            return str(design)
+        return projection.RESTRICTED_DESIGN_LABEL
+
     def _reconcile_item(self, design, rack, face_key, item, errors,
                         desired_placement_ids, ref_map=None):
         """
@@ -3839,7 +4004,8 @@ class DesignViewSet(NetBoxModelViewSet):
                 "u_position": _norm_pos(u_position),
                 "device_id": None,
                 "detail": (
-                    f"placement {placement_id} belongs to {foreign_placement.design}, "
+                    f"placement {placement_id} belongs to "
+                    f"{self._design_label(foreign_placement.design)}, "
                     f"not this design ({design}), and cannot be edited or cancelled "
                     f"here."
                 ),
@@ -4002,6 +4168,7 @@ class DesignViewSet(NetBoxModelViewSet):
                 if not ok:
                     return None
             before = self._snapshot(add)
+            add.snapshot()  # changelog prechange data, before any attribute moves
             for attr, value in target.fields.items():
                 setattr(add, attr, value)
             # Only overwrite role/tenant/name when the editor actually sent them,
@@ -4127,6 +4294,8 @@ class DesignViewSet(NetBoxModelViewSet):
         # Snapshot the matched placement's persisted fields so we can detect a
         # genuine change after we mutate it (idempotency guard, below).
         before = self._snapshot(existing) if existing is not None else None
+        if existing is not None:
+            existing.snapshot()
 
         if kind == "existing":
             # Device sits at its real position/face → no placement needed; clean
@@ -4288,15 +4457,32 @@ class DesignViewSet(NetBoxModelViewSet):
 
         try:
             ancestors = design.baseline_chain()
-        except ValueError:
-            # A cycle: the walk itself cannot be ordered. resolve_baseline_chain
-            # (below) reports the SAME break as ``refusal``; this just avoids
-            # crashing the endpoint that displays it.
+        except LineageError:
+            # A cycle (or a chain too deep): the walk itself cannot be ordered.
+            # resolve_baseline_chain (below) reports the SAME break as
+            # ``refusal``; this just avoids crashing the endpoint that displays it.
             ancestors = []
-        children = list(design.children)
-        _, refusal = projection.resolve_baseline_chain(design)
+        user = request.user
+        # Lists are restricted (NetBox core parity): children the reader cannot
+        # view are dropped; ancestors they cannot view stay in place as a
+        # "(restricted design)" placeholder so the chain keeps its length. The
+        # direct parent is a direct link and always shows its title.
+        viewable = projection.visible_design_ids(
+            user, [d.pk for d in ancestors] + list(design.children.values_list("pk", flat=True)))
+        children = [c for c in design.children if c.pk in viewable]
+        shown = viewable | ({design.based_on_id} if design.based_on_id else set())
+        _, refusal = projection.resolve_baseline_chain(design, user=user)
 
         context = {"request": request}
+
+        def nested(d):
+            return {**NestedDesignSerializer(d, context=context).data, "restricted": False}
+
+        placeholder = {
+            "id": None, "url": None, "display": projection.RESTRICTED_DESIGN_LABEL,
+            "title": projection.RESTRICTED_DESIGN_LABEL, "version": None, "status": None,
+            "restricted": True,
+        }
         refusal_data = None
         if refusal is not None:
             refusal_data = {
@@ -4304,15 +4490,15 @@ class DesignViewSet(NetBoxModelViewSet):
                 "severity": refusal["severity"],
                 "detail": refusal["detail"],
                 "source_design": (
-                    NestedDesignSerializer(refusal["source_design"], context=context).data
-                    if refusal["source_design"] is not None else None
+                    nested(refusal["source_design"]) if refusal["source_design"] is not None
+                    else (dict(placeholder) if refusal.get("source_design_restricted") else None)
                 ),
             }
 
         return Response(
             {
-                "ancestors": NestedDesignSerializer(ancestors, many=True, context=context).data,
-                "children": NestedDesignSerializer(children, many=True, context=context).data,
+                "ancestors": [nested(a) if a.pk in shown else dict(placeholder) for a in ancestors],
+                "children": [nested(c) for c in children],
                 "resolves": refusal is None,
                 "refusal": refusal_data,
             },
@@ -4375,7 +4561,9 @@ class DesignViewSet(NetBoxModelViewSet):
         entries = []
         for rack in design.racks.all():
             result = projection.project_rack(design, rack)
-            entries.extend(projection.flatten_conflicts(rack, result.conflicts))
+            # Chain refusals name an ancestor: redact the ones the reader may not view.
+            conflicts = projection.redact_conflicts(result.conflicts, design, request.user)
+            entries.extend(projection.flatten_conflicts(rack, conflicts))
 
         return Response({"conflicts": entries}, status=status.HTTP_200_OK)
 
@@ -4426,14 +4614,15 @@ class DesignViewSet(NetBoxModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if not isinstance(request.data, Mapping):
+            return Response({"detail": ["Expected a JSON object."]},
+                            status=status.HTTP_400_BAD_REQUEST)
         title = request.data.get("title")
+        bad = _bad_title(title)
+        if bad is not None:
+            return bad
         if title is None:
-            title = f"{design.title} (derived)"
-        elif not title.strip():
-            return Response(
-                {"title": ["This field may not be blank."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            title = f"{design.title} (derived)"[:Design._meta.get_field("title").max_length]
 
         child = Design(
             title=title,
@@ -4441,31 +4630,42 @@ class DesignViewSet(NetBoxModelViewSet):
             based_on=design,
             status=DesignStatusChoices.STATUS_DRAFT,
         )
-        with transaction.atomic():
-            child.full_clean()
-            child.save()
-            # M5: a derived design starts with the parent's own sites (a
-            # design cannot be created with zero sites -- Design.clean()
-            # enforces "at least one", M1 -- and copying the parent's is what
-            # guarantees the `based_on` "shares at least one site" check
-            # below passes for a freshly derived child). Must run after
-            # save() (M2M needs a pk), same as `racks` below.
-            child.sites.set(design.sites.all())
-            # G6: seed the child's rack scope with a SNAPSHOT of the parent's
-            # racks at derive time, not a live link -- a rack added to the
-            # parent later does NOT retroactively appear on the child, which
-            # owns and edits its own scope from here on. This is safe because
-            # baseline replay is per-rack: a rack present on the child but
-            # absent from the parent simply has no inherited layer. Must run
-            # after save() (the M2M needs a pk) and inside the same
-            # transaction as the create, so a child can never exist with a
-            # half-copied scope.
-            child.racks.set(design.racks.all())
+        try:
+            with transaction.atomic():
+                child.full_clean()
+                child.save()
+                self._seed_derived(child, design)
+        except ValidationError as exc:
+            return Response(
+                exc.message_dict if hasattr(exc, "message_dict") else {"detail": exc.messages},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         logger.debug("api.derive: design=%s -> child=%s", design.pk, child.pk)
         return Response(
             DesignSerializer(child, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @staticmethod
+    def _seed_derived(child, design):
+        """The M2M half of a derive; needs the saved child's pk."""
+        # M5: a derived design starts with the parent's own sites (a
+        # design cannot be created with zero sites -- Design.clean()
+        # enforces "at least one", M1 -- and copying the parent's is what
+        # guarantees the `based_on` "shares at least one site" check
+        # below passes for a freshly derived child). Must run after
+        # save() (M2M needs a pk), same as `racks` below.
+        child.sites.set(design.sites.all())
+        # G6: seed the child's rack scope with a SNAPSHOT of the parent's
+        # racks at derive time, not a live link -- a rack added to the
+        # parent later does NOT retroactively appear on the child, which
+        # owns and edits its own scope from here on. This is safe because
+        # baseline replay is per-rack: a rack present on the child but
+        # absent from the parent simply has no inherited layer. Must run
+        # after save() (the M2M needs a pk) and inside the same
+        # transaction as the create, so a child can never exist with a
+        # half-copied scope.
+        child.racks.set(design.racks.all())
 
     @action(detail=True, methods=["post"], url_path="new-version")
     def new_version(self, request, pk=None):
@@ -4496,18 +4696,21 @@ class DesignViewSet(NetBoxModelViewSet):
         URL name: plugins-api:netbox_rack_design-api:design-new-version
         Path:     /api/plugins/rack-design/designs/<pk>/new-version/
         """
-        # Restrict by "add" (not "view"): the required permission for this
-        # action IS add_design (it creates a Design), matching `derive`.
+        # Restrict by "add" (the permission this action IS) AND by "view": the
+        # clone copies the source's content, so a design the requester may not
+        # view cannot be cloned.
         if request.user.is_authenticated:
-            self.queryset = Design.objects.restrict(request.user, "add")
+            self.queryset = Design.objects.restrict(request.user, "add").restrict(
+                request.user, "view")
         design = self.get_object()
 
+        if not isinstance(request.data, Mapping):
+            return Response({"detail": ["Expected a JSON object."]},
+                            status=status.HTTP_400_BAD_REQUEST)
         title = request.data.get("title")
-        if title is not None and not title.strip():
-            return Response(
-                {"title": ["This field may not be blank."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        bad = _bad_title(title)
+        if bad is not None:
+            return bad
 
         try:
             clone = versioning.new_version(design, title=title)
@@ -4551,7 +4754,9 @@ class DesignViewSet(NetBoxModelViewSet):
         body.is_valid(raise_exception=True)
         target_id = body.validated_data["based_on"]
 
-        target = Design.objects.filter(pk=target_id).first()
+        # Only designs the requester may view are candidates, so the error below
+        # never names (or confirms the existence of) a hidden design.
+        target = Design.objects.restrict(request.user, "view").filter(pk=target_id).first()
         if target is None:
             return Response(
                 {"based_on": ["Design does not exist."]},
@@ -4570,7 +4775,20 @@ class DesignViewSet(NetBoxModelViewSet):
             )
 
         previous_based_on_id = design.based_on_id
+        design.snapshot()  # changelog prechange data, before based_on moves
         design.based_on = target
+        try:
+            design.baseline_chain()
+        except LineageError as exc:
+            # Same message the model would give, but a design the requester may
+            # not view is named "(restricted design)", not by title.
+            design.based_on_id = previous_based_on_id
+            viewable = projection.visible_design_ids(request.user, [d.pk for d in exc.designs])
+            return Response(
+                {"based_on": [exc.message_for(
+                    lambda d: str(d) if d.pk in viewable else projection.RESTRICTED_DESIGN_LABEL)]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             design.full_clean()
         except ValidationError as exc:
@@ -4667,7 +4885,7 @@ class PlannedRackViewSet(NetBoxModelViewSet):
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
         if not instance.is_orphan:
-            exc = APIException(_planned_rack_referenced_rest_message(instance))
+            exc = APIException(_planned_rack_referenced_rest_message(instance, self.request.user))
             exc.status_code = status.HTTP_409_CONFLICT
             raise exc
         super().perform_destroy(instance)
@@ -5169,7 +5387,7 @@ class TemplateViewSet(NetBoxModelViewSet):
             )
 
         try:
-            _kind, _pk, rack = resolve_rack_from_id(data["rack"])
+            _kind, _pk, rack = resolve_design_rack(design, data["rack"])
         except ValueError as exc:
             return Response({"rack": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
         if rack is None:
@@ -5183,7 +5401,7 @@ class TemplateViewSet(NetBoxModelViewSet):
         group = None
         group_id = data.get("group_id")
         if group_id is not None:
-            group = TemplateGroup.objects.filter(pk=group_id).first()
+            group = TemplateGroup.objects.restrict(request.user, "view").filter(pk=group_id).first()
             if group is None:
                 return Response(
                     {"group_id": ["Template group does not exist."]},
@@ -5246,7 +5464,8 @@ class TemplateViewSet(NetBoxModelViewSet):
         body.is_valid(raise_exception=True)
         data = body.validated_data
 
-        rack = Rack.objects.filter(pk=data["rack_id"]).first()
+        # No design to scope by here, so the rack itself must be viewable.
+        rack = Rack.objects.restrict(request.user, "view").filter(pk=data["rack_id"]).first()
         if rack is None:
             return Response(
                 {"rack_id": ["Rack does not exist."]}, status=status.HTTP_400_BAD_REQUEST,
@@ -5255,7 +5474,7 @@ class TemplateViewSet(NetBoxModelViewSet):
         group = None
         group_id = data.get("group_id")
         if group_id is not None:
-            group = TemplateGroup.objects.filter(pk=group_id).first()
+            group = TemplateGroup.objects.restrict(request.user, "view").filter(pk=group_id).first()
             if group is None:
                 return Response(
                     {"group_id": ["Template group does not exist."]},
@@ -5429,7 +5648,7 @@ class FavoriteSetViewSet(viewsets.ViewSet):
     has a set to work in.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedTokenWrite]
 
     @staticmethod
     def _serialize(fav_set, members):
@@ -5473,7 +5692,7 @@ class FavoriteSetViewSet(viewsets.ViewSet):
 
     def partial_update(self, request, pk=None):
         """Rename one of the user's own sets."""
-        fav_set = FavoriteSet.objects.filter(user=request.user, pk=pk).first()
+        fav_set = FavoriteSet.objects.filter(user=request.user, pk=_int_or_none(pk)).first()
         if fav_set is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
         body = FavoriteSetWriteSerializer(data=request.data)
@@ -5503,7 +5722,7 @@ class FavoriteSetViewSet(viewsets.ViewSet):
         Deleting the last set is allowed: the next read provisions an empty
         default rather than leaving the editor with nothing to work in.
         """
-        fav_set = FavoriteSet.objects.filter(user=request.user, pk=pk).first()
+        fav_set = FavoriteSet.objects.filter(user=request.user, pk=_int_or_none(pk)).first()
         if fav_set is None:
             return Response(status=status.HTTP_404_NOT_FOUND)
         removed = FavoriteDeviceType.objects.filter(favorite_set=fav_set).count()
@@ -5530,7 +5749,7 @@ class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
       POST /api/plugins/rack-design/favorite-device-types/toggle/ -> star/unstar
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedTokenWrite]
 
     @staticmethod
     def _resolve_set(user, raw_set_id):
@@ -5598,6 +5817,11 @@ class FavoriteDeviceTypeViewSet(viewsets.ViewSet):
         })
 
 
+# Most device-type ids one device-type-power call will resolve (the palette sends
+# one id per row it shows; a URL carrying more than this is not a palette).
+MAX_DEVICE_TYPE_POWER_IDS = 500
+
+
 class DeviceTypePowerViewSet(viewsets.ViewSet):
     """
     Projected power draw for bare device TYPES -- feeds the catalog palette so a
@@ -5622,16 +5846,25 @@ class DeviceTypePowerViewSet(viewsets.ViewSet):
         -> {"results": {"1": {"draw_w", "draw_known", "power_ports": [...]}, ...}}
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedTokenWrite]
 
     def list(self, request):
         """Return per-id power summaries for the requested device-type ids."""
+        # Plugin perms are the boundary (planners hold no dcim perms): the
+        # caller must be able to view designs at all.
+        if not request.user.has_perm("netbox_rack_design.view_design"):
+            raise PermissionDenied("This user does not have permission to view designs.")
         ids = []
         for raw in request.query_params.getlist("id"):
             try:
                 ids.append(int(raw))
             except (TypeError, ValueError):
                 continue
+        if len(ids) > MAX_DEVICE_TYPE_POWER_IDS:
+            return Response(
+                {"id": [f"At most {MAX_DEVICE_TYPE_POWER_IDS} device type ids per request."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         role = None
         try:
             role_id = int(request.query_params.get("role_id") or 0)
@@ -5665,7 +5898,7 @@ class HiddenDesignChassisViewSet(viewsets.ViewSet):
            body {"design_id", "chassis_id"}
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedTokenWrite]
 
     def _hidden_ids(self, user, design_id):
         return list(
@@ -5680,8 +5913,12 @@ class HiddenDesignChassisViewSet(viewsets.ViewSet):
                 {"design_id": ["This query parameter is required."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        design_id = _int_or_none(design_id)
+        if design_id is None:
+            return Response({"design_id": ["Must be a whole number."]},
+                            status=status.HTTP_400_BAD_REQUEST)
         return Response({
-            "design_id": int(design_id),
+            "design_id": design_id,
             "hidden_chassis_ids": self._hidden_ids(request.user, design_id),
         })
 
@@ -5693,10 +5930,12 @@ class HiddenDesignChassisViewSet(viewsets.ViewSet):
         design_id = body.validated_data["design_id"]
         chassis_id = body.validated_data["chassis_id"]
 
-        if not Design.objects.filter(pk=design_id).exists():
+        design = Design.objects.restrict(request.user, "view").filter(pk=design_id).first()
+        if design is None:
             return Response({"design_id": ["Design does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
-        if not Device.objects.filter(pk=chassis_id).exists():
+        # Plugin perms are the boundary: the chassis must sit in one of the design's sites.
+        if not Device.objects.filter(pk=chassis_id, site__in=design.sites.all()).exists():
             return Response({"chassis_id": ["Device does not exist."]},
                             status=status.HTTP_400_BAD_REQUEST)
 
@@ -5734,7 +5973,7 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
            body {"design_id"} -> clear all hidden rows for the design
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedTokenWrite]
 
     def _hidden_ids(self, user, design_id):
         return list(
@@ -5757,8 +5996,12 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
                 {"design_id": ["This query parameter is required."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        design_id = _int_or_none(design_id)
+        if design_id is None:
+            return Response({"design_id": ["Must be a whole number."]},
+                            status=status.HTTP_400_BAD_REQUEST)
         return Response({
-            "design_id": int(design_id),
+            "design_id": design_id,
             "hidden_rack_ids": self._hidden_ids(request.user, design_id),
             "hidden_planned_rack_ids": self._hidden_planned_ids(request.user, design_id),
         })
@@ -5778,18 +6021,21 @@ class HiddenDesignRackViewSet(viewsets.ViewSet):
         rack_id = body.validated_data.get("rack_id")
         planned_rack_id = body.validated_data.get("planned_rack_id")
 
-        if not Design.objects.filter(pk=design_id).exists():
+        design = Design.objects.restrict(request.user, "view").filter(pk=design_id).first()
+        if design is None:
             return Response(
                 {"design_id": ["Design does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if rack_id is not None and not Rack.objects.filter(pk=rack_id).exists():
+        # Racks must sit in one of the design's sites (plugin perms are the boundary).
+        if rack_id is not None and not Rack.objects.filter(
+                pk=rack_id, site__in=design.sites.all()).exists():
             return Response(
                 {"rack_id": ["Rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if planned_rack_id is not None and not PlannedRack.objects.filter(
-                pk=planned_rack_id).exists():
+                pk=planned_rack_id, location__site__in=design.sites.all()).exists():
             return Response(
                 {"planned_rack_id": ["Planned rack does not exist."]},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -5840,7 +6086,7 @@ class PlacementFieldsView(views.APIView):
     contract.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedTokenWrite]
 
     def get(self, request):
         return Response(planning_fields.public_placement_field_schema())

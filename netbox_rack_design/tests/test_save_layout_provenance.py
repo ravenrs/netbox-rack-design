@@ -182,7 +182,8 @@ class SaveLayoutProvenanceTest(APITestCase):
     # --- preview-template's response carries provenance to echo back -----------
 
     def test_preview_template_response_carries_template_and_version(self):
-        self.add_permissions("netbox_rack_design.view_design")
+        self.add_permissions(
+            "netbox_rack_design.view_design", "netbox_rack_design.view_template")
         template = Template.objects.create(name="SLP Preview ToR", u_height=47)
         TemplatePlacement.objects.create(
             template=template, device_type=self.device_type,
@@ -204,6 +205,7 @@ class SaveLayoutProvenanceTest(APITestCase):
     def test_round_trip_preview_then_save_persists_provenance(self):
         self.add_permissions(
             "netbox_rack_design.view_design",
+            "netbox_rack_design.view_template",
             "netbox_rack_design.change_design",
             "netbox_rack_design.add_designplacement",
             "netbox_rack_design.change_designplacement",

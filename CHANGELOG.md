@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-20
+
+### Release Summary
+
+A security release. A full audit of the REST API, HTML views, GraphQL, the
+apply engine and the editor's JavaScript closed several stored-XSS paths,
+object-permission leaks between designs, permission gaps in Apply, and a few
+denial-of-service vectors. Every fix ships with a regression test that
+reproduces the attack, and new CI guards (a JavaScript HTML-sink scanner, a
+permission matrix over every API action, ruff's security rules) keep these
+classes from coming back. No migrations. Upgrade recommended for all
+installations; run `manage.py reindex netbox_rack_design` afterwards.
+
+Thanks to @lonewolf101101, whose fork pointed at several of these issues.
+
+### **Breaking Changes**
+- REST: `Design.root`, `version` and `sequence` are read-only (always
+  server-set by `new-version`). Clients that sent them must stop.
+- GraphQL: `ancestors` is now `[DesignType]` with `null` at the position of a
+  design the caller cannot view (chain length is kept). Direct links
+  (`based_on`, `root`, `depends_on`, `design` on placements/feeds/steps)
+  resolve to `null` for a hidden design. New `lineage` field returns the chain
+  with `(restricted design)` placeholders.
+- Permissions now enforced where they were missing: previewing or extracting
+  templates needs `view_template`/`view_templategroup`; extracting a template
+  from a rack needs `dcim.view_rack`; `new-version` needs `view_design` on the
+  source; a re-base target must be viewable; device-type power data needs
+  `view_design`; Apply needs `dcim.add_rack` when it has to create a rack.
+
+### Security
+- **Stored XSS** through power-feed names (bank legend, PDU bind dialog),
+  site and location names (Create rack dialog), and rack names. All
+  server-provided strings in the editor now go through one full HTML escaper
+  or are set as text.
+- **Designs the caller cannot view no longer leak** through: the REST `chain`
+  and `feeds` actions, GraphQL `children`/`ancestors` and relation fields, the
+  design page (children, dependents, ancestor stack, chain health), editor
+  hover cards, the re-base picker, the elevation browser, chain-break
+  messages, delete/guard error messages ("N design(s) you cannot view"), and
+  global search results for planned power feeds. Hidden ancestors show as
+  "(restricted design)" and keep the chain's length; direct links (parent,
+  depends on, group) still show their title, as in NetBox core.
+- **Apply** checks `dcim.add_rack` before creating a rack, only trusts a
+  `realized_rack` in the planned rack's own site, re-checks the user's
+  object permissions after every write (rolling the whole apply back on a
+  violation), and snapshots objects before changing them so the changelog
+  records prechange data.
+- **Version groups can't be hijacked**: `root`/`version`/`sequence` are
+  server-set and `root` is validated.
+- **Approved designs stay frozen**: placements, planned feeds and steps can no
+  longer be moved out of an approved design.
+- **Scope**: rack, feed and device references are limited to the design's
+  sites (recompute-distribution, power-source, feeds, copy-feeds, rack-power,
+  preview-template, preview-name, placements).
+- **Read-only API tokens** can no longer write through the favorites,
+  hidden-rack/chassis and other custom endpoints.
+- **Preview endpoints** no longer fire webhooks/event rules for rows they
+  create and roll back, and their list inputs are size-capped.
+- **Denial of service**: `depends_on` cycle detection is linear (and checks
+  edges sent over the API); lineage walks are capped at 200; GraphQL lineage
+  lists are bounded (setting `GRAPHQL_MAX_QUERY_DEPTH` is recommended, see
+  docs/security.md); malformed `power_config` is rejected instead of breaking
+  the editor for every viewer.
+- **Peer conflicts** disclose only the other design's title: slot claims name
+  your own contested unit, device claims no longer name the peer's
+  destination, and "reserved by" honours `peer_conflicts_enabled`.
+- **Work-order CSV** cells are protected against spreadsheet formula
+  injection.
+- Malformed input returns 400 or a message instead of a 500 in several
+  actions and bulk views.
+
+### Added
+- `docs/security.md` (permission model, how hidden designs appear,
+  hardening settings) and `SECURITY.md` (how to report a vulnerability).
+- GraphQL `lineage` field on designs.
+
 ## [1.2.1] - 2026-10-13
 
 ### Release Summary

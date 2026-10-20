@@ -2,7 +2,7 @@
 
 import django_tables2 as tables
 from django.urls import reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from netbox.tables import NetBoxTable, columns
@@ -223,7 +223,7 @@ class ChainHealthTable(tables.Table):
                 '<span class="badge text-bg-danger" title="{}">{}</span>',
                 reason["detail"], label,
             ))
-        return mark_safe("".join(str(p) for p in parts))
+        return format_html_join("", "{}", ((p,) for p in parts))
 
     def render_stale_count(self, record):
         count = record["stale_count"]
@@ -255,7 +255,7 @@ class ChainHealthTable(tables.Table):
             '<i class="mdi mdi-eye"></i> {}</a>',
             design.get_absolute_url(), _("Open design"),
         ))
-        return mark_safe(" ".join(str(b) for b in buttons))
+        return format_html_join(" ", "{}", ((b,) for b in buttons))
 
 
 class DesignPowerFeedTable(NetBoxTable):

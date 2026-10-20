@@ -37,10 +37,13 @@ exists.
 Three kinds of overlap, each reported with one of these exact `kind` values:
 
 - **`peer_slot_claim`** — a peer plans a device on a unit this design claims.
+  The conflict names **this design's** contested unit ("<peer> also plans a
+  device at U36 in <rack>"), never where the peer put its device.
 - **`peer_name_claim`** — a peer plans the same name.
 - **`peer_device_claim`** — a peer plans to move the same real device
   somewhere. Both plans are legal on their own; whichever gets applied first
-  makes the other one false.
+  makes the other one false. The conflict names the peer and the device, not
+  the peer's destination.
 
 ## What "a unit this design claims" means
 
@@ -147,7 +150,9 @@ promised to write.
 - `GET /api/plugins/rack-design/designs/<pk>/conflicts/` — requires
   `view_design`, writes nothing. Returns `{"conflicts": [...]}`, where each
   entry has `kind`, `severity`, `detail`, `rack_id`, `source_design_id`,
-  `source_design_name`, and `slot_key`. This also carries **chain**
+  `source_design_name`, and `slot_key`. For a chain conflict whose source
+  design the caller may not view, `source_design_id` and `source_design_name` are `null` and `detail` reads
+  `(restricted design)` instead of naming it. This also carries **chain**
   conflicts, not only peer ones — the point is that an automation pipeline
   can gate on one call before ever reaching `apply`, which is otherwise the
   first thing that would tell it about a problem.
@@ -174,7 +179,14 @@ conflict's `source_design_name` even when NetBox's own object permissions
 would otherwise hide that design from the reader — "another design claims
 U36" without a name is not actionable; you cannot go talk to anyone about
 it. **No other field of the hidden design is exposed** — the title is a
-plain string, never a nested representation of the peer design. For a
+plain string, never a nested representation of the peer design, and the
+conflict text never reveals the peer's layout (target rack or unit). For a
 deployment where even that disclosure is unacceptable, setting
 `peer_conflicts_enabled` to `False` turns off peer detection entirely — no
 peer query runs, and no peer design's title is ever returned.
+
+The same switch governs the **"reserved by"** marking on a real device that
+another design has already applied: with `peer_conflicts_enabled` off, the
+device is drawn as ordinary existing hardware and the applying design's id and
+title are not returned. A design's own applied tiles are always marked, since
+that is its own data.

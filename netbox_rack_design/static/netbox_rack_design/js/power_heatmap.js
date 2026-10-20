@@ -322,6 +322,21 @@
         }
     }
 
+    // Bank states the stylesheet knows; anything else renders as "ok" so a
+    // script-supplied state can never inject markup through a class name.
+    var DIST_STATES = ["ok", "warn", "critical", "overload"];
+    // A feed letter ends up in a class name: keep only a short [A-Za-z0-9_-] token.
+    function safeToken(v) {
+        var t = String(v == null ? "" : v);
+        return /^[A-Za-z0-9_-]{1,8}$/.test(t) ? t : "";
+    }
+    // Full HTML escaping (& < > " ') for the few string-built innerHTML sinks.
+    function escapeHtml(v) {
+        return String(v == null ? "" : v)
+            .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
     function renderDistLegend(block, dist) {
         var existing = block.querySelector(".nbx-rd-dist-legend");
         if (!dist) { if (existing) { existing.remove(); } return; }
@@ -351,25 +366,42 @@
             var first = byPdu[pduName][0];
             // Header carries the feed color (A blue / B orange) + a 3φ flag for
             // three-phase PDUs; it matches the tiles' accent edge = the key.
-            var head = first.feed + (first.phase === 3 ? " 3φ" : "");
-            var chips = byPdu[pduName].map(function (b) {
+            // Built with createElement/textContent: the feed name is user-defined
+            // text, and state/feedLetter land in class names, so both are
+            // whitelisted rather than trusted.
+            var pduEl = document.createElement("div");
+            pduEl.className = "nbx-rd-dist-pdu";
+            var headEl = document.createElement("span");
+            headEl.className = "nbx-rd-dist-pdu-head nbx-rd-feedhead-" + safeToken(first.feedLetter);
+            headEl.textContent = first.feed + (first.phase === 3 ? " 3φ" : "");
+            pduEl.appendChild(headEl);
+            byPdu[pduName].forEach(function (b) {
                 // A mini "health bar" per bank: the fill is the load/breaker
                 // ratio, colored by state -- same idea as the rack power bar.
-                var w = Math.max(0, Math.min(100, b.util || 0));
-                return '<span class="nbx-rd-dist-chip nbx-rd-dist-' + b.state + '">'
-                    + '<span class="nbx-rd-dist-fill" style="width:' + w.toFixed(1) + '%"></span>'
-                    + '<span class="nbx-rd-dist-label">B' + b.bank + ": "
-                    + Math.round(b.load) + "/" + Math.round(b.max) + " W</span>"
-                    + "</span>";
-            }).join("");
-            return '<div class="nbx-rd-dist-pdu">'
-                + '<span class="nbx-rd-dist-pdu-head nbx-rd-feedhead-' + first.feedLetter
-                + '">' + head + "</span>" + chips + "</div>";
+                var w = Math.max(0, Math.min(100, Number(b.util) || 0));
+                var chip = document.createElement("span");
+                chip.className = "nbx-rd-dist-chip nbx-rd-dist-"
+                    + (DIST_STATES.indexOf(b.state) >= 0 ? b.state : "ok");
+                var fill = document.createElement("span");
+                fill.className = "nbx-rd-dist-fill";
+                fill.style.width = w.toFixed(1) + "%";
+                var lab = document.createElement("span");
+                lab.className = "nbx-rd-dist-label";
+                lab.textContent = "B" + b.bank + ": "
+                    + Math.round(b.load) + "/" + Math.round(b.max) + " W";
+                chip.appendChild(fill);
+                chip.appendChild(lab);
+                pduEl.appendChild(chip);
+            });
+            return pduEl;
         };
-        legend.innerHTML = legOrder.map(function (key) {
-            return '<div class="nbx-rd-dist-leg">'
-                + byLeg[key].map(pduBlock).join("") + "</div>";
-        }).join("");
+        legend.textContent = "";
+        legOrder.forEach(function (key) {
+            var legEl = document.createElement("div");
+            legEl.className = "nbx-rd-dist-leg";
+            byLeg[key].forEach(function (pduName) { legEl.appendChild(pduBlock(pduName)); });
+            legend.appendChild(legEl);
+        });
         var rack = dist.rack || {};
         if (rack.alarm && (rack.warnings || []).length) {
             var alarm = document.createElement("span");
@@ -899,8 +931,8 @@
         var util = bar.getAttribute("data-rd-power-util");
         var unconn = bar.getAttribute("data-rd-power-unconnected");
         var pop = ensurePop();
-        var html = '<div class="nbx-rd-power-pop-head">' + draw + " / " + cap
-            + " W · " + util + "%</div>";
+        var html = '<div class="nbx-rd-power-pop-head">' + escapeHtml(draw) + " / "
+            + escapeHtml(cap) + " W · " + escapeHtml(util) + "%</div>";
         if (unconn) {
             html += '<div class="nbx-rd-power-pop-sub">⚠ ' + unconn.split("|").length
                 + " device(s) with power ports not connected — highlighted in the rack</div>";
